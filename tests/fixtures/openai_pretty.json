@@ -1,0 +1,1 @@
+{"model": "gpt-4o", "messages": [{"role": "user", "content": "{\n  \"service\": {\n    \"name\": \"api\",\n    \"replicas\": 3,\n    \"limits\": {\n      \"cpu\": \"500m\",\n      \"mem\": \"512Mi\"\n    }\n  },\n  \"flags\": {\n    \"beta\": true,\n    \"cache\": false\n  },\n  \"regions\": [\n    \"us\",\n    \"eu\",\n    \"ap\"\n  ]\n}"}], "max_tokens": 300}

@@ -1,0 +1,8 @@
+Some data below uses TOON, a compact tabular encoding of JSON that saves tokens. Reading it:
+
+- A header line `[N]{f1,f2,...}:` — optionally prefixed with a field name, e.g. `users[N]{f1,f2,...}:` — starts an array of N objects with the listed fields, in that order.
+- Each following indented line is one object: its field values in the header's order, comma-separated. Values containing a comma, quote, or newline are wrapped in double quotes (CSV-style).
+- Inside a JSON object, a string value may itself be TOON (recognizable by its `[N]{...}:` header) — decode it the same way.
+- Anything not in this tabular form is ordinary JSON.
+
+TOON is lossless: it encodes exactly the same data as the equivalent JSON.

@@ -1,0 +1,1 @@
+Think step by step, but keep each reasoning step to a terse draft of at most ~5 words. Put the final answer on its own line after the drafts.

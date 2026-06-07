@@ -1,0 +1,42 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: ${{ matrix.target }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-musl
+            os: ubuntu-latest
+          - target: aarch64-unknown-linux-gnu
+            os: ubuntu-latest
+          - target: x86_64-apple-darwin
+            os: macos-latest
+          - target: aarch64-apple-darwin
+            os: macos-latest
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      # Distributing a compiled binary statically links every dependency, so the archive
+      # must carry the AGPL license text + third-party attribution notices. The NOTICE is
+      # generated here (not committed) by harvesting LICENSE files from the cargo cache.
+      - name: Generate third-party license notice
+        run: python3 tools/gen_third_party_licenses.py
+      # Cross-compiles, strips, tars as llmtrim-<target>.tar.gz, and uploads to the
+      # GitHub Release for this tag. The archive name matches what install.sh downloads.
+      # `include` bundles LICENSE + the generated NOTICE into every archive.
+      - uses: taiki-e/upload-rust-binary-action@v1
+        with:
+          bin: llmtrim
+          target: ${{ matrix.target }}
+          archive: llmtrim-$target
+          include: LICENSE,THIRD-PARTY-LICENSES.md
+          token: ${{ secrets.GITHUB_TOKEN }}

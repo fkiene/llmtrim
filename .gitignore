@@ -1,0 +1,46 @@
+# Build
+/target
+
+# Environment & secrets
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.crt
+*.p12
+credentials.json
+secrets.json
+*.secret
+
+# Savings ledger / local databases
+*.db
+*.sqlite
+*.sqlite3
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Local Claude Code workspace config (per-developer, not part of the product)
+.claude/
+CLAUDE.md
+
+# Benchmark corpora (downloaded + license-bound) and generated results — reproducible
+# via `python3 bench/download.py` (hashes in bench/data/manifest.json). Keep the
+# committed charts (bench/frontier-dark.svg + bench/frontier-light.svg) and scripts;
+# exclude the data + run outputs.
+/bench/data/
+/bench/results/
+
+# Third-party attribution NOTICE — generated at release time and bundled into the
+# binary tarballs (.github/workflows/release.yml), not committed. Regenerate locally
+# with `python3 tools/gen_third_party_licenses.py`.
+/THIRD-PARTY-LICENSES.md

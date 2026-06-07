@@ -1,0 +1,9 @@
+# Normalize line endings to LF in the repo so `cargo fmt --all -- --check` is consistent
+# across platforms (a CRLF checkout on Windows would otherwise fail the format gate).
+* text=auto eol=lf
+
+# Binaries / fixtures git already detects as binary stay untouched by the rule above,
+# but pin the ones we care about explicitly.
+*.png binary
+*.jpg binary
+*.svg text eol=lf

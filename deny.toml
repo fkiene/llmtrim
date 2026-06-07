@@ -1,0 +1,59 @@
+# cargo-deny config — license + advisory gate for llmtrim (AGPL-3.0-only).
+# Run: cargo deny check            (all sections)
+#      cargo deny check licenses   (license compatibility only)
+# Install: cargo install cargo-deny --locked
+#
+# Rule: every dependency must be permissive or AGPL-compatible weak-copyleft.
+# A new dep under GPL-2.0-only / GPL-3.0 / AGPL / proprietary fails the build,
+# protecting the AGPL-3.0-only relicensing of the combined work.
+
+[graph]
+# Evaluate every target so a platform-specific dep can't smuggle in a bad license.
+all-features = true
+
+[licenses]
+# Deny-by-default: only the SPDX ids below are allowed. Anything else fails.
+# confidence-threshold: how sure the SPDX scanner must be (0.8 = standard).
+confidence-threshold = 0.8
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Zlib",
+    "BSL-1.0",          # Boost — permissive
+    "0BSD",
+    "CC0-1.0",          # public-domain dedication
+    "MIT-0",
+    "Unicode-3.0",      # unicode-ident data
+    "Unlicense",
+    "CDLA-Permissive-2.0", # webpki-roots cert data
+    "MPL-2.0",          # weak copyleft, explicitly AGPL-compatible (file-level)
+    "OpenSSL",          # ring/aws-lc transitive, permissive
+    "AGPL-3.0-only",    # our own crate
+]
+# Per-crate license overrides for deps that ship a license file but no SPDX
+# expression (cargo-deny can't auto-detect). Add entries here only if a build
+# fails on a known-good crate — keep the list minimal and justified.
+# fuchsia-cprng (transitive, old rand chain) ships a LICENSE file but no SPDX id.
+[[licenses.clarify]]
+name = "fuchsia-cprng"
+expression = "BSD-3-Clause"
+
+[bans]
+# Surface accidental duplicate-version bloat; warn, don't fail.
+multiple-versions = "warn"
+
+[advisories]
+# RUSTSEC vulnerability + yanked-crate gate. Uncomment ignores only with a
+# tracked justification.
+yanked = "warn"
+# ignore = ["RUSTSEC-0000-0000"]
+
+[sources]
+# Only crates.io. Any git/registry source not listed fails — blocks a typo-squat
+# or unreviewed fork from entering the tree.
+unknown-registry = "deny"
+unknown-git = "deny"

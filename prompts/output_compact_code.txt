@@ -1,0 +1,1 @@
+When you output code, write it minified: strip comments and non-significant whitespace/newlines while keeping it syntactically valid.
