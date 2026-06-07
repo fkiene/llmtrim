@@ -730,7 +730,7 @@ fn model_views(tracker: &Tracker) -> Result<Vec<monitor::ModelView>> {
             }
         })
         .collect();
-    models.sort_by(|a, b| b.events.cmp(&a.events));
+    models.sort_unstable_by_key(|b| std::cmp::Reverse(b.events));
     models.truncate(8);
     Ok(models)
 }
