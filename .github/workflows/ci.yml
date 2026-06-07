@@ -13,6 +13,8 @@ jobs:
   test:
     name: Test (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
+    permissions:
+      contents: write
     strategy:
       fail-fast: false
       matrix:
@@ -41,6 +43,21 @@ jobs:
       # (`default-features = false` drops the interceptor + tokio).
       - name: Compile embedder core (no default features)
         run: cargo check --no-default-features --lib
+      # Refresh the README test-count badge (shields endpoint reads .github/badges/tests.json).
+      # Ubuntu + main only; commits only when the count changes — `[skip ci]` stops a re-trigger
+      # loop, the diff-guard stops empty commits.
+      - name: Update test-count badge
+        if: matrix.os == 'ubuntu-latest' && github.ref == 'refs/heads/main'
+        run: |
+          count=$(cargo test 2>&1 | grep -oE '[0-9]+ passed' | awk '{s+=$1} END{print s}')
+          printf '{"schemaVersion":1,"label":"tests","message":"%s passing","color":"2ea043"}\n' "$count" > .github/badges/tests.json
+          if ! git diff --quiet -- .github/badges/tests.json; then
+            git config user.name  "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git add .github/badges/tests.json
+            git commit -m "ci: test-count badge -> ${count} passing [skip ci]"
+            git push
+          fi
 
   # Gate the AGPL-3.0-only relicensing: fail if any dependency carries a license
   # outside deny.toml's allow-list (e.g. GPL/proprietary) or an unknown source.

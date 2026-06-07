@@ -1,14 +1,14 @@
 <h1 align="center">llmtrim</h1>
 
 <p align="center">
-  <strong>Cut the whole LLM bill — input, output, and cache — with zero extra model calls.</strong>
+  <strong>Cut the whole LLM bill ~46% — input, output, and cache — with zero extra model calls.</strong>
 </p>
 
 <p align="center">
   <a href="https://github.com/fkiene/llmtrim/actions/workflows/ci.yml"><img src="https://github.com/fkiene/llmtrim/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-AGPL--3.0-blue" alt="License: AGPL v3"></a>
   <img src="https://img.shields.io/badge/rust-1.85%2B-orange" alt="Rust 1.85+">
-  <img src="https://img.shields.io/badge/tests-177_passing-2ea043" alt="tests">
+  <img src="https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/fkiene/llmtrim/main/.github/badges/tests.json" alt="tests">
 </p>
 
 <p align="center">
@@ -25,16 +25,15 @@
   <a href="#run-it-and-forget-it">How it works</a> &bull;
   <a href="#what-it-does-to-your-prompt">Stages</a> &bull;
   <a href="#benchmark">Benchmark</a> &bull;
+  <a href="#security">Security</a> &bull;
   <a href="#license">License</a>
 </p>
 
 ---
 
-llmtrim is a **static, deterministic, zero-LLM-call** compressor for closed LLM APIs. It runs as a transparent `HTTPS_PROXY`, intercepts the request your tools send to OpenAI / Anthropic / Gemini / any provider, shrinks it with deterministic algorithms only — **no auxiliary model, no embeddings, no neural scoring** — forwards it, and reverses the lossless transforms on the response. One install, every tool, every provider. It optimizes the thing you are actually billed for: the **round-trip cost**.
+**llmtrim cuts your whole LLM bill ~46% — one install, any provider, zero extra model calls.** Output tokens **−73%**, input **−24%**, the cached prefix billed once, the answer unchanged — **87 live A/B cases, billed at real rates.**
 
-## The whole round-trip, measured
-
-Every case below is sent **twice** — once original, once compressed — both answers scored, the round-trip priced at real provider rates (`openai/gpt-oss-20b` via Groq). Not estimated. Billed.
+## −46% of the bill — measured live, not estimated
 
 <p align="center">
   <picture>
@@ -43,16 +42,16 @@ Every case below is sent **twice** — once original, once compressed — both a
   </picture>
 </p>
 
-**Receipts — 87 live A/B cases, every axis:**
-
-| | original | compressed | saved |
+| 87 live A/B cases | original | compressed | saved |
 |---|--:|--:|--:|
 | input tokens | 58,518 | 44,379 | **−24%** |
 | output tokens | 27,588 | 7,504 | **−73%** |
 | total tokens | 86,106 | 51,883 | **−40%** |
 | **round-trip cost** | **$0.0167** | **$0.0090** | **−46%** |
 
-**−46% of the bill, pooled across 87 A/B cases** (generation, chat, reasoning, code, RAG, agents, summary, cache). The win is **both ends of the round-trip**: output collapses **−73%** (the expensive half), input trims **−24%** — most tools cut only one side. At n≈12/corpus the *per-corpus* deltas are noisy (the LLM-judge baseline alone swings ±30pp between runs), so read the pooled figure. **[Full methodology, per-corpus frontier + CIs →](bench/README.md)**
+Every case is sent **twice** — once original, once compressed — both answers scored, the round-trip priced at real provider rates (`openai/gpt-oss-20b` via Groq). **Not estimated. Billed.** Pooled across 87 cases (generation, chat, reasoning, code, RAG, agents, summary, cache), the win is **both ends**: output collapses **−73%** (the expensive half), input trims **−24%** — most tools cut only one side. At n≈12/corpus the *per-corpus* deltas are noisy (the LLM-judge baseline alone swings ±30pp between runs), so read the pooled figure. **[Full methodology, per-corpus frontier + CIs →](bench/README.md)**
+
+llmtrim is a **static, deterministic, zero-LLM-call** compressor for closed LLM APIs — a transparent `HTTPS_PROXY` that intercepts the request your tools send to OpenAI / Anthropic / Gemini / any provider, shrinks it with deterministic algorithms only (**no auxiliary model, no embeddings, no neural scoring**), forwards it, and reverses the lossless transforms on the response. A per-stage tokenizer gate means it **can never make your bill bigger or break a call**. One install, every tool, every provider.
 
 ## Why llmtrim
 
@@ -256,6 +255,17 @@ python3 bench/scripts/chart.py         # regenerate the chart + table
 Env: `LLMTRIM_PRESET` (select a preset by name), `LLMTRIM_CONFIG` (config-file path), `LLMTRIM_DB_PATH` (ledger location).
 
 </details>
+
+## Security
+
+llmtrim sits between your tool and the provider, so its trust model *is* the product. Full policy + threat model in **[SECURITY.md](SECURITY.md)**; the essentials:
+
+- **Local CA, name-constrained.** Generated on your machine (`~/.llmtrim/ca.pem`, key `0600`) and X.509-constrained to LLM API domains — it **cannot mint a cert for any other host**, even if the key were stolen. Trusted per-tool via `NODE_EXTRA_CA_CERTS`, not system-wide; every non-LLM HTTPS connection blind-tunnels untouched.
+- **No keys, no prompts on disk.** The proxy forwards your tool's own auth (needs no key of its own); prompt and response text stay in memory — never logged, never persisted.
+- **Binds `127.0.0.1` only** — no client authentication; never expose it on a public interface.
+- **Metadata-only ledger** — token counts, provider, model id. Never prompt or response text. `llmtrim uninstall --purge` deletes it.
+
+Report vulnerabilities **privately** via a [GitHub security advisory](https://github.com/fkiene/llmtrim/security/advisories/new), not a public issue.
 
 ## Known limits
 
