@@ -31,7 +31,7 @@
 
 ---
 
-llmtrim is a deterministic HTTPS proxy that compresses the requests your AI tools send to any LLM API — and the answers they stream back. Zero extra model calls, no embeddings, no neural scoring — just a per-stage tokenizer gate that can never make your bill bigger.
+llmtrim is a drop-in, deterministic HTTPS proxy that shrinks every LLM request and reply — **cheaper bills, faster responses, answers unchanged.** Any provider, zero extra model calls, no neural model or embeddings, ~0.1 ms overhead.
 
 ## −46% of the bill — measured live, not estimated
 
