@@ -24,7 +24,7 @@ jobs:
             os: macos-latest
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       # Distributing a compiled binary statically links every dependency, so the archive
       # must carry the AGPL license text + third-party attribution notices. The NOTICE is
       # generated here (not committed) by harvesting LICENSE files from the cargo cache.
