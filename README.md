@@ -13,14 +13,7 @@
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-AGPL--3.0-blue" alt="License: AGPL v3"></a>
   <img src="https://img.shields.io/badge/rust-1.88%2B-orange" alt="Rust 1.88+">
   <img src="https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/fkiene/llmtrim/main/.github/badges/tests.json" alt="tests">
-</p>
-
-<p align="center">
   <img src="https://img.shields.io/badge/round--trip_cost-%E2%88%9246%25-2ea043" alt="round-trip cost saved">
-  <img src="https://img.shields.io/badge/output_tokens-%E2%88%9273%25-2ea043" alt="output tokens saved">
-  <img src="https://img.shields.io/badge/added_model_calls-0-0969da" alt="zero added model calls">
-  <img src="https://img.shields.io/badge/deterministic-yes-0969da" alt="deterministic">
-  <img src="https://img.shields.io/badge/any_provider-yes-0969da" alt="any provider">
 </p>
 
 <p align="center">
@@ -30,6 +23,7 @@
   <a href="#what-it-does-to-your-prompt">Stages</a> &bull;
   <a href="#benchmark">Benchmark</a> &bull;
   <a href="#security">Security</a> &bull;
+  <a href="#acknowledgments">Acknowledgments</a> &bull;
   <a href="#license">License</a>
 </p>
 
@@ -277,6 +271,35 @@ Honesty is the product. The same A/B that proves the savings is the one that sur
 - **Output savings aren't measured live** — the proxy compresses the input prompt; an output *saving* needs the A/B counterfactual, which only the offline `bench` has. `status` shows captured output + total spend, but "saved" is input-side.
 - **The default is quality-gated, not lossless.** The bar is *cost with no measured quality regression* — so the shipped default (`auto`) runs lossy stages (output control everywhere; retrieval / skeleton / dedup per shape) wherever the [eval](bench/README.md) shows quality holds. The per-stage **token** gate guarantees fewer tokens, **not** quality — quality is proven offline and baked into the routing. Need a guaranteed byte-faithful round-trip? Use the **`safe`** preset (lossless only). When you raise a drop ratio yourself, read the frontier first.
 - **`rusqlite` is held at 0.39** — 0.40+ pulls `libsqlite3-sys` 0.38, whose build script uses the still-unstable `cfg_select` ([rust#115585](https://github.com/rust-lang/rust/issues/115585)) and won't compile on stable Rust.
+
+## Acknowledgments
+
+llmtrim's levers are deterministic implementations of published research — the engineering and the real-tokenizer gate are ours, the ideas are theirs. Each stage cites its source:
+
+**Retrieval & context (Stage B)**
+- **BM25** — Robertson & Zaragoza, *The Probabilistic Relevance Framework: BM25 and Beyond* (2009) · [`bm25`](https://crates.io/crates/bm25)
+- **TextRank** — Mihalcea & Tarau, *TextRank: Bringing Order into Texts* (EMNLP 2004)
+- **MMR** — Carbonell & Goldstein, *The Use of MMR, Diversity-Based Reranking…* (SIGIR 1998)
+- **Lost in the Middle** — Liu et al. (2023), [arXiv:2307.03172](https://arxiv.org/abs/2307.03172) — head+tail reordering
+- **DSLR** — Hwang et al. (2024), [arXiv:2407.03627](https://arxiv.org/abs/2407.03627) — sentence-level pruning
+
+**Code (Stages C, F)**
+- **RepoCoder** — Zhang et al. (2023), [arXiv:2303.12570](https://arxiv.org/abs/2303.12570) — AST skeletons beat raw source for non-focus code
+- **The Hidden Cost of Readability** — Pan et al. (2025), [arXiv:2508.13666](https://arxiv.org/abs/2508.13666) — code minification
+- **Reducing Token Usage … via Minification** — Hrubec & Cito (2026), [arXiv:2606.01326](https://arxiv.org/abs/2606.01326) — per-transformation token accounting
+
+**Dedup & abbreviation (Stages E, E+)**
+- **SimHash** — Charikar, *Similarity Estimation Techniques from Rounding Algorithms* (STOC 2002) · [`gaoya`](https://crates.io/crates/gaoya)
+- **CompactPrompt** — Choi et al. (2025), [arXiv:2510.18043](https://arxiv.org/abs/2510.18043) — n-gram abbreviation
+
+**Output control (Stage F)**
+- **Chain-of-Draft** — Xu et al. (2025), [arXiv:2502.18600](https://arxiv.org/abs/2502.18600) — terse reasoning steps
+- **TALE** — Han et al. (2024), [arXiv:2412.18547](https://arxiv.org/abs/2412.18547) — soft "answer within N tokens" budget
+
+**Serialization (Stage D)**
+- **TOON** (Token-Oriented Object Notation) — Johann Schopplich · [`toon-format`](https://crates.io/crates/toon-format)
+
+Built on the Rust ecosystem: [`tiktoken-rs`](https://crates.io/crates/tiktoken-rs), [`toon-format`](https://crates.io/crates/toon-format), [`bm25`](https://crates.io/crates/bm25), [`gaoya`](https://crates.io/crates/gaoya), [`tree-sitter`](https://crates.io/crates/tree-sitter), [`pest`](https://crates.io/crates/pest), [`image`](https://crates.io/crates/image), [`unicode-normalization`](https://crates.io/crates/unicode-normalization), [`whatlang`](https://crates.io/crates/whatlang), [`hudsucker`](https://crates.io/crates/hudsucker), [`rusqlite`](https://crates.io/crates/rusqlite).
 
 ## License
 
