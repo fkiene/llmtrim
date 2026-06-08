@@ -62,9 +62,9 @@ enum Commands {
     /// enable run-at-login, and start the interceptor. The fastest path from install to
     /// compressing. No IDE settings are touched — llmtrim is purely a MITM proxy.
     Setup {
-        /// Interceptor port.
-        #[arg(long, default_value_t = 8787)]
-        port: u16,
+        /// Interceptor port. Omit to auto-select a free port starting at 8787.
+        #[arg(long)]
+        port: Option<u16>,
     },
     /// Undo everything `setup` did: stop the daemon, disable autostart, strip the
     /// shell-profile env block, and remove the CA + state (and the binary). Transparent —

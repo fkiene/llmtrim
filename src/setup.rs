@@ -6,6 +6,7 @@
 //!
 //! Best-effort and idempotent: a step that fails warns and the rest proceeds.
 
+use std::net::{Ipv4Addr, TcpListener};
 use std::path::PathBuf;
 
 use anyhow::{Context, Result};
@@ -13,7 +14,32 @@ use anyhow::{Context, Result};
 const BEGIN: &str = "# >>> llmtrim >>>";
 const END: &str = "# <<< llmtrim <<<";
 
-pub fn run(port: u16) -> Result<()> {
+/// Default interceptor port; the scan for a free port starts here.
+const DEFAULT_PORT: u16 = 8787;
+
+/// First loopback port that actually binds, scanning `start..=start+span`. A successful bind
+/// (immediately dropped) proves the port is usable *right now*; because we accept only `Ok`,
+/// this also skips Windows reserved/excluded ranges, which fail the bind with `PermissionDenied`
+/// rather than `AddrInUse`. Probes `127.0.0.1` to match exactly what `serve` binds. `None` if the
+/// whole window is unusable.
+fn first_free_port(start: u16, span: u16) -> Option<u16> {
+    (start..=start.saturating_add(span))
+        .find(|&p| TcpListener::bind((Ipv4Addr::LOCALHOST, p)).is_ok())
+}
+
+pub fn run(requested: Option<u16>) -> Result<()> {
+    // 0. Resolve the port *once*, here, before anything is wired. The port is a contract
+    //    between three parties that must agree: the profile's HTTPS_PROXY (clients), the
+    //    autostart entry (`serve --port N` at login), and the daemon that binds it. Picking
+    //    it lazily in `serve` would desync the clients — so we choose a port that actually
+    //    binds now and feed that single value into all three below.
+    let start = requested.unwrap_or(DEFAULT_PORT);
+    let port = first_free_port(start, 64)
+        .with_context(|| format!("no free port in {start}..={}", start.saturating_add(64)))?;
+    if port != start {
+        println!("• Port {start} busy — using {port}.");
+    }
+
     // 1. Local CA (generated on first run, name-constrained to LLM domains).
     crate::serve::ensure_ca()?;
     let ca = crate::serve::ca_cert_path()?.to_string_lossy().to_string();
@@ -333,5 +359,26 @@ mod tests {
     fn strip_block_reverses_powershell_block() {
         let withblock = format!("keep\n{}", env_block("p", "c", Syntax::PowerShell));
         assert_eq!(strip_block(&withblock), "keep\n");
+    }
+
+    #[test]
+    fn first_free_port_rejects_occupied_accepts_free() {
+        // Hold a real port open → occupied. Scanning just that port (span 0) finds nothing,
+        // proving a bound port is rejected (this is the bug we hit: 8787 held by VS Code).
+        let held = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).expect("bind ephemeral");
+        let taken = held.local_addr().expect("local_addr").port();
+        assert_eq!(
+            first_free_port(taken, 0),
+            None,
+            "occupied port not rejected"
+        );
+
+        // Release it; the same port is now bindable and the probe returns it.
+        drop(held);
+        assert_eq!(
+            first_free_port(taken, 0),
+            Some(taken),
+            "free port not accepted"
+        );
     }
 }

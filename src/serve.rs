@@ -732,6 +732,14 @@ mod imp {
         };
 
         let addr = SocketAddr::from(([127, 0, 0, 1], port));
+        // Pre-flight bind: hudsucker's `Proxy::start` collapses a bind failure to a bare
+        // "io error", hiding whether the port is in use or OS-reserved. Bind once ourselves
+        // first so the real cause reaches the log, then drop it microseconds before hudsucker
+        // rebinds the same addr.
+        drop(
+            std::net::TcpListener::bind(addr)
+                .with_context(|| format!("cannot bind {addr} — port in use or reserved"))?,
+        );
         eprintln!("llmtrim: MITM interceptor on http://127.0.0.1:{port}");
         eprintln!("  export HTTPS_PROXY=http://127.0.0.1:{port}");
         eprintln!(
