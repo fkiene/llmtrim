@@ -10,6 +10,9 @@ license = "AGPL-3.0-only"
 readme = "README.md"
 keywords = ["llm", "tokens", "compression", "openai", "anthropic"]
 categories = ["command-line-utilities", "development-tools", "compression"]
+# Keep the published crate lean — benchmark corpora, the license-notice generator, CI config
+# and editor rules aren't needed to build or use llmtrim. Verify with `cargo package --list`.
+exclude = ["bench/", "tools/", ".github/", ".claude/", "*.png"]
 
 [dependencies]
 anyhow = "1.0.102"

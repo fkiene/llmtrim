@@ -8,8 +8,27 @@ permissions:
   contents: write
 
 jobs:
+  # One published GitHub Release per tag, body taken from the matching CHANGELOG.md section.
+  # Runs before the build matrix so every binary uploads into a release that already has notes.
+  # NOTE: rename `## [Unreleased]` to `## [x.y.z] - <date>` in CHANGELOG.md before tagging, or
+  # this step fails (no section to extract).
+  create-release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: taiki-e/create-gh-release-action@v1
+        with:
+          changelog: CHANGELOG.md
+          title: llmtrim $version
+          token: ${{ secrets.GITHUB_TOKEN }}
+
   build:
+    needs: create-release
     name: ${{ matrix.target }}
+    permissions:
+      contents: write
+      id-token: write       # mint the OIDC token for build-provenance attestation
+      attestations: write   # write the attestation back to the repo
     strategy:
       fail-fast: false
       matrix:
@@ -44,13 +63,45 @@ jobs:
       # generated here (not committed) by harvesting LICENSE files from the cargo cache.
       - name: Generate third-party license notice
         run: python3 tools/gen_third_party_licenses.py
-      # Cross-compiles, strips, archives as llmtrim-<target>.tar.gz (.zip on Windows), and
-      # uploads to the GitHub Release for this tag. The archive name matches what install.sh
-      # and install.ps1 download. `include` bundles LICENSE + the generated NOTICE.
+      # Cross-compiles, strips, archives as llmtrim-<target>.tar.gz (.zip on Windows) with a
+      # matching .sha256, and uploads to the GitHub Release for this tag. The archive name
+      # matches what install.sh and install.ps1 download. `include` bundles LICENSE + NOTICE.
       - uses: taiki-e/upload-rust-binary-action@v1
         with:
           bin: llmtrim
           target: ${{ matrix.target }}
           archive: llmtrim-$target
+          checksum: sha256
           include: LICENSE,THIRD-PARTY-LICENSES.md
           token: ${{ secrets.GITHUB_TOKEN }}
+      # SLSA build provenance for the compiled binary — users verify with
+      # `gh attestation verify <binary> --repo fkiene/llmtrim`.
+      - name: Attest build provenance
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: target/${{ matrix.target }}/release/llmtrim${{ runner.os == 'Windows' && '.exe' || '' }}
+
+  # Publish to crates.io so `cargo install llmtrim` works (not just --git). Needs the
+  # CARGO_REGISTRY_TOKEN secret (crates.io -> Account Settings -> API Tokens).
+  publish-crate:
+    needs: create-release
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo publish --token ${{ secrets.CARGO_REGISTRY_TOKEN }}
+
+  # Bump the Homebrew tap (fkiene/homebrew-tap) to this tag: rewrites url + sha256 in the
+  # formula. Build-from-source, so the download URL is the git source tarball. Needs a PAT
+  # with write access to the tap repo in the HOMEBREW_TAP_TOKEN secret.
+  bump-homebrew:
+    needs: create-release
+    runs-on: ubuntu-latest
+    steps:
+      - uses: mislav/bump-homebrew-formula-action@v3
+        with:
+          formula-name: llmtrim
+          homebrew-tap: fkiene/homebrew-tap
+          download-url: https://github.com/fkiene/llmtrim/archive/refs/tags/${{ github.ref_name }}.tar.gz
+        env:
+          COMMITTER_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
