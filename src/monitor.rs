@@ -89,11 +89,10 @@ pub struct ModelView {
 
 // ── ANSI helpers ────────────────────────────────────────────────────────────────
 
-const GREEN: &str = "1;32";
+const ACCENT: &str = "38;2;153;204;255"; // #99ccff — the savings accent
 const DIM: &str = "2";
 const BOLD: &str = "1";
 const YELLOW: &str = "33";
-const CACHE_BLUE: &str = "38;2;153;204;255"; // #99ccff — sets the cache discount apart
 
 fn paint(color: bool, code: &str, s: &str) -> String {
     if color {
@@ -104,21 +103,15 @@ fn paint(color: bool, code: &str, s: &str) -> String {
 }
 
 /// A `width`-cell depletion bar for a `saved` percentage (0–100, clamped): the kept portion
-/// is filled + dim (what you still pay), the saved tail is dotted + green (what was cut), so
-/// the green dots line up with the green savings label. ≥100 → all dots, ≤0 → all filled.
+/// is filled + dim (what you still pay), the saved tail is dotted + the accent (what was cut),
+/// so the accent dots line up with the accent savings label. ≥100 → all dots, ≤0 → all filled.
 fn bar(color: bool, saved: f64, width: usize) -> String {
-    bar_colored(color, saved, width, GREEN)
-}
-
-/// Like [`bar`] but paints the saved (dotted) tail in `cut` instead of green — for axes that
-/// want their own accent (e.g. the cache discount in `#99ccff`).
-fn bar_colored(color: bool, saved: f64, width: usize, cut: &str) -> String {
-    let n = ((saved.clamp(0.0, 100.0) / 100.0) * width as f64).round() as usize;
-    let kept = width.saturating_sub(n);
+    let cut = ((saved.clamp(0.0, 100.0) / 100.0) * width as f64).round() as usize;
+    let kept = width.saturating_sub(cut);
     format!(
         "{}{}",
         paint(color, DIM, &"█".repeat(kept)),
-        paint(color, cut, &"░".repeat(n)),
+        paint(color, ACCENT, &"░".repeat(cut)),
     )
 }
 
@@ -148,7 +141,7 @@ fn commas(n: i64) -> String {
     if n < 0 { format!("-{out}") } else { out }
 }
 
-/// A `saved → label` line with a bar and a signed percentage (green when saving, yellow
+/// A `saved → label` line with a bar and a signed percentage (accent when saving, yellow
 /// when it grew). `before`/`after` are token counts.
 fn axis(color: bool, name: &str, before: i64, after: i64) -> String {
     let pct = if before > 0 {
@@ -157,7 +150,7 @@ fn axis(color: bool, name: &str, before: i64, after: i64) -> String {
         0.0
     };
     let pct_str = format!("{:+.0}%", -pct); // show as a signed delta (-41% = saved 41%)
-    let pct_col = if pct >= 0.0 { GREEN } else { YELLOW };
+    let pct_col = if pct >= 0.0 { ACCENT } else { YELLOW };
     format!(
         "  {:<7} {} {:>6}   {} → {}",
         name,
@@ -187,7 +180,7 @@ pub fn snapshot(
         if d.running {
             o.push_str(&format!(
                 " {} {}  {}\n",
-                paint(color, GREEN, "llmtrim ●"),
+                paint(color, ACCENT, "llmtrim ●"),
                 paint(color, DIM, "running"),
                 paint(
                     color,
@@ -220,7 +213,11 @@ pub fn snapshot(
     let hero = match cost {
         Some(c) => format!(
             "{}   {} round-trip   {} requests",
-            paint(color, GREEN, &format!("~${:.2} saved", c.projected_saved())),
+            paint(
+                color,
+                ACCENT,
+                &format!("~${:.2} saved", c.projected_saved())
+            ),
             paint(color, BOLD, &format!("~-{:.0}%", c.projected_pct())),
             commas(s.events),
         ),
@@ -228,7 +225,7 @@ pub fn snapshot(
             "{}   {} requests",
             paint(
                 color,
-                GREEN,
+                ACCENT,
                 &format!("-{:.0}% input tokens", s.saved_pct())
             ),
             commas(s.events),
@@ -254,7 +251,7 @@ pub fn snapshot(
             bar(color, BENCH_OUTPUT_REDUCTION * 100.0, 22),
             paint(
                 color,
-                GREEN,
+                ACCENT,
                 &format!("~{:+.0}%", -BENCH_OUTPUT_REDUCTION * 100.0)
             ),
             human(s.output_after),
@@ -268,8 +265,8 @@ pub fn snapshot(
         o.push_str(&format!(
             "  {:<7} {} {:>6}   {} reused at ~10%\n",
             "cache",
-            bar_colored(color, 90.0, 22, CACHE_BLUE),
-            paint(color, CACHE_BLUE, "~-90%"),
+            bar(color, 90.0, 22),
+            paint(color, ACCENT, "~-90%"),
             human(s.cache_read_tokens),
         ));
     }
@@ -289,9 +286,9 @@ pub fn snapshot(
                 _ => (m.saved_pct, "", m.cost_saved),
             };
             let cost_col = dollars
-                .map(|c| format!("  {}", paint(color, GREEN, &format!("${c:.2}"))))
+                .map(|c| format!("  {}", paint(color, ACCENT, &format!("${c:.2}"))))
                 .unwrap_or_default();
-            let pct_col = if pct >= 0.0 { GREEN } else { YELLOW };
+            let pct_col = if pct >= 0.0 { ACCENT } else { YELLOW };
             o.push_str(&format!(
                 "   {:<22} {:>6}  {}{}\n",
                 truncate(&m.name, 22),
@@ -416,7 +413,7 @@ pub fn period_report(color: bool, label: &str, rows: &[PeriodRow]) -> String {
             r.bucket,
             commas(r.events),
             format!("{}→{}", human(r.input_before), human(r.input_after)),
-            paint(color, GREEN, &format!("{:+.0}%", -in_pct)),
+            paint(color, ACCENT, &format!("{:+.0}%", -in_pct)),
             out,
         ));
     }
