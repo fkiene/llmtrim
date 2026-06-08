@@ -12,7 +12,6 @@ use anyhow::{Context, Result};
 use serde_json::Value;
 
 pub mod autostart;
-pub mod batch;
 pub mod bench;
 pub mod config;
 pub mod daemon;

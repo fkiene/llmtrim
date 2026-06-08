@@ -1,7 +1,7 @@
 //! llmtrim CLI.
 //!
 //! Network-free surface: `compress` reads a provider request body on stdin and writes the
-//! compressed body to stdout; `send`/`batch` add the network round-trip; `monitor` shows
+//! compressed body to stdout; `send` adds the network round-trip; `monitor` shows
 //! savings from the SQLite ledger; `serve`/`setup` run the MITM interceptor. The pure
 //! transform core lives in `lib.rs`.
 
@@ -121,12 +121,6 @@ enum Commands {
     /// Print the local CA certificate path (generating it on first run) and how to trust
     /// it. Required once before `serve` can intercept HTTPS.
     Ca,
-    /// Compress every request in a batch JSONL (stdin → stdout) for the Batch API.
-    Batch {
-        /// Provider of the batch requests: openai|anthropic.
-        #[arg(long, default_value = "openai")]
-        provider: String,
-    },
     /// Evaluate Stage B retrieval recall + savings on a held-out corpus JSONL (§6).
     Eval {
         /// Corpus JSONL: lines with {context|input, question|query, answers|answer}.
@@ -324,55 +318,6 @@ fn main() -> Result<()> {
             }
             println!();
             println!("The CA is name-constrained to LLM API domains only.");
-        }
-        Commands::Batch { provider } => {
-            let kind = ProviderKind::from_str(&provider)?;
-            let config = llmtrim::config::DenseConfig::load().unwrap_or_else(|e| {
-                eprintln!("llmtrim: {e}; using defaults");
-                llmtrim::config::DenseConfig::default()
-            });
-            let input = read_stdin()?;
-            let (mut before, mut after) = (0usize, 0usize);
-            let mut out = String::new();
-            for line in input.lines() {
-                if line.trim().is_empty() {
-                    continue;
-                }
-                match llmtrim::batch::compress_line(line, kind, &config) {
-                    Ok(b) => {
-                        before += b.tokens_before;
-                        after += b.tokens_after;
-                        out.push_str(&b.line);
-                        out.push('\n');
-                    }
-                    Err(e) => {
-                        eprintln!("llmtrim batch: passing a line through unchanged ({e})");
-                        out.push_str(line);
-                        out.push('\n');
-                    }
-                }
-            }
-            print!("{out}");
-            eprintln!(
-                "llmtrim batch: {before} -> {after} input tokens; submit the output JSONL to the provider Batch API for ~50% off"
-            );
-            // Record the batch aggregate to the savings ledger (best-effort; mirrors
-            // `compress` — a ledger failure must never fail the batch output).
-            if before > 0
-                && let (Ok(tracker), Ok(counter)) =
-                    (Tracker::open(), llmtrim::tokenizer::counter_for(kind, None))
-            {
-                let _ = tracker.record(&Record {
-                    provider: kind.as_str().to_string(),
-                    model: None,
-                    tokenizer: counter.label().to_string(),
-                    exact: counter.is_exact(),
-                    input_before: before as i64,
-                    input_after: after as i64,
-                    output_before: None,
-                    output_after: None,
-                });
-            }
         }
         Commands::Eval {
             corpus,
