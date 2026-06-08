@@ -296,12 +296,24 @@ mod imp {
                 Ok(c) => c.to_bytes(),
                 Err(_) => return Request::from_parts(parts, Body::empty()).into(),
             };
-            let new_body = match self.compress(&bytes, provider) {
-                Some(json) => {
-                    // We changed the body — remember the original so we can replay it
-                    // verbatim if the upstream rejects our compressed version (4xx/5xx).
-                    // Compression must never break the user's call.
-                    if let (Some(host), Some(pending)) = (host.as_deref(), self.pending.as_mut()) {
+            // Run the CPU-bound compression on the blocking pool so a burst of large requests
+            // can't monopolize the async workers (which would stall response streaming for
+            // everyone). Cheap to move in: `Bytes` is ref-counted, `config` is an `Arc`.
+            let config = self.config.clone();
+            let body_for_compress = bytes.clone();
+            let compressed = tokio::task::spawn_blocking(move || {
+                compress_blocking(&config, &body_for_compress, provider)
+            })
+            .await
+            .ok()
+            .flatten();
+
+            let new_body = match compressed {
+                Some((json, mut pending)) => {
+                    // We changed the body — remember the original so we can replay it verbatim
+                    // if the upstream rejects our compressed version (4xx/5xx). Compression must
+                    // never break the user's call.
+                    if let Some(host) = host.as_deref() {
                         let path = parts.uri.path_and_query().map_or("/", |p| p.as_str());
                         pending.original = Some(OriginalRequest {
                             url: format!("https://{host}{path}"),
@@ -309,6 +321,7 @@ mod imp {
                             body: bytes.to_vec(),
                         });
                     }
+                    self.pending = Some(pending);
                     Body::from(json)
                 }
                 None => Body::from(Full::new(bytes)),
@@ -405,39 +418,42 @@ mod imp {
         }
     }
 
-    impl Interceptor {
-        /// Compress a request body, stashing the input savings in `self.pending` for the
-        /// response to complete. Returns the new JSON, or `None` to forward verbatim (not
-        /// UTF-8/JSON, or compression yielded no win / errored).
-        fn compress(&mut self, body: &[u8], provider: ProviderKind) -> Option<String> {
-            let text = std::str::from_utf8(body).ok()?;
-            if !text.trim_start().starts_with('{') {
-                return None;
-            }
-            let started = std::time::Instant::now();
-            let result = crate::compress_with_config(text, Some(provider), &self.config).ok()?;
-            let compress_micros = started.elapsed().as_micros() as i64;
-            // Never forward a request larger than we received. On tiny or non-chat bodies
-            // (e.g. token-count / auxiliary calls) the input-side stages can't offset the
-            // output-control instruction's fixed cost, so the compressed form is a net token
-            // *increase*. Forward the original verbatim and record nothing — this is the
-            // "never a bigger bill" guarantee, and keeps non-wins out of the savings ledger.
-            if result.input_tokens_after >= result.input_tokens_before {
-                return None;
-            }
-            self.pending = Some(Pending {
-                provider,
-                model: result.model.clone(),
-                tokenizer: result.tokenizer_label.clone(),
-                exact: result.tokenizer_exact,
-                input_before: result.input_tokens_before.0 as i64,
-                input_after: result.input_tokens_after.0 as i64,
-                compress_micros,
-                plan: serde_json::to_string(&result.plan).unwrap_or_default(),
-                original: None,
-            });
-            Some(result.request_json)
+    /// The CPU-bound compression, run on the blocking pool (see `handle_request`). Pure: takes
+    /// the request body + config, returns the compressed JSON paired with the per-request
+    /// `Pending` (its `original` left unset — the caller fills it). `None` to forward verbatim
+    /// (not UTF-8/JSON, errored, or no net token win).
+    fn compress_blocking(
+        config: &DenseConfig,
+        body: &[u8],
+        provider: ProviderKind,
+    ) -> Option<(String, Pending)> {
+        let text = std::str::from_utf8(body).ok()?;
+        if !text.trim_start().starts_with('{') {
+            return None;
         }
+        let started = std::time::Instant::now();
+        let result = crate::compress_with_config(text, Some(provider), config).ok()?;
+        let compress_micros = started.elapsed().as_micros() as i64;
+        // Never forward a request larger than we received. On tiny or non-chat bodies (e.g.
+        // token-count / auxiliary calls) the input-side stages can't offset the output-control
+        // instruction's fixed cost, so the compressed form is a net token *increase*. Forward
+        // the original verbatim and record nothing — the "never a bigger bill" guarantee, and
+        // keeps non-wins out of the savings ledger.
+        if result.input_tokens_after >= result.input_tokens_before {
+            return None;
+        }
+        let pending = Pending {
+            provider,
+            model: result.model.clone(),
+            tokenizer: result.tokenizer_label.clone(),
+            exact: result.tokenizer_exact,
+            input_before: result.input_tokens_before.0 as i64,
+            input_after: result.input_tokens_after.0 as i64,
+            compress_micros,
+            plan: serde_json::to_string(&result.plan).unwrap_or_default(),
+            original: None,
+        };
+        Some((result.request_json, pending))
     }
 
     /// Owns the accumulated response bytes; on drop (stream complete/aborted) it measures
