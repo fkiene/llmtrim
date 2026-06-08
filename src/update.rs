@@ -9,6 +9,8 @@
 
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+// `Context` is only used by the non-Windows installer arm in `run()`.
+#[cfg_attr(windows, allow(unused_imports))]
 use anyhow::{Context, Result};
 
 const CURRENT: &str = env!("CARGO_PKG_VERSION");

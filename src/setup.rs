@@ -167,9 +167,10 @@ pub fn profile_has_block() -> bool {
 }
 
 /// Which shell dialect the profile uses, so the managed block is written in its native syntax.
-/// `PowerShell` is only constructed on Windows; the variant + `env_block`'s arm are still
-/// compiled (and unit-tested) everywhere so the formatting is verifiable off-Windows.
-#[cfg_attr(not(windows), allow(dead_code))]
+/// Each variant is constructed on only one platform (`Posix` off-Windows, `PowerShell` on
+/// Windows), yet both arms of `env_block` are compiled and unit-tested everywhere so the
+/// formatting is verifiable on either OS — hence the unconditional `allow(dead_code)`.
+#[allow(dead_code)]
 #[derive(Clone, Copy)]
 enum Syntax {
     Posix,
