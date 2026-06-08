@@ -57,9 +57,23 @@ pub fn run(port: u16) -> Result<()> {
         Err(e) => eprintln!("• Daemon not started: {e}"),
     }
 
+    // The managed block only lands in *future* shells — already-running tools (editors,
+    // Claude Code, open terminals) keep their old environment until relaunched. Spell that
+    // out: it's the #1 "why don't I see any traffic?" confusion.
+    let check = if cfg!(windows) {
+        "echo $env:HTTPS_PROXY"
+    } else {
+        "echo $HTTPS_PROXY"
+    };
+    println!("\nDone. The interceptor is running.");
     println!(
-        "\nDone. Open a new terminal (or `source` your profile), then use your tools normally."
+        "Note: only programs started from a new shell pick up the proxy env. Already-running\n\
+         tools (your editor, Claude Code, open terminals) keep their old environment until\n\
+         relaunched. To route one through llmtrim:"
     );
+    println!("  1. open a new terminal (or re-source your shell profile)");
+    println!("  2. verify it took:  {check}  →  {proxy}");
+    println!("  3. launch your tool from that shell");
     println!("Watch savings: llmtrim status");
     #[cfg(windows)]
     println!(
