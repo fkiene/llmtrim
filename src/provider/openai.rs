@@ -1,4 +1,6 @@
-//! OpenAI Chat Completions adapter.
+//! OpenAI adapter — Chat Completions *and* the Responses API (`/v1/responses`). Both share
+//! one adapter: same tokenizer, pricing, and provider identity. Each method dispatches on the
+//! body shape, since Responses replaces `messages` with `input`/`instructions`.
 
 use serde_json::{Value, json};
 
@@ -7,6 +9,49 @@ use crate::ir::{ProviderKind, Request};
 
 pub struct OpenAiProvider;
 
+/// True for a Responses API body (`input`, no `messages`). Chat Completions carries `messages`;
+/// the two never coexist, so this cleanly distinguishes the shapes.
+fn is_responses(req: &Request) -> bool {
+    req.raw()
+        .as_object()
+        .is_some_and(|o| !o.contains_key("messages") && o.contains_key("input"))
+}
+
+/// True for a Responses text content block (`input_text`/`output_text`/`text` with a string body).
+fn is_responses_text_block(b: &Value) -> bool {
+    matches!(
+        b.get("type").and_then(Value::as_str),
+        Some("input_text" | "output_text" | "text")
+    ) && b.get("text").is_some_and(Value::is_string)
+}
+
+/// Text segments of a Responses body: the `instructions` system string, plus `input` — a bare
+/// string, or an array of items whose `content` is a string or typed text blocks.
+fn responses_text_pointers(root: &Value, out: &mut Vec<String>) {
+    if root.get("instructions").is_some_and(Value::is_string) {
+        out.push("/instructions".to_string());
+    }
+    match root.get("input") {
+        Some(Value::String(_)) => out.push("/input".to_string()),
+        Some(Value::Array(items)) => {
+            for (i, item) in items.iter().enumerate() {
+                match item.get("content") {
+                    Some(Value::String(_)) => out.push(format!("/input/{i}/content")),
+                    Some(Value::Array(blocks)) => {
+                        for (j, b) in blocks.iter().enumerate() {
+                            if is_responses_text_block(b) {
+                                out.push(format!("/input/{i}/content/{j}/text"));
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
 impl Provider for OpenAiProvider {
     fn kind(&self) -> ProviderKind {
         ProviderKind::OpenAi
@@ -14,16 +59,22 @@ impl Provider for OpenAiProvider {
 
     fn content_text_pointers(&self, req: &Request) -> Vec<String> {
         let mut out = Vec::new();
-        if let Some(messages) = req.raw().get("messages") {
+        if is_responses(req) {
+            responses_text_pointers(req.raw(), &mut out);
+        } else if let Some(messages) = req.raw().get("messages") {
             super::message_text_pointers(messages, &mut out);
         }
         out
     }
 
     fn set_max_tokens(&self, req: &mut Request, max_tokens: u64) {
+        let responses = is_responses(req);
         if let Some(obj) = req.raw_mut().as_object_mut() {
-            // Prefer whichever cap field is already present; default to the modern one.
-            let key = if obj.contains_key("max_tokens") {
+            // Responses caps with `max_output_tokens`; Chat Completions prefers whichever cap
+            // field is already present, defaulting to the modern one.
+            let key = if responses {
+                "max_output_tokens"
+            } else if obj.contains_key("max_tokens") {
                 "max_tokens"
             } else {
                 "max_completion_tokens"
@@ -34,18 +85,37 @@ impl Provider for OpenAiProvider {
 
     fn max_tokens(&self, req: &Request) -> Option<u64> {
         let obj = req.raw().as_object()?;
+        if is_responses(req) {
+            return obj.get("max_output_tokens").and_then(Value::as_u64);
+        }
         obj.get("max_tokens")
             .or_else(|| obj.get("max_completion_tokens"))
             .and_then(Value::as_u64)
     }
 
     fn add_stop_sequence(&self, req: &mut Request, stop: &str) {
+        // The Responses API has no stop-sequence field — leave it untouched (lossless).
+        if is_responses(req) {
+            return;
+        }
         append_stop(req.raw_mut(), "stop", stop);
     }
 
     fn add_system_instruction(&self, req: &mut Request, text: &str) {
-        // OpenAI carries the system prompt as a `role: system` message. Insert at
-        // the front so it joins the stable prefix (Stage A ordering, later phase).
+        // Responses carries the system prompt in the top-level `instructions` string; prepend
+        // to any existing one.
+        if is_responses(req) {
+            if let Some(obj) = req.raw_mut().as_object_mut() {
+                let combined = match obj.get("instructions").and_then(Value::as_str) {
+                    Some(existing) if !existing.is_empty() => format!("{text}\n{existing}"),
+                    _ => text.to_string(),
+                };
+                obj.insert("instructions".to_string(), Value::String(combined));
+            }
+            return;
+        }
+        // Chat Completions carries it as a `role: system` message. Insert at the front so it
+        // joins the stable prefix (Stage A ordering, later phase).
         if let Some(obj) = req.raw_mut().as_object_mut()
             && let Some(Value::Array(messages)) = obj.get_mut("messages")
         {
@@ -54,14 +124,30 @@ impl Provider for OpenAiProvider {
     }
 
     fn bind_structured_output(&self, req: &mut Request, name: &str, schema: Value) {
+        let responses = is_responses(req);
         if let Some(obj) = req.raw_mut().as_object_mut() {
-            obj.insert(
-                "response_format".to_string(),
-                json!({
-                    "type": "json_schema",
-                    "json_schema": {"name": name, "schema": schema, "strict": true},
-                }),
-            );
+            if responses {
+                // Responses binds the schema under `text.format`.
+                obj.insert(
+                    "text".to_string(),
+                    json!({
+                        "format": {
+                            "type": "json_schema",
+                            "name": name,
+                            "schema": schema,
+                            "strict": true,
+                        }
+                    }),
+                );
+            } else {
+                obj.insert(
+                    "response_format".to_string(),
+                    json!({
+                        "type": "json_schema",
+                        "json_schema": {"name": name, "schema": schema, "strict": true},
+                    }),
+                );
+            }
         }
     }
 
@@ -76,13 +162,15 @@ impl Provider for OpenAiProvider {
         tools
             .iter()
             .map(|t| {
-                let f = t.get("function");
-                let name = f
-                    .and_then(|f| f.get("name"))
+                // Responses tools are flat (`{name, description}`); Chat Completions nests them
+                // under `function`.
+                let scope = t.get("function").unwrap_or(t);
+                let name = scope
+                    .get("name")
                     .and_then(Value::as_str)
                     .unwrap_or_default();
-                let desc = f
-                    .and_then(|f| f.get("description"))
+                let desc = scope
+                    .get("description")
                     .and_then(Value::as_str)
                     .unwrap_or_default();
                 (name.to_string(), desc.to_string())
@@ -97,9 +185,12 @@ impl Provider for OpenAiProvider {
     fn truncate_tool_descriptions(&self, req: &mut Request, max_chars: usize) {
         if let Some(Value::Array(tools)) = req.raw_mut().get_mut("tools") {
             for t in tools.iter_mut() {
-                if let Some(f) = t.get_mut("function").and_then(Value::as_object_mut)
-                    && let Some(Value::String(d)) = f.get_mut("description")
-                {
+                // Description lives under `function` (Chat) or at the top level (Responses).
+                let desc = match t.get_mut("function").and_then(Value::as_object_mut) {
+                    Some(f) => f.get_mut("description"),
+                    None => t.get_mut("description"),
+                };
+                if let Some(Value::String(d)) = desc {
                     super::truncate_chars(d, max_chars);
                 }
             }
@@ -107,18 +198,46 @@ impl Provider for OpenAiProvider {
     }
 
     fn answer_text(&self, response: &Value) -> Option<String> {
+        // Chat Completions.
         if let Some(content) = response
             .pointer("/choices/0/message/content")
             .and_then(Value::as_str)
         {
             return Some(content.to_string());
         }
-        // A tool-call response has null content; the call itself is the answer.
-        // Serialize the first call's function ({name, arguments}) so callers and the
-        // tool-match scorer can read it.
-        response
-            .pointer("/choices/0/message/tool_calls/0/function")
-            .map(|f| f.to_string())
+        if let Some(f) = response.pointer("/choices/0/message/tool_calls/0/function") {
+            // A tool-call response has null content; the call itself is the answer.
+            // Serialize the first call's function ({name, arguments}) for the tool-match scorer.
+            return Some(f.to_string());
+        }
+        // Responses API: concatenate the `output_text` of every message item in `output[]`.
+        if let Some(output) = response.get("output").and_then(Value::as_array) {
+            let mut text = String::new();
+            for item in output {
+                if item.get("type").and_then(Value::as_str) == Some("message")
+                    && let Some(blocks) = item.get("content").and_then(Value::as_array)
+                {
+                    for b in blocks {
+                        if b.get("type").and_then(Value::as_str) == Some("output_text")
+                            && let Some(t) = b.get("text").and_then(Value::as_str)
+                        {
+                            text.push_str(t);
+                        }
+                    }
+                }
+            }
+            if !text.is_empty() {
+                return Some(text);
+            }
+            // No text — a function_call item is the answer.
+            if let Some(fc) = output
+                .iter()
+                .find(|i| i.get("type").and_then(Value::as_str) == Some("function_call"))
+            {
+                return Some(fc.to_string());
+            }
+        }
+        None
     }
 
     fn set_image_detail(&self, req: &mut Request, tier: &str) {
@@ -203,6 +322,78 @@ mod tests {
                 .pointer("/response_format/type")
                 .and_then(Value::as_str),
             Some("json_schema"),
+        );
+    }
+
+    // ── Responses API (/v1/responses) ──────────────────────────────────────────────────
+
+    #[test]
+    fn responses_text_pointers_cover_instructions_and_input() {
+        // String `input`.
+        let r = req(r#"{"instructions":"be terse","input":"hello"}"#);
+        assert_eq!(
+            OpenAiProvider.content_text_pointers(&r),
+            vec!["/instructions", "/input"]
+        );
+        // Array `input` with a string content and a typed `input_text` block (the latter sits
+        // beside a non-text block that must be skipped).
+        let r2 = req(r#"{"input":[
+                {"role":"user","content":"plain"},
+                {"role":"user","content":[{"type":"input_text","text":"typed"},{"type":"input_image","image_url":"x"}]}
+            ]}"#);
+        assert_eq!(
+            OpenAiProvider.content_text_pointers(&r2),
+            vec!["/input/0/content", "/input/1/content/0/text"]
+        );
+    }
+
+    #[test]
+    fn responses_uses_max_output_tokens() {
+        let mut r = req(r#"{"input":"hi"}"#);
+        OpenAiProvider.set_max_tokens(&mut r, 32);
+        assert_eq!(OpenAiProvider.max_tokens(&r), Some(32));
+        assert_eq!(
+            r.raw().get("max_output_tokens").and_then(Value::as_u64),
+            Some(32)
+        );
+        assert!(r.raw().get("max_tokens").is_none());
+    }
+
+    #[test]
+    fn responses_system_prepends_instructions() {
+        let mut r = req(r#"{"instructions":"keep","input":"hi"}"#);
+        OpenAiProvider.add_system_instruction(&mut r, "be terse");
+        assert_eq!(
+            r.raw().get("instructions").and_then(Value::as_str),
+            Some("be terse\nkeep")
+        );
+    }
+
+    #[test]
+    fn responses_tools_are_flat() {
+        let r = req(
+            r#"{"input":"hi","tools":[{"type":"function","name":"grep","description":"search"}]}"#,
+        );
+        assert_eq!(
+            OpenAiProvider.tool_descriptors(&r),
+            vec![("grep".to_string(), "search".to_string())]
+        );
+    }
+
+    #[test]
+    fn responses_answer_text_walks_output() {
+        let body = json!({
+            "output": [
+                {"type": "reasoning", "summary": []},
+                {"type": "message", "role": "assistant", "content": [
+                    {"type": "output_text", "text": "hello "},
+                    {"type": "output_text", "text": "world"}
+                ]}
+            ]
+        });
+        assert_eq!(
+            OpenAiProvider.answer_text(&body).as_deref(),
+            Some("hello world")
         );
     }
 }

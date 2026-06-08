@@ -190,6 +190,14 @@ pub fn detect(body: &Value) -> Option<ProviderKind> {
         return Some(ProviderKind::Anthropic);
     }
 
+    // OpenAI Responses API: `input` replaces `messages`, with `instructions` or
+    // `max_output_tokens` alongside. No other provider uses this top-level shape.
+    if obj.contains_key("input")
+        && (obj.contains_key("instructions") || obj.contains_key("max_output_tokens"))
+    {
+        return Some(ProviderKind::OpenAi);
+    }
+
     // OpenAI-only top-level fields.
     if obj.contains_key("max_completion_tokens") || obj.contains_key("response_format") {
         return Some(ProviderKind::OpenAi);

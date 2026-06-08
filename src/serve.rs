@@ -567,7 +567,9 @@ mod imp {
                     .or_else(|| v.pointer("/message/usage/output_tokens"))
                     .and_then(Value::as_i64),
                 ProviderKind::OpenAi => v
-                    .pointer("/usage/completion_tokens")
+                    .pointer("/usage/completion_tokens") // Chat Completions
+                    .or_else(|| v.pointer("/usage/output_tokens")) // Responses (non-stream)
+                    .or_else(|| v.pointer("/response/usage/output_tokens")) // Responses SSE done
                     .and_then(Value::as_i64),
                 ProviderKind::Google => v
                     .pointer("/usageMetadata/candidatesTokenCount")
@@ -614,7 +616,9 @@ mod imp {
                     .or_else(|| v.pointer("/message/usage/cache_read_input_tokens"))
                     .and_then(Value::as_i64),
                 ProviderKind::OpenAi => v
-                    .pointer("/usage/prompt_tokens_details/cached_tokens")
+                    .pointer("/usage/prompt_tokens_details/cached_tokens") // Chat Completions
+                    .or_else(|| v.pointer("/usage/input_tokens_details/cached_tokens")) // Responses
+                    .or_else(|| v.pointer("/response/usage/input_tokens_details/cached_tokens"))
                     .and_then(Value::as_i64),
                 ProviderKind::Google => v
                     .pointer("/usageMetadata/cachedContentTokenCount")
@@ -648,11 +652,25 @@ mod imp {
     fn sse_delta(provider: ProviderKind, v: &serde_json::Value) -> String {
         use serde_json::Value;
         match provider {
-            ProviderKind::OpenAi => v
-                .pointer("/choices/0/delta/content")
-                .and_then(Value::as_str)
-                .unwrap_or_default()
-                .to_string(),
+            ProviderKind::OpenAi => {
+                // Chat Completions streams text under `/choices/0/delta/content`; the Responses
+                // API streams it as the `delta` string of a `response.output_text.delta` event.
+                if let Some(c) = v
+                    .pointer("/choices/0/delta/content")
+                    .and_then(Value::as_str)
+                {
+                    c.to_string()
+                } else if v.get("type").and_then(Value::as_str)
+                    == Some("response.output_text.delta")
+                {
+                    v.get("delta")
+                        .and_then(Value::as_str)
+                        .unwrap_or_default()
+                        .to_string()
+                } else {
+                    String::new()
+                }
+            }
             ProviderKind::Anthropic => v
                 .pointer("/delta/text")
                 .and_then(Value::as_str)
@@ -975,6 +993,18 @@ mod imp {
             let gemini_json = "{\"usageMetadata\":{\"candidatesTokenCount\":9}}";
             assert_eq!(
                 extract_output_usage(ProviderKind::Google, gemini_json.as_bytes()),
+                Some(9)
+            );
+            // Responses API: non-streaming body reports `output_tokens`…
+            let responses_json = "{\"usage\":{\"input_tokens\":17,\"output_tokens\":42}}";
+            assert_eq!(
+                extract_output_usage(ProviderKind::OpenAi, responses_json.as_bytes()),
+                Some(42)
+            );
+            // …and the streaming total rides the final `response.completed` event.
+            let responses_sse = "data: {\"type\":\"response.completed\",\"response\":{\"usage\":{\"output_tokens\":9}}}\n\n";
+            assert_eq!(
+                extract_output_usage(ProviderKind::OpenAi, responses_sse.as_bytes()),
                 Some(9)
             );
             // No usage present → None (caller falls back to tokenizing the text).
