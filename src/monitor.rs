@@ -315,7 +315,7 @@ pub fn snapshot(
         o.push_str(&paint(
             color,
             DIM,
-            " ~ projected: output savings is the A/B-benchmark figure (−73%); input is measured\n   exactly. The live proxy never sees the un-compressed reply, so your output baseline\n   can't be measured here — only projected.\n",
+            " ~ projected: output −73% (A/B bench); input exact. Proxy never sees uncompressed reply — output projected, not measured.\n",
         ));
     }
     o
