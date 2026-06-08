@@ -93,6 +93,7 @@ const GREEN: &str = "1;32";
 const DIM: &str = "2";
 const BOLD: &str = "1";
 const YELLOW: &str = "33";
+const CACHE_BLUE: &str = "38;2;153;204;255"; // #99ccff — sets the cache discount apart
 
 fn paint(color: bool, code: &str, s: &str) -> String {
     if color {
@@ -106,12 +107,18 @@ fn paint(color: bool, code: &str, s: &str) -> String {
 /// is filled + dim (what you still pay), the saved tail is dotted + green (what was cut), so
 /// the green dots line up with the green savings label. ≥100 → all dots, ≤0 → all filled.
 fn bar(color: bool, saved: f64, width: usize) -> String {
-    let cut = ((saved.clamp(0.0, 100.0) / 100.0) * width as f64).round() as usize;
-    let kept = width.saturating_sub(cut);
+    bar_colored(color, saved, width, GREEN)
+}
+
+/// Like [`bar`] but paints the saved (dotted) tail in `cut` instead of green — for axes that
+/// want their own accent (e.g. the cache discount in `#99ccff`).
+fn bar_colored(color: bool, saved: f64, width: usize, cut: &str) -> String {
+    let n = ((saved.clamp(0.0, 100.0) / 100.0) * width as f64).round() as usize;
+    let kept = width.saturating_sub(n);
     format!(
         "{}{}",
         paint(color, DIM, &"█".repeat(kept)),
-        paint(color, GREEN, &"░".repeat(cut)),
+        paint(color, cut, &"░".repeat(n)),
     )
 }
 
@@ -261,8 +268,8 @@ pub fn snapshot(
         o.push_str(&format!(
             "  {:<7} {} {:>6}   {} reused at ~10%\n",
             "cache",
-            bar(color, 90.0, 22),
-            paint(color, GREEN, "~-90%"),
+            bar_colored(color, 90.0, 22, CACHE_BLUE),
+            paint(color, CACHE_BLUE, "~-90%"),
             human(s.cache_read_tokens),
         ));
     }
