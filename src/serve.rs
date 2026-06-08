@@ -183,7 +183,7 @@ mod imp {
         false
     }
 
-    fn record_from(p: Pending, output_after: Option<i64>) -> Record {
+    fn record_from(p: Pending, output_after: Option<i64>, cache_read: Option<i64>) -> Record {
         Record {
             provider: p.provider.as_str().to_string(),
             model: p.model,
@@ -194,6 +194,7 @@ mod imp {
             output_before: None,
             output_after,
             compress_micros: Some(p.compress_micros),
+            cache_read_tokens: cache_read,
         }
     }
 
@@ -203,7 +204,7 @@ mod imp {
     fn rehydrate_response(bytes: &[u8], p: &Pending, ledger: &Sender<Record>) -> Vec<u8> {
         let original = bytes.to_vec();
         let Ok(mut json) = serde_json::from_slice::<serde_json::Value>(bytes) else {
-            let _ = ledger.send(record_from(p.clone(), None));
+            let _ = ledger.send(record_from(p.clone(), None, None));
             return original;
         };
         let answer = crate::provider::for_kind(p.provider).answer_text(&json);
@@ -218,7 +219,7 @@ mod imp {
         {
             set_answer(&mut json, p.provider, &expanded);
         }
-        let _ = ledger.send(record_from(p.clone(), out_tok));
+        let _ = ledger.send(record_from(p.clone(), out_tok, None));
         serde_json::to_vec(&json).unwrap_or(original)
     }
 
@@ -260,7 +261,7 @@ mod imp {
             // A compressed request whose response we never saw (connection dropped): still
             // record the input savings, with output unknown.
             if let Some(p) = self.pending.take() {
-                let _ = self.ledger.send(record_from(p, None));
+                let _ = self.ledger.send(record_from(p, None, None));
             }
         }
     }
@@ -349,7 +350,7 @@ mod imp {
                     status.as_u16()
                 );
                 // Record the fall-back honestly: the original was sent, so zero savings.
-                let mut rec = record_from(pending, None);
+                let mut rec = record_from(pending, None, None);
                 rec.input_after = rec.input_before;
                 let _ = self.ledger.send(rec);
                 return replayed;
@@ -467,7 +468,10 @@ mod imp {
                         .map(|c| c.count(&text) as i64)
                 })
             });
-            let _ = self.ledger.send(record_from(p, output_after));
+            // Cached-prefix tokens the provider served from its prompt cache (the discounted
+            // resent context); `None` when the provider reports none.
+            let cache_read = extract_cache_read(p.provider, &buf);
+            let _ = self.ledger.send(record_from(p, output_after, cache_read));
         }
     }
 
@@ -527,6 +531,50 @@ mod imp {
         }
         // SSE: the final usage wins (Anthropic reports a partial count in `message_start` and
         // the true total in `message_delta`), so take the max seen across events.
+        let mut best: Option<i64> = None;
+        for line in text.lines() {
+            let Some(data) = line.trim_start().strip_prefix("data:") else {
+                continue;
+            };
+            let data = data.trim();
+            if data.is_empty() || data == "[DONE]" {
+                continue;
+            }
+            if let Ok(v) = serde_json::from_str::<Value>(data)
+                && let Some(n) = from_value(&v)
+            {
+                best = Some(best.map_or(n, |b| b.max(n)));
+            }
+        }
+        best
+    }
+
+    /// Provider-reported cached input tokens reused on this request (prompt-cache hits) — the
+    /// discounted resent prefix. Anthropic `cache_read_input_tokens` (in `message_start`),
+    /// OpenAI `prompt_tokens_details.cached_tokens`, Gemini `cachedContentTokenCount`. Mirrors
+    /// `extract_output_usage`'s JSON/SSE walk; `None` when the provider reports none.
+    fn extract_cache_read(provider: ProviderKind, body: &[u8]) -> Option<i64> {
+        use serde_json::Value;
+        let text = std::str::from_utf8(body).ok()?;
+        let from_value = |v: &Value| -> Option<i64> {
+            match provider {
+                ProviderKind::Anthropic => v
+                    .pointer("/usage/cache_read_input_tokens")
+                    .or_else(|| v.pointer("/message/usage/cache_read_input_tokens"))
+                    .and_then(Value::as_i64),
+                ProviderKind::OpenAi => v
+                    .pointer("/usage/prompt_tokens_details/cached_tokens")
+                    .and_then(Value::as_i64),
+                ProviderKind::Google => v
+                    .pointer("/usageMetadata/cachedContentTokenCount")
+                    .and_then(Value::as_i64),
+            }
+        };
+        if text.trim_start().starts_with('{')
+            && let Ok(v) = serde_json::from_str::<Value>(text.trim())
+        {
+            return from_value(&v);
+        }
         let mut best: Option<i64> = None;
         for line in text.lines() {
             let Some(data) = line.trim_start().strip_prefix("data:") else {

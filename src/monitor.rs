@@ -284,6 +284,16 @@ pub fn snapshot(
         }
     }
 
+    if s.cache_read_tokens > 0 {
+        o.push_str(&paint(
+            color,
+            GREEN,
+            &format!(
+                " cache · {} prefix tokens reused, billed at ~10% (the resent context, discounted)\n",
+                human(s.cache_read_tokens)
+            ),
+        ));
+    }
     if let Some(us) = s.avg_compress_micros {
         o.push_str(&paint(
             color,
@@ -430,6 +440,7 @@ pub fn export_json(
         "cost": cost.map(|c| json!({ "saved_usd": c.saved, "spend_usd": c.spend, "round_trip_pct": c.pct(),
                                      "projected_saved_usd": c.projected_saved(), "projected_round_trip_pct": c.projected_pct() })),
         "added_latency_ms": s.avg_compress_micros.map(|us| us / 1000.0),
+        "cache_read_tokens": s.cache_read_tokens,
         "approximate": s.any_approximate,
         "by_model": models.iter().map(|m| json!({
             "model": m.name, "requests": m.events, "saved_pct": m.saved_pct, "cost_saved_usd": m.cost_saved,
@@ -471,6 +482,7 @@ mod tests {
             output_after: 229_000,
             output_events: 1204,
             avg_compress_micros: Some(310.0),
+            cache_read_tokens: 1_200_000,
         }
     }
 

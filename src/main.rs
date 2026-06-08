@@ -209,6 +209,7 @@ fn main() -> Result<()> {
                     output_before: None,
                     output_after: None,
                     compress_micros: None,
+                    cache_read_tokens: None,
                 });
             }
 
@@ -247,6 +248,7 @@ fn main() -> Result<()> {
                         output_before: None,
                         output_after,
                         compress_micros: None,
+                        cache_read_tokens: None,
                     });
                 }
             }

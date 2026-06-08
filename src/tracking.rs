@@ -24,6 +24,10 @@ pub struct Record {
     pub output_after: Option<i64>,
     /// Microseconds spent compressing this request (proxy overhead); `None` for CLI paths.
     pub compress_micros: Option<i64>,
+    /// Provider-reported cached input tokens reused on this request (Anthropic
+    /// `cache_read_input_tokens`), billed at ~10% of input price — a real bill discount the
+    /// token % can't show. `None` when the provider reports none / on CLI paths.
+    pub cache_read_tokens: Option<i64>,
 }
 
 /// Per-provider aggregate row.
@@ -102,6 +106,8 @@ pub struct Summary {
     pub output_events: i64,
     /// Mean compression overhead (µs) across recorded requests; `None` if none recorded it.
     pub avg_compress_micros: Option<f64>,
+    /// Total cached input tokens reused (Anthropic prompt-cache hits) — the discounted prefix.
+    pub cache_read_tokens: i64,
 }
 
 impl Summary {
@@ -185,17 +191,20 @@ impl Tracker {
                     input_after   INTEGER NOT NULL,
                     output_before INTEGER,
                     output_after  INTEGER,
-                    compress_micros INTEGER
+                    compress_micros INTEGER,
+                    cache_read_tokens INTEGER
                 );",
             )
             .context("failed to migrate ledger schema")?;
-        // Additive column for ledgers created before latency tracking — the ALTER errors with
-        // "duplicate column" once it exists (and on fresh DBs the CREATE already has it), which
-        // we ignore.
-        let _ = self.conn.execute(
-            "ALTER TABLE compressions ADD COLUMN compress_micros INTEGER",
-            [],
-        );
+        // Additive columns for ledgers created before these fields existed — each ALTER errors
+        // with "duplicate column" once it exists (and on fresh DBs the CREATE already has it),
+        // which we ignore.
+        for col in ["compress_micros", "cache_read_tokens"] {
+            let _ = self.conn.execute(
+                &format!("ALTER TABLE compressions ADD COLUMN {col} INTEGER"),
+                [],
+            );
+        }
         Ok(())
     }
 
@@ -245,8 +254,8 @@ impl Tracker {
             .execute(
                 "INSERT INTO compressions
                     (ts, provider, model, tokenizer, exact, input_before, input_after,
-                     output_before, output_after, compress_micros)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+                     output_before, output_after, compress_micros, cache_read_tokens)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
                 params![
                     ts,
                     r.provider,
@@ -258,6 +267,7 @@ impl Tracker {
                     r.output_before,
                     r.output_after,
                     r.compress_micros,
+                    r.cache_read_tokens,
                 ],
             )
             .context("failed to record compression")?;
@@ -272,8 +282,8 @@ impl Tracker {
             .execute(
                 "INSERT INTO compressions
                     (ts, provider, model, tokenizer, exact, input_before, input_after,
-                     output_before, output_after, compress_micros)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+                     output_before, output_after, compress_micros, cache_read_tokens)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
                 params![
                     ts,
                     r.provider,
@@ -285,6 +295,7 @@ impl Tracker {
                     r.output_before,
                     r.output_after,
                     r.compress_micros,
+                    r.cache_read_tokens,
                 ],
             )
             .context("failed to record compression (test)")?;
@@ -351,14 +362,16 @@ impl Tracker {
             .collect::<rusqlite::Result<Vec<_>>>()
             .context("failed to read provider summary")?;
 
-        // Mean compression overhead; AVG ignores NULL (CLI rows / pre-latency ledgers), and
-        // returns NULL itself when nothing has it — mapped to None.
-        let avg_compress_micros: Option<f64> = self
+        // Mean compression overhead + total cached-prefix tokens reused. AVG/SUM ignore NULL
+        // (CLI rows / pre-feature ledgers); AVG returns NULL → None when nothing has it.
+        let (avg_compress_micros, cache_read_tokens): (Option<f64>, i64) = self
             .conn
-            .query_row("SELECT AVG(compress_micros) FROM compressions", [], |row| {
-                row.get(0)
-            })
-            .context("failed to average compression latency")?;
+            .query_row(
+                "SELECT AVG(compress_micros), COALESCE(SUM(cache_read_tokens), 0) FROM compressions",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .context("failed to summarize latency + cache")?;
 
         Ok(Summary {
             events,
@@ -370,6 +383,7 @@ impl Tracker {
             output_after,
             output_events,
             avg_compress_micros,
+            cache_read_tokens,
         })
     }
 
@@ -469,6 +483,7 @@ mod tests {
             output_before: None,
             output_after: None,
             compress_micros: None,
+            cache_read_tokens: None,
         }
     }
 
@@ -531,6 +546,7 @@ mod tests {
             output_before: None,
             output_after: Some(42),
             compress_micros: Some(300),
+            cache_read_tokens: Some(50),
         })
         .unwrap();
 
@@ -545,6 +561,7 @@ mod tests {
             output_before: None,
             output_after: Some(17),
             compress_micros: Some(500),
+            cache_read_tokens: Some(70),
         })
         .unwrap();
 
@@ -567,6 +584,8 @@ mod tests {
 
         // Mean compression overhead over the two timed rows (the rec() row is NULL → ignored).
         assert_eq!(s.avg_compress_micros, Some(400.0));
+        // Cached-prefix tokens summed over the rows that reported them.
+        assert_eq!(s.cache_read_tokens, 120);
 
         // Per-provider reflects the same aggregation.
         let oa = s
