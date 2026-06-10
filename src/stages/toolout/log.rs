@@ -28,7 +28,9 @@ pub fn compress(text: &str, ctx: &Ctx, query: &HashSet<String>) -> Option<String
         return compress_errors_only(text);
     }
     let (collapsed, folded) = if ctx.template {
-        template::collapse(text)
+        // Global collapse: consecutive runs *and* non-adjacent (interleaved parallel-build)
+        // same-template lines, folded into the same `[×N: …]` representation.
+        template::collapse_global(text)
     } else {
         (text.to_string(), false)
     };

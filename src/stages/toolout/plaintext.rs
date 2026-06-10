@@ -32,7 +32,7 @@ pub fn compress(text: &str, ctx: &Ctx, query: &HashSet<String>) -> Option<String
     // the `folded` flag, not `collapsed == text`: collapse rebuilds via `join("\n")`,
     // which strips a trailing newline, so a string compare reads "changed" for any prose
     // ending in '\n' even when nothing folded — defeating the decline.
-    let (collapsed, folded) = template::collapse(text);
+    let (collapsed, folded) = template::collapse_global(text);
     if !folded {
         return None;
     }
