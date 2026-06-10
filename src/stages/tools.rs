@@ -125,6 +125,19 @@ pub(crate) fn lex_words(s: &str) -> Vec<String> {
     s.unicode_words().map(str::to_lowercase).collect()
 }
 
+/// 64-bit FNV-1a hash. Unlike `DefaultHasher`, output is **stable across Rust versions
+/// and platforms** — safe to compare across restarts (cache fingerprints, bigram sets).
+/// Non-cryptographic; used only for equality checks. Takes any byte iterator so hot
+/// callers (per-pair bigram hashing in sizing) can chain without an intermediate `Vec`.
+pub(crate) fn fnv1a(bytes: impl IntoIterator<Item = u8>) -> u64 {
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    for b in bytes {
+        h ^= b as u64;
+        h = h.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    h
+}
+
 /// Content words of `lower` (already lowercased) as a set of **borrowed** slices —
 /// Unicode-segmented (universal), snake_case split (`run_sql` → `run`, `sql`), stopwords +
 /// single chars dropped. Borrows from `lower`, so no per-word allocation.

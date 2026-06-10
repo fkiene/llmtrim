@@ -550,6 +550,8 @@ fn textrank_rank(chunks: &[String]) -> Vec<usize> {
 }
 
 /// Indices sorted by score descending, ties broken by original order (deterministic).
+/// Not `toolout::fill_by_score`: this returns a full ranking (selection + boundary
+/// pinning happen later in `select`), not a budget-filled keep mask.
 fn argsort_desc(scores: &[f64]) -> Vec<usize> {
     let mut idx: Vec<usize> = (0..scores.len()).collect();
     idx.sort_by(|&a, &b| {

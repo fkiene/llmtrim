@@ -244,6 +244,31 @@ pub(crate) fn query_bonus(line: &str, query: &HashSet<String>) -> f64 {
     (hits as f64 * 0.1).min(0.3)
 }
 
+/// Fill `keep` up to `budget` slots by picking the highest-scoring unfilled indices,
+/// ties broken by original (ascending) order. Indices already set in `keep` count
+/// toward the budget; the caller sets any forced/pinned slots before calling this.
+/// Shared by [`select_keep`], [`diff::cap_by_score`], and [`crate::stages::jsoncrush`].
+pub(crate) fn fill_by_score(keep: &mut [bool], scores: &[f64], budget: usize) {
+    let n = keep.len();
+    let mut order: Vec<usize> = (0..n).collect();
+    order.sort_by(|&a, &b| {
+        scores[b]
+            .partial_cmp(&scores[a])
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then(a.cmp(&b))
+    });
+    let mut count = keep.iter().filter(|&&x| x).count();
+    for &i in &order {
+        if count >= budget {
+            break;
+        }
+        if !keep[i] {
+            keep[i] = true;
+            count += 1;
+        }
+    }
+}
+
 /// Choose which of `scores.len()` lines to keep: always the first [`HEAD`] and last
 /// [`TAIL`], always any at or above `force`, then fill by descending score (ties by
 /// original order) until `k` are kept. Forced lines may exceed `k` — errors are never
@@ -262,23 +287,7 @@ pub(crate) fn select_keep(scores: &[f64], k: usize, force: f64) -> Vec<bool> {
             keep[i] = true;
         }
     }
-    let mut order: Vec<usize> = (0..n).collect();
-    order.sort_by(|&a, &b| {
-        scores[b]
-            .partial_cmp(&scores[a])
-            .unwrap_or(std::cmp::Ordering::Equal)
-            .then(a.cmp(&b))
-    });
-    let mut count = keep.iter().filter(|&&x| x).count();
-    for &i in &order {
-        if count >= k {
-            break;
-        }
-        if !keep[i] {
-            keep[i] = true;
-            count += 1;
-        }
-    }
+    fill_by_score(&mut keep, scores, k);
     keep
 }
 

@@ -155,12 +155,14 @@ pub fn run(requested: Option<u16>) -> Result<()> {
         // Upgrade path: drop any legacy managed block a previous version wrote to the
         // PowerShell profile, so a dead (possibly ExecutionPolicy-blocked) block isn't
         // left behind.
-        if let Ok(Some(path)) = remove_profile_block() {
-            rows.push((
-                ui::OK,
-                "Profile".into(),
-                format!("legacy env block removed from {}", path.display()),
-            ));
+        if let Ok(paths) = remove_profile_block() {
+            for path in paths {
+                rows.push((
+                    ui::OK,
+                    "Profile".into(),
+                    format!("legacy env block removed from {}", path.display()),
+                ));
+            }
         }
         // Tell Explorer to re-read the environment so freshly-launched terminals/editors
         // inherit it without a logout (a raw registry write alone is invisible to running
@@ -350,24 +352,32 @@ pub fn uninstall(purge: bool, keep_binary: bool) -> Result<()> {
             )),
             Err(e) => rows.push((ui::WARN, "Environment".into(), format!("not cleaned: {e}"))),
         }
-        if let Ok(Some(path)) = remove_profile_block() {
-            rows.push((
-                ui::OK,
-                "Profile".into(),
-                format!("legacy env block removed from {}", path.display()),
-            ));
+        if let Ok(paths) = remove_profile_block() {
+            for path in paths {
+                rows.push((
+                    ui::OK,
+                    "Profile".into(),
+                    format!("legacy env block removed from {}", path.display()),
+                ));
+            }
         }
         // Refresh Explorer's environment so new processes stop seeing the removed values.
         broadcast_env_change();
     }
     #[cfg(not(windows))]
     match remove_profile_block() {
-        Ok(Some(path)) => rows.push((
-            ui::OK,
-            "Profile".into(),
-            format!("env block removed from {}", path.display()),
-        )),
-        Ok(None) => rows.push((ui::NOTE, "Profile".into(), "no env block to remove".into())),
+        Ok(paths) if paths.is_empty() => {
+            rows.push((ui::NOTE, "Profile".into(), "no env block to remove".into()))
+        }
+        Ok(paths) => {
+            for path in paths {
+                rows.push((
+                    ui::OK,
+                    "Profile".into(),
+                    format!("env block removed from {}", path.display()),
+                ));
+            }
+        }
         Err(e) => rows.push((ui::WARN, "Profile".into(), format!("not cleaned: {e}"))),
     }
 
@@ -487,25 +497,84 @@ pub fn uninstall(purge: bool, keep_binary: bool) -> Result<()> {
     Ok(())
 }
 
-/// Strip the llmtrim managed block from the shell profile, if present.
-fn remove_profile_block() -> Result<Option<PathBuf>> {
-    let Some((path, _)) = profile_target() else {
-        return Ok(None);
-    };
-    let Ok(existing) = std::fs::read_to_string(&path) else {
-        return Ok(None);
-    };
-    if !existing.contains(BEGIN) {
-        return Ok(None);
+/// All POSIX shell profile files that llmtrim may have written a managed block into.
+/// A user can install under bash (block goes to `.bashrc`), later switch to zsh, and the
+/// stale block in `.bashrc` keeps `HTTPS_PROXY` pointed at a dead proxy unless we sweep
+/// all three candidates on every removal. `base` is the home directory; tests pass a
+/// temp dir so no real `$HOME` is ever mutated.
+#[cfg(not(windows))]
+fn candidate_profiles(base: &std::path::Path) -> Vec<PathBuf> {
+    [".bashrc", ".zshrc", ".profile"]
+        .iter()
+        .map(|f| base.join(f))
+        .collect()
+}
+
+/// Strip the llmtrim managed block from **every** POSIX shell profile that contains it,
+/// using `base` as the home directory. Returns the paths that were actually cleaned.
+/// A file that does not exist or cannot be read is silently skipped; a write failure is
+/// returned as an error so the caller can report it. Windows: always returns `Ok(vec![])`.
+#[cfg_attr(windows, allow(dead_code))]
+fn remove_profile_block_in(base: &std::path::Path) -> Result<Vec<PathBuf>> {
+    #[cfg(windows)]
+    {
+        let _ = base;
+        return Ok(vec![]);
     }
-    std::fs::write(&path, strip_block(&existing))
-        .with_context(|| format!("failed to write {}", path.display()))?;
-    Ok(Some(path))
+    #[cfg(not(windows))]
+    {
+        let mut cleaned = Vec::new();
+        for path in candidate_profiles(base) {
+            let existing = match std::fs::read_to_string(&path) {
+                Ok(s) => s,
+                Err(_) => continue, // absent or unreadable — skip
+            };
+            if !existing.contains(BEGIN) {
+                continue;
+            }
+            std::fs::write(&path, strip_block(&existing))
+                .with_context(|| format!("failed to write {}", path.display()))?;
+            cleaned.push(path);
+        }
+        Ok(cleaned)
+    }
+}
+
+/// Strip the llmtrim managed block from all candidate shell profiles under `$HOME`.
+/// Thin `$HOME`-reading wrapper around [`remove_profile_block_in`].
+/// On Windows only deals with any legacy PowerShell profile block (registry is the live path).
+fn remove_profile_block() -> Result<Vec<PathBuf>> {
+    #[cfg(windows)]
+    {
+        // Windows live env is the registry; this only handles a legacy profile block that a
+        // prior POSIX-style version may have written to the PowerShell profile.
+        let Some((path, _)) = profile_target() else {
+            return Ok(vec![]);
+        };
+        let existing = match std::fs::read_to_string(&path) {
+            Ok(s) => s,
+            Err(_) => return Ok(vec![]),
+        };
+        if !existing.contains(BEGIN) {
+            return Ok(vec![]);
+        }
+        std::fs::write(&path, strip_block(&existing))
+            .with_context(|| format!("failed to write {}", path.display()))?;
+        return Ok(vec![path]);
+    }
+    #[cfg(not(windows))]
+    {
+        let Ok(home) = std::env::var("HOME") else {
+            return Ok(vec![]);
+        };
+        remove_profile_block_in(std::path::Path::new(&home))
+    }
 }
 
 /// Is the interceptor env still wired up? Used to warn that stopping the daemon while
 /// `HTTPS_PROXY` still points at it will break the client's HTTPS. Windows reads the
-/// `HKCU\Environment` value; POSIX checks the shell-profile block.
+/// `HKCU\Environment` value; POSIX checks **all three candidate shell profiles** —
+/// a stale block in any of them means the env may still be wired for that shell.
 pub fn profile_has_block() -> bool {
     #[cfg(windows)]
     {
@@ -513,11 +582,22 @@ pub fn profile_has_block() -> bool {
     }
     #[cfg(not(windows))]
     {
-        profile_target()
-            .and_then(|(p, _)| std::fs::read_to_string(p).ok())
+        let Ok(home) = std::env::var("HOME") else {
+            return false;
+        };
+        profile_has_block_in(std::path::Path::new(&home))
+    }
+}
+
+/// Inner check used by [`profile_has_block`] and tests. Scans all candidate profiles under
+/// `base`; returns `true` if the BEGIN marker is found in any of them.
+#[cfg(not(windows))]
+fn profile_has_block_in(base: &std::path::Path) -> bool {
+    candidate_profiles(base).into_iter().any(|path| {
+        std::fs::read_to_string(&path)
             .map(|t| t.contains(BEGIN))
             .unwrap_or(false)
-    }
+    })
 }
 
 // ── Windows user environment (`HKCU\Environment`) ───────────────────────────────
@@ -726,6 +806,20 @@ enum Syntax {
     PowerShell,
 }
 
+/// The rc file for a `$SHELL` value (its basename decides; unknown shells get `.profile`).
+/// Single source for the shell→file mapping — used by both [`profile_target`] and
+/// [`write_profile_block_in`].
+#[cfg(not(windows))]
+fn shell_profile_file(shell: &str) -> &'static str {
+    if shell.ends_with("zsh") {
+        ".zshrc"
+    } else if shell.ends_with("bash") {
+        ".bashrc"
+    } else {
+        ".profile"
+    }
+}
+
 /// The profile file to write the managed env block into, and the syntax it uses. Unix: the
 /// `$SHELL` rc file (`export`). Windows: the current-user PowerShell profile (`$env:`).
 fn profile_target() -> Option<(PathBuf, Syntax)> {
@@ -733,13 +827,7 @@ fn profile_target() -> Option<(PathBuf, Syntax)> {
     {
         let home = std::env::var("HOME").ok()?;
         let shell = std::env::var("SHELL").unwrap_or_default();
-        let file = if shell.ends_with("zsh") {
-            ".zshrc"
-        } else if shell.ends_with("bash") {
-            ".bashrc"
-        } else {
-            ".profile"
-        };
+        let file = shell_profile_file(&shell);
         Some((PathBuf::from(home).join(file), Syntax::Posix))
     }
     #[cfg(windows)]
@@ -792,26 +880,71 @@ fn env_block(proxy: &str, ca: &str, syntax: Syntax) -> String {
     }
 }
 
+/// Inner seam for [`write_profile_block`]: write into a profile file named by `shell` (the
+/// basename of `$SHELL`, e.g. `"bash"` → `.bashrc`, `"zsh"` → `.zshrc`) under `base` as the
+/// home directory. Sweeps stale blocks from all other candidates under `base` first, then
+/// writes the new block. Returns the path written. `base` is never `$HOME` itself; it is
+/// always a caller-supplied directory, which tests supply as a temp dir.
+#[cfg(not(windows))]
+fn write_profile_block_in(
+    base: &std::path::Path,
+    shell: &str,
+    proxy: &str,
+    ca: &str,
+) -> Result<PathBuf> {
+    let path = base.join(shell_profile_file(shell));
+    // Sweep stale blocks from ALL candidate profiles under base (including the target).
+    // Best-effort: a failure to strip a stale file must not block writing the new block.
+    let _ = remove_profile_block_in(base);
+    let existing = std::fs::read_to_string(&path).unwrap_or_default();
+    // strip_block is a safety net in case remove_profile_block_in skipped a file with a
+    // broken BEGIN-without-END that it left intact.
+    let mut base_content = strip_block(&existing);
+    if !base_content.is_empty() && !base_content.ends_with('\n') {
+        base_content.push('\n');
+    }
+    let block = env_block(proxy, ca, Syntax::Posix);
+    std::fs::write(&path, format!("{base_content}{block}"))
+        .with_context(|| format!("failed to write {}", path.display()))?;
+    Ok(path)
+}
+
 /// Replace (or append) the llmtrim managed block in the shell profile. Idempotent — a
-/// re-run updates the existing block rather than stacking duplicates. POSIX-only: on
-/// Windows the env lives in the registry, so `run()` never calls this there.
+/// re-run updates the existing block rather than stacking duplicates. Also sweeps stale
+/// blocks from all other candidate profile files (e.g. `.bashrc` when now running zsh),
+/// so re-setup under a different shell does not leave a dead proxy block behind.
+/// POSIX-only: on Windows the env lives in the registry, so `run()` never calls this there.
 #[allow(dead_code)]
 fn write_profile_block(proxy: &str, ca: &str) -> Result<Option<PathBuf>> {
-    let Some((path, syntax)) = profile_target() else {
-        return Ok(None);
-    };
-    if let Some(parent) = path.parent() {
-        let _ = std::fs::create_dir_all(parent); // the PowerShell profile dir may not exist yet
+    #[cfg(not(windows))]
+    {
+        // Delegate to the seam so production and tests run the same code path.
+        let Ok(home) = std::env::var("HOME") else {
+            return Ok(None);
+        };
+        let shell = std::env::var("SHELL").unwrap_or_default();
+        write_profile_block_in(std::path::Path::new(&home), &shell, proxy, ca).map(Some)
     }
-    let existing = std::fs::read_to_string(&path).unwrap_or_default();
-    let mut base = strip_block(&existing);
-    if !base.is_empty() && !base.ends_with('\n') {
-        base.push('\n');
+    #[cfg(windows)]
+    {
+        // Legacy PowerShell-profile arm: the live Windows env is the registry; this is
+        // only reachable for a profile-style install a prior version may have used.
+        let Some((path, syntax)) = profile_target() else {
+            return Ok(None);
+        };
+        if let Some(parent) = path.parent() {
+            let _ = std::fs::create_dir_all(parent); // the PowerShell profile dir may not exist yet
+        }
+        let existing = std::fs::read_to_string(&path).unwrap_or_default();
+        let mut base_content = strip_block(&existing);
+        if !base_content.is_empty() && !base_content.ends_with('\n') {
+            base_content.push('\n');
+        }
+        let block = env_block(proxy, ca, syntax);
+        std::fs::write(&path, format!("{base_content}{block}"))
+            .with_context(|| format!("failed to write {}", path.display()))?;
+        Ok(Some(path))
     }
-    let block = env_block(proxy, ca, syntax);
-    std::fs::write(&path, format!("{base}{block}"))
-        .with_context(|| format!("failed to write {}", path.display()))?;
-    Ok(Some(path))
 }
 
 /// Remove any existing llmtrim managed block (between the markers, inclusive).
@@ -1038,5 +1171,319 @@ mod tests {
             Some(taken),
             "free port not accepted"
         );
+    }
+
+    // ── Multi-profile sweep tests (POSIX only) ─────────────────────────────────────
+    // All tests use a temp dir as the synthetic $HOME so real profile files are never
+    // touched and tests are hermetic under parallel `cargo test` runs.
+    //
+    // `TempDir` is a drop guard: the directory (and its contents) is deleted when it goes
+    // out of scope, with no external crate required.
+
+    #[cfg(not(windows))]
+    struct TempDir(PathBuf);
+
+    #[cfg(not(windows))]
+    impl TempDir {
+        fn new(suffix: &str) -> Self {
+            // Use PID + a suffix so concurrent test threads don't collide.
+            let dir = std::env::temp_dir().join(format!(
+                "llmtrim-test-{}-{}",
+                std::process::id(),
+                suffix
+            ));
+            std::fs::create_dir_all(&dir).expect("create temp dir");
+            Self(dir)
+        }
+        fn path(&self) -> &std::path::Path {
+            &self.0
+        }
+    }
+
+    #[cfg(not(windows))]
+    impl Drop for TempDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    /// Helper: write a managed block into a candidate file under `base`.
+    #[cfg(not(windows))]
+    fn write_block_to(base: &std::path::Path, name: &str) {
+        let block = format!("{BEGIN}\nexport HTTPS_PROXY=\"http://127.0.0.1:8787\"\n{END}\n");
+        std::fs::write(base.join(name), block).expect("write test block");
+    }
+
+    /// Block present in two files → both cleaned; function returns both paths.
+    #[cfg(not(windows))]
+    #[test]
+    fn remove_profile_block_in_cleans_all_files_that_contain_block() {
+        let dir = TempDir::new("sweep-two");
+        let base = dir.path();
+        write_block_to(base, ".bashrc");
+        write_block_to(base, ".zshrc");
+        // .profile intentionally absent
+
+        let cleaned = remove_profile_block_in(base).expect("remove_profile_block_in");
+        let mut names: Vec<String> = cleaned
+            .iter()
+            .map(|p| p.file_name().unwrap().to_string_lossy().to_string())
+            .collect();
+        names.sort();
+        assert_eq!(names, vec![".bashrc", ".zshrc"]);
+
+        // Both files now contain no managed block.
+        for name in [".bashrc", ".zshrc"] {
+            let content = std::fs::read_to_string(base.join(name)).expect("read back");
+            assert!(
+                !content.contains(BEGIN),
+                "{name} still contains BEGIN marker after sweep"
+            );
+        }
+    }
+
+    /// No files contain the block → Ok(empty vec), no error.
+    #[cfg(not(windows))]
+    #[test]
+    fn remove_profile_block_in_noop_when_no_blocks() {
+        let dir = TempDir::new("noop");
+        let base = dir.path();
+        // Write files with ordinary content, no managed block.
+        std::fs::write(base.join(".bashrc"), "export FOO=bar\n").expect("write .bashrc");
+
+        let cleaned = remove_profile_block_in(base).expect("remove_profile_block_in");
+        assert!(cleaned.is_empty(), "expected no files cleaned");
+        // Content unchanged.
+        let content = std::fs::read_to_string(base.join(".bashrc")).expect("read");
+        assert_eq!(content, "export FOO=bar\n");
+    }
+
+    /// One file is absent/unreadable, others are cleaned without error.
+    #[cfg(not(windows))]
+    #[test]
+    fn remove_profile_block_in_skips_absent_files_cleans_rest() {
+        let dir = TempDir::new("skip-absent");
+        let base = dir.path();
+        // Only .zshrc exists with a block; .bashrc and .profile are absent.
+        write_block_to(base, ".zshrc");
+
+        let cleaned = remove_profile_block_in(base).expect("remove_profile_block_in");
+        assert_eq!(cleaned.len(), 1);
+        assert_eq!(cleaned[0].file_name().unwrap().to_string_lossy(), ".zshrc");
+    }
+
+    /// profile_has_block_in returns true when ANY candidate file contains the block.
+    #[cfg(not(windows))]
+    #[test]
+    fn profile_has_block_in_detects_block_in_any_candidate() {
+        let dir = TempDir::new("has-block");
+        let base = dir.path();
+
+        // Nothing present → false.
+        assert!(!profile_has_block_in(base));
+
+        // Block only in .bashrc → still detected.
+        write_block_to(base, ".bashrc");
+        assert!(profile_has_block_in(base));
+
+        // After sweep → false again.
+        remove_profile_block_in(base).expect("sweep");
+        assert!(!profile_has_block_in(base));
+
+        // Block only in .zshrc → detected.
+        write_block_to(base, ".zshrc");
+        assert!(profile_has_block_in(base));
+    }
+
+    // ── write_profile_block_in tests ────────────────────────────────────────────────
+
+    /// Round-trip: write then read back the block, confirm it contains valid export lines and
+    /// BEGIN/END markers, and that unrelated content above it is preserved.
+    #[cfg(not(windows))]
+    #[test]
+    fn write_profile_block_in_roundtrip_preserves_existing_content() {
+        let dir = TempDir::new("wpb-roundtrip");
+        let base = dir.path();
+        let proxy = "http://127.0.0.1:8787";
+        let ca = "/tmp/ca.crt";
+
+        // Pre-populate .bashrc with unrelated content.
+        std::fs::write(base.join(".bashrc"), "export FOO=bar\nexport BAZ=qux\n")
+            .expect("write pre-existing .bashrc");
+
+        let path = write_profile_block_in(base, "bash", proxy, ca).expect("write_profile_block_in");
+        assert_eq!(path, base.join(".bashrc"));
+
+        let content = std::fs::read_to_string(&path).expect("read back");
+        // Unrelated content must be preserved above the block.
+        assert!(
+            content.contains("export FOO=bar"),
+            "pre-existing content lost"
+        );
+        // Block delimiters must be present.
+        assert!(content.contains(BEGIN), "BEGIN marker missing");
+        assert!(content.contains(END), "END marker missing");
+        // POSIX export syntax.
+        assert!(
+            content.contains(&format!("export HTTPS_PROXY=\"{proxy}\"")),
+            "proxy export missing"
+        );
+        assert!(
+            content.contains(&format!("export NODE_EXTRA_CA_CERTS=\"{ca}\"")),
+            "CA export missing"
+        );
+    }
+
+    /// Idempotency: calling write_profile_block_in twice on the same shell must leave exactly
+    /// ONE managed block (BEGIN appears exactly once) and preserve unrelated content.
+    #[cfg(not(windows))]
+    #[test]
+    fn write_profile_block_in_idempotent_second_call_does_not_duplicate_block() {
+        let dir = TempDir::new("wpb-idempotent");
+        let base = dir.path();
+        let proxy = "http://127.0.0.1:8787";
+        let ca = "/tmp/ca.crt";
+
+        std::fs::write(base.join(".bashrc"), "# user config\n").expect("write .bashrc");
+
+        write_profile_block_in(base, "bash", proxy, ca).expect("first write");
+        write_profile_block_in(base, "bash", proxy, ca).expect("second write");
+
+        let content = std::fs::read_to_string(base.join(".bashrc")).expect("read back");
+        let begin_count = content.matches(BEGIN).count();
+        assert_eq!(
+            begin_count, 1,
+            "BEGIN marker appears {begin_count} times after two writes — expected 1"
+        );
+        assert!(
+            content.contains("# user config"),
+            "pre-existing content lost after double write"
+        );
+    }
+
+    /// Shell-switch sweep: block written for bash, then write_profile_block_in called with zsh.
+    /// The stale .bashrc block must be removed; .zshrc gets the new block.
+    #[cfg(not(windows))]
+    #[test]
+    fn write_profile_block_in_sweeps_stale_shell_on_switch() {
+        let dir = TempDir::new("wpb-switch");
+        let base = dir.path();
+        let proxy = "http://127.0.0.1:8787";
+        let ca = "/tmp/ca.crt";
+
+        // Simulate a prior bash setup: .bashrc has a managed block.
+        write_block_to(base, ".bashrc");
+
+        // Now "switch" to zsh.
+        let path =
+            write_profile_block_in(base, "zsh", proxy, ca).expect("write_profile_block_in for zsh");
+        assert_eq!(path, base.join(".zshrc"), "should write to .zshrc");
+
+        // .bashrc must have its stale block swept.
+        let bashrc = std::fs::read_to_string(base.join(".bashrc")).expect("read .bashrc");
+        assert!(
+            !bashrc.contains(BEGIN),
+            ".bashrc still contains stale block after shell switch"
+        );
+
+        // .zshrc must have exactly one block.
+        let zshrc = std::fs::read_to_string(base.join(".zshrc")).expect("read .zshrc");
+        assert_eq!(
+            zshrc.matches(BEGIN).count(),
+            1,
+            ".zshrc should have exactly one block"
+        );
+    }
+
+    // ── strip_block adversarial cases ────────────────────────────────────────────────
+
+    /// Block at the very start of the file (no content before BEGIN).
+    #[test]
+    fn strip_block_at_file_start() {
+        let input = format!("{BEGIN}\nexport X=1\n{END}\nafter\n");
+        let out = strip_block(&input);
+        assert_eq!(out, "after\n");
+    }
+
+    /// Block at the very end of the file (no content after END).
+    #[test]
+    fn strip_block_at_file_end() {
+        let input = format!("before\n{BEGIN}\nexport X=1\n{END}\n");
+        let out = strip_block(&input);
+        assert_eq!(out, "before\n");
+    }
+
+    /// Block in the middle of the file (content before and after).
+    #[test]
+    fn strip_block_in_the_middle() {
+        let input = format!("top\n{BEGIN}\nexport X=1\n{END}\nbottom\n");
+        let out = strip_block(&input);
+        assert_eq!(out, "top\nbottom\n");
+    }
+
+    /// Two stacked (adjacent) managed blocks — both must be stripped.
+    #[test]
+    fn strip_block_two_stacked_blocks() {
+        let input =
+            format!("before\n{BEGIN}\nexport X=1\n{END}\n{BEGIN}\nexport Y=2\n{END}\nafter\n");
+        let out = strip_block(&input);
+        assert_eq!(out, "before\nafter\n");
+    }
+
+    /// File with no trailing newline — strip_block must not panic and must return
+    /// a sane result (either the content before the block, or the original if no block).
+    #[test]
+    fn strip_block_no_trailing_newline() {
+        // No block, no trailing newline — must return unchanged.
+        let no_block = "just some text";
+        let out = strip_block(no_block);
+        assert_eq!(out, "just some text\n"); // strip_block always appends \n per line
+
+        // With block and no trailing newline after END.
+        let with_block = format!("before\n{BEGIN}\nexport X=1\n{END}");
+        let out2 = strip_block(&with_block);
+        assert_eq!(out2, "before\n");
+    }
+
+    // ── env_block syntax verification ───────────────────────────────────────────────
+
+    /// POSIX block: every line between the markers is a valid `export KEY="value"` line.
+    #[test]
+    fn env_block_posix_all_lines_are_valid_exports() {
+        let proxy = "http://127.0.0.1:8787";
+        let ca = "/home/user/.llmtrim/ca.crt";
+        let block = env_block(proxy, ca, Syntax::Posix);
+
+        // Collect non-marker, non-empty lines inside the block.
+        let inner: Vec<&str> = block.lines().filter(|l| *l != BEGIN && *l != END).collect();
+        assert!(!inner.is_empty(), "no inner lines in POSIX block");
+        for line in &inner {
+            assert!(
+                line.starts_with("export ") && line.contains("=\""),
+                "line is not a valid POSIX export: {line:?}"
+            );
+        }
+    }
+
+    /// PowerShell block: every line between the markers uses `$env:` assignment syntax, never
+    /// POSIX `export`.
+    #[test]
+    fn env_block_powershell_all_lines_use_dollar_env() {
+        let proxy = "http://127.0.0.1:8787";
+        let ca = "C:\\Users\\u\\ca.pem";
+        let block = env_block(proxy, ca, Syntax::PowerShell);
+
+        let inner: Vec<&str> = block.lines().filter(|l| *l != BEGIN && *l != END).collect();
+        assert!(!inner.is_empty(), "no inner lines in PowerShell block");
+        for line in &inner {
+            assert!(
+                line.starts_with("$env:") && line.contains(" = \""),
+                "line is not a valid PowerShell env assignment: {line:?}"
+            );
+            assert!(
+                !line.starts_with("export "),
+                "POSIX `export` leaked into PowerShell block: {line:?}"
+            );
+        }
     }
 }

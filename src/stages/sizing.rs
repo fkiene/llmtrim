@@ -24,7 +24,7 @@ use gaoya::simhash::SimHashBits;
 
 use crate::stages::dedup::make_simhasher;
 
-use crate::stages::tools::lex_words;
+use crate::stages::tools::{fnv1a, lex_words};
 
 /// Minimum normalized deviation above the chord for a point to count as a knee.
 /// Below this the curve is ~linear (no saturation) and we keep up to the budget.
@@ -145,12 +145,7 @@ fn distinct_clusters(items: &[&str]) -> usize {
 /// bigram set can be a `HashSet<u64>` without per-pair allocation. Matches the FNV-1a
 /// used for the cache prefix fingerprint.
 fn token_hash(a: &str, b: &str) -> u64 {
-    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
-    for byte in a.bytes().chain(std::iter::once(0x1f)).chain(b.bytes()) {
-        h ^= byte as u64;
-        h = h.wrapping_mul(0x0000_0100_0000_01b3);
-    }
-    h
+    fnv1a(a.bytes().chain(std::iter::once(0x1f)).chain(b.bytes()))
 }
 
 #[cfg(test)]

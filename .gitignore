@@ -33,6 +33,9 @@ Thumbs.db
 .claude/
 CLAUDE.md
 
+# graphify skill output (local, generated)
+/graphify-out/
+
 # Benchmark corpora (downloaded + license-bound) and generated results — reproducible
 # via `python3 bench/download.py` (hashes in bench/data/manifest.json). Keep the
 # committed charts (bench/frontier-dark.svg + bench/frontier-light.svg) and scripts;

@@ -9,7 +9,7 @@
 
 use std::collections::HashSet;
 
-use super::{Ctx, Mode, elide, pick_mode, query_bonus};
+use super::{Ctx, Mode, elide, fill_by_score, pick_mode, query_bonus};
 
 /// Most files to keep (by total changed lines).
 const MAX_FILES: usize = 20;
@@ -144,23 +144,7 @@ fn cap_by_score(scores: &[f64], max: usize) -> Vec<bool> {
     let mut keep = vec![false; n];
     keep[0] = true;
     keep[n - 1] = true;
-    let mut order: Vec<usize> = (0..n).collect();
-    order.sort_by(|&a, &b| {
-        scores[b]
-            .partial_cmp(&scores[a])
-            .unwrap_or(std::cmp::Ordering::Equal)
-            .then(a.cmp(&b))
-    });
-    let mut count = keep.iter().filter(|&&x| x).count();
-    for &i in &order {
-        if count >= max {
-            break;
-        }
-        if !keep[i] {
-            keep[i] = true;
-            count += 1;
-        }
-    }
+    fill_by_score(&mut keep, scores, max);
     keep
 }
 

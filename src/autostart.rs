@@ -95,7 +95,59 @@ fn remove_autostart_everywhere() {
 
 // ── macOS / Linux: auto-launch crate ────────────────────────────────────────────
 
-#[cfg(not(windows))]
+/// The XDG autostart directory relative to a home base (Linux only).
+#[cfg(target_os = "linux")]
+fn xdg_autostart_dir(base: &std::path::Path) -> std::path::PathBuf {
+    base.join(".config").join("autostart")
+}
+
+/// The content of the `.desktop` entry for a given `exe` path and `port`.
+#[cfg(target_os = "linux")]
+fn desktop_entry(exe: &std::path::Path, port: u16) -> String {
+    format!(
+        "[Desktop Entry]\n\
+         Type=Application\n\
+         Version=1.0\n\
+         Name=llmtrim\n\
+         Comment=llmtrim startup script\n\
+         Exec={} serve --port {} --supervised\n\
+         StartupNotify=false\n\
+         Terminal=false",
+        exe.display(),
+        port
+    )
+}
+
+/// Inner seam: enable or disable the XDG autostart entry using `base` as the home directory
+/// instead of the real `$HOME`. Tests pass a temp dir; production passes the actual home.
+/// On Linux only — macOS goes through `configure_auto_launch` directly without a base seam.
+#[cfg(target_os = "linux")]
+fn configure_in(enable: bool, port: u16, base: &std::path::Path) -> Result<()> {
+    let dir = xdg_autostart_dir(base);
+    let file = dir.join("llmtrim.desktop");
+
+    if enable {
+        let exe = std::env::current_exe().context("could not find the llmtrim executable")?;
+        std::fs::create_dir_all(&dir)
+            .with_context(|| format!("failed to create {}", dir.display()))?;
+        std::fs::write(&file, desktop_entry(&exe, port))
+            .with_context(|| format!("failed to write {}", file.display()))?;
+    } else if file.exists() {
+        std::fs::remove_file(&file)
+            .with_context(|| format!("failed to remove {}", file.display()))?;
+        // Already absent → no-op (idempotent disable).
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn configure_auto_launch(enable: bool, port: u16) -> Result<()> {
+    let home = std::env::var("HOME")
+        .context("HOME is not set — cannot determine XDG autostart directory")?;
+    configure_in(enable, port, std::path::Path::new(&home))
+}
+
+#[cfg(all(not(windows), not(target_os = "linux")))]
 fn configure_auto_launch(enable: bool, port: u16) -> Result<()> {
     use auto_launch::AutoLaunchBuilder;
 
@@ -118,4 +170,116 @@ fn configure_auto_launch(enable: bool, port: u16) -> Result<()> {
             .map_err(|e| anyhow::anyhow!("failed to disable autostart: {e}"))?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::PathBuf;
+
+    // Minimal RAII temp-dir guard — same approach as setup.rs tests.
+    struct TempDir(PathBuf);
+
+    impl TempDir {
+        fn new(suffix: &str) -> Self {
+            let dir = std::env::temp_dir().join(format!(
+                "llmtrim-autostart-test-{}-{}",
+                std::process::id(),
+                suffix
+            ));
+            std::fs::create_dir_all(&dir).expect("create temp dir");
+            Self(dir)
+        }
+        fn path(&self) -> &std::path::Path {
+            &self.0
+        }
+    }
+
+    impl Drop for TempDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    // These tests exercise configure_in directly, which is only compiled on Linux.
+    // On Windows the cfg(target_os = "linux") gate keeps them out; the Windows
+    // registry arm has its own scratch-key test in setup.rs.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn configure_in_install_creates_desktop_file_with_expected_content() {
+        let dir = TempDir::new("install");
+        let base = dir.path();
+
+        configure_in(true, 8787, base).expect("configure_in enable");
+
+        let file = base
+            .join(".config")
+            .join("autostart")
+            .join("llmtrim.desktop");
+        assert!(file.exists(), ".desktop file not created");
+
+        let content = std::fs::read_to_string(&file).expect("read .desktop");
+        assert!(
+            content.contains("[Desktop Entry]"),
+            "missing [Desktop Entry]"
+        );
+        assert!(content.contains("Name=llmtrim"), "missing Name=");
+        assert!(
+            content.contains("serve --port 8787 --supervised"),
+            "missing serve invocation with port"
+        );
+        assert!(content.contains("Terminal=false"), "missing Terminal=false");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn configure_in_install_twice_is_idempotent() {
+        let dir = TempDir::new("idempotent");
+        let base = dir.path();
+
+        configure_in(true, 8787, base).expect("first enable");
+        configure_in(true, 8787, base).expect("second enable");
+
+        // Exactly one .desktop file should exist (no duplicate, no error).
+        let autostart_dir = base.join(".config").join("autostart");
+        let count = std::fs::read_dir(&autostart_dir)
+            .expect("read autostart dir")
+            .filter_map(|e| e.ok())
+            .count();
+        assert_eq!(count, 1, "expected exactly 1 .desktop file, found {count}");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn configure_in_remove_deletes_desktop_file() {
+        let dir = TempDir::new("remove");
+        let base = dir.path();
+
+        configure_in(true, 8787, base).expect("enable");
+        let file = base
+            .join(".config")
+            .join("autostart")
+            .join("llmtrim.desktop");
+        assert!(file.exists(), "file should exist before disable");
+
+        configure_in(false, 8787, base).expect("disable");
+        assert!(!file.exists(), ".desktop file still present after disable");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn configure_in_remove_when_absent_is_ok_noop() {
+        let dir = TempDir::new("remove-absent");
+        let base = dir.path();
+
+        // Disable without ever enabling — must return Ok without error.
+        configure_in(false, 8787, base).expect("disable when absent must be Ok");
+
+        // The autostart dir itself may or may not exist; either way, no .desktop file.
+        let file = base
+            .join(".config")
+            .join("autostart")
+            .join("llmtrim.desktop");
+        assert!(!file.exists(), ".desktop file should not exist");
+    }
 }

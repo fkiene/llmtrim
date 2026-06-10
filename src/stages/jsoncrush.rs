@@ -22,6 +22,7 @@ use serde_json::Value;
 use crate::gate::{GateKind, PlanEntry, Scope, Transform};
 use crate::ir::Request;
 use crate::provider::Provider;
+use crate::stages::toolout::fill_by_score;
 use crate::stages::tools::lex_words;
 
 /// One-time note so the model knows some arrays are representative samples, not complete.
@@ -148,27 +149,12 @@ fn crush_array(v: &Value, max_rows: usize, query: &HashSet<String>) -> Option<Ve
 
     // Fill the remaining budget by query relevance (ties → original order).
     let scores: Vec<f64> = serialized.iter().map(|r| query_overlap(r, query)).collect();
-    let mut order: Vec<usize> = (0..n).collect();
-    order.sort_by(|&a, &b| {
-        scores[b]
-            .partial_cmp(&scores[a])
-            .unwrap_or(std::cmp::Ordering::Equal)
-            .then(a.cmp(&b))
-    });
-    for &i in &order {
-        if count >= max_rows {
-            break;
-        }
-        if !keep[i] {
-            keep[i] = true;
-            count += 1;
-        }
-    }
+    fill_by_score(&mut keep, &scores, max_rows);
 
     // Only report a sample when rows were actually dropped: an all-error array can keep
     // everything, and emitting an unchanged array (plus the "sampled" note) would just add
     // tokens and revert. `None` ⇒ the stage leaves this array (and skips the note).
-    if count >= n {
+    if keep.iter().filter(|&&k| k).count() >= n {
         return None;
     }
     Some(

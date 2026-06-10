@@ -17,6 +17,7 @@ use serde_json::Value;
 use crate::gate::{GateKind, PlanEntry, Transform};
 use crate::ir::Request;
 use crate::provider::Provider;
+use crate::stages::tools::fnv1a;
 
 pub struct CacheStage {
     /// Maximum cache breakpoints to place (Anthropic allows up to 4).
@@ -96,18 +97,6 @@ fn sort_keys(v: &mut Value) {
     }
 }
 
-/// 64-bit FNV-1a. Unlike `DefaultHasher`, its output is **stable across Rust versions
-/// and platforms**, so a prefix fingerprint stays comparable over time. Non-crypto —
-/// used only to test equality of the cacheable prefix.
-fn fnv1a(bytes: &[u8]) -> u64 {
-    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
-    for &b in bytes {
-        h ^= b as u64;
-        h = h.wrapping_mul(0x0000_0100_0000_01b3);
-    }
-    h
-}
-
 /// Fingerprint of the cacheable prefix (system + tool schemas). Two requests with a
 /// byte-identical prefix share this hash → eligible for the provider prefix cache,
 /// including across independent single-turn calls (structural reuse, *UniCache*).
@@ -140,7 +129,7 @@ pub fn cache_prefix_hash(req: &Request) -> u64 {
             }
         }
     }
-    fnv1a(buf.as_bytes())
+    fnv1a(buf.bytes())
 }
 
 #[cfg(test)]
