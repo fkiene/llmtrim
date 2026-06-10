@@ -186,12 +186,12 @@ Ten stages, ordered by the savings hierarchy `tool-output > retrieve > cache > o
 
 | Stage | Lever | What it does | When it runs |
 |---|---|---|---|
-| **T** tool-output | toolout | window logs · diffs · grep · repetitive dumps to the signal (errors, changes, matches); adaptive↔aggressive auto-split | auto · tool results |
+| **T** tool-output | toolout | lossless template fold first — consecutive runs *and* interleaved parallel-build lines — then window logs · diffs · grep · repetitive dumps to the signal (errors, changes, matches); adaptive↔aggressive auto-split | auto · tool results |
 | **A** cache discipline | cache | mark + stabilize the invariant prefix (sort tools/schema · OpenAI `prompt_cache_key`) so it stays cached across calls | auto · tools |
-| **B** lexical retrieval | retrieve | BM25 / TextRank keep only the query-relevant chunks; question protected | auto · long context |
-| **C** skeletonization | skeleton | tree-sitter drops function bodies, keeps signatures - 14 languages | auto · code |
+| **B** lexical retrieval | retrieve | BM25+ ranking with RM3 feedback (TextRank when query-less) · TextTiling cuts prose at topic shifts · budgeted submodular selection keeps the relevant *non-redundant* chunks; question protected | auto · long context |
+| **C** skeletonization | skeleton | tree-sitter keeps the bodies of the query-relevant functions, drops the rest to signatures - 14 languages | auto · code |
 | **D** serialize + hygiene | serialization | minify JSON, encode record arrays to [TOON](https://crates.io/crates/toon-format)/CSV, Unicode-normalize | always · lossless |
-| **D₊** json sample | json_crush | down-sample huge record arrays — keep first/last + outliers (errors, rare values) + a query-biased sample | auto · big JSON |
+| **D₊** json sample | json_crush | down-sample huge record arrays — keep first/last + outliers (errors, rare values) + a query-biased *diverse* sample | auto · big JSON |
 | **E** dedup | dedup | collapse duplicate + near-duplicate lines (prose only; data untouched) | always · exact |
 | **F** output control | output | terse instruction · Chain-of-Draft · token budget · native JSON schema | auto |
 | **G** tool layer | tool | static tool selection + description trimming (schemas resent each call) | auto · tools |
@@ -271,7 +271,7 @@ Under the hood `auto` routes by shape: tools → `agent`, code → `code`, long-
 | `output_token_budget` | _(none)_ | inject a soft "answer within N tokens" budget |
 | `output_compact_code` | `false` | instruct minified-code output (model-gated) |
 | `retrieve` | `false` | Stage B lexical retrieval (lossy) |
-| `retrieve_keep_ratio` | `0.5` | fraction of chunks to keep |
+| `retrieve_keep_ratio` | `0.5` | fraction of the segment's tokens kept (the selection budget) |
 | `retrieve_reorder` | `false` | head+tail U-shape (lost-in-the-middle; lossless) |
 | `retrieve_mmr` | `false` | MMR diversity-aware selection |
 | `retrieve_sentence` | `false` | training-free DSLR sentence pruning (answer + boundary protected) |
@@ -283,8 +283,10 @@ Under the hood `auto` routes by shape: tools → `agent`, code → `code`, long-
 | `toolout` | `false` → on in `agent`/`aggressive` | Stage T tool-output compression (log / diff / grep + repetitive fallback); positional elision |
 | `toolout_mode` | `"auto"` | Stage T split: `adaptive` · `aggressive` · `auto` (per-segment by noise density) |
 | `toolout_max_lines` / `toolout_min_lines` | `40` / `20` | keep-budget ceiling / skip segments shorter than this |
-| `toolout_template` | `true` | lossless Drain template fold before windowing |
+| `toolout_template` | `true` | lossless template fold before windowing - consecutive runs (Drain) + interleaved lines (LSH grouping) |
 | `skeletonize` / `minify_code` | `false` | Stage C drop bodies / strip indentation (lossless) |
+| `skeleton_keep_full_top_k` | `5` | bodies kept for the top-k functions overlapping the conversation (HCP-graded) |
+| `skeleton_drop_unmatched` / `skeleton_drop_min_body_lines` | `false` / `8` | also drop zero-overlap functions ≥ N lines entirely (on in `aggressive`) |
 | `multimodal` / `image_detail` | `false` | Stage H downscale to the provider's cap |
 
 Env: `LLMTRIM_PRESET` (preset by name), `LLMTRIM_CONFIG` (config-file path), `LLMTRIM_DB_PATH` (ledger location).
@@ -320,19 +322,31 @@ Every lever is a deterministic implementation of published research - the ideas 
 
 **Retrieval & context (Stage B)**
 - **BM25**: Robertson & Zaragoza, *The Probabilistic Relevance Framework: BM25 and Beyond* (2009) · [`bm25`](https://crates.io/crates/bm25)
+- **BM25+**: Lv & Zhai, *Lower-Bounding Term Frequency Normalization* (CIKM 2011) - δ floor so an occurrence always beats absence
+- **RM3**: Lavrenko & Croft, *Relevance-Based Language Models* (SIGIR 2001) - pseudo-relevance feedback for sparse queries
+- **TextTiling**: Hearst, *TextTiling: Segmenting Text into Multi-paragraph Subtopic Passages* (CL 1997) - prose chunk boundaries at lexical-cohesion valleys
 - **TextRank**: Mihalcea & Tarau, *TextRank: Bringing Order into Texts* (EMNLP 2004)
 - **MMR**: Carbonell & Goldstein, *The Use of MMR, Diversity-Based Reranking…* (SIGIR 1998)
+- **Submodular selection**: Lin & Bilmes, *A Class of Submodular Functions for Document Summarization* (ACL 2011) + cost-ratio knapsack greedy, [arXiv:2008.05391](https://arxiv.org/abs/2008.05391) - token-budgeted chunk/row selection (CELF lazy greedy)
+- **Diverse sampling**: Chen et al., *Fast Greedy MAP Inference for DPP* (NeurIPS 2018) - the json-sample diversity fill
 - **Lost in the Middle**: Liu et al. (2023), [arXiv:2307.03172](https://arxiv.org/abs/2307.03172) - head+tail reordering
 - **DSLR**: Hwang et al. (2024), [arXiv:2407.03627](https://arxiv.org/abs/2407.03627) - sentence-level pruning
 
 **Code (Stages C, F)**
 - **RepoCoder**: Zhang et al. (2023), [arXiv:2303.12570](https://arxiv.org/abs/2303.12570) - AST skeletons beat raw source for non-focus code
+- **Hierarchical Context Pruning**: Zhang et al. (2024), [arXiv:2406.18294](https://arxiv.org/abs/2406.18294) - keep full bodies only for the completion-relevant functions (our ranking is lexical, not embeddings)
 - **The Hidden Cost of Readability**: Pan et al. (2025), [arXiv:2508.13666](https://arxiv.org/abs/2508.13666) - code minification
 - **Reducing Token Usage … via Minification**: Hrubec & Cito (2026), [arXiv:2606.01326](https://arxiv.org/abs/2606.01326) - per-transformation token accounting
+
+**Tool output (Stage T)**
+- **Drain**: He et al., *Drain: An Online Log Parsing Approach with Fixed Depth Tree* (ICWS 2017) - the consecutive template fold
+- **Brain**: Yu et al., *Brain: Log Parsing with Bidirectional Parallel Tree* (IEEE TSC 2023) - positional-voting template extraction
+- **LogLSHD**: Huang et al. (2025), [arXiv:2504.02172](https://arxiv.org/abs/2504.02172) - MinHash-LSH grouping of interleaved same-template lines (ours is deterministic: first-N voting, alphanumeric tokens kept)
 
 **Dedup & abbreviation (Stages E, E+)**
 - **SimHash**: Charikar, *Similarity Estimation Techniques from Rounding Algorithms* (STOC 2002) · [`gaoya`](https://crates.io/crates/gaoya)
 - **CompactPrompt**: Choi et al. (2025), [arXiv:2510.18043](https://arxiv.org/abs/2510.18043) - n-gram abbreviation
+- **Maximal repeats**: Becher et al., *Efficient Repeat Finding via Suffix Arrays* ([arXiv:1304.0528](https://arxiv.org/abs/1304.0528)) + **Re-Pair**, Larsson & Moffat (DCC 1999) - the dictionary miner: all maximal repeated phrases, selected by real token gain
 
 **Output control (Stage F)**
 - **Chain-of-Draft**: Xu et al. (2025), [arXiv:2502.18600](https://arxiv.org/abs/2502.18600) - terse reasoning steps
