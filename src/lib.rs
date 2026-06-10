@@ -23,6 +23,7 @@ pub mod monitor;
 pub mod pipeline;
 pub mod provider;
 pub mod quality;
+pub mod select;
 pub mod serve;
 pub mod setup;
 pub mod stages;

@@ -22,6 +22,8 @@ use unicode_segmentation::UnicodeSegmentation;
 use crate::gate::{GateKind, PlanEntry, Transform};
 use crate::ir::Request;
 use crate::provider::Provider;
+use crate::select::{self, Item, Weights};
+use crate::stages::sizing::optimal_keep;
 use crate::stages::tools::{detect_lang, lex_words, stopword_set};
 
 pub struct RetrieveStage {
@@ -249,7 +251,11 @@ fn rebuild_chunked(text: &str, query: &[String], cfg: &RetrieveStage) -> Option<
         bm25_rank(&chunks, query)
     };
     if !cfg.reorder && !cfg.mmr {
-        return Some(rebuild(&chunks, &select(&ranked, keep, chunks.len()), sep));
+        return Some(rebuild(
+            &chunks,
+            &budgeted_select(&chunks, &ranked, keep, cfg),
+            sep,
+        ));
     }
     let mut chosen = if cfg.mmr {
         mmr_order(&ranked, &chunks, keep, cfg.mmr_lambda)
@@ -288,7 +294,7 @@ fn head_tail_keep(keep: usize, n: usize) -> Vec<usize> {
 
 /// Ensure the first and last chunk are always kept — a prompt's instruction/question
 /// lives at its edges, and the token gate can't see that dropping them breaks the task
-/// (it still cuts tokens). Shared by [`select`] and the MMR/reorder path.
+/// (it still cuts tokens). Shared by [`budgeted_select`] and the MMR/reorder path.
 fn pin_boundaries(chosen: &mut Vec<usize>, n: usize) {
     for b in [0, n - 1] {
         if !chosen.contains(&b) {
@@ -564,7 +570,7 @@ fn argsort_desc(scores: &[f64]) -> Vec<usize> {
 }
 
 /// The top `keep` ranked indices, returned in original (ascending) order.
-/// Test-only helper for recall@k assertions; production uses [`select`].
+/// Test-only helper for recall@k assertions; production uses [`budgeted_select`].
 #[cfg(test)]
 fn top_k(ranked: &[usize], keep: usize) -> Vec<usize> {
     let mut kept: Vec<usize> = ranked.iter().copied().take(keep).collect();
@@ -572,18 +578,90 @@ fn top_k(ranked: &[usize], keep: usize) -> Vec<usize> {
     kept
 }
 
-/// Top `keep` indices, but always retaining the **boundary chunks** (first + last).
+/// Token cost of a chunk, as a word count (the cheap, tokenizer-free proxy shared with
+/// [`optimal_keep`]'s bigram estimate). The gate re-measures real tokens after the stage,
+/// so an exact tokenizer here would only duplicate that work; word count is monotone with
+/// it and keeps selection deterministic and fast.
+fn chunk_cost(chunk: &str) -> usize {
+    lex_words(chunk).len().max(1)
+}
+
+/// Selection weights for chunk retrieval. A **low saturation** (`α = 0.3`) makes a
+/// word-bigram stop paying off after roughly one covering chunk, so repeated facts
+/// (near-duplicate paragraphs) earn ~zero marginal coverage past the first copy and are
+/// dropped — the prose-dedup behaviour MMR provided, now inside the budgeted objective.
+/// `λ = 0.5` keeps relevance and coverage balanced.
+const RETRIEVE_WEIGHTS: Weights = Weights {
+    lambda: 0.5,
+    saturation: 0.3,
+};
+
+/// Budget-constrained submodular chunk selection (replaces a plain top-k keep).
 ///
-/// Safety guard: a prompt's instruction/question lives at its edges, and with no
-/// query the centrality ranker scores a unique trailing question *lowest* (it
-/// shares no words with the bulk context) — so it would be silently elided,
-/// destroying the task. The token gate can't catch this (dropping the question
-/// still cuts tokens), so we pin the edges here. Costs at most two extra chunks.
-fn select(ranked: &[usize], keep: usize, n: usize) -> Vec<usize> {
-    let mut kept: Vec<usize> = ranked.iter().copied().take(keep).collect();
-    pin_boundaries(&mut kept, n);
-    kept.sort_unstable();
-    kept
+/// Instead of "keep the K best-ranked chunks", choose the subset that maximizes
+/// relevance + diverse bigram coverage under a **token budget** (Lin-Bilmes via the
+/// CELF greedy in [`crate::select`]). Two near-duplicate chunks that top-k would both
+/// keep now compete for the same coverage, so the redundant one is dropped in favour of
+/// a novel chunk — a strictly better use of the budget.
+///
+/// Budget derivation (preserving the existing knobs, and repurposing sizing as a budget
+/// source rather than deleting it):
+/// - When `keep_ratio` is a real fraction (`0 < ratio < 1`, the configured case) it is the
+///   budget: `ratio · Σ chunk tokens`. Coverage in [`crate::select`] then drops the chunks
+///   the budget can't justify — the redundant near-duplicates first.
+/// - When no usable ratio is given (`ratio ≥ 1` ⇒ "keep everything") the bigram-**saturation**
+///   estimate [`optimal_keep`] supplies the default budget instead: the token cost of the
+///   `k_sat` best-ranked chunks, where `k_sat` is the diversity-justified keep count. So a
+///   redundant segment still shrinks even without an explicit ratio.
+///
+/// Boundary chunks (first + last) are always retained — the same instruction/question
+/// safety guard top-k had: the gate can't see that dropping an edge breaks the task.
+/// Returned indices are sorted ascending; emission stays in document order.
+fn budgeted_select(
+    chunks: &[String],
+    ranked: &[usize],
+    keep: usize,
+    cfg: &RetrieveStage,
+) -> Vec<usize> {
+    let n = chunks.len();
+    let costs: Vec<usize> = chunks.iter().map(|c| chunk_cost(c)).collect();
+    let total_tokens: usize = costs.iter().sum();
+    let min_cost = *costs.iter().min().unwrap_or(&1);
+    let budget = if cfg.keep_ratio > 0.0 && cfg.keep_ratio < 1.0 {
+        // Explicit ratio: a fraction of the segment's tokens (existing semantics).
+        ((total_tokens as f64) * cfg.keep_ratio).ceil() as usize
+    } else {
+        // No usable ratio → fall back to sizing's saturation estimate as the budget: the
+        // token cost of the `k_sat` best-ranked chunks (near-duplicate spam can't inflate it).
+        let k_sat = optimal_keep(
+            &chunks.iter().map(String::as_str).collect::<Vec<_>>(),
+            1,
+            keep,
+        );
+        ranked.iter().take(k_sat).map(|&i| costs[i]).sum()
+    }
+    .max(min_cost); // always enough for at least one chunk
+
+    // rank position → relevance in (0, 1]: best-ranked chunk scores ~1, worst ~1/n. Mirrors
+    // the MMR path's `rel()`. `ranked` is a full permutation, so every chunk gets a score.
+    let mut rel = vec![0.0f64; n];
+    for (pos, &i) in ranked.iter().enumerate() {
+        if i < n {
+            rel[i] = (n - pos) as f64 / n as f64;
+        }
+    }
+    let items: Vec<Item> = (0..n)
+        .map(|i| Item::from_text(&chunks[i], costs[i], rel[i]))
+        .collect();
+
+    let mut chosen = select::select(&items, budget, &RETRIEVE_WEIGHTS);
+
+    // Safety: a prompt's instruction/question lives at its edges; pin them so the gate
+    // (blind to task-breakage) can't elide a unique trailing question.
+    pin_boundaries(&mut chosen, n);
+    chosen.sort_unstable();
+    chosen.dedup();
+    chosen
 }
 
 /// Greedy MMR selection: balance relevance (rank position) against redundancy
@@ -1107,6 +1185,112 @@ mod tests {
         assert!(
             !out.stages[0].applied,
             "short content is the query, not pruned"
+        );
+    }
+
+    fn retrieve_cfg(keep_ratio: f64) -> RetrieveStage {
+        RetrieveStage {
+            keep_ratio,
+            min_segment_chars: 200,
+            reorder: false,
+            mmr: false,
+            mmr_lambda: 0.5,
+            sentence: false,
+        }
+    }
+
+    #[test]
+    fn budgeted_select_prunes_redundant_near_duplicates_topk_kept() {
+        // Seven chunks. 0 and 6 are distinct boundaries (always pinned). 1,2,3 are
+        // near-identical revenue lines (same bigrams) that rank highest. 4 and 5 are
+        // distinct novel paragraphs ranked below the duplicates. A plain top-k keeps the
+        // highest-RANKED chunks — the three redundant copies — wasting the budget on
+        // duplicates. The budgeted submodular selection saturates the shared revenue
+        // bigrams after the FIRST copy, so the remaining duplicates earn only their
+        // (relevance-only) marginal and lose the budget to the novel chunks 4/5.
+        let chunks: Vec<String> = vec![
+            "alpha preamble about the office building main entrance and lobby desk".to_string(),
+            "the quarterly revenue for the logistics division was four point two million"
+                .to_string(),
+            "the quarterly revenue for the logistics division was four point two million"
+                .to_string(),
+            "the quarterly revenue for the logistics division was four point two million"
+                .to_string(),
+            "recycling bins sit on every floor right beside the north stairwell doors".to_string(),
+            "visitor parking validation happens at the front security reception window".to_string(),
+            "omega closing remarks about the parking garage exit gate and ramp barrier".to_string(),
+        ];
+        // Ranking: the three revenue copies first, then the two novel chunks, then edges.
+        let ranked = vec![1, 2, 3, 4, 5, 0, 6];
+        let keep = ((chunks.len() as f64) * 0.5).ceil() as usize;
+
+        // Old top-k keep would retain all three redundant copies.
+        let old = top_k(&ranked, keep + 2); // generous K, as old code pinned edges on top
+        assert!(
+            old.contains(&1) && old.contains(&2) && old.contains(&3),
+            "baseline top-k kept all three redundant copies: {old:?}"
+        );
+
+        // New budgeted selection: at most one revenue copy survives, and a novel chunk is
+        // preferred over a redundant one.
+        let chosen = budgeted_select(&chunks, &ranked, keep, &retrieve_cfg(0.5));
+        let dup_kept = [1usize, 2, 3]
+            .iter()
+            .filter(|&&i| chosen.contains(&i))
+            .count();
+        assert!(
+            dup_kept <= 1,
+            "at most one revenue copy is kept (redundancy pruned): {chosen:?}"
+        );
+        assert!(
+            chosen.contains(&4) || chosen.contains(&5),
+            "a novel chunk is preferred over a redundant duplicate: {chosen:?}"
+        );
+        assert!(
+            chosen.contains(&0) && chosen.contains(&6),
+            "distinct boundary chunks retained: {chosen:?}"
+        );
+    }
+
+    #[test]
+    fn budgeted_stage_drops_duplicate_paragraphs_and_cuts_tokens() {
+        fn count_tokens(text: &str) -> usize {
+            text.split_whitespace().count()
+        }
+        // A large context: one answer paragraph repeated many times (near-duplicate spam)
+        // plus a few distinct paragraphs and a query. The stage must cut tokens and collapse
+        // the duplicate block to a single representative + an elision marker.
+        let mut paras: Vec<String> = Vec::new();
+        for _ in 0..10 {
+            paras.push(
+                "The quarterly revenue figure for the logistics division was 4.2 million."
+                    .to_string(),
+            );
+        }
+        paras.push("Parking is available in the north lot for all visitors.".to_string());
+        paras.push("Recycling bins are located on every floor near the elevators.".to_string());
+        paras.push("Office hours run from nine to five on weekdays only.".to_string());
+        let big = paras.join("\n\n");
+        let body = json!({"model":"gpt-4o","messages":[
+            {"role":"user","content":big},
+            {"role":"user","content":"what was the quarterly revenue for logistics?"}]});
+        let mut req = Request::from_value(ProviderKind::OpenAi, body);
+        let counter = counter_for(ProviderKind::OpenAi, Some("gpt-4o")).unwrap();
+        let stages: Vec<Box<dyn Transform>> = vec![Box::new(retrieve_cfg(0.5))];
+        let before = req
+            .get_str("/messages/0/content")
+            .map(count_tokens)
+            .unwrap();
+        let out = pipeline::run(&mut req, &OpenAiProvider, counter.as_ref(), &stages);
+        assert!(out.stages[0].applied, "duplicate-heavy context is pruned");
+        let kept = req.get_str("/messages/0/content").unwrap();
+        assert!(kept.contains("revenue"), "the answer survives");
+        assert!(kept.contains("omitted"), "redundant copies are elided");
+        assert!(
+            count_tokens(kept) < before,
+            "tokens reduced ({} -> {})",
+            before,
+            count_tokens(kept)
         );
     }
 }

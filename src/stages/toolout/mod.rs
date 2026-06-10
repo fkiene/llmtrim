@@ -247,7 +247,7 @@ pub(crate) fn query_bonus(line: &str, query: &HashSet<String>) -> f64 {
 /// Fill `keep` up to `budget` slots by picking the highest-scoring unfilled indices,
 /// ties broken by original (ascending) order. Indices already set in `keep` count
 /// toward the budget; the caller sets any forced/pinned slots before calling this.
-/// Shared by [`select_keep`], [`diff::cap_by_score`], and [`crate::stages::jsoncrush`].
+/// Shared by [`select_keep`] and [`diff::cap_by_score`].
 pub(crate) fn fill_by_score(keep: &mut [bool], scores: &[f64], budget: usize) {
     let n = keep.len();
     let mut order: Vec<usize> = (0..n).collect();

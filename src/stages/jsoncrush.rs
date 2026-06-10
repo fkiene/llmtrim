@@ -22,7 +22,7 @@ use serde_json::Value;
 use crate::gate::{GateKind, PlanEntry, Scope, Transform};
 use crate::ir::Request;
 use crate::provider::Provider;
-use crate::stages::toolout::fill_by_score;
+use crate::select::{self, Item, Weights};
 use crate::stages::tools::lex_words;
 
 /// One-time note so the model knows some arrays are representative samples, not complete.
@@ -147,9 +147,12 @@ fn crush_array(v: &Value, max_rows: usize, query: &HashSet<String>) -> Option<Ve
         }
     }
 
-    // Fill the remaining budget by query relevance (ties → original order).
-    let scores: Vec<f64> = serialized.iter().map(|r| query_overlap(r, query)).collect();
-    fill_by_score(&mut keep, &scores, max_rows);
+    // Fill the remaining budget with a query-biased *diverse* sample of the rest:
+    // greedy submodular selection (facility-location-style) over each row's value
+    // strings, so the kept sample spans distinct rows instead of N near-identical
+    // highest-overlap ones. Relevance = query overlap (preserves the query bias),
+    // coverage = the row's value bigrams (the diversity term).
+    fill_diverse(arr, &serialized, &mut keep, max_rows, query);
 
     // Only report a sample when rows were actually dropped: an all-error array can keep
     // everything, and emitting an unchanged array (plus the "sampled" note) would just add
@@ -164,6 +167,75 @@ fn crush_array(v: &Value, max_rows: usize, query: &HashSet<String>) -> Option<Ve
             .map(|(row, _)| row.clone())
             .collect(),
     )
+}
+
+/// Fill the remaining `max_rows` slots in `keep` with a query-biased, diverse sample of the
+/// not-yet-kept rows. Greedy submodular selection ([`crate::select`]) over each row's value
+/// strings: relevance is the row's query overlap (the existing bias), coverage is its value
+/// bigrams (facility-location-style diversity — Lin & Bilmes, ACL 2011; Chen et al., NeurIPS
+/// 2018). Each candidate row costs one slot, so the budget is the leftover row count; this
+/// preserves the first/last/outlier rows already pinned in `keep`.
+fn fill_diverse(
+    arr: &[Value],
+    serialized: &[String],
+    keep: &mut [bool],
+    max_rows: usize,
+    query: &HashSet<String>,
+) {
+    let used = keep.iter().filter(|&&k| k).count();
+    let remaining = max_rows.saturating_sub(used);
+    if remaining == 0 {
+        return;
+    }
+    // Candidate pool = rows not already pinned. Diversity is computed over this pool only
+    // (the saturation ceilings come from the candidates), so the fill spans distinct rows.
+    let candidates: Vec<usize> = (0..arr.len()).filter(|&i| !keep[i]).collect();
+    let items: Vec<Item> = candidates
+        .iter()
+        .map(|&i| {
+            let rel = query_overlap(&serialized[i], query);
+            Item::from_text(&row_value_text(&arr[i]), 1, rel)
+        })
+        .collect();
+    for local in select::select(&items, remaining, &Weights::default()) {
+        keep[candidates[local]] = true;
+    }
+}
+
+/// A row's **value** strings joined into one text — the features the diverse sample spans.
+/// Only values are used (object keys are shared across rows and carry no row-distinguishing
+/// signal); nested objects/arrays are flattened to their scalar leaves. Strings contribute
+/// their text, numbers/bools their literal — universal, no language assumptions.
+fn row_value_text(row: &Value) -> String {
+    let mut out = String::new();
+    collect_scalar_values(row, &mut out);
+    out
+}
+
+/// Append every scalar leaf of `v` (string text or number/bool literal) to `out`, space-
+/// separated, recursing into objects (values only) and arrays.
+fn collect_scalar_values(v: &Value, out: &mut String) {
+    match v {
+        Value::String(s) => {
+            out.push_str(s);
+            out.push(' ');
+        }
+        Value::Number(_) | Value::Bool(_) => {
+            out.push_str(&v.to_string());
+            out.push(' ');
+        }
+        Value::Array(a) => {
+            for e in a {
+                collect_scalar_values(e, out);
+            }
+        }
+        Value::Object(m) => {
+            for val in m.values() {
+                collect_scalar_values(val, out);
+            }
+        }
+        Value::Null => {}
+    }
 }
 
 /// Rows worth keeping regardless of budget: any row carrying an error keyword, or holding
@@ -347,5 +419,77 @@ mod tests {
             v["results"].as_array().unwrap().len() <= 50,
             "results sampled"
         );
+    }
+
+    #[test]
+    fn diverse_fill_prefers_distinct_rows_over_near_duplicate_spam() {
+        // The middle of the array (not first/last, no errors/rare values) is a block of
+        // identical rows plus a handful of distinct ones. A pure highest-overlap fill would
+        // keep interchangeable duplicates; the diverse (facility-location) fill must surface
+        // the distinct rows so the sample spans the data.
+        let mut a: Vec<Value> = Vec::new();
+        // A long head/tail of identical filler so first/last pins land on duplicates.
+        for _ in 0..120 {
+            a.push(json!({"kind": "x", "msg": "routine heartbeat ping ok steady nominal"}));
+        }
+        // Five genuinely distinct rows buried in the middle.
+        let distinct = [
+            "disk volume remount latency spike detected",
+            "auth token rotation completed for tenant",
+            "cache warm reload finished across shards",
+            "queue backlog drained after worker scale",
+            "tls handshake renegotiated upstream peer",
+        ];
+        let pos: Vec<usize> = (0..distinct.len()).map(|k| 40 + k * 3).collect();
+        for (k, &p) in pos.iter().enumerate() {
+            a[p] = json!({"kind": "x", "msg": distinct[k]});
+        }
+        let arr = Value::Array(a);
+
+        let rows = crush_array(&arr, 30, &HashSet::new()).expect("over-cap array is sampled");
+        let msgs: HashSet<&str> = rows.iter().filter_map(|r| r["msg"].as_str()).collect();
+        let distinct_kept = distinct.iter().filter(|d| msgs.contains(**d)).count();
+        assert!(
+            distinct_kept >= 3,
+            "diverse fill surfaces the distinct rows (kept {distinct_kept}/5): {msgs:?}"
+        );
+        assert!(rows.len() <= 30, "within budget, got {}", rows.len());
+    }
+
+    #[test]
+    fn query_bias_survives_diverse_fill() {
+        // The diverse fill keeps the relevance (query-overlap) term: a row matching the
+        // query must be sampled even though it isn't first/last or an outlier.
+        let mut a: Vec<Value> = Vec::new();
+        for i in 0..400 {
+            a.push(json!({"kind": "x", "msg": format!("routine event number {i}")}));
+        }
+        // A single needle in the middle that matches the query's distinctive words.
+        a[200] = json!({"kind": "x", "msg": "kubernetes pod eviction quota exceeded"});
+        let arr = Value::Array(a);
+        let query: HashSet<String> = lex_words("kubernetes pod eviction").into_iter().collect();
+
+        let rows = crush_array(&arr, 30, &query).expect("over-cap array is sampled");
+        let kept_needle = rows
+            .iter()
+            .any(|r| r["msg"].as_str() == Some("kubernetes pod eviction quota exceeded"));
+        assert!(
+            kept_needle,
+            "the query-matching row is kept (relevance term)"
+        );
+    }
+
+    #[test]
+    fn row_value_text_uses_values_not_keys() {
+        // Two rows with the SAME keys but different values must produce different feature
+        // text (keys carry no row-distinguishing signal).
+        let a = row_value_text(&json!({"city": "Paris", "code": 75}));
+        let b = row_value_text(&json!({"city": "Tokyo", "code": 13}));
+        assert!(
+            a.contains("Paris") && a.contains("75"),
+            "values present: {a:?}"
+        );
+        assert!(!a.contains("city"), "keys excluded: {a:?}");
+        assert_ne!(a, b, "different values → different feature text");
     }
 }
