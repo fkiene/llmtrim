@@ -486,4 +486,50 @@ mod tests {
             m1.len()
         );
     }
+
+    #[test]
+    fn repeated_tool_invocation_ships_full_output() {
+        // Rail: repeat → passthrough. The agent re-ran a tool because its first result
+        // was compressed — the newest occurrence must ship byte-identical (this is the
+        // recovery the elision header promises), while the first still compresses.
+        let dump = (0..80)
+            .map(|i| format!("src/a.rs:{}:    let v = step({i});", i + 1))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let input = serde_json::json!({
+            "model": "claude-3-5-sonnet-20241022",
+            "messages": [
+                {"role": "user", "content": [
+                    {"type": "tool_result", "tool_use_id": "t1", "content": dump}
+                ]},
+                {"role": "user", "content": [
+                    {"type": "tool_result", "tool_use_id": "t2", "content": dump}
+                ]},
+            ],
+            "max_tokens": 1024,
+        })
+        .to_string();
+
+        let cfg = config::DenseConfig::preset("agent").expect("agent preset");
+        let result =
+            compress_with_config(&input, Some(ProviderKind::Anthropic), &cfg).expect("compress");
+        let body: Value = serde_json::from_str(&result.request_json).unwrap();
+
+        let first = body
+            .pointer("/messages/0/content/0/content")
+            .and_then(Value::as_str)
+            .unwrap();
+        let second = body
+            .pointer("/messages/1/content/0/content")
+            .and_then(Value::as_str)
+            .unwrap();
+        assert_eq!(second, dump, "the repeat ships in full");
+        assert_ne!(first, dump, "the first occurrence still compresses");
+        assert!(
+            first.len() < dump.len(),
+            "first occurrence got smaller ({} -> {})",
+            dump.len(),
+            first.len()
+        );
+    }
 }

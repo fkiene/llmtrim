@@ -969,3 +969,42 @@ mod tests {
         let _ = bucket_key("北");
     }
 }
+
+#[cfg(test)]
+mod global_grep_records {
+    use super::*;
+
+    #[test]
+    fn interleaved_grep_records_fold_globally() {
+        // 70 same-template `path:line:` records interleaved with `--` separators
+        // (rg -C style): runs of 2 sit below MIN_RUN, so only the global pass can fold
+        // them. Regression coverage for the enumeration-query shape ("where is X
+        // called?") where every record is the answer.
+        let mut lines = Vec::new();
+        for i in 0..70 {
+            lines.push(format!(
+                "src/parser/config.rs:{}:    let v = parse_config(input, {});",
+                i + 10,
+                i
+            ));
+            if i % 2 == 1 {
+                lines.push("--".to_string());
+            }
+        }
+        let text = lines.join("\n");
+        let (out, folded) = collapse_global(&text);
+        assert!(folded, "global pass must fold the 70-member group");
+        assert!(
+            out.lines().count() < 40,
+            "70 records + seps collapse far below input size"
+        );
+        // lossless: every line number survives
+        for i in 0..70 {
+            assert!(
+                out.contains(&format!("{}", i + 10)),
+                "line number {} lost",
+                i + 10
+            );
+        }
+    }
+}

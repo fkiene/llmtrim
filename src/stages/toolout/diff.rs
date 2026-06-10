@@ -9,7 +9,7 @@
 
 use std::collections::HashSet;
 
-use super::{Ctx, Mode, elide, fill_by_score, pick_mode, query_bonus};
+use super::{Ctx, Mode, attributed, elide, elide_into, fill_by_score, pick_mode, query_bonus};
 
 /// Most files to keep (by total changed lines).
 const MAX_FILES: usize = 20;
@@ -131,7 +131,9 @@ pub fn compress(text: &str, ctx: &Ctx, query: &HashSet<String>) -> Option<String
         }
     }
 
-    changed.then(|| out.join("\n"))
+    // Attribution rail: a windowed diff opens with the recovery header (no-op when the
+    // never-inflate rail ended up keeping everything it tried to elide).
+    changed.then(|| attributed(out, text.lines().count()))
 }
 
 /// Keep slots scoring highest, always including the first and last (so structure
@@ -190,8 +192,8 @@ fn trim_context(body: &[&str], max_context: usize) -> (Vec<String>, bool) {
             while i < n && !keep[i] {
                 i += 1;
             }
-            out.push(elide(&body[start..i]));
-            trimmed = true;
+            // Never-inflate rail: a tiny context run stays inline instead of a marker.
+            trimmed |= elide_into(&body[start..i], &mut out);
         }
     }
     (out, trimmed)

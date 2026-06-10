@@ -6,17 +6,34 @@
 //! (retrieve, ngram) don't fit this shape. This stage detects the *kind* of each tool
 //! output and routes it to a purpose-built lexical compressor:
 //!
-//! - **log**  → level/stack-aware line selection (+ Drain template collapse, [`template`])
-//! - **diff** → file/hunk capping + context trimming
-//! - **grep** → per-file match selection
+//! - **log**  → lossless template fold, then level/stack-aware line selection
+//! - **diff** → file/hunk capping + context trimming (grammar, not folding: template
+//!   collapse would corrupt patch semantics)
+//! - **grep** → lossless template fold, then query-relevant windowing with a
+//!   one-match-per-file *floor* (a keep-more guarantee, never a drop rule)
 //!
-//! All three keep the structurally important lines (errors, changes, query-relevant
-//! matches), window the rest under an adaptive budget ([`crate::stages::sizing`]), and
-//! replace dropped runs with a positional elision marker (`[… N lines omitted …]`, like
-//! the `retrieve` stage). If the agent needs the dropped detail it re-runs the tool —
-//! fresher than a stored copy, and what a tool-using agent does naturally. Lossy,
-//! `InputTokens`-gated (reverts if it doesn't cut tokens), `Content`-scoped. Zero model
-//! calls.
+//! The shape detectors contribute only structure *hints* (what a file field is, which
+//! tokens are failure levels, where hunks begin); none of them owns a drop policy. The
+//! drop policy is one shared recipe — fold losslessly first, ship that if it fits, else
+//! window under an adaptive budget ([`crate::stages::sizing`]) with dropped runs
+//! becoming positional elision markers (`[… N lines omitted …]`, like the `retrieve`
+//! stage) — plus three universal rails that apply to every windowed segment, current
+//! and future kinds alike:
+//!
+//! 1. **Attribution** ([`rebuild`]): windowed output opens with a self-identifying
+//!    header naming llmtrim and the recovery action, so an agent never misattributes
+//!    the elision to the tool (or to whatever wrapper ran it).
+//! 2. **Repeat → passthrough** ([`ToolOutputStage::apply`]): when a candidate's content
+//!    already appears verbatim earlier in the request — the agent re-ran the tool to
+//!    get the dropped detail back — the newest occurrence ships in full. This is what
+//!    makes the header's "re-run the tool" promise true: compression is deterministic,
+//!    so without this rail a retry would be windowed identically and the agent would
+//!    conclude the tool itself is broken.
+//! 3. **Never inflate** ([`elide_into`]): an elision marker is emitted only when it is
+//!    shorter than the lines it hides; a lone `--` separator survives as itself.
+//!
+//! Lossy, `InputTokens`-gated (reverts if it doesn't cut tokens), `Content`-scoped.
+//! Zero model calls.
 //!
 //! Note on universality: the level/failure keywords scored below are tokens
 //! *machine-emitted* by runtimes and build tools (`ERROR`, `FATAL`, `Traceback`,
@@ -67,7 +84,8 @@ const AUTO_SIGNAL_PCT: usize = 25;
 pub enum ModeSetting {
     /// Always window to the adaptive budget (keep more).
     Adaptive,
-    /// Always keep signal-only (errors / changes / one-per-file) + a summary.
+    /// Always keep signal-only (errors / changes) + a summary. Kinds with no
+    /// signal-anchored aggressive form (grep) window adaptively regardless.
     Aggressive,
     /// Decide per segment by noise density (the tuned default).
     Auto,
@@ -97,7 +115,10 @@ pub(crate) fn pick_mode(setting: ModeSetting, total: usize, signal: usize) -> Mo
         ModeSetting::Adaptive => Mode::Adaptive,
         ModeSetting::Aggressive => Mode::Aggressive,
         ModeSetting::Auto => {
-            if total >= AUTO_MIN_LINES && signal * 100 <= total * AUTO_SIGNAL_PCT {
+            // `signal >= 1`: signal-only selection needs signal to anchor on. With zero
+            // must-keep units there is nothing to select *by* — "sparse" degenerates to
+            // "drop everything", so fall back to adaptive windowing instead.
+            if signal >= 1 && total >= AUTO_MIN_LINES && signal * 100 <= total * AUTO_SIGNAL_PCT {
                 Mode::Aggressive
             } else {
                 Mode::Adaptive
@@ -178,13 +199,36 @@ impl Transform for ToolOutputStage {
             mode: self.mode,
         };
 
+        // Rail: repeat → passthrough. A candidate whose raw text already appears at an
+        // earlier content pointer is a re-invocation returning identical output — the
+        // agent asking for the windowed detail back (the elision header tells it to).
+        // Ship the newest occurrence in full. Raw-text equality is provider-neutral and
+        // language-free: deterministic tools (grep, file reads, ls) repeat verbatim;
+        // non-deterministic output (timestamps) simply never triggers the rail.
+        let repeats: HashSet<String> = {
+            let candidates: HashSet<&str> = pointers.iter().map(String::as_str).collect();
+            let mut earlier: HashSet<&str> = HashSet::new();
+            let mut repeats = HashSet::new();
+            for p in provider.content_text_pointers(req) {
+                let Some(t) = req.get_str(&p) else { continue };
+                if candidates.contains(p.as_str()) && earlier.contains(t) {
+                    repeats.insert(p);
+                } else {
+                    earlier.insert(t);
+                }
+            }
+            repeats
+        };
+
         for ((ptr, text), kind) in pointers.iter().zip(&texts).zip(&kinds) {
             let Some((text, normalized)) = text else {
                 continue;
             };
-            if text.lines().count() < self.min_lines {
-                // Too small to window, but if the pre-pass cleaned it, ship the cleaner
-                // form (the gate reverts if it didn't actually save tokens).
+            if text.lines().count() < self.min_lines || repeats.contains(ptr) {
+                // Too small to window — or a repeated invocation the agent made to get
+                // the full output back (passthrough). Either way no windowing; still
+                // ship the pre-pass-cleaned form if the ANSI/CR strip changed anything
+                // (the gate reverts if it didn't actually save tokens).
                 if *normalized {
                     req.set(ptr, Value::String(text.clone()));
                 }
@@ -293,14 +337,55 @@ pub(crate) fn select_keep(scores: &[f64], k: usize, force: f64) -> Vec<bool> {
 
 /// Replace a dropped run of lines with a positional elision marker — dropped content is
 /// referenced by position, never stored (matches the `retrieve` stage's convention). If
-/// the agent needs it back, it re-runs the tool, which is fresher than a stored copy.
+/// the agent needs it back, it re-runs the tool (true by construction: the repeat →
+/// passthrough rail ships a re-invocation in full).
 pub(crate) fn elide(dropped: &[&str]) -> String {
-    format!("[… {} lines omitted …]", dropped.len())
+    if dropped.len() == 1 {
+        "[… 1 line omitted …]".to_string()
+    } else {
+        format!("[… {} lines omitted …]", dropped.len())
+    }
 }
 
-/// Reassemble `lines` in original order, keeping those flagged in `keep` and collapsing
-/// each maximal dropped run into one [`elide`] marker. Shared by the log and grep
-/// compressors (both select at line granularity).
+/// Rail: never inflate. Append the [`elide`] marker for `dropped` — unless the marker
+/// would cost as much as the lines it hides (a lone `--` separator, a tiny run), in
+/// which case the lines themselves are appended. Returns whether a marker was emitted.
+pub(crate) fn elide_into(dropped: &[&str], out: &mut Vec<String>) -> bool {
+    let marker = elide(dropped);
+    let dropped_len: usize = dropped.iter().map(|l| l.len() + 1).sum();
+    if marker.len() + 1 >= dropped_len {
+        out.extend(dropped.iter().map(|l| (*l).to_string()));
+        false
+    } else {
+        out.push(marker);
+        true
+    }
+}
+
+/// True for a line this module emitted as an elision marker (not content).
+fn is_elision_marker(line: &str) -> bool {
+    line.starts_with("[… ") && line.ends_with(" omitted …]")
+}
+
+/// Rail: attribution. Prefix a windowed `body` with a self-identifying header stating
+/// who elided and how to recover, so the agent never misattributes the gaps to the tool
+/// (or to whatever wrapper ran it). No header when nothing was actually elided (the
+/// never-inflate rail may have kept every "dropped" run).
+pub(crate) fn attributed(body: Vec<String>, total: usize) -> String {
+    if !body.iter().any(|l| is_elision_marker(l)) {
+        return body.join("\n");
+    }
+    let shown = body.iter().filter(|l| !is_elision_marker(l)).count();
+    format!(
+        "[llmtrim: showing {shown} of {total} lines — re-run the tool for the full output]\n{}",
+        body.join("\n")
+    )
+}
+
+/// Reassemble `lines` in original order, keeping those flagged in `keep`, collapsing
+/// each maximal dropped run into one [`elide`] marker (unless the marker would inflate),
+/// and opening with the [`attributed`] recovery header. Shared by the log, grep and
+/// plaintext compressors (all select at line granularity).
 pub(crate) fn rebuild(lines: &[&str], keep: &[bool]) -> String {
     let mut out: Vec<String> = Vec::new();
     let mut i = 0;
@@ -313,10 +398,10 @@ pub(crate) fn rebuild(lines: &[&str], keep: &[bool]) -> String {
             while i < lines.len() && !keep[i] {
                 i += 1;
             }
-            out.push(elide(&lines[start..i]));
+            elide_into(&lines[start..i], &mut out);
         }
     }
-    out.join("\n")
+    attributed(out, lines.len())
 }
 
 #[cfg(test)]
@@ -330,7 +415,7 @@ pub(crate) fn test_ctx() -> Ctx {
 
 #[cfg(test)]
 mod tests {
-    use super::{Mode, ModeSetting, pick_mode};
+    use super::{Mode, ModeSetting, attributed, elide, elide_into, pick_mode, rebuild};
 
     #[test]
     fn auto_goes_aggressive_only_when_big_and_sparse() {
@@ -349,6 +434,61 @@ mod tests {
             Mode::Adaptive,
             "too small"
         );
+        // Rail: no signal → no aggressive. Zero must-keep units means signal-only
+        // selection has nothing to anchor on; "sparse" must not degenerate to "drop all".
+        assert_eq!(
+            pick_mode(ModeSetting::Auto, 1000, 0),
+            Mode::Adaptive,
+            "zero signal stays adaptive"
+        );
+    }
+
+    #[test]
+    fn elide_grammar_is_number_aware() {
+        assert_eq!(elide(&["x"]), "[… 1 line omitted …]");
+        assert_eq!(elide(&["x", "y"]), "[… 2 lines omitted …]");
+    }
+
+    #[test]
+    fn elide_never_inflates() {
+        // A lone `--` separator (rg -C output) is shorter than any marker: keep it.
+        let mut out = Vec::new();
+        assert!(!elide_into(&["--"], &mut out), "no marker for a tiny run");
+        assert_eq!(out, vec!["--".to_string()]);
+
+        // A long run is genuinely worth a marker.
+        let big = vec!["this line is long enough to be worth eliding away"; 4];
+        let mut out = Vec::new();
+        assert!(elide_into(&big, &mut out), "marker for a real run");
+        assert_eq!(out, vec!["[… 4 lines omitted …]".to_string()]);
+    }
+
+    #[test]
+    fn rebuild_attributes_the_elision_and_states_recovery() {
+        let lines: Vec<&str> = (0..10)
+            .map(|_| "payload line with real content here")
+            .collect();
+        let mut keep = vec![false; 10];
+        keep[0] = true;
+        keep[9] = true;
+        let out = rebuild(&lines, &keep);
+        assert!(
+            out.starts_with("[llmtrim: showing 2 of 10 lines — re-run the tool"),
+            "self-identifying recovery header first: {out}"
+        );
+        assert!(
+            out.contains("[… 8 lines omitted …]"),
+            "positional marker kept"
+        );
+    }
+
+    #[test]
+    fn no_header_when_nothing_was_actually_elided() {
+        // The never-inflate rail can return every "dropped" line — then there is no
+        // elision to attribute and the header must not appear.
+        let body = vec!["--".to_string(), "ok".to_string()];
+        let out = attributed(body, 2);
+        assert_eq!(out, "--\nok");
     }
 
     #[test]
