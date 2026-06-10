@@ -316,20 +316,43 @@ impl OpenRouterModel {
     }
 }
 
+/// Answer text for the bench transport: the provider's extraction, falling back to the
+/// reasoning channel when `content` is null/empty. Reasoning models (gpt-oss, R1) on
+/// OpenRouter sometimes return the whole answer in `message.reasoning` (or DeepSeek's
+/// `reasoning_content`) with empty content — flaky per-call, previously misclassified as
+/// "compressed send broke the request". Bench-only: the proxy's rehydration must NOT
+/// treat reasoning as answer text, so this stays out of `Provider::answer_text`.
+#[cfg(feature = "live")]
+fn answer_text_or_reasoning(
+    provider: &dyn provider::Provider,
+    response: &serde_json::Value,
+) -> Option<String> {
+    if let Some(t) = provider.answer_text(response)
+        && !t.trim().is_empty()
+    {
+        return Some(t);
+    }
+    [
+        "/choices/0/message/reasoning",
+        "/choices/0/message/reasoning_content",
+    ]
+    .iter()
+    .find_map(|p| response.pointer(p).and_then(serde_json::Value::as_str))
+    .filter(|t| !t.trim().is_empty())
+    .map(str::to_string)
+}
+
 #[cfg(feature = "live")]
 impl Model for OpenRouterModel {
     fn answer(&self, request_json: &str) -> Result<String> {
         let response = self.send(request_json)?;
-        self.provider
-            .answer_text(&response)
+        answer_text_or_reasoning(self.provider.as_ref(), &response)
             .context("no answer text found in response")
     }
 
     fn answer_with_usage(&self, request_json: &str) -> Result<(String, Usage)> {
         let response = self.send(request_json)?;
-        let text = self
-            .provider
-            .answer_text(&response)
+        let text = answer_text_or_reasoning(self.provider.as_ref(), &response)
             .context("no answer text found in response")?;
         Ok((text, parse_usage(&response)))
     }

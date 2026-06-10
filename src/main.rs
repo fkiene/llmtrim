@@ -796,7 +796,6 @@ fn run_live(
         exec_timeout: 10,
         judge: Some(&llm),
         judge_model: args.judge_model.clone(),
-        route: args.route.clone(),
     };
 
     let run = bench::run_ab(cases, config, &llm, counter.as_ref(), &scorer, price)?;

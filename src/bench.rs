@@ -463,8 +463,11 @@ fn tool_call_match(answer: &str, gold: &str) -> f64 {
 
 /// Ask a cheap judge model whether `answer` is equivalent to the reference `gold`
 /// (open-ended shapes only). The reply is constrained to a single 1/0 token;
-/// `judge_model` is the id the judge endpoint routes to.
-fn judge_score(judge: &dyn Model, judge_model: &str, route: &str, answer: &str, gold: &str) -> f64 {
+/// `judge_model` is the id the judge endpoint routes to. The judge is deliberately NOT
+/// pinned to the bench's `--route`: the judge is a different model, and pinning it to the
+/// bench's provider (e.g. gpt-4o-mini → groq) yields a no-provider error for every call —
+/// which the old code swallowed as 0.0 on both arms, silently zeroing whole corpora.
+fn judge_score(judge: &dyn Model, judge_model: &str, answer: &str, gold: &str) -> f64 {
     // Cap the texts so the judge prompt stays cheap; equivalence needs the gist, not
     // the full long-form answer.
     let clip = |s: &str| s.chars().take(1500).collect::<String>();
@@ -475,7 +478,7 @@ fn judge_score(judge: &dyn Model, judge_model: &str, route: &str, answer: &str, 
         clip(gold),
         clip(answer)
     );
-    let mut req = json!({
+    let req = json!({
         "model": judge_model,
         "messages": [{"role": "user", "content": prompt}],
         // Reasoning models (e.g. gpt-oss) spend tokens thinking before the content — too
@@ -484,23 +487,14 @@ fn judge_score(judge: &dyn Model, judge_model: &str, route: &str, answer: &str, 
         "temperature": 0,
         "reasoning": {"effort": "low"},
     });
-    // Pin the judge to the same upstream as the bench (else it hits a random provider).
-    if !route.is_empty()
-        && let Some(obj) = req.as_object_mut()
-    {
-        let (provider, quant) = match route.split_once('/') {
-            Some((p, q)) => (p, Some(q)),
-            None => (route, None),
-        };
-        let mut routing = json!({"order": [provider], "allow_fallbacks": false});
-        if let Some(q) = quant {
-            routing["quantizations"] = json!([q]);
-        }
-        obj.insert("provider".to_string(), routing);
-    }
     match judge.answer(&req.to_string()) {
         Ok(t) => parse_judge_verdict(&t),
-        Err(_) => 0.0,
+        // A failed judge call must be LOUD: scoring it 0.0 silently zeroes both arms of
+        // every case and the corpus's retention number becomes meaningless garbage.
+        Err(e) => {
+            eprintln!("bench: judge call failed (scored 0): {e:#}");
+            0.0
+        }
     }
 }
 
@@ -540,9 +534,6 @@ pub struct BenchScorer<'a> {
     pub exec_timeout: u64,
     pub judge: Option<&'a dyn Model>,
     pub judge_model: String,
-    /// Upstream route for judge calls (same `provider`/`provider/quant` as the bench),
-    /// so the judge hits the same pinned endpoint rather than a random one.
-    pub route: String,
 }
 
 impl BenchScorer<'_> {
@@ -555,7 +546,7 @@ impl BenchScorer<'_> {
             Scorer::ToolCallMatch => tool_call_match(answer, gold),
             Scorer::LlmJudge => self
                 .judge
-                .map(|j| judge_score(j, &self.judge_model, &self.route, answer, gold))
+                .map(|j| judge_score(j, &self.judge_model, answer, gold))
                 .unwrap_or(0.0),
             other => score_text(other, answer, gold).unwrap_or(0.0),
         }
@@ -1203,7 +1194,6 @@ mod tests {
             exec_timeout: 10,
             judge: None,
             judge_model: String::new(),
-            route: String::new(),
         };
         let run = run_ab(
             &cases,
@@ -1281,7 +1271,6 @@ mod tests {
             exec_timeout: 5,
             judge: None,
             judge_model: String::new(),
-            route: String::new(),
         };
         let run = run_ab(
             &one_case(),
@@ -1322,7 +1311,6 @@ mod tests {
             exec_timeout: 5,
             judge: None,
             judge_model: String::new(),
-            route: String::new(),
         };
         let run = run_ab(
             &one_case(),
@@ -1523,7 +1511,6 @@ mod tests {
             exec_timeout: 10,
             judge: None,
             judge_model: String::new(),
-            route: String::new(),
         };
         assert_eq!(s.score(Scorer::NumericExact, "the answer is 42", "42"), 1.0);
         assert_eq!(s.score(Scorer::ContainsMatch, "nope", "42"), 0.0);
@@ -1551,14 +1538,13 @@ mod tests {
     fn judge_and_bench_scorer_dispatch() {
         let yes = StubModel("1".to_string());
         let no = StubModel("0".to_string());
-        assert_eq!(judge_score(&yes, "m", "", "ans", "gold"), 1.0);
-        assert_eq!(judge_score(&no, "m", "", "ans", "gold"), 0.0);
+        assert_eq!(judge_score(&yes, "m", "ans", "gold"), 1.0);
+        assert_eq!(judge_score(&no, "m", "ans", "gold"), 0.0);
 
         let s = BenchScorer {
             exec_timeout: 5,
             judge: Some(&yes),
             judge_model: "m".into(),
-            route: String::new(),
         };
         assert_eq!(s.score(Scorer::LlmJudge, "ans", "gold"), 1.0);
         assert_eq!(s.score(Scorer::TokenF1, "paris", "paris"), 1.0);
@@ -1576,7 +1562,6 @@ mod tests {
             exec_timeout: 5,
             judge: None,
             judge_model: "m".into(),
-            route: String::new(),
         };
         assert_eq!(s2.score(Scorer::LlmJudge, "ans", "gold"), 0.0);
     }

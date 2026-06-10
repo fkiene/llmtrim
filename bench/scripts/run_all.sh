@@ -13,8 +13,13 @@ unset HTTPS_PROXY https_proxy HTTP_PROXY http_proxy ALL_PROXY all_proxy
 
 run() { # corpus preset n
   echo "=== $1 ($2, n=$3) ==="
-  cargo run -q --features live -- bench --corpus "bench/data/$1.jsonl" --preset "$2" --n "$3" \
-    --json-out "bench/results/$1.json" 2>&1 | tail -8 || echo "FAILED: $1"
+  # Keep the summary panel short but never swallow per-case diagnostics: a `tail -8`
+  # alone hid the `FAIL <case> …: <error>` and judge-failure lines that explain a
+  # failed/zeroed corpus.
+  out=$(cargo run -q --features live -- bench --corpus "bench/data/$1.jsonl" --preset "$2" --n "$3" \
+    --json-out "bench/results/$1.json" 2>&1) || echo "FAILED: $1"
+  printf '%s\n' "$out" | grep -E '^  FAIL|judge call failed' || true
+  printf '%s\n' "$out" | tail -8
   echo
 }
 
