@@ -11,6 +11,8 @@ use std::path::PathBuf;
 
 use anyhow::{Context, Result};
 
+use crate::ui::{self, Tone};
+
 const BEGIN: &str = "# >>> llmtrim >>>";
 const END: &str = "# <<< llmtrim <<<";
 
@@ -28,6 +30,8 @@ fn first_free_port(start: u16, span: u16) -> Option<u16> {
 }
 
 pub fn run(requested: Option<u16>) -> Result<()> {
+    let color = ui::color_stdout();
+
     // 0. Resolve the port *once*, here, before anything is wired. The port is a contract
     //    between three parties that must agree: the profile's HTTPS_PROXY (clients), the
     //    autostart entry (`serve --port N` at login), and the daemon that binds it. Picking
@@ -37,50 +41,87 @@ pub fn run(requested: Option<u16>) -> Result<()> {
     let port = first_free_port(start, 64)
         .with_context(|| format!("no free port in {start}..={}", start.saturating_add(64)))?;
     if port != start {
-        println!("• Port {start} busy — using {port}.");
+        println!(
+            "{}",
+            ui::note(color, &format!("Port {start} busy — using {port}."))
+        );
     }
+
+    // Steps are collected as checklist rows and rendered as one summary panel at the
+    // end; soft failures become `⚠` rows instead of stderr asides, so the user sees
+    // one coherent report.
+    let mut rows: Vec<(&str, String, String)> = Vec::new();
 
     // 1. Local CA (generated on first run, name-constrained to LLM domains).
     crate::serve::ensure_ca()?;
     let ca = crate::serve::ca_cert_path()?.to_string_lossy().to_string();
     let proxy = format!("http://127.0.0.1:{port}");
-    println!("✓ Local CA: {ca}");
+    rows.push((ui::OK, "Local CA".into(), ca.clone()));
 
     // 2. Route + trust at the environment level (shell profile managed block).
-    match write_profile_block(&proxy, &ca)? {
+    let manual_env = match write_profile_block(&proxy, &ca)? {
         Some(path) => {
-            println!("✓ Updated {} with the interceptor env:", path.display());
-            println!("    HTTPS_PROXY={proxy}");
-            println!("    NODE_EXTRA_CA_CERTS={ca}");
+            rows.push((
+                ui::OK,
+                "Profile".into(),
+                format!("{} — HTTPS_PROXY + CA trust", path.display()),
+            ));
+            false
         }
         None => {
-            #[cfg(windows)]
-            {
-                println!("• No PowerShell profile found — set these yourself:");
-                println!("    $env:HTTPS_PROXY = \"{proxy}\"");
-                println!("    $env:NODE_EXTRA_CA_CERTS = \"{ca}\"");
-            }
-            #[cfg(not(windows))]
-            {
-                println!("• No shell profile found — export these yourself:");
-                println!("    export HTTPS_PROXY={proxy}");
-                println!("    export NODE_EXTRA_CA_CERTS={ca}");
-            }
+            rows.push((
+                ui::NOTE,
+                "Profile".into(),
+                "no shell profile found — set the env yourself (below)".into(),
+            ));
+            true
         }
-    }
+    };
 
     // 3. Run at login (systemd / launchd / Windows, via auto-launch).
-    if let Err(e) = crate::autostart::configure(true, port) {
-        eprintln!("• Autostart not enabled: {e}");
+    match crate::autostart::configure(true, port) {
+        Ok(()) => rows.push((ui::OK, "Autostart".into(), "runs at login".into())),
+        Err(e) => rows.push((ui::WARN, "Autostart".into(), format!("not enabled: {e}"))),
     }
 
     // 4. (Re)start the interceptor. Stop any existing daemon first so re-running `setup`
     //    after an update actually goes live — otherwise the old process keeps serving the
     //    old binary until a manual restart (the silent-stale-update trap).
     let _ = crate::daemon::stop();
-    match crate::daemon::spawn_detached(port) {
-        Ok(pid) => println!("✓ Interceptor running (pid {pid}, port {port})."),
-        Err(e) => eprintln!("• Daemon not started: {e}"),
+    let daemon_ok = match crate::daemon::spawn_detached(port) {
+        Ok(pid) => {
+            rows.push((
+                ui::OK,
+                "Interceptor".into(),
+                format!("running · pid {pid} · port {port}"),
+            ));
+            true
+        }
+        Err(e) => {
+            rows.push((ui::WARN, "Interceptor".into(), format!("not started: {e}")));
+            false
+        }
+    };
+
+    print!(
+        "{}",
+        ui::panel(color, "llmtrim setup", &ui::kv_rows(color, &rows))
+    );
+
+    if manual_env {
+        println!();
+        #[cfg(windows)]
+        {
+            println!("Set these in your PowerShell profile yourself:");
+            println!("    $env:HTTPS_PROXY = \"{proxy}\"");
+            println!("    $env:NODE_EXTRA_CA_CERTS = \"{ca}\"");
+        }
+        #[cfg(not(windows))]
+        {
+            println!("Export these in your shell yourself:");
+            println!("    export HTTPS_PROXY={proxy}");
+            println!("    export NODE_EXTRA_CA_CERTS={ca}");
+        }
     }
 
     // The managed block only lands in *future* shells — already-running tools (editors,
@@ -91,93 +132,179 @@ pub fn run(requested: Option<u16>) -> Result<()> {
     } else {
         "echo $HTTPS_PROXY"
     };
-    println!("\nDone. The interceptor is running.");
+    println!();
+    if daemon_ok {
+        println!(
+            "{}",
+            ui::paint(color, Tone::Bold, "Done — the interceptor is running.")
+        );
+    } else {
+        println!(
+            "{}",
+            ui::warn(
+                color,
+                "Setup finished, but the interceptor is not running — see above."
+            )
+        );
+    }
     println!(
-        "Note: only programs started from a new shell pick up the proxy env. Already-running\n\
-         tools (your editor, Claude Code, open terminals) keep their old environment until\n\
-         relaunched. To route one through llmtrim:"
+        "Only programs started from a new shell pick up the proxy env; already-running\n\
+         tools (your editor, Claude Code, open terminals) keep their old environment\n\
+         until relaunched. To route one through llmtrim:"
     );
+    println!();
     println!("  1. open a new terminal (or re-source your shell profile)");
     println!("  2. verify it took:  {check}  →  {proxy}");
     println!("  3. launch your tool from that shell");
-    println!("Watch savings: llmtrim status");
+    println!();
+    println!(
+        "  {}  llmtrim status",
+        ui::paint(color, Tone::Dim, "watch savings")
+    );
     #[cfg(windows)]
     println!(
-        "(For non-PowerShell / GUI apps, trust the CA system-wide: \
-         certutil -addstore -user Root \"{ca}\" — or see `llmtrim ca`.)"
+        "{}",
+        ui::note(
+            color,
+            &format!(
+                "For non-PowerShell / GUI apps, trust the CA system-wide: \
+                 certutil -addstore -user Root \"{ca}\" — or see llmtrim ca."
+            )
+        )
     );
     #[cfg(not(windows))]
     println!(
-        "(GUI apps that ignore the shell env need the CA trusted system-wide — see `llmtrim ca`.)"
+        "{}",
+        ui::note(
+            color,
+            "GUI apps that ignore the shell env need the CA trusted system-wide — see llmtrim ca."
+        )
     );
     Ok(())
 }
 
 /// `llmtrim uninstall` — the transparent inverse of `setup`: stop the daemon, disable
 /// autostart, strip the shell-profile block, and remove the CA + state (and, unless told
-/// otherwise, the binary itself). Each action is printed; nothing is silent.
+/// otherwise, the binary itself). Best-effort: a failed step becomes a `⚠` row and the
+/// rest proceeds; every action lands in the summary panel, nothing is silent.
 pub fn uninstall(purge: bool, keep_binary: bool) -> Result<()> {
+    let color = ui::color_stdout();
+    let mut rows: Vec<(&str, String, String)> = Vec::new();
+
     // 1. Stop the running daemon.
     match crate::daemon::stop() {
-        Ok(Some(pid)) => println!("✓ Stopped interceptor (pid {pid})."),
-        Ok(None) => println!("• No daemon was running."),
-        Err(e) => eprintln!("• Could not stop daemon: {e}"),
+        Ok(Some(pid)) => rows.push((ui::OK, "Interceptor".into(), format!("stopped (pid {pid})"))),
+        Ok(None) => rows.push((
+            ui::NOTE,
+            "Interceptor".into(),
+            "no daemon was running".into(),
+        )),
+        Err(e) => rows.push((
+            ui::WARN,
+            "Interceptor".into(),
+            format!("could not stop: {e}"),
+        )),
     }
 
     // 2. Disable run-at-login (matched by app name, so the port is irrelevant here).
     match crate::autostart::configure(false, 8787) {
-        Ok(()) => println!("✓ Autostart disabled."),
-        Err(e) => eprintln!("• Autostart not changed: {e}"),
+        Ok(()) => rows.push((ui::OK, "Autostart".into(), "disabled".into())),
+        Err(e) => rows.push((ui::WARN, "Autostart".into(), format!("not changed: {e}"))),
     }
 
     // 3. Remove the managed env block from the shell profile.
-    match remove_profile_block()? {
-        Some(path) => println!("✓ Removed the env block from {}.", path.display()),
-        None => println!("• No shell-profile block to remove."),
+    match remove_profile_block() {
+        Ok(Some(path)) => rows.push((
+            ui::OK,
+            "Profile".into(),
+            format!("env block removed from {}", path.display()),
+        )),
+        Ok(None) => rows.push((ui::NOTE, "Profile".into(), "no env block to remove".into())),
+        Err(e) => rows.push((ui::WARN, "Profile".into(), format!("not cleaned: {e}"))),
     }
 
     // 4. Remove the CA + daemon state (~/.llmtrim).
     let home = crate::daemon::home_dir()?;
     if home.exists() {
-        std::fs::remove_dir_all(&home)
-            .with_context(|| format!("failed to remove {}", home.display()))?;
-        println!("✓ Removed {} (CA, key, daemon state).", home.display());
+        match std::fs::remove_dir_all(&home) {
+            Ok(()) => rows.push((
+                ui::OK,
+                "State".into(),
+                format!("removed {} (CA, key, daemon state)", home.display()),
+            )),
+            Err(e) => rows.push((
+                ui::WARN,
+                "State".into(),
+                format!("could not remove {}: {e}", home.display()),
+            )),
+        }
     } else {
-        println!("• No state directory to remove.");
+        rows.push((
+            ui::NOTE,
+            "State".into(),
+            "no state directory to remove".into(),
+        ));
     }
 
     // 5. The savings ledger — kept by default (it's your history), removed with --purge.
     match crate::tracking::db_path() {
         Ok(db) if db.exists() && purge => {
             std::fs::remove_file(&db).ok();
-            println!("✓ Removed the savings ledger {}.", db.display());
+            rows.push((ui::OK, "Ledger".into(), format!("removed {}", db.display())));
         }
         Ok(db) if db.exists() => {
-            println!(
-                "• Kept the savings ledger {} (use --purge to remove).",
-                db.display()
-            );
+            rows.push((
+                ui::NOTE,
+                "Ledger".into(),
+                format!("kept {} (use --purge to remove)", db.display()),
+            ));
         }
         _ => {}
     }
 
     // 6. The binary itself (Unix can unlink a running executable; Windows can't).
     if keep_binary {
-        println!("• Kept the binary.");
+        rows.push((ui::NOTE, "Binary".into(), "kept".into()));
     } else if let Ok(exe) = std::env::current_exe() {
         #[cfg(unix)]
         {
             std::fs::remove_file(&exe).ok();
-            println!("✓ Removed the binary {}.", exe.display());
+            rows.push((
+                ui::OK,
+                "Binary".into(),
+                format!("removed {}", exe.display()),
+            ));
         }
         #[cfg(not(unix))]
         {
-            println!("• Remove the binary manually: {}", exe.display());
+            rows.push((
+                ui::NOTE,
+                "Binary".into(),
+                format!("remove manually: {}", exe.display()),
+            ));
         }
     }
 
-    println!("\nDone. Open a new shell so the environment changes take effect.");
-    println!("(If you trusted the CA system-wide manually, remove it from your OS trust store.)");
+    print!(
+        "{}",
+        ui::panel(color, "llmtrim uninstall", &ui::kv_rows(color, &rows))
+    );
+    println!();
+    println!(
+        "{}",
+        ui::paint(
+            color,
+            Tone::Bold,
+            "Done. Open a new shell so the environment changes take effect."
+        )
+    );
+    println!(
+        "{}",
+        ui::note(
+            color,
+            "If you trusted the CA system-wide manually, remove it from your OS trust store."
+        )
+    );
     Ok(())
 }
 

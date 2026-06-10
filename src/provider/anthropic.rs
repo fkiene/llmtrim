@@ -59,19 +59,23 @@ impl Provider for AnthropicProvider {
     }
 
     fn add_system_instruction(&self, req: &mut Request, text: &str) {
-        // Anthropic carries `system` as a top-level field (string or block array).
-        // Prepend our instruction, preserving any existing system content.
+        // Anthropic carries `system` as a top-level field (string or block array). APPEND our
+        // instruction after the existing system content, never prepend: prepending changes the
+        // bytes *before* a client `cache_control` breakpoint (Claude Code marks the last system
+        // block), busting the prompt cache at 1.25× write cost every turn. Appending leaves the
+        // cached prefix byte-identical — our (small, possibly per-request) instruction simply
+        // sits after the breakpoint, uncached, which is correct since it can vary.
         let Some(obj) = req.raw_mut().as_object_mut() else {
             return;
         };
         match obj.get("system") {
             Some(Value::String(existing)) => {
-                let combined = format!("{text}\n\n{existing}");
+                let combined = format!("{existing}\n\n{text}");
                 obj.insert("system".to_string(), Value::String(combined));
             }
             Some(Value::Array(_)) => {
                 if let Some(Value::Array(arr)) = obj.get_mut("system") {
-                    arr.insert(0, json!({"type": "text", "text": text}));
+                    arr.push(json!({"type": "text", "text": text}));
                 }
             }
             _ => {
@@ -153,6 +157,19 @@ impl Provider for AnthropicProvider {
                 _ => {}
             }
         }
+
+        // History breakpoint: on a multi-turn conversation (≥2 messages) with breakpoints to
+        // spare, cache the conversation prefix by marking the last block of the last message.
+        // The growing history is the bulk of a raw-SDK agent's input and is otherwise re-billed
+        // at full rate every turn; this turn writes the cache, the next reads it. Skipped on
+        // single-shot requests (no next turn to amortize the +25% write).
+        if used < max
+            && let Some(Value::Array(messages)) = obj.get_mut("messages")
+            && messages.len() >= 2
+            && let Some(last) = messages.last_mut()
+        {
+            mark_last_block(last);
+        }
     }
 
     fn tool_descriptors(&self, req: &Request) -> Vec<(String, String)> {
@@ -202,14 +219,51 @@ impl Provider for AnthropicProvider {
 
     fn downscale_images(&self, req: &mut Request) {
         super::for_each_content_block(req, |b| {
-            if b.get("type").and_then(Value::as_str) == Some("image")
-                && b.pointer("/source/type").and_then(Value::as_str) == Some("base64")
-                && let Some(Value::String(data)) = b.pointer_mut("/source/data")
-                && let Some(new_data) = crate::media::fit_to_cap(data, crate::media::CAP_ANTHROPIC)
+            downscale_anthropic_block(b);
+            // Computer-use screenshots are image blocks nested inside tool_result content.
+            if b.get("type").and_then(Value::as_str) == Some("tool_result")
+                && let Some(inner) = b.get_mut("content").and_then(Value::as_array_mut)
             {
-                *data = new_data;
+                for ib in inner.iter_mut() {
+                    downscale_anthropic_block(ib);
+                }
             }
         });
+    }
+}
+
+/// Mark a message's last content block with an ephemeral cache breakpoint, promoting a bare
+/// string content to a single text block (a string can't carry `cache_control`). This is the
+/// current turn (not a cached prefix), so reshaping it here is safe.
+fn mark_last_block(msg: &mut Value) {
+    let Some(obj) = msg.as_object_mut() else {
+        return;
+    };
+    match obj.get_mut("content") {
+        Some(Value::Array(blocks)) => {
+            if let Some(b) = blocks.last_mut().and_then(Value::as_object_mut) {
+                b.insert("cache_control".to_string(), json!({"type": "ephemeral"}));
+            }
+        }
+        Some(Value::String(s)) => {
+            let text = s.clone();
+            obj.insert(
+                "content".to_string(),
+                json!([{"type": "text", "text": text, "cache_control": {"type": "ephemeral"}}]),
+            );
+        }
+        _ => {}
+    }
+}
+
+/// Downscale one Anthropic `image` block (base64 source) in place, to the resolution cap.
+fn downscale_anthropic_block(b: &mut Value) {
+    if b.get("type").and_then(Value::as_str) == Some("image")
+        && b.pointer("/source/type").and_then(Value::as_str) == Some("base64")
+        && let Some(Value::String(data)) = b.pointer_mut("/source/data")
+        && let Some(new_data) = crate::media::fit_to_cap(data, crate::media::CAP_ANTHROPIC)
+    {
+        *data = new_data;
     }
 }
 
@@ -292,6 +346,31 @@ mod tests {
     }
 
     #[test]
+    fn tool_use_input_and_document_are_covered() {
+        // Assistant tool_use echoes the call args (Write/Edit carries whole files in `input`);
+        // text `document` blocks carry plain-text data. Both were uncovered before.
+        let r = req(r#"{"messages":[
+            {"role":"assistant","content":[
+                {"type":"tool_use","id":"u1","name":"write","input":{"path":"a.rs","content":"FILE BODY"}}]},
+            {"role":"user","content":[
+                {"type":"document","source":{"type":"text","media_type":"text/plain","data":"DOC BODY"}}]}
+        ]}"#);
+        let p = AnthropicProvider.content_text_pointers(&r);
+        assert!(
+            p.contains(&"/messages/0/content/0/input/content".to_string()),
+            "{p:?}"
+        );
+        assert!(
+            p.contains(&"/messages/0/content/0/input/path".to_string()),
+            "{p:?}"
+        );
+        assert!(
+            p.contains(&"/messages/1/content/0/source/data".to_string()),
+            "{p:?}"
+        );
+    }
+
+    #[test]
     fn stop_uses_stop_sequences_key() {
         let mut r = req(r#"{"messages":[],"max_tokens":1}"#);
         AnthropicProvider.add_stop_sequence(&mut r, "STOP");
@@ -299,13 +378,30 @@ mod tests {
     }
 
     #[test]
-    fn system_instruction_prepends_to_string() {
+    fn system_instruction_appends_to_string() {
+        // Appended (not prepended) so the cached system prefix stays byte-identical.
         let mut r = req(r#"{"system":"old","messages":[],"max_tokens":1}"#);
         AnthropicProvider.add_system_instruction(&mut r, "new");
         assert_eq!(
             r.raw().get("system").and_then(Value::as_str),
-            Some("new\n\nold")
+            Some("old\n\nnew")
         );
+    }
+
+    #[test]
+    fn system_instruction_appends_after_cache_breakpoint() {
+        // Client (Claude Code) put cache_control on the last system block. Our instruction must
+        // land *after* it, leaving the marked/cached block untouched (cache stays warm).
+        let mut r = req(r#"{"system":[
+            {"type":"text","text":"stable","cache_control":{"type":"ephemeral"}}
+        ],"messages":[],"max_tokens":1}"#);
+        AnthropicProvider.add_system_instruction(&mut r, "legend");
+        let sys = r.raw().get("system").and_then(Value::as_array).unwrap();
+        assert_eq!(sys.len(), 2);
+        // The breakpoint block is unchanged; ours is the new trailing, uncached block.
+        assert!(sys[0].get("cache_control").is_some());
+        assert_eq!(sys[1].get("text").and_then(Value::as_str), Some("legend"));
+        assert!(sys[1].get("cache_control").is_none());
     }
 
     #[test]

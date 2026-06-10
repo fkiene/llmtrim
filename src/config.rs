@@ -230,6 +230,16 @@ impl DenseConfig {
         if let Some(name) = value.get("preset").and_then(toml::Value::as_str) {
             return Self::preset(name).with_context(|| format!("unknown preset '{name}'"));
         }
+        // A file with no *compression* keys (empty, or only orthogonal keys like
+        // `retention_days`) keeps the shipped `auto` shape-routing default. Otherwise adding
+        // e.g. `retention_days = 30` would silently fall through to the bare flag set
+        // (`auto = false`, everything-but-lossless off) and disable shape-routing — a
+        // surprising downgrade for a key that has nothing to do with compression.
+        if let Some(table) = value.as_table()
+            && !table.keys().any(|k| k != "retention_days" && k != "preset")
+        {
+            return Ok(Self::auto());
+        }
         value.try_into().context("config does not match the schema")
     }
 

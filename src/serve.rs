@@ -50,21 +50,37 @@ mod imp {
     use crate::ir::ProviderKind;
     use crate::tracking::{Record, Tracker};
 
-    /// Parent domains of every endpoint in the `llm_providers` registry — the maintained
-    /// upstream source of truth. The CA is name-constrained to these, and only hosts under
-    /// them are intercepted. Computed once.
+    /// The exact endpoint hosts of every provider in the `llm_providers` registry — the
+    /// maintained upstream source of truth. The CA is name-constrained to these (plus their
+    /// subdomains, via [`host_covered`]) and only matching hosts are intercepted. We key on the
+    /// *exact* host, NOT the registrable parent: collapsing `generativelanguage.googleapis.com`
+    /// to `googleapis.com` (or `dashscope.aliyuncs.com` → `aliyuncs.com`) would let the MITM CA
+    /// forge certs for — and intercept — all of Google Cloud / Alibaba Cloud, an enormous and
+    /// unnecessary blast radius. Computed once.
     static LLM_DOMAINS: once_cell::sync::Lazy<std::collections::HashSet<String>> =
         once_cell::sync::Lazy::new(|| {
             let mut set = std::collections::HashSet::new();
             for provider in llm_providers::get_providers_data().values() {
                 for endpoint in provider.endpoints.values() {
                     if let Some(host) = host_of_url(endpoint.base_url) {
-                        set.insert(parent_domain(host));
+                        set.insert(host.to_ascii_lowercase());
                     }
                 }
             }
+            // Vertex AI (`aiplatform`) isn't in the registry but serves Claude/Gemini/OpenAI
+            // shapes by path; cover it explicitly so the exact-host switch doesn't drop it.
+            for h in GOOGLE_API_HOSTS {
+                set.insert((*h).to_string());
+            }
             set
         });
+
+    /// Google LLM API hosts needing CA coverage + interception. `generativelanguage` is also in
+    /// the registry; `aiplatform` (Vertex) is not, so it must be listed here explicitly.
+    static GOOGLE_API_HOSTS: &[&str] = &[
+        "generativelanguage.googleapis.com",
+        "aiplatform.googleapis.com",
+    ];
 
     /// Reputable direct LLM API hosts beyond the `llm_providers` registry that speak one of
     /// the three wire shapes we adapt (OpenAI / Anthropic / Gemini). Interception + CA coverage
@@ -121,14 +137,10 @@ mod imp {
         (!host.is_empty()).then_some(host)
     }
 
-    /// The registrable parent domain (last two labels): `ark.cn-beijing.volces.com` →
-    /// `volces.com`, `api.openai.com` → `openai.com`.
-    fn parent_domain(host: &str) -> String {
-        let mut it = host.rsplit('.');
-        match (it.next(), it.next()) {
-            (Some(tld), Some(sld)) => format!("{sld}.{tld}"),
-            _ => host.to_string(),
-        }
+    /// True if `host` equals `domain` or is a subdomain of it (dot-anchored, so
+    /// `notanthropic.com` does not match `anthropic.com`).
+    fn host_in(host: &str, domain: &str) -> bool {
+        host == domain || host.ends_with(&format!(".{domain}"))
     }
 
     /// The provider wire shape for a host, or `None` if it isn't an LLM API host (so it is
@@ -136,21 +148,38 @@ mod imp {
     /// provider speaks the OpenAI `/v1/chat/completions` shape.
     fn provider_for_host(host: &str) -> Option<ProviderKind> {
         let h = host.to_ascii_lowercase();
-        if h.ends_with("anthropic.com") {
+        if host_in(&h, "anthropic.com") {
             return Some(ProviderKind::Anthropic);
         }
-        if h.ends_with("generativelanguage.googleapis.com")
-            || h.ends_with("aiplatform.googleapis.com")
-        {
+        if GOOGLE_API_HOSTS.iter().any(|d| host_in(&h, d)) {
             return Some(ProviderKind::Google);
         }
-        // Registry domains and the curated extra hosts default to the OpenAI shape; the exact
-        // adapter is refined from the body at compress time (`provider::detect`), so a host that
-        // serves a Claude- or Gemini-shaped body is still handled correctly.
-        if LLM_DOMAINS.contains(&parent_domain(&h)) || is_extra_host(&h) {
+        // Registry endpoint hosts and the curated extra hosts default to the OpenAI shape; the
+        // exact adapter is refined from the body at compress time (`provider::detect`), so a host
+        // that serves a Claude- or Gemini-shaped body is still handled correctly.
+        if host_covered(&h, &LLM_DOMAINS) || is_extra_host(&h) {
             return Some(ProviderKind::OpenAi);
         }
         None
+    }
+
+    /// Endpoints whose POST bodies we may compress: text-generation only. Embeddings,
+    /// moderations, audio, image, files, batch, and token-count endpoints carry bodies that
+    /// either aren't prompts or whose semantics our prompt stages would corrupt — they pass
+    /// through verbatim. Allowlist by path suffix/marker (host already gated separately).
+    fn is_compressible_path(path: &str) -> bool {
+        // Token-count endpoints must pass through: we'd otherwise return the count of the
+        // *compressed* prompt, silently skewing the client's budgeting.
+        if path.contains("count_tokens") || path.contains(":countTokens") {
+            return false;
+        }
+        path.ends_with("/chat/completions")
+            || path.ends_with("/responses")
+            || path.ends_with("/messages")
+            || path.contains(":generateContent")
+            || path.contains(":streamGenerateContent")
+            || path.contains(":rawPredict")
+            || path.contains(":streamRawPredict")
     }
 
     /// Vertex AI serves all three wire shapes on `aiplatform.googleapis.com`, distinguished by
@@ -220,11 +249,14 @@ mod imp {
     }
 
     /// Client request headers to forward on replay — everything except `host` and
-    /// `content-length` (the HTTP client sets those from the URL and body).
+    /// `content-length` (the HTTP client sets those from the URL and body) and `accept-encoding`
+    /// (we don't bundle a brotli decoder, so force identity: replaying the client's
+    /// `accept-encoding: br` could hand the client an undecodable body — the replay path's whole
+    /// job is to not break the call).
     fn forward_headers(headers: &header::HeaderMap) -> Vec<(String, String)> {
         headers
             .iter()
-            .filter(|(n, _)| !matches!(n.as_str(), "host" | "content-length"))
+            .filter(|(n, _)| !matches!(n.as_str(), "host" | "content-length" | "accept-encoding"))
             .filter_map(|(n, v)| v.to_str().ok().map(|v| (n.to_string(), v.to_string())))
             .collect()
     }
@@ -367,6 +399,12 @@ mod imp {
             let Some(provider) = provider.filter(|_| req.method() == Method::POST) else {
                 return req.into();
             };
+            // Compress text-generation endpoints only. Embeddings / moderations / token-count
+            // bodies aren't prompts (or our edits would skew the result), so forward verbatim —
+            // never silently mutate the input of a `/v1/embeddings` call.
+            if !is_compressible_path(req.uri().path()) {
+                return req.into();
+            }
             // Body-signed requests (AWS SigV4) must pass through untouched — changing the
             // body would invalidate the signature and the provider would reject it.
             if is_body_signed(req.headers()) {
@@ -430,11 +468,14 @@ mod imp {
             let Some(pending) = self.pending.take() else {
                 return res;
             };
-            // Safety net: if the upstream rejected our compressed request (4xx/5xx), replay
-            // the original verbatim and hand the client THAT — compression must never break
-            // the call. Only when we actually changed the body (original captured).
+            // Safety net: if the upstream rejected our compressed request with a *validation*
+            // error (400 Bad Request / 422 Unprocessable) — the failure class our body edits can
+            // cause — replay the original verbatim and hand the client THAT. We deliberately do
+            // NOT replay 429/5xx (rate-limit, overload, server faults): those are unrelated to
+            // our mutation, and re-sending would double provider load during an incident and
+            // strip the client's `retry-after`. Only when we actually changed the body.
             let status = res.status();
-            if (status.is_client_error() || status.is_server_error())
+            if matches!(status.as_u16(), 400 | 422)
                 && let Some(original) = pending.original.clone()
                 && let Ok(Some(replayed)) =
                     tokio::task::spawn_blocking(move || replay_original(&original)).await
@@ -1211,12 +1252,59 @@ mod imp {
         #[test]
         fn intercept_domains_include_registry_and_extras_sorted() {
             let d = intercept_domains();
-            assert!(d.contains(&"openai.com".to_string())); // from the registry
+            assert!(d.contains(&"api.openai.com".to_string())); // exact registry endpoint host
             assert!(d.contains(&"opencode.ai".to_string())); // from EXTRA_HOSTS
             assert!(
                 d.windows(2).all(|w| w[0] <= w[1]),
                 "must be sorted for sidecar compare"
             );
+        }
+
+        #[test]
+        fn intercept_set_does_not_widen_to_shared_cloud_parents() {
+            // Security: we key on exact endpoint hosts, never the registrable parent — else the
+            // name-constrained MITM CA could forge certs for, and intercept, all of Google
+            // Cloud / Alibaba Cloud / Volcano Engine. Guard against a regression to parents.
+            let d = intercept_domains();
+            for bad in [
+                "googleapis.com",
+                "aliyuncs.com",
+                "volces.com",
+                "amazonaws.com",
+            ] {
+                assert!(
+                    !d.contains(&bad.to_string()),
+                    "must not cover shared infra {bad}"
+                );
+            }
+            // But the specific LLM endpoints under those parents are still covered.
+            let set: std::collections::HashSet<String> = d.into_iter().collect();
+            assert!(host_covered("generativelanguage.googleapis.com", &set));
+            assert!(host_covered("aiplatform.googleapis.com", &set));
+            // A non-LLM Google host is NOT intercepted.
+            assert!(!host_covered("storage.googleapis.com", &set));
+        }
+
+        #[test]
+        fn compressible_path_allows_generation_blocks_embeddings_and_count() {
+            for ok in [
+                "/v1/chat/completions",
+                "/v1/responses",
+                "/v1/messages",
+                "/v1beta/models/gemini-2.0-flash:generateContent",
+                "/v1/projects/p/locations/l/publishers/anthropic/models/claude:rawPredict",
+            ] {
+                assert!(is_compressible_path(ok), "should compress {ok}");
+            }
+            for skip in [
+                "/v1/embeddings",
+                "/v1/moderations",
+                "/v1/messages/count_tokens",
+                "/v1beta/models/gemini-2.0-flash:countTokens",
+                "/v1/audio/transcriptions",
+            ] {
+                assert!(!is_compressible_path(skip), "must NOT compress {skip}");
+            }
         }
 
         #[test]

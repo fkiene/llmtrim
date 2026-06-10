@@ -23,17 +23,6 @@ pub enum OutKind {
 static GREP_LINE: Lazy<Regex> =
     Lazy::new(|| Regex::new(r"^(?:[A-Za-z]:)?[^:\n]*[A-Za-z./\\][^:\n]*:\d+:").unwrap());
 
-/// A failure-level signal anywhere in a line. Tool-emitted tokens (see module note in
-/// `mod.rs`), so an English set is appropriate.
-static STRONG_SIGNAL: Lazy<Regex> = Lazy::new(|| {
-    Regex::new(r"(?i)\b(error|fatal|fail(?:ed|ure)?|panic(?:ked)?|exception|traceback|segfault|assert(?:ion)?)\b")
-        .unwrap()
-});
-
-/// Any log-level token (includes the strong ones plus informational levels).
-static LEVEL_SIGNAL: Lazy<Regex> =
-    Lazy::new(|| Regex::new(r"(?i)\b(error|warn|info|debug|trace|fatal|fail|panic|exception)\b").unwrap());
-
 /// Minimum non-empty lines for the line-oriented kinds (grep, log).
 const MIN_LINES: usize = 3;
 /// Minimum non-empty lines before a segment is considered for log windowing.
@@ -80,8 +69,14 @@ fn is_log(lines: &[&str]) -> bool {
     if lines.len() < MIN_LOG_LINES {
         return false;
     }
-    let strong = lines.iter().filter(|l| STRONG_SIGNAL.is_match(l)).count();
-    let level = lines.iter().filter(|l| LEVEL_SIGNAL.is_match(l)).count();
+    let strong = lines
+        .iter()
+        .filter(|l| super::signals::STRONG.is_match(l))
+        .count();
+    let level = lines
+        .iter()
+        .filter(|l| super::signals::LEVEL.is_match(l))
+        .count();
     strong >= 2 || level * 100 >= lines.len() * 30
 }
 

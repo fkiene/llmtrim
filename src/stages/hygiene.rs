@@ -62,8 +62,10 @@ impl Transform for HygieneStage {
                 if minified != s {
                     req.set(&ptr, Value::String(minified));
                 }
-            } else if self.strip_base64 || self.normalize_unicode {
-                // Non-JSON prose: optional base64 scrub + unicode normalization.
+            } else {
+                // Non-JSON prose: optional base64 scrub + unicode normalization, then minify
+                // any JSON embedded *inside* the prose (fenced ```json blocks and balanced
+                // top-level {…}/[…] spans). The whole-segment JSON case is handled above.
                 let mut text = s.clone();
                 if self.strip_base64 {
                     text = scrub_base64_text(&text);
@@ -71,6 +73,7 @@ impl Transform for HygieneStage {
                 if self.normalize_unicode {
                     text = normalize_text(&text);
                 }
+                text = minify_embedded_json(&text);
                 if text != s {
                     req.set(&ptr, Value::String(text));
                 }
@@ -103,6 +106,143 @@ fn scrub_base64_value(v: &mut Value) {
         Value::Object(map) => map.values_mut().for_each(scrub_base64_value),
         _ => {}
     }
+}
+
+/// Fenced ```json … ``` block (DOTALL, non-greedy). The language tag is matched
+/// case-insensitively; the captured group is the inner content to minify.
+static JSON_FENCE: Lazy<Regex> =
+    Lazy::new(|| Regex::new(r"(?is)```json\b[^\r\n]*\r?\n(.*?)```").unwrap());
+
+/// Losslessly minify JSON embedded inside prose: fenced ```json blocks and balanced
+/// top-level `{…}` / `[…]` spans. Each span is only rewritten if it parses as valid JSON
+/// and the minified form is strictly shorter — surrounding prose is never touched. With
+/// serde_json's `arbitrary_precision`, numbers round-trip exactly, so this stays lossless.
+fn minify_embedded_json(text: &str) -> String {
+    // 1. Fenced ```json blocks: minify the inner JSON in place (keep the fence).
+    let fenced = JSON_FENCE.replace_all(text, |caps: &regex::Captures| {
+        let inner = &caps[1];
+        match minify_json_str(inner) {
+            Some(min) => format!("```json\n{min}\n```"),
+            None => caps[0].to_string(),
+        }
+    });
+    // 2. Balanced top-level {…}/[…] spans in the remaining prose (skipping code fences so
+    //    `{` inside a ```rust block, or a json fence already handled above, is left alone).
+    minify_balanced_spans(&fenced)
+}
+
+/// Minify a single JSON string if it parses and the result is strictly shorter; else `None`.
+fn minify_json_str(s: &str) -> Option<String> {
+    let value: Value = serde_json::from_str(s.trim()).ok()?;
+    let min = serde_json::to_string(&value).ok()?;
+    (min.len() < s.len()).then_some(min)
+}
+
+/// Replace each balanced top-level `{…}`/`[…]` span that is valid JSON (and shrinks) with
+/// its minified form, leaving prose and fenced code blocks untouched.
+fn minify_balanced_spans(text: &str) -> String {
+    let bytes = text.as_bytes();
+    let mut out = String::with_capacity(text.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        // Skip fenced code blocks verbatim (``` … ```), so we don't parse code braces.
+        if bytes[i..].starts_with(b"```") {
+            let after = i + 3;
+            let end = find_fence_close(bytes, after).unwrap_or(bytes.len());
+            out.push_str(&text[i..end]);
+            i = end;
+            continue;
+        }
+        if (bytes[i] == b'{' || bytes[i] == b'[')
+            && looks_like_json_open(bytes, i)
+            && let Some(end) = balanced_json_end(bytes, i)
+            && let Some(min) = minify_json_str(&text[i..end])
+        {
+            out.push_str(&min);
+            i = end;
+            continue;
+        }
+        // Ordinary prose char: copy one whole UTF-8 char (structural bytes are ASCII, so the
+        // branches above always land on char boundaries).
+        let ch_len = text[i..].chars().next().map_or(1, char::len_utf8);
+        out.push_str(&text[i..i + ch_len]);
+        i += ch_len;
+    }
+    out
+}
+
+/// Byte index just past the closing ``` ``` `` starting the search at `from`, or `None`.
+fn find_fence_close(bytes: &[u8], from: usize) -> Option<usize> {
+    let mut j = from;
+    while j + 3 <= bytes.len() {
+        if bytes[j..].starts_with(b"```") {
+            return Some(j + 3);
+        }
+        j += 1;
+    }
+    None
+}
+
+/// Cheap pre-check that the bracket at `open` plausibly begins JSON, so we don't run the
+/// balanced scan (and a parse) on every `{` in prose like "the {placeholder} field". For an
+/// object: the next non-space byte is `"` (a key) or `}` (empty). For an array: a JSON value
+/// start. Avoids O(n²) rescans on brace-dense non-JSON prose.
+fn looks_like_json_open(bytes: &[u8], open: usize) -> bool {
+    let mut j = open + 1;
+    while j < bytes.len() && (bytes[j] as char).is_whitespace() {
+        j += 1;
+    }
+    let Some(&next) = bytes.get(j) else {
+        return false;
+    };
+    if bytes[open] == b'{' {
+        next == b'"' || next == b'}'
+    } else {
+        matches!(
+            next,
+            b'"' | b'{' | b'[' | b']' | b'-' | b't' | b'f' | b'n' | b'0'..=b'9'
+        )
+    }
+}
+
+/// Byte index one past the JSON value's matching close bracket starting at `start` (a `{`
+/// or `[`), tracking nesting and string/escape state so a bracket inside a string doesn't
+/// count. `None` if the brackets never balance (then it isn't a JSON span). Only ASCII
+/// structural bytes are inspected, so returned indices are valid char boundaries.
+fn balanced_json_end(bytes: &[u8], start: usize) -> Option<usize> {
+    let mut depth = 0i32;
+    let mut in_str = false;
+    let mut escaped = false;
+    let mut i = start;
+    while i < bytes.len() {
+        let b = bytes[i];
+        if in_str {
+            if escaped {
+                escaped = false;
+            } else if b == b'\\' {
+                escaped = true;
+            } else if b == b'"' {
+                in_str = false;
+            }
+        } else {
+            match b {
+                b'"' => in_str = true,
+                b'{' | b'[' => depth += 1,
+                b'}' | b']' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        return Some(i + 1);
+                    }
+                    if depth < 0 {
+                        return None; // unbalanced close before open
+                    }
+                }
+                _ => {}
+            }
+        }
+        i += 1;
+    }
+    None
 }
 
 /// Tokenizer-aware text normalization (opt-in, meaning-preserving, not byte-reversible).
@@ -200,6 +340,113 @@ mod tests {
         assert!(!now.contains("\n  "), "pretty whitespace removed");
         let before: Value = json!({"a":1,"b":[1,2,3],"c":{"d":true}});
         assert_eq!(serde_json::from_str::<Value>(now).unwrap(), before);
+    }
+
+    #[test]
+    fn minifies_fenced_json_block_leaving_prose() {
+        let pretty = "{\n  \"a\": 1,\n  \"b\": [\n    1,\n    2\n  ]\n}";
+        let content = format!("Here is the response:\n```json\n{pretty}\n```\nThanks!");
+        let body = json!({"model":"gpt-4o","messages":[{"role":"user","content":content}]});
+        let (req, applied) = run(
+            body,
+            HygieneStage {
+                strip_base64: false,
+                sig_figs: None,
+                normalize_unicode: false,
+            },
+        );
+        assert!(applied, "embedded fenced JSON minifies → fewer tokens");
+        let now = req.get_str("/messages/0/content").unwrap();
+        assert!(
+            now.contains("Here is the response:"),
+            "leading prose untouched"
+        );
+        assert!(now.contains("Thanks!"), "trailing prose untouched");
+        assert!(
+            now.contains(r#"{"a":1,"b":[1,2]}"#),
+            "JSON minified losslessly: {now}"
+        );
+        assert!(!now.contains("\n  \"a\""), "pretty whitespace gone");
+    }
+
+    #[test]
+    fn minifies_inline_json_span_leaving_prose() {
+        // An inline balanced {…} span inside a sentence: minify only the JSON.
+        let content = "The server returned { \"ok\" : true , \"count\" : 3 } as the body.";
+        let body = json!({"model":"gpt-4o","messages":[{"role":"user","content":content}]});
+        let (req, applied) = run(
+            body,
+            HygieneStage {
+                strip_base64: false,
+                sig_figs: None,
+                normalize_unicode: false,
+            },
+        );
+        assert!(applied, "inline JSON span minifies");
+        let now = req.get_str("/messages/0/content").unwrap();
+        assert!(
+            now.starts_with("The server returned "),
+            "prose before span intact"
+        );
+        assert!(now.ends_with(" as the body."), "prose after span intact");
+        assert!(
+            now.contains(r#"{"ok":true,"count":3}"#),
+            "span minified: {now}"
+        );
+    }
+
+    #[test]
+    fn invalid_json_braces_are_left_alone() {
+        // Braces that are NOT valid JSON (a code snippet / placeholder) must pass through
+        // untouched — never corrupt surrounding prose.
+        let content = "Use the { placeholder } token and call foo() { return 1; } please.";
+        let body = json!({"model":"gpt-4o","messages":[{"role":"user","content":content}]});
+        let (req, applied) = run(
+            body,
+            HygieneStage {
+                strip_base64: false,
+                sig_figs: None,
+                normalize_unicode: false,
+            },
+        );
+        assert!(!applied, "no valid JSON span → nothing to minify");
+        assert_eq!(
+            req.get_str("/messages/0/content").unwrap(),
+            content,
+            "invalid-JSON braces left exactly verbatim"
+        );
+    }
+
+    #[test]
+    fn embedded_json_scanner_handles_braces_inside_strings() {
+        // A string value containing `}`, escaped `"`, and `[` must not close the span early
+        // or corrupt the surrounding prose.
+        let content = r#"prefix {"k": "a}b\"c[d", "n": 2} suffix"#;
+        let out = minify_embedded_json(content);
+        assert!(out.starts_with("prefix "), "prose before intact: {out}");
+        assert!(out.ends_with(" suffix"), "prose after intact: {out}");
+        assert!(
+            out.contains(r#""a}b\"c[d""#),
+            "string-with-braces preserved exactly: {out}"
+        );
+        // Re-parse the minified span to prove it's still valid JSON (lossless value).
+        let lo = out.find('{').unwrap();
+        let hi = out.rfind('}').unwrap();
+        let v: Value = serde_json::from_str(&out[lo..=hi]).expect("still valid JSON");
+        assert_eq!(v["k"], json!("a}b\"c[d"));
+        assert_eq!(v["n"], json!(2));
+    }
+
+    #[test]
+    fn embedded_json_minify_is_lossless_on_numbers() {
+        // arbitrary_precision: a big/precise number must round-trip exactly through minify.
+        let content = "data: {\"x\": 123456789012345678, \"y\": 0.1234567890123456789}";
+        let out = minify_embedded_json(content);
+        assert!(out.contains("123456789012345678"), "large int exact: {out}");
+        assert!(
+            out.contains("0.1234567890123456789"),
+            "long decimal exact: {out}"
+        );
     }
 
     #[test]

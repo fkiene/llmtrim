@@ -4,9 +4,16 @@
 //! concurrency). The pure parts (`url`, `headers`) are unit-tested; the live
 //! `send` needs an API key + network, so it isn't exercised in the test suite.
 
+use std::time::Duration;
+
 use anyhow::{Context, Result};
 
 use crate::ir::ProviderKind;
+
+/// Hard ceiling on any single upstream round-trip. ureq has no default timeout, so a hung
+/// upstream would pin a blocking thread forever (and on the replay path, leak the daemon's
+/// connection pool). Generous enough for slow streamed generations.
+const UPSTREAM_TIMEOUT: Duration = Duration::from_secs(600);
 
 /// A configured provider endpoint.
 pub struct Endpoint {
@@ -81,7 +88,13 @@ impl Endpoint {
     /// POST the request body and return the raw response body. Blocking.
     pub fn send(&self, request_json: &str) -> Result<String> {
         let url = self.url();
-        let mut request = ureq::post(&url);
+        // Never route through an HTTP(S)_PROXY (ureq honors them by default) — that would loop
+        // a proxied shell's traffic back through the llmtrim daemon. And bound the round-trip.
+        let mut request = ureq::post(&url)
+            .config()
+            .proxy(None)
+            .timeout_global(Some(UPSTREAM_TIMEOUT))
+            .build();
         for (name, value) in self.headers() {
             request = request.header(name, &value);
         }
@@ -109,7 +122,14 @@ pub struct Upstream {
 /// are RELAYED, not turned into transport errors — a proxy must hand the client the
 /// provider's real status and message.
 pub fn forward_post(url: &str, headers: &[(String, String)], body: &str) -> Result<Upstream> {
-    let mut req = ureq::post(url).config().http_status_as_error(false).build();
+    let mut req = ureq::post(url)
+        .config()
+        .http_status_as_error(false)
+        // No proxy: the daemon's own replay must never loop back through the proxy it runs
+        // (HTTPS_PROXY in a proxied shell points at us → unbounded recursion). And bound it.
+        .proxy(None)
+        .timeout_global(Some(UPSTREAM_TIMEOUT))
+        .build();
     for (k, v) in headers {
         req = req.header(k.as_str(), v.as_str());
     }
@@ -132,7 +152,12 @@ pub fn forward_post(url: &str, headers: &[(String, String)], body: &str) -> Resu
 
 /// Forward a GET (e.g. a client's `/v1/models` probe) — passthrough, no body, streamed.
 pub fn forward_get(url: &str, headers: &[(String, String)]) -> Result<Upstream> {
-    let mut req = ureq::get(url).config().http_status_as_error(false).build();
+    let mut req = ureq::get(url)
+        .config()
+        .http_status_as_error(false)
+        .proxy(None)
+        .timeout_global(Some(UPSTREAM_TIMEOUT))
+        .build();
     for (k, v) in headers {
         req = req.header(k.as_str(), v.as_str());
     }

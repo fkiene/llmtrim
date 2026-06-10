@@ -7,10 +7,22 @@
 
 use serde_json::{Value, json};
 
-use super::Provider;
+use super::{Provider, Role, string_leaf_pointers, turn_index};
 use crate::ir::{ProviderKind, Request};
 
 pub struct GoogleProvider;
+
+/// The system-instruction key actually present (Gemini accepts both proto3 JSON
+/// casings; SDKs emit `systemInstruction`, hand-rolled clients sometimes snake_case).
+fn system_key(root: &Value) -> Option<&'static str> {
+    if root.get("systemInstruction").is_some() {
+        Some("systemInstruction")
+    } else if root.get("system_instruction").is_some() {
+        Some("system_instruction")
+    } else {
+        None
+    }
+}
 
 impl Provider for GoogleProvider {
     fn kind(&self) -> ProviderKind {
@@ -20,31 +32,57 @@ impl Provider for GoogleProvider {
     fn content_text_pointers(&self, req: &Request) -> Vec<String> {
         let mut out = Vec::new();
         let root = req.raw();
-        // Top-level systemInstruction.parts[].text
-        if let Some(parts) = root
-            .pointer("/systemInstruction/parts")
-            .and_then(Value::as_array)
+        // Top-level system instruction parts[].text (either casing).
+        if let Some(sk) = system_key(root)
+            && let Some(parts) = root
+                .pointer(&format!("/{sk}/parts"))
+                .and_then(Value::as_array)
         {
             for (j, p) in parts.iter().enumerate() {
                 if p.get("text").is_some_and(Value::is_string) {
-                    out.push(format!("/systemInstruction/parts/{j}/text"));
+                    out.push(format!("/{sk}/parts/{j}/text"));
                 }
             }
         }
-        // contents[].parts[].text
+        // contents[].parts[]: text, plus tool-channel payloads (functionResponse from the
+        // tool, functionCall replayed by the model) whose text lives in string leaves.
         if let Some(contents) = root.get("contents").and_then(Value::as_array) {
             for (i, c) in contents.iter().enumerate() {
                 let Some(parts) = c.get("parts").and_then(Value::as_array) else {
                     continue;
                 };
                 for (j, p) in parts.iter().enumerate() {
+                    let prefix = format!("/contents/{i}/parts/{j}");
                     if p.get("text").is_some_and(Value::is_string) {
-                        out.push(format!("/contents/{i}/parts/{j}/text"));
+                        out.push(format!("{prefix}/text"));
+                    }
+                    if let Some(resp) = p.pointer("/functionResponse/response") {
+                        string_leaf_pointers(
+                            resp,
+                            &format!("{prefix}/functionResponse/response"),
+                            &mut out,
+                        );
+                    }
+                    if let Some(args) = p.pointer("/functionCall/args") {
+                        string_leaf_pointers(
+                            args,
+                            &format!("{prefix}/functionCall/args"),
+                            &mut out,
+                        );
                     }
                 }
             }
         }
         out
+    }
+
+    fn role_at(&self, req: &Request, pointer: &str) -> Option<Role> {
+        let i = turn_index(pointer)?;
+        let role = req
+            .raw()
+            .pointer(&format!("/contents/{i}/role"))
+            .and_then(Value::as_str)?;
+        Some(Role::from_str(role))
     }
 
     fn set_max_tokens(&self, req: &mut Request, max_tokens: u64) {
@@ -54,8 +92,10 @@ impl Provider for GoogleProvider {
     }
 
     fn max_tokens(&self, req: &Request) -> Option<u64> {
-        req.raw()
-            .pointer("/generationConfig/maxOutputTokens")
+        let root = req.raw();
+        root.pointer("/generationConfig/maxOutputTokens")
+            .or_else(|| root.pointer("/generation_config/maxOutputTokens"))
+            .or_else(|| root.pointer("/generation_config/max_output_tokens"))
             .and_then(Value::as_u64)
     }
 
@@ -69,23 +109,24 @@ impl Provider for GoogleProvider {
     }
 
     fn add_system_instruction(&self, req: &mut Request, text: &str) {
+        // Reuse whichever casing the client sent; default to the SDK camelCase.
+        let key = system_key(req.raw()).unwrap_or("systemInstruction");
         let Some(obj) = req.raw_mut().as_object_mut() else {
             return;
         };
-        // Prepend our text part, preserving any existing systemInstruction.
-        match obj.get_mut("systemInstruction") {
+        // Append our part after the existing system instruction (don't prepend): a volatile
+        // prepend in front of an otherwise-stable systemInstruction defeats Gemini's implicit
+        // prefix caching. Appended, the stable prefix is preserved.
+        match obj.get_mut(key) {
             Some(si) => {
                 if let Some(parts) = si.get_mut("parts").and_then(Value::as_array_mut) {
-                    parts.insert(0, json!({"text": text}));
+                    parts.push(json!({"text": text}));
                 } else {
                     *si = json!({"parts": [{"text": text}]});
                 }
             }
             None => {
-                obj.insert(
-                    "systemInstruction".to_string(),
-                    json!({"parts": [{"text": text}]}),
-                );
+                obj.insert(key.to_string(), json!({"parts": [{"text": text}]}));
             }
         }
     }
@@ -204,7 +245,13 @@ impl Provider for GoogleProvider {
                 continue;
             };
             for p in parts.iter_mut() {
-                if let Some(Value::String(data)) = p.pointer_mut("/inline_data/data")
+                // Gemini accepts both proto3 JSON casings; SDKs emit camelCase `inlineData`.
+                let ptr = if p.pointer("/inlineData/data").is_some() {
+                    "/inlineData/data"
+                } else {
+                    "/inline_data/data"
+                };
+                if let Some(Value::String(data)) = p.pointer_mut(ptr)
                     && let Some(new_data) = crate::media::fit_to_cap(data, crate::media::CAP_GOOGLE)
                 {
                     *data = new_data;
@@ -214,12 +261,19 @@ impl Provider for GoogleProvider {
     }
 }
 
-/// Get a mutable `generationConfig` object, creating it if absent, and apply `f`.
+/// Get a mutable generation-config object, reusing whichever casing the client sent
+/// (creating camelCase if absent — inserting a second `generationConfig` beside an
+/// existing `generation_config` is a duplicate proto field → Gemini 400), and apply `f`.
 fn gen_config_mut(req: &mut Request, f: impl FnOnce(&mut serde_json::Map<String, Value>)) {
     let Some(obj) = req.raw_mut().as_object_mut() else {
         return;
     };
-    let gc = obj.entry("generationConfig").or_insert_with(|| json!({}));
+    let key = if obj.contains_key("generation_config") {
+        "generation_config"
+    } else {
+        "generationConfig"
+    };
+    let gc = obj.entry(key).or_insert_with(|| json!({}));
     if let Some(g) = gc.as_object_mut() {
         f(g);
     }
@@ -266,7 +320,9 @@ mod tests {
     }
 
     #[test]
-    fn system_instruction_prepends_part() {
+    fn system_instruction_appends_part() {
+        // Appended after the existing system instruction so the stable prefix is preserved
+        // (Gemini implicit prefix caching).
         let mut r = req(r#"{"systemInstruction":{"parts":[{"text":"old"}]},"contents":[]}"#);
         GoogleProvider.add_system_instruction(&mut r, "new");
         let parts = r
@@ -274,8 +330,8 @@ mod tests {
             .pointer("/systemInstruction/parts")
             .and_then(Value::as_array)
             .unwrap();
-        assert_eq!(parts[0], json!({"text": "new"}));
-        assert_eq!(parts[1], json!({"text": "old"}));
+        assert_eq!(parts[0], json!({"text": "old"}));
+        assert_eq!(parts[1], json!({"text": "new"}));
     }
 
     #[test]
@@ -300,6 +356,41 @@ mod tests {
             .filter_map(|x| x.get("name").and_then(Value::as_str))
             .collect();
         assert_eq!(names, vec!["run_sql"]);
+    }
+
+    #[test]
+    fn function_response_payload_is_covered() {
+        // Gemini tool output: text lives in functionResponse.response string leaves.
+        let r = req(r#"{"contents":[
+            {"role":"user","parts":[{"functionResponse":{"name":"read","response":{"result":"BIG FILE BODY"}}}]}
+        ]}"#);
+        let p = GoogleProvider.content_text_pointers(&r);
+        assert!(
+            p.contains(&"/contents/0/parts/0/functionResponse/response/result".to_string()),
+            "{p:?}"
+        );
+        assert_eq!(
+            GoogleProvider.role_at(&r, "/contents/0/parts/0/functionResponse/response/result"),
+            Some(Role::User)
+        );
+    }
+
+    #[test]
+    fn snake_case_system_instruction_is_covered_and_downscale_handles_camel() {
+        // Hand-rolled clients send snake_case; SDKs send camelCase inlineData.
+        let r = req(r#"{"system_instruction":{"parts":[{"text":"sys"}]},"contents":[]}"#);
+        assert_eq!(
+            GoogleProvider.content_text_pointers(&r),
+            vec!["/system_instruction/parts/0/text"]
+        );
+        // gen_config reuses snake_case key instead of inserting a duplicate proto field.
+        let mut r2 = req(r#"{"generation_config":{"temperature":0},"contents":[]}"#);
+        GoogleProvider.set_max_tokens(&mut r2, 8);
+        assert!(
+            r2.raw().get("generationConfig").is_none(),
+            "no duplicate config"
+        );
+        assert_eq!(GoogleProvider.max_tokens(&r2), Some(8));
     }
 
     #[test]

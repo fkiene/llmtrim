@@ -68,7 +68,9 @@ impl Transform for SerializeStage {
             };
             // Flatten nested-uniform records to dotted columns first; if it yields a
             // uniform flat array the existing columnar path below encodes it.
-            if self.flatten && let Some(flat) = flatten_array(&value, self.min_rows) {
+            if self.flatten
+                && let Some(flat) = flatten_array(&value, self.min_rows)
+            {
                 value = flat;
             }
             let new_content = if is_uniform_flat_array(&value, self.min_rows) {
@@ -97,8 +99,10 @@ impl Transform for SerializeStage {
                 // identical (the case `is_uniform_flat_array` rejects).
                 csv_used = true;
                 Some(to_csv(&value))
-            } else if let Some(blocks) =
-                self.buckets.then(|| bucket_encode(&value, self.min_rows)).flatten()
+            } else if let Some(blocks) = self
+                .buckets
+                .then(|| bucket_encode(&value, self.min_rows))
+                .flatten()
             {
                 // Heterogeneous array → one TOON table per record shape (read via the
                 // same TOON legend; multiple tables are already valid TOON).
@@ -133,10 +137,15 @@ fn is_uniform_flat_array(v: &Value, min_rows: usize) -> bool {
     let Some(arr) = v.as_array() else {
         return false;
     };
-    if arr.len() < min_rows {
+    // Need ≥1 row to read a schema from, and columnar never wins on a single row; a
+    // user-set `min_rows` of 0 would otherwise index `arr[0]` on an empty array (panic).
+    if arr.len() < min_rows.max(1) {
         return false;
     }
-    let first_keys = match arr[0].as_object() {
+    let Some(first) = arr.first() else {
+        return false;
+    };
+    let first_keys = match first.as_object() {
         Some(o) if o.values().all(|x| !x.is_array() && !x.is_object()) => sorted_keys(o),
         _ => return false,
     };
@@ -163,9 +172,10 @@ fn flatten_array(v: &Value, min_rows: usize) -> Option<Value> {
     if arr.len() < min_rows {
         return None;
     }
-    let has_nested = arr
-        .iter()
-        .any(|it| it.as_object().is_some_and(|o| o.values().any(Value::is_object)));
+    let has_nested = arr.iter().any(|it| {
+        it.as_object()
+            .is_some_and(|o| o.values().any(Value::is_object))
+    });
     if !has_nested {
         return None; // nothing to flatten — leave it to the plain uniform check
     }
@@ -433,6 +443,17 @@ mod tests {
     }
 
     #[test]
+    fn empty_array_with_min_rows_zero_does_not_panic() {
+        // `min_rows` is user-settable; 0 on an empty array must not index `arr[0]` (panic).
+        assert!(
+            !is_uniform_flat_array(&json!([]), 0),
+            "empty array is never columnar"
+        );
+        // A `min_rows` of 0 is floored to 1: an empty array still fails, no panic.
+        assert!(!is_uniform_flat_array(&Value::Array(vec![]), 0));
+    }
+
+    #[test]
     fn toon_round_trip_is_lossless() {
         let v = records(10);
         let toon = to_toon(&v).unwrap();
@@ -604,7 +625,10 @@ mod tests {
     #[test]
     fn flatten_dots_nested_uniform_records() {
         let flat = flatten_array(&nested_records(4), 2).expect("nested-uniform flattens");
-        assert!(is_uniform_flat_array(&flat, 2), "flattened result is columnar-ready");
+        assert!(
+            is_uniform_flat_array(&flat, 2),
+            "flattened result is columnar-ready"
+        );
         let first = flat.as_array().unwrap()[0].as_object().unwrap();
         assert!(first.contains_key("meta.region"), "dotted column present");
         assert!(first.contains_key("meta.tier"));
@@ -613,9 +637,15 @@ mod tests {
 
     #[test]
     fn flatten_declines_when_nothing_nested_or_value_is_array() {
-        assert!(flatten_array(&records(3), 2).is_none(), "already flat → no gain");
+        assert!(
+            flatten_array(&records(3), 2).is_none(),
+            "already flat → no gain"
+        );
         let with_array = json!([{"id": 1, "tags": [1, 2]}, {"id": 2, "tags": [3]}]);
-        assert!(flatten_array(&with_array, 2).is_none(), "array value can't be a column");
+        assert!(
+            flatten_array(&with_array, 2).is_none(),
+            "array value can't be a column"
+        );
     }
 
     #[test]
@@ -636,7 +666,10 @@ mod tests {
         assert!(out.stages[0].applied, "flatten + TOON beats nested JSON");
         assert!(out.input_tokens_after < out.input_tokens_before);
         let encoded = req.get_str("/messages/1/content").unwrap();
-        assert!(encoded.contains("meta.region"), "TOON header carries dotted columns");
+        assert!(
+            encoded.contains("meta.region"),
+            "TOON header carries dotted columns"
+        );
     }
 
     #[test]
@@ -659,27 +692,45 @@ mod tests {
         let mut a: Vec<Value> = (0..9).map(|i| json!({"id": i, "status": "ok"})).collect();
         a.push(json!({"id": 9, "status": "error", "detail": "boom"}));
         let arr = Value::Array(a);
-        assert!(!is_uniform_flat_array(&arr, 2), "anomaly row breaks strict uniformity");
-        assert!(is_columnar_array(&arr, 2), "but it's columnar (shared core schema)");
+        assert!(
+            !is_uniform_flat_array(&arr, 2),
+            "anomaly row breaks strict uniformity"
+        );
+        assert!(
+            is_columnar_array(&arr, 2),
+            "but it's columnar (shared core schema)"
+        );
         let csv = to_csv(&arr);
-        assert!(csv.lines().next().unwrap().contains("detail"), "union header keeps the extra key: {csv}");
+        assert!(
+            csv.lines().next().unwrap().contains("detail"),
+            "union header keeps the extra key: {csv}"
+        );
         assert!(csv.contains("boom"), "anomaly value survives (lossless)");
     }
 
     #[test]
     fn union_csv_stage_compresses_near_uniform_array() {
-        let mut a: Vec<Value> =
-            (0..40).map(|i| json!({"ts": i, "level": "INFO", "msg": format!("event {i}")})).collect();
+        let mut a: Vec<Value> = (0..40)
+            .map(|i| json!({"ts": i, "level": "INFO", "msg": format!("event {i}")}))
+            .collect();
         a[7] = json!({"ts": 7, "level": "ERROR", "msg": "failed", "code": 500});
         let content = serde_json::to_string(&Value::Array(a)).unwrap();
         let body = json!({"model":"gpt-4o","messages":[{"role":"user","content":content}],"max_tokens":200});
         let mut req = Request::from_value(ProviderKind::OpenAi, body);
         let counter = counter_for(ProviderKind::OpenAi, Some("gpt-4o")).unwrap();
-        let out = pipeline::run(&mut req, &OpenAiProvider, counter.as_ref(), &[serialize_stage()]);
+        let out = pipeline::run(
+            &mut req,
+            &OpenAiProvider,
+            counter.as_ref(),
+            &[serialize_stage()],
+        );
         assert!(out.stages[0].applied, "near-uniform array encoded");
         assert!(out.input_tokens_after < out.input_tokens_before);
         let encoded = req.get_str("/messages/1/content").unwrap();
-        assert!(encoded.contains("code"), "the anomaly's extra column survives (lossless)");
+        assert!(
+            encoded.contains("code"),
+            "the anomaly's extra column survives (lossless)"
+        );
     }
 
     #[test]
@@ -697,7 +748,10 @@ mod tests {
             buckets: true,
         })];
         let out = pipeline::run(&mut req, &OpenAiProvider, counter.as_ref(), &stages);
-        assert!(out.stages[0].applied, "bucketed TOON beats heterogeneous JSON");
+        assert!(
+            out.stages[0].applied,
+            "bucketed TOON beats heterogeneous JSON"
+        );
         assert!(out.input_tokens_after < out.input_tokens_before);
     }
 }

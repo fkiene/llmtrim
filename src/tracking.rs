@@ -178,6 +178,14 @@ impl Tracker {
     }
 
     fn migrate(&self) -> Result<()> {
+        // The ledger is written by the daemon thread AND by every CLI compress/send while
+        // `monitor --watch` reads it every 2s. With rusqlite's defaults (rollback journal,
+        // busy_timeout 0) a concurrent writer/reader hits SQLITE_BUSY immediately, dropping
+        // rows or failing reads. WAL lets a reader and a writer proceed together; a 2s busy
+        // timeout absorbs the brief writer-vs-writer overlap. Best-effort: an in-memory DB
+        // (tests) can't use WAL, and a missing pragma must not break recording.
+        let _ = self.conn.pragma_update(None, "journal_mode", "WAL");
+        let _ = self.conn.pragma_update(None, "busy_timeout", 2000);
         self.conn
             .execute_batch(
                 "CREATE TABLE IF NOT EXISTS compressions (
@@ -198,12 +206,16 @@ impl Tracker {
             .context("failed to migrate ledger schema")?;
         // Additive columns for ledgers created before these fields existed — each ALTER errors
         // with "duplicate column" once it exists (and on fresh DBs the CREATE already has it),
-        // which we ignore.
+        // which we ignore. A *different* failure (read-only / corrupt DB) must surface here, not
+        // hide until a confusing later INSERT error, so we only swallow the duplicate-column case.
         for col in ["compress_micros", "cache_read_tokens"] {
-            let _ = self.conn.execute(
+            if let Err(e) = self.conn.execute(
                 &format!("ALTER TABLE compressions ADD COLUMN {col} INTEGER"),
                 [],
-            );
+            ) && !is_duplicate_column(&e)
+            {
+                return Err(e).with_context(|| format!("failed to add ledger column {col}"));
+            }
         }
         Ok(())
     }
@@ -447,6 +459,13 @@ impl Tracker {
     }
 }
 
+/// True if `e` is SQLite's "duplicate column name" error — the expected outcome of
+/// re-running an additive `ALTER TABLE … ADD COLUMN` on a ledger that already has it.
+/// Any other ALTER failure (read-only / corrupt) is a real error to surface.
+fn is_duplicate_column(e: &rusqlite::Error) -> bool {
+    e.to_string().to_lowercase().contains("duplicate column")
+}
+
 /// The ledger file path (respects `LLMTRIM_DB_PATH` / `XDG_DATA_HOME`). Exposed so
 /// `uninstall --purge` can remove it.
 pub fn db_path() -> Result<PathBuf> {
@@ -634,5 +653,57 @@ mod tests {
         let deleted = t.prune(DEFAULT_MAX_ROWS, None).unwrap();
         assert_eq!(deleted, 0);
         assert_eq!(t.summary().unwrap().events, 1);
+    }
+
+    #[test]
+    fn file_ledger_enables_wal_and_busy_timeout() {
+        // WAL + a non-zero busy timeout protect the always-on daemon writer against the
+        // `monitor --watch` reader. (In-memory DBs can't run WAL, so test a file path.)
+        let dir = std::env::temp_dir().join(format!("llmtrim_wal_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("t.db");
+        let t = Tracker::open_at(&path).expect("open file ledger");
+        let mode: String = t
+            .conn
+            .query_row("PRAGMA journal_mode", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(mode.to_lowercase(), "wal", "WAL journal mode is set");
+        let timeout: i64 = t
+            .conn
+            .query_row("PRAGMA busy_timeout", [], |r| r.get(0))
+            .unwrap();
+        assert!(timeout >= 2000, "busy_timeout set (got {timeout})");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn migrate_is_idempotent_on_existing_columns() {
+        // Re-running migrate() must not error on the additive columns it already added
+        // (the duplicate-column ALTER is the expected, swallowed case).
+        let t = Tracker::open_in_memory().unwrap();
+        t.migrate()
+            .expect("second migrate swallows duplicate-column ALTERs");
+        t.record(&rec("openai", true, 10, 5)).unwrap();
+        assert_eq!(t.summary().unwrap().events, 1);
+    }
+
+    #[test]
+    fn duplicate_column_classifier_matches_only_that_error() {
+        // The classifier underpinning #2: only the duplicate-column ALTER is swallowed; a
+        // genuine failure (here, a syntax error) is reported as distinct.
+        let t = Tracker::open_in_memory().unwrap();
+        let dup = t
+            .conn
+            .execute("ALTER TABLE compressions ADD COLUMN model TEXT", [])
+            .expect_err("model already exists");
+        assert!(is_duplicate_column(&dup), "duplicate column recognized");
+        let other = t
+            .conn
+            .execute("ALTER TABLE compressions ADD COLUMN", [])
+            .expect_err("malformed ALTER");
+        assert!(
+            !is_duplicate_column(&other),
+            "non-duplicate error not swallowed"
+        );
     }
 }

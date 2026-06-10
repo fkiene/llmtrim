@@ -2,13 +2,14 @@
 //! time-series reports, and machine-readable export.
 //!
 //! Pure formatting: `main.rs` gathers the ledger + daemon state + pricing and feeds it
-//! here, so this module stays decoupled from the interceptor feature and I/O. Hand-rolled
-//! ANSI (no TUI dependency, on-brand with the zero-bloat ethos); colour is passed in by
-//! the caller, which disables it for non-TTY stdout or when `NO_COLOR` is set.
+//! here, so this module stays decoupled from the interceptor feature and I/O. All
+//! styling goes through `crate::ui`; colour is passed in by the caller, which disables
+//! it for non-TTY stdout or when `NO_COLOR` is set.
 
 use serde_json::json;
 
 use crate::tracking::{PeriodRow, Summary};
+use crate::ui::{self, Tone};
 
 // ── view models (built by main from the ledger/daemon/pricing) ──────────────────
 
@@ -87,20 +88,7 @@ pub struct ModelView {
     pub out_spend: Option<f64>,
 }
 
-// ── ANSI helpers ────────────────────────────────────────────────────────────────
-
-const ACCENT: &str = "38;2;153;204;255"; // #99ccff — the savings accent
-const DIM: &str = "2";
-const BOLD: &str = "1";
-const YELLOW: &str = "33";
-
-fn paint(color: bool, code: &str, s: &str) -> String {
-    if color {
-        format!("\x1b[{code}m{s}\x1b[0m")
-    } else {
-        s.to_string()
-    }
-}
+// ── rendering helpers ───────────────────────────────────────────────────────────
 
 /// A `width`-cell depletion bar for a `saved` percentage (0–100, clamped): the kept portion
 /// is filled + dim (what you still pay), the saved tail is dotted + the accent (what was cut),
@@ -110,54 +98,24 @@ fn bar(color: bool, saved: f64, width: usize) -> String {
     let kept = width.saturating_sub(cut);
     format!(
         "{}{}",
-        paint(color, DIM, &"█".repeat(kept)),
-        paint(color, ACCENT, &"░".repeat(cut)),
+        ui::paint(color, Tone::Dim, &"█".repeat(kept)),
+        ui::paint(color, Tone::Accent, &"░".repeat(cut)),
     )
 }
 
-/// Compact human token count: 1_234_567 → "1.2M", 12_345 → "12.3K".
-fn human(n: i64) -> String {
-    let a = n.unsigned_abs();
-    let sign = if n < 0 { "-" } else { "" };
-    if a >= 1_000_000 {
-        format!("{sign}{:.1}M", a as f64 / 1_000_000.0)
-    } else if a >= 1_000 {
-        format!("{sign}{:.1}K", a as f64 / 1_000.0)
-    } else {
-        format!("{sign}{a}")
-    }
-}
-
-/// Group digits with commas: 1234567 → "1,234,567".
-fn commas(n: i64) -> String {
-    let s = n.unsigned_abs().to_string();
-    let mut out = String::new();
-    for (i, c) in s.chars().enumerate() {
-        if i > 0 && (s.len() - i).is_multiple_of(3) {
-            out.push(',');
-        }
-        out.push(c);
-    }
-    if n < 0 { format!("-{out}") } else { out }
-}
-
-/// A `saved → label` line with a bar and a signed percentage (accent when saving, yellow
+/// A `saved → label` line with a bar and a signed percentage (accent when saving, warn
 /// when it grew). `before`/`after` are token counts.
 fn axis(color: bool, name: &str, before: i64, after: i64) -> String {
-    let pct = if before > 0 {
-        (before - after) as f64 / before as f64 * 100.0
-    } else {
-        0.0
-    };
+    let pct = ui::saved_pct(before as f64, after as f64);
     let pct_str = format!("{:+.0}%", -pct); // show as a signed delta (-41% = saved 41%)
-    let pct_col = if pct >= 0.0 { ACCENT } else { YELLOW };
+    let pct_tone = if pct >= 0.0 { Tone::Accent } else { Tone::Warn };
     format!(
         "  {:<7} {} {:>6}   {} → {}",
         name,
         bar(color, pct, 22),
-        paint(color, pct_col, &pct_str),
-        human(before),
-        human(after),
+        ui::paint(color, pct_tone, &pct_str),
+        ui::human(before),
+        ui::human(after),
     )
 }
 
@@ -180,82 +138,90 @@ pub fn snapshot(
         if d.running {
             o.push_str(&format!(
                 " {} {}  {}\n",
-                paint(color, ACCENT, "llmtrim ●"),
-                paint(color, DIM, "running"),
-                paint(
+                ui::paint(color, Tone::Accent, "llmtrim ●"),
+                ui::paint(color, Tone::Dim, "running"),
+                ui::paint(
                     color,
-                    DIM,
+                    Tone::Dim,
                     &format!("pid {} · :{} · up {}", d.pid, d.port, d.uptime)
                 ),
             ));
         } else {
             o.push_str(&format!(
                 " {} {}\n",
-                paint(color, DIM, "llmtrim ○"),
-                paint(color, DIM, "stopped — start: llmtrim setup"),
+                ui::paint(color, Tone::Dim, "llmtrim ○"),
+                ui::paint(color, Tone::Dim, "stopped — start: llmtrim setup"),
             ));
         }
         if !d.ca_present {
-            o.push_str(&paint(color, YELLOW, "  ca missing — run: llmtrim ca\n"));
+            o.push_str(&ui::paint(
+                color,
+                Tone::Warn,
+                "  ca missing — run: llmtrim ca\n",
+            ));
         }
     }
 
     if s.events == 0 {
-        o.push_str(&paint(
+        o.push_str(&ui::paint(
             color,
-            DIM,
+            Tone::Dim,
             "\n no activity yet — run `llmtrim setup`, then use your tools as normal.\n",
         ));
         return o;
     }
 
-    // hero panel
+    // Hero panel — the headline is the MEASURED input-side saving (real, per-row): every
+    // request's input is compressed and re-tokenized, so this is honest for all traffic.
+    // The output side is NOT in the headline: the proxy never sees the un-instructed reply,
+    // so any output saving is a benchmark projection that only holds when output is actually
+    // shaped — projecting it onto agent traffic (output left unshaped by design) would
+    // overstate the number ~2.7×. We surface it separately, clearly labeled, below.
     let hero = match cost {
         Some(c) => format!(
             "{}   {} round-trip   {} requests",
-            paint(
-                color,
-                ACCENT,
-                &format!("~${:.2} saved", c.projected_saved())
-            ),
-            paint(color, BOLD, &format!("~-{:.0}%", c.projected_pct())),
-            commas(s.events),
+            ui::paint(color, Tone::Accent, &format!("${:.2} saved", c.saved)),
+            ui::paint(color, Tone::Bold, &format!("-{:.0}%", c.pct())),
+            ui::commas(s.events),
         ),
         None => format!(
             "{}   {} requests",
-            paint(
+            ui::paint(
                 color,
-                ACCENT,
+                Tone::Accent,
                 &format!("-{:.0}% input tokens", s.saved_pct())
             ),
-            commas(s.events),
+            ui::commas(s.events),
         ),
     };
     o.push('\n');
     let title = if cost.is_some() {
-        "saved (projected · A/B)"
+        "saved (input · measured)"
     } else {
         "saved (all time)"
     };
-    o.push_str(&panel(color, title, &hero));
+    o.push_str(&ui::panel(color, title, &[hero]));
     o.push('\n');
 
     // axes
     o.push_str(&axis(color, "input", s.input_before, s.input_after));
     o.push('\n');
     if s.output_events > 0 {
-        // No live output baseline → show the benchmark bar + the real billed volume, tagged.
+        // No live output baseline (the proxy never sees the un-instructed reply), so this is
+        // the A/B benchmark factor, not a measurement — and it only holds where output is
+        // actually shaped. Show the real billed volume + the benchmark bar, tagged as an
+        // estimate so it's never read as measured per-row data.
         o.push_str(&format!(
             "  {:<7} {} {:>6}   {} billed   {}",
             "output",
             bar(color, BENCH_OUTPUT_REDUCTION * 100.0, 22),
-            paint(
+            ui::paint(
                 color,
-                ACCENT,
+                Tone::Accent,
                 &format!("~{:+.0}%", -BENCH_OUTPUT_REDUCTION * 100.0)
             ),
-            human(s.output_after),
-            paint(color, DIM, "(projected)"),
+            ui::human(s.output_after),
+            ui::paint(color, Tone::Dim, "(est · if output shaped)"),
         ));
         o.push('\n');
     }
@@ -266,43 +232,40 @@ pub fn snapshot(
             "  {:<7} {} {:>6}   {} reused at ~10%\n",
             "cache",
             bar(color, 90.0, 22),
-            paint(color, ACCENT, "~-90%"),
-            human(s.cache_read_tokens),
+            ui::paint(color, Tone::Accent, "~-90%"),
+            ui::human(s.cache_read_tokens),
         ));
     }
 
-    // by-model table
+    // by-model table — MEASURED input-side saving per model (matches the honest headline):
+    // input % saved and the input-side $ saved where the registry prices the model. No output
+    // projection here, so a model that serves agent traffic isn't credited an unshaped-output win.
     if !models.is_empty() {
-        o.push_str(&paint(color, DIM, "\n by model\n"));
+        o.push_str(&ui::paint(color, Tone::Dim, "\n by model\n"));
+        let mut t = ui::table(color, &["model", "requests", "saved", "$ saved"]);
         for m in models {
-            // Projected round-trip per model when the registry prices it (matches the hero);
-            // otherwise the measured input %. The `~` marks the projection.
-            let (pct, mark, dollars) = match (m.cost_saved, m.spend, m.out_spend) {
-                (Some(saved), Some(spend), Some(out_spend)) => (
-                    projected_round_trip_pct(saved, spend, out_spend),
-                    "~",
-                    Some(projected_saved_usd(saved, out_spend)),
+            let pct = m.saved_pct;
+            let pct_tone = if pct >= 0.0 { Tone::Accent } else { Tone::Warn };
+            t.add_row(vec![
+                comfy_table::Cell::new(ui::truncate(&m.name, 28)),
+                ui::right(ui::commas(m.events)),
+                ui::right(ui::paint(color, pct_tone, &format!("{:+.0}%", -pct))),
+                ui::right(
+                    m.cost_saved
+                        .map(|c| ui::paint(color, Tone::Accent, &format!("${c:.2}")))
+                        .unwrap_or_default(),
                 ),
-                _ => (m.saved_pct, "", m.cost_saved),
-            };
-            let cost_col = dollars
-                .map(|c| format!("  {}", paint(color, ACCENT, &format!("${c:.2}"))))
-                .unwrap_or_default();
-            let pct_col = if pct >= 0.0 { ACCENT } else { YELLOW };
-            o.push_str(&format!(
-                "   {:<22} {:>6}  {}{}\n",
-                truncate(&m.name, 22),
-                commas(m.events),
-                paint(color, pct_col, &format!("{mark}{:+.0}%", -pct)),
-                cost_col,
-            ));
+            ]);
+        }
+        for line in t.to_string().lines() {
+            o.push_str(&format!(" {line}\n"));
         }
     }
 
     if let Some(us) = s.avg_compress_micros {
-        o.push_str(&paint(
+        o.push_str(&ui::paint(
             color,
-            DIM,
+            Tone::Dim,
             &format!(
                 " added latency ~{:.2} ms/req · llmtrim compression overhead\n",
                 us / 1000.0
@@ -310,69 +273,27 @@ pub fn snapshot(
         ));
     }
     if s.any_approximate {
-        o.push_str(&paint(
+        o.push_str(&ui::paint(
             color,
-            DIM,
+            Tone::Dim,
             " * some counts approximate (provider lacks a public tokenizer)\n",
         ));
     }
-    if cost.is_some() {
-        o.push_str(&paint(
-            color,
-            DIM,
-            " ~ projected: output −73% (A/B bench); input exact. Proxy never sees uncompressed reply — output projected, not measured.\n",
-        ));
-    }
-    o
-}
-
-/// A single-line boxed hero panel with a dim title above it.
-fn panel(color: bool, title: &str, content: &str) -> String {
-    // width by visible content length (strip ANSI for measuring)
-    let inner = visible_len(content).max(visible_len(title) + 2) + 2;
-    let top = format!(
-        "╭─ {} {}╮",
-        title,
-        "─".repeat(inner.saturating_sub(title.len() + 3))
-    );
-    let mid = format!(
-        "│ {}{} │",
-        content,
-        " ".repeat(inner.saturating_sub(visible_len(content) + 2))
-    );
-    let bot = format!("╰{}╯", "─".repeat(inner));
-    format!(
-        " {}\n {}\n {}\n",
-        paint(color, DIM, &top),
-        mid,
-        paint(color, DIM, &bot)
-    )
-}
-
-/// Visible length, ignoring ANSI escape sequences.
-fn visible_len(s: &str) -> usize {
-    let mut n = 0;
-    let mut in_esc = false;
-    for c in s.chars() {
-        if in_esc {
-            if c == 'm' {
-                in_esc = false;
-            }
-        } else if c == '\x1b' {
-            in_esc = true;
-        } else {
-            n += 1;
+    if let Some(c) = cost {
+        // Surface the output-side projection separately and clearly as an estimate that holds
+        // ONLY when output is shaped — never folded into the measured headline above.
+        let extra = c.projected_saved() - c.saved;
+        if extra > 0.0 {
+            o.push_str(&ui::paint(
+                color,
+                Tone::Dim,
+                &format!(
+                    " ~ + est. ${extra:.2} more if output is shaped (A/B bench −73%); not measured live, excluded from the headline.\n"
+                ),
+            ));
         }
     }
-    n
-}
-
-fn truncate(s: &str, max: usize) -> String {
-    if s.chars().count() <= max {
-        s.to_string()
-    } else {
-        format!("{}…", s.chars().take(max - 1).collect::<String>())
-    }
+    o
 }
 
 // ── time-series report ──────────────────────────────────────────────────────────
@@ -381,51 +302,42 @@ fn truncate(s: &str, max: usize) -> String {
 pub fn period_report(color: bool, label: &str, rows: &[PeriodRow]) -> String {
     let mut o = format!(
         "{}\n",
-        paint(color, BOLD, &format!("llmtrim — {label} savings"))
+        ui::paint(color, Tone::Bold, &format!("llmtrim — {label} savings"))
     );
     if rows.is_empty() {
-        o.push_str(&paint(color, DIM, " no activity recorded yet\n"));
+        o.push_str(&ui::paint(color, Tone::Dim, " no activity recorded yet\n"));
         return o;
     }
-    o.push_str(&paint(
-        color,
-        DIM,
-        &format!(
-            "  {:<12} {:>6}  {:>16}  {:>16}\n",
-            "period", "reqs", "input", "output"
-        ),
-    ));
+    let mut t = ui::table(color, &["period", "requests", "input", "saved", "output"]);
     for r in rows {
-        let in_pct = pct(r.input_before, r.input_after);
+        let in_pct = ui::saved_pct(r.input_before as f64, r.input_after as f64);
         let out = if r.output_before > 0 {
             format!(
                 "{} ({:+.0}%)",
-                human(r.output_after),
-                -pct(r.output_before, r.output_after)
+                ui::human(r.output_after),
+                -ui::saved_pct(r.output_before as f64, r.output_after as f64)
             )
         } else if r.output_after > 0 {
-            human(r.output_after)
+            ui::human(r.output_after)
         } else {
             "—".to_string()
         };
-        o.push_str(&format!(
-            "  {:<12} {:>6}  {:>9} {}  {:>16}\n",
-            r.bucket,
-            commas(r.events),
-            format!("{}→{}", human(r.input_before), human(r.input_after)),
-            paint(color, ACCENT, &format!("{:+.0}%", -in_pct)),
-            out,
-        ));
+        t.add_row(vec![
+            comfy_table::Cell::new(&r.bucket),
+            ui::right(ui::commas(r.events)),
+            ui::right(format!(
+                "{}→{}",
+                ui::human(r.input_before),
+                ui::human(r.input_after)
+            )),
+            ui::right(ui::paint(color, Tone::Accent, &format!("{:+.0}%", -in_pct))),
+            ui::right(out),
+        ]);
+    }
+    for line in t.to_string().lines() {
+        o.push_str(&format!(" {line}\n"));
     }
     o
-}
-
-fn pct(before: i64, after: i64) -> f64 {
-    if before > 0 {
-        (before - after) as f64 / before as f64 * 100.0
-    } else {
-        0.0
-    }
 }
 
 // ── machine-readable export ─────────────────────────────────────────────────────
@@ -492,14 +404,6 @@ mod tests {
     }
 
     #[test]
-    fn human_and_commas() {
-        assert_eq!(human(1_234_567), "1.2M");
-        assert_eq!(human(12_345), "12.3K");
-        assert_eq!(human(512), "512");
-        assert_eq!(commas(1_234_567), "1,234,567");
-    }
-
-    #[test]
     fn bar_clamps_and_fills() {
         assert_eq!(bar(false, 50.0, 10), "█████░░░░░"); // 50% saved: 5 kept, 5 cut
         assert_eq!(bar(false, 0.0, 4), "████"); // nothing saved → all filled
@@ -513,7 +417,7 @@ mod tests {
         let cost = Cost {
             saved: 12.47,
             spend: 9.0,
-            out_spend: 0.0,
+            out_spend: 3.0, // non-zero → an output estimate exists to surface separately
         };
         let models = vec![ModelView {
             name: "gpt-4o".into(),
@@ -524,16 +428,48 @@ mod tests {
             out_spend: Some(0.0),
         }];
         let out = snapshot(false, None, &summ(), &models, Some(&cost));
-        assert!(out.contains("$12.47 saved"), "hero cost");
+        // Headline shows the MEASURED input-side saving, not a projection that assumes shaping.
+        assert!(
+            out.contains("$12.47 saved"),
+            "hero shows measured input saving"
+        );
         assert!(out.contains("1,204 requests"), "request count");
         assert!(
             out.contains("input") && out.contains("2.1M → 1.2M"),
             "input axis"
         );
         assert!(out.contains("gpt-4o") && out.contains("$4.10"), "model row");
-        assert!(out.contains("projected"), "projected label present");
+        // The output projection is surfaced separately and labeled as an estimate, never
+        // baked into the headline dollar number.
+        assert!(
+            out.contains("if output is shaped") || out.contains("if output shaped"),
+            "output projection clearly labeled as estimate"
+        );
         assert!(out.contains("ms/req"), "added-latency line");
         assert!(!out.contains('\x1b'), "no ANSI when color=false");
+    }
+
+    #[test]
+    fn headline_excludes_output_projection() {
+        // The measured headline ($ saved + round-trip %) must equal the input-side cost,
+        // NOT the larger projected figure — otherwise unshaped (agent) traffic is overstated.
+        let cost = Cost {
+            saved: 10.0,
+            spend: 10.0,
+            out_spend: 5.0,
+        };
+        let out = snapshot(false, None, &summ(), &[], Some(&cost));
+        assert!(
+            out.contains("$10.00 saved"),
+            "headline = measured input saving"
+        );
+        assert!(
+            !out.contains(&format!("${:.2} saved", cost.projected_saved())),
+            "projected total ({:.2}) is not the headline",
+            cost.projected_saved()
+        );
+        // Round-trip % is the measured input-side pct (50%), not the projected one.
+        assert!(out.contains("-50%"), "measured round-trip pct in headline");
     }
 
     #[test]

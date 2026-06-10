@@ -125,41 +125,75 @@ fn newer(latest: &str) -> Option<String> {
 
 /// The `llmtrim update` command — channel-aware.
 pub fn run() -> Result<()> {
-    println!("llmtrim v{CURRENT} — checking the latest release…");
+    let color = crate::ui::color_stdout();
+    println!(
+        "{}",
+        crate::ui::paint(
+            color,
+            crate::ui::Tone::Dim,
+            &format!("llmtrim v{CURRENT} — checking the latest release…")
+        )
+    );
     let latest = fetch_latest();
     match &latest {
         Some(v) if semver(v) <= semver(CURRENT) => {
-            println!("✓ Already up to date (v{CURRENT}).");
+            println!(
+                "{}",
+                crate::ui::ok(color, &format!("Already up to date (v{CURRENT})."))
+            );
             return Ok(());
         }
-        Some(v) => println!("→ v{v} is available (you have v{CURRENT})."),
-        None => println!("• Couldn't reach GitHub to confirm the version — proceeding anyway."),
+        Some(v) => println!(
+            "{} v{v} available {}",
+            crate::ui::paint(color, crate::ui::Tone::Accent, "→"),
+            crate::ui::paint(
+                color,
+                crate::ui::Tone::Dim,
+                &format!("(you have v{CURRENT})")
+            )
+        ),
+        None => println!(
+            "{}",
+            crate::ui::note(
+                color,
+                "Couldn't reach GitHub to confirm the version — proceeding anyway."
+            )
+        ),
     }
 
+    // Package-manager channels get their commands in a panel; the binary channel on
+    // Unix actually runs the installer, so its output stays plain.
+    let instructions = |title: &str, cmds: &[&str]| {
+        let lines: Vec<String> = cmds.iter().map(|c| c.to_string()).collect();
+        print!("\n{}", crate::ui::panel(color, title, &lines));
+    };
     match channel() {
-        Channel::Cargo => {
-            println!("Installed via cargo. Update with:");
-            println!(
-                "  cargo install --git https://github.com/{} --force",
-                repo()
-            );
-            println!("  llmtrim setup    # restart the daemon on the new binary");
-        }
-        Channel::Homebrew => {
-            println!("Installed via Homebrew. Update with:");
-            println!("  brew upgrade llmtrim");
-            println!("  llmtrim setup    # restart the daemon on the new binary");
-        }
+        Channel::Cargo => instructions(
+            "update via cargo",
+            &[
+                &format!("cargo install --git https://github.com/{} --force", repo()),
+                "llmtrim setup    # restart the daemon on the new binary",
+            ],
+        ),
+        Channel::Homebrew => instructions(
+            "update via Homebrew",
+            &[
+                "brew upgrade llmtrim",
+                "llmtrim setup    # restart the daemon on the new binary",
+            ],
+        ),
         Channel::Binary => {
             #[cfg(windows)]
-            {
-                println!("On Windows, update with:");
-                println!(
-                    "  iwr -useb https://raw.githubusercontent.com/{}/main/install.ps1 | iex",
-                    repo()
-                );
-                println!("  llmtrim setup    # restart the daemon on the new binary");
-            }
+            instructions(
+                "update via the installer",
+                &[
+                    &format!(
+                        "iwr -useb https://raw.githubusercontent.com/{}/main/install.ps1 | iex",
+                        repo()
+                    ),
+                    "llmtrim setup    # restart the daemon on the new binary",
+                ],
+            );
             #[cfg(not(windows))]
             {
                 let url = format!(

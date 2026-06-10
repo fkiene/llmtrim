@@ -29,6 +29,7 @@ pub mod stages;
 pub mod tokenizer;
 pub mod tracking;
 pub mod transport;
+pub mod ui;
 pub mod update;
 
 use gate::{PlanEntry, Transform};
@@ -178,11 +179,15 @@ pub fn route(req: &Request, provider: &dyn provider::Provider) -> &'static str {
     if texts.iter().any(|t| t.contains("```")) {
         return "code";
     }
-    let messages = raw
-        .get("messages")
-        .and_then(Value::as_array)
-        .map_or(0, Vec::len);
-    if messages >= 2 && texts.iter().any(|t| t.chars().count() >= 1200) {
+    // Turn count across every wire shape (Chat `messages`, Responses `input`, Gemini
+    // `contents`) — not just `messages`, else Gemini/Responses RAG misroutes to aggressive.
+    let turns = ["messages", "input", "contents"]
+        .iter()
+        .filter_map(|k| raw.get(*k).and_then(Value::as_array))
+        .map(Vec::len)
+        .max()
+        .unwrap_or(0);
+    if turns >= 2 && texts.iter().any(|t| t.chars().count() >= 1200) {
         return "rag";
     }
     "aggressive"
@@ -401,8 +406,8 @@ mod tests {
         .to_string();
 
         let cfg = config::DenseConfig::preset("agent").expect("agent preset");
-        let result = compress_with_config(&input, Some(ProviderKind::Anthropic), &cfg)
-            .expect("compress");
+        let result =
+            compress_with_config(&input, Some(ProviderKind::Anthropic), &cfg).expect("compress");
 
         assert!(
             result.input_tokens_after < result.input_tokens_before,
@@ -447,14 +452,28 @@ mod tests {
         .to_string();
 
         let cfg = config::DenseConfig::preset("agent").expect("agent preset");
-        let result = compress_with_config(&input, Some(ProviderKind::Anthropic), &cfg)
-            .expect("compress");
+        let result =
+            compress_with_config(&input, Some(ProviderKind::Anthropic), &cfg).expect("compress");
         let body: Value = serde_json::from_str(&result.request_json).unwrap();
 
-        let m0 = body.pointer("/messages/0/content/0/content").and_then(Value::as_str).unwrap();
-        assert_eq!(m0, cached_log, "cached prefix must be byte-identical (cache stays warm)");
+        let m0 = body
+            .pointer("/messages/0/content/0/content")
+            .and_then(Value::as_str)
+            .unwrap();
+        assert_eq!(
+            m0, cached_log,
+            "cached prefix must be byte-identical (cache stays warm)"
+        );
 
-        let m1 = body.pointer("/messages/1/content/0/content").and_then(Value::as_str).unwrap();
-        assert!(m1.len() < live_log.len(), "live turn was compressed ({} -> {})", live_log.len(), m1.len());
+        let m1 = body
+            .pointer("/messages/1/content/0/content")
+            .and_then(Value::as_str)
+            .unwrap();
+        assert!(
+            m1.len() < live_log.len(),
+            "live turn was compressed ({} -> {})",
+            live_log.len(),
+            m1.len()
+        );
     }
 }

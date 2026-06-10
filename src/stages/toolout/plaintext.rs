@@ -28,9 +28,12 @@ pub fn compress(text: &str, ctx: &Ctx, query: &HashSet<String>) -> Option<String
         return None;
     }
     // Fold gate: lossless template collapse. If nothing folds, the lines are distinct
-    // (prose / already tight) and we decline — that's the retrieve stage's job.
-    let collapsed = template::collapse(text);
-    if collapsed == text {
+    // (prose / already tight) and we decline — that's the retrieve stage's job. Gate on
+    // the `folded` flag, not `collapsed == text`: collapse rebuilds via `join("\n")`,
+    // which strips a trailing newline, so a string compare reads "changed" for any prose
+    // ending in '\n' even when nothing folded — defeating the decline.
+    let (collapsed, folded) = template::collapse(text);
+    if !folded {
         return None;
     }
     let lines: Vec<&str> = collapsed.lines().collect();
@@ -63,7 +66,10 @@ mod tests {
         let mut lines: Vec<String> = (0..80)
             .map(|i| format!("checking dependency package-{i} resolved ok cached"))
             .collect();
-        lines.insert(40, "ERROR version conflict on left-pad needs manual resolution".to_string());
+        lines.insert(
+            40,
+            "ERROR version conflict on left-pad needs manual resolution".to_string(),
+        );
         lines.join("\n")
     }
 
@@ -72,7 +78,10 @@ mod tests {
         let dump = repetitive_dump();
         let out = compress(&dump, &test_ctx(), &HashSet::new()).expect("fires");
         assert!(out.lines().count() < dump.lines().count(), "got shorter");
-        assert!(out.contains("version conflict on left-pad"), "error survives");
+        assert!(
+            out.contains("version conflict on left-pad"),
+            "error survives"
+        );
         // The runs collapse losslessly to template lines (no information dropped).
         assert!(out.contains("[×"), "repetitive runs folded");
     }
@@ -103,7 +112,10 @@ mod tests {
 
     #[test]
     fn declines_short_segments() {
-        let short = (0..10).map(|i| format!("line {i} same")).collect::<Vec<_>>().join("\n");
+        let short = (0..10)
+            .map(|i| format!("line {i} same"))
+            .collect::<Vec<_>>()
+            .join("\n");
         assert_eq!(compress(&short, &test_ctx(), &HashSet::new()), None);
     }
 
@@ -112,7 +124,10 @@ mod tests {
         let mut lines: Vec<String> = (0..80)
             .map(|i| format!("scanning module-{i} clean nothing to report"))
             .collect();
-        lines.insert(50, "module billing references the widget gateway endpoint".to_string());
+        lines.insert(
+            50,
+            "module billing references the widget gateway endpoint".to_string(),
+        );
         let dump = lines.join("\n");
         let query: HashSet<String> = ["widget".to_string()].into_iter().collect();
         let out = compress(&dump, &test_ctx(), &query).expect("fires");

@@ -28,9 +28,14 @@ def noise(prefix, n):
     return [f"{prefix} {WORDS[i % len(WORDS)]}-{i}" for i in range(n)]
 
 
-def case(name, context, question, gold):
-    return {"name": name, "context": context, "question": question, "gold": gold,
-            "scorer": "contains"}
+def case(name, context, question, gold, adversarial=False):
+    c = {"name": name, "context": context, "question": question, "gold": gold,
+         "scorer": "contains"}
+    if adversarial:
+        # Tag (ignored by the loader) so a reader can see these are the windowing-stress cases
+        # whose gold sits in DROPPED lines — retention SHOULD fall if windowing is too greedy.
+        c["adversarial"] = True
+    return c
 
 
 cases = []
@@ -140,5 +145,81 @@ cases.append(case("grep-const-decl",
                   "In which file is the API_KEY constant declared?",
                   "config/secrets.rs"))
 
+# ====================================================================================
+# ADVERSARIAL cases — the gold sits in a line the toolout stage DROPS by construction
+# (a noise/INFO line, a diff CONTEXT line, a middle grep match, or a global aggregate that
+# needs lines the windowing elides). The non-adversarial cases above can't catch
+# over-aggressive windowing because their answer is always in a force-kept line; these can.
+# A faithful windower keeps enough to answer → retention holds. A too-greedy one drops the
+# answer line → these cases fail → the eval finally has teeth on windowing regressions.
+# ====================================================================================
+
+# --- answer in a buried INFO (noise) line, not in any error -------------------------
+# No error at all: the signal-only/aggressive path keeps "errors + boundaries", so a fact
+# living in a middle INFO line is exactly what gets elided. The target table name is unique
+# (inserted once, not from the cycling WORDS pool) and the row count is 5-digit, so the
+# `contains` gold is unambiguous.
+target_rows = 84017
+infolog_lines = [f"INFO  [{i:03d}] migrated table {WORDS[i % len(WORDS)]} ({1000+i} rows)"
+                 for i in range(120)]
+infolog_lines.insert(57, f"INFO  [057] migrated table audit_ledger ({target_rows} rows)")
+infolog = "\n".join(infolog_lines)
+cases.append(case("adv-info-rowcount",
+                  infolog,
+                  "How many rows were migrated for the audit_ledger table? Answer with the number.",
+                  str(target_rows),
+                  adversarial=True))
+
+# Buried INFO carrying a config value, surrounded by templatable noise that folds away.
+cfglog = "\n".join([f"INFO loading plugin {WORDS[i % len(WORDS)]}" for i in range(70)])
+cfglog = (cfglog.split("\n")[:35] +
+          ["INFO  effective max_connections = 384 (from config)"] +
+          cfglog.split("\n")[35:])
+cfglog = "\n".join(cfglog)
+cases.append(case("adv-info-config",
+                  cfglog,
+                  "What is the effective max_connections value? Answer with the number.",
+                  "384",
+                  adversarial=True))
+
+# --- answer in a diff CONTEXT (unchanged, space-prefixed) line ----------------------
+# The signal-only path keeps +/- changed lines; an unchanged context line is dropped, so a
+# fact that lives only in surrounding context vanishes.
+ctx_named = [f"// owner: team-{WORDS[i]}" for i in range(20)]
+ctx_named[8] = "    pub const RETRY_LIMIT: u32 = 5;  // unchanged context, not part of the hunk"
+ctxdiff = diff_file("src/net.rs",
+                    "fn send(req: Req) -> Resp",
+                    "fn send(req: Req, deadline: Instant) -> Resp",
+                    ctx_named)
+cases.append(case("adv-diff-context-const",
+                  ctxdiff,
+                  "What is the value of RETRY_LIMIT shown in the context around the change?",
+                  "5",
+                  adversarial=True))
+
+# --- answer in the Nth grep match (middle), not the first/last ----------------------
+# Per-file/first-match sampling keeps a representative match per file; a specific middle hit
+# in a long single-file run is exactly what gets sampled out.
+gmid = [f"src/store.rs:{100+i}:    cache.put(key_{i}, val_{i});" for i in range(80)]
+gmid[39] = "src/store.rs:139:    cache.put(SENTINEL_KEY, poison_value);"  # the one that matters
+cases.append(case("adv-grep-middle-match",
+                  "\n".join(gmid),
+                  "Which key is paired with poison_value in a cache.put call?",
+                  "SENTINEL_KEY",
+                  adversarial=True))
+
+# --- global aggregate that needs the elided body, not just kept boundaries ----------
+# "How many …" over noise: the count can only be derived from lines the windower drops, so a
+# windowed view literally cannot answer it. Job ids are prefixed (job-J<i>) so the small WARN
+# count can't collide with an index inside a job line (the `contains` gold must be unambiguous).
+warns = [f'{"WARN" if i % 5 == 0 else "INFO"}  job-J{i} finished' for i in range(50)]
+n_warn = sum(1 for i in range(50) if i % 5 == 0)  # == 10
+cases.append(case("adv-aggregate-count",
+                  "\n".join(warns),
+                  "How many WARN lines are in this log? Reply with exactly: count=<number>.",
+                  f"count={n_warn}",
+                  adversarial=True))
+
 OUT.write_text("\n".join(json.dumps(c) for c in cases) + "\n")
-print(f"wrote {len(cases)} cases -> {OUT}")
+n_adv = sum(1 for c in cases if c.get("adversarial"))
+print(f"wrote {len(cases)} cases ({n_adv} adversarial) -> {OUT}")

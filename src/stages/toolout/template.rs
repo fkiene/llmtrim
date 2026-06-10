@@ -32,26 +32,31 @@ const MIN_RUN: usize = 3;
 /// UUID, hex, IPv4) so those win over the trailing bare-number alternative.
 static VARIABLE: Lazy<Regex> = Lazy::new(|| {
     Regex::new(concat!(
-        r#""[^"]*""#,                                                    // quoted string
+        r#""[^"]*""#, // quoted string
         r#"|\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:?\d{2})?"#, // ISO-8601
         r"|\b[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\b", // UUID
-        r"|\b0x[0-9a-fA-F]+\b",                                          // hex literal
-        r"|\b[0-9a-fA-F]{12,}\b",                                        // long hex (hashes)
-        r"|\b\d{1,3}(?:\.\d{1,3}){3}\b",                                 // IPv4
+        r"|\b0x[0-9a-fA-F]+\b", // hex literal
+        r"|\b[0-9a-fA-F]{12,}\b", // long hex (hashes)
+        r"|\b\d{1,3}(?:\.\d{1,3}){3}\b", // IPv4
         r"|\d+(?:\.\d+)?", // unsigned integer / decimal (a leading `-` stays in the
-                           // template — it's a separator in `db-01` as often as a sign)
+                      // template — it's a separator in `db-01` as often as a sign)
     ))
     .unwrap()
 });
 
-/// Collapse consecutive same-template runs in `text`, losslessly. Returns the text
-/// unchanged where no run of [`MIN_RUN`] templated lines pays for itself.
-pub fn collapse(text: &str) -> String {
+/// Collapse consecutive same-template runs in `text`, losslessly. Returns the rebuilt
+/// text and whether any run was actually folded. The boolean — not a string compare with
+/// the input — is the authoritative "did anything fold?" signal: rebuilding via
+/// `join("\n")` strips a trailing newline, so a raw `collapsed != text` reads as "changed"
+/// for any input ending in `\n` even when nothing folded, which would defeat the callers'
+/// prose-decline / no-op gates.
+pub fn collapse(text: &str) -> (String, bool) {
     let lines: Vec<&str> = text.lines().collect();
     if lines.len() < MIN_RUN {
-        return text.to_string();
+        return (text.to_string(), false);
     }
     let mut out: Vec<String> = Vec::with_capacity(lines.len());
+    let mut folded = false;
     let mut i = 0;
     while i < lines.len() {
         let tpl = template_of(lines[i]).0;
@@ -67,6 +72,7 @@ pub fn collapse(text: &str) -> String {
             let original_len: usize = run.iter().map(|l| l.len() + 1).sum();
             if collapsed.len() < original_len {
                 out.push(collapsed);
+                folded = true;
                 i = j;
                 continue;
             }
@@ -74,7 +80,7 @@ pub fn collapse(text: &str) -> String {
         out.extend(run.iter().map(|l| (*l).to_string()));
         i = j;
     }
-    out.join("\n")
+    (out.join("\n"), folded)
 }
 
 /// `(template, variables)` for one line: each variable token replaced by `{}`, the
@@ -145,8 +151,13 @@ mod tests {
         let text = "Connection to db-01 timed out after 30ms\n\
                     Connection to db-02 timed out after 12ms\n\
                     Connection to db-07 timed out after 5ms";
-        let out = collapse(text);
-        assert_eq!(out.lines().count(), 1, "three same-template lines fold to one");
+        let (out, folded) = collapse(text);
+        assert!(folded, "a real run folded");
+        assert_eq!(
+            out.lines().count(),
+            1,
+            "three same-template lines fold to one"
+        );
         assert!(out.starts_with("Connection to db-{} timed out after {}ms [×3:"));
         // every original's values survive in the tuples (lossless)
         for tuple in ["(01,30)", "(02,12)", "(07,5)"] {
@@ -158,7 +169,9 @@ mod tests {
     #[test]
     fn leaves_short_runs_untouched() {
         let text = "host a failed 1 time\nhost b failed 2 times";
-        assert_eq!(collapse(text), text, "a 2-line run is below MIN_RUN");
+        let (out, folded) = collapse(text);
+        assert_eq!(out, text, "a 2-line run is below MIN_RUN");
+        assert!(!folded, "nothing folded");
     }
 
     #[test]
@@ -169,17 +182,26 @@ mod tests {
         let text = "drwxr-xr-x 2 u g        0 Apr 01 file_0.log\n\
                     drwxr-xr-x 2 u g     1024 Apr 02 file_1.log\n\
                     drwxr-xr-x 2 u g   524288 Apr 03 file_2.log";
-        let out = collapse(text);
-        assert_eq!(out.lines().count(), 1, "aligned rows fold to one despite padding: {out}");
+        let (out, _) = collapse(text);
+        assert_eq!(
+            out.lines().count(),
+            1,
+            "aligned rows fold to one despite padding: {out}"
+        );
         assert!(out.contains("[×3:"), "one run of 3");
-        assert!(out.contains("524288") && out.contains("1024"), "every value preserved");
+        assert!(
+            out.contains("524288") && out.contains("1024"),
+            "every value preserved"
+        );
     }
 
     #[test]
     fn does_not_collapse_slot_free_identical_lines() {
         // No variable tokens → that's exact-dedup territory, not template collapse.
         let text = "starting up\nstarting up\nstarting up";
-        assert_eq!(collapse(text), text);
+        let (out, folded) = collapse(text);
+        assert_eq!(out, text);
+        assert!(!folded, "slot-free identical lines do not fold");
     }
 
     #[test]
@@ -187,6 +209,26 @@ mod tests {
         // Same template at lines 0 and 2, broken by a different line at 1: neither run
         // reaches MIN_RUN, so nothing collapses (order is preserved).
         let text = "value is 1\ndifferent entirely here\nvalue is 2";
-        assert_eq!(collapse(text), text);
+        let (out, folded) = collapse(text);
+        assert_eq!(out, text);
+        assert!(!folded, "non-consecutive runs below MIN_RUN do not fold");
+    }
+
+    #[test]
+    fn trailing_newline_with_no_fold_reports_not_folded() {
+        // Distinct lines, input ends in '\n'. `join("\n")` strips that newline, so the
+        // rebuilt string differs from the input even though nothing folded — the boolean
+        // (not a string compare) must still report `false` so callers don't misread the
+        // dropped newline as a real change.
+        let text = "alpha beta gamma\ndelta epsilon zeta\neta theta iota\n";
+        let (out, folded) = collapse(text);
+        assert!(
+            !folded,
+            "nothing folded → false despite the stripped trailing newline"
+        );
+        assert_ne!(
+            out, text,
+            "join() drops the trailing newline (would fool a string compare)"
+        );
     }
 }

@@ -73,10 +73,13 @@ impl TokenCounter for TiktokenCounter {
 /// drives the savings %: alphanumeric "words" are token-dense (~1 token / 4 chars), while
 /// punctuation and symbols are each roughly their own token. That's why it tracks
 /// structure-stripping stages (JSON→TOON, minify) — which a flat byte/char ratio under-counts
-/// ~2×, because it can't see that the punctuation a stage removes was token-dense. Whitespace is
-/// ~free (BPE folds a leading space into the next word). Unicode letters join word runs
-/// (CJK is over-merged, but these counts are flagged approximate and the savings % is what we
-/// report).
+/// ~2×, because it can't see that the punctuation a stage removes was token-dense. The *first*
+/// whitespace char in a run is free (BPE folds a leading space into the next word), but a *run*
+/// of whitespace — code indentation, blank lines — is token-dense and priced ~1 token / 4 extra
+/// chars. Pricing runs (not zeroing all whitespace) is what lets a whitespace-only lossless
+/// stage (`minify-code`) register a token win here instead of measuring `after == before` and
+/// reverting on every Anthropic/Google request. Unicode letters join word runs (CJK is
+/// over-merged, but these counts are flagged approximate and the savings % is what we report).
 fn estimate_tokens(text: &str) -> usize {
     const CHARS_PER_WORD_TOKEN: usize = 4;
     // Calibrate the raw word+punct count to o200k's scale: the raw estimate runs ~1.39× o200k
@@ -87,20 +90,30 @@ fn estimate_tokens(text: &str) -> usize {
     const CALIB: f64 = 0.72;
     let mut raw = 0usize;
     let mut run = 0usize; // length of the current alphanumeric run
+    let mut ws = 0usize; // length of the current whitespace run
+    // A whitespace run's first char folds into the adjacent word (free); the rest is priced.
+    let price_ws = |ws: usize| ws.saturating_sub(1).div_ceil(CHARS_PER_WORD_TOKEN);
     for c in text.chars() {
         if c.is_alphanumeric() {
+            raw += price_ws(ws);
+            ws = 0;
             run += 1;
         } else {
             if run > 0 {
                 raw += run.div_ceil(CHARS_PER_WORD_TOKEN);
                 run = 0;
             }
-            if !c.is_whitespace() {
+            if c.is_whitespace() {
+                ws += 1;
+            } else {
+                raw += price_ws(ws);
+                ws = 0;
                 raw += 1; // punctuation / symbol ≈ its own token
             }
         }
     }
     raw += run.div_ceil(CHARS_PER_WORD_TOKEN);
+    raw += price_ws(ws);
     (raw as f64 * CALIB).round() as usize
 }
 
@@ -135,14 +148,15 @@ pub fn counter_for(provider: ProviderKind, model: Option<&str>) -> Result<Box<dy
         // OpenAI ships the real tokenizer — use it exactly (its own model→encoding registry;
         // unknown/newer models fall back to o200k_base).
         ProviderKind::OpenAi => {
-            let bpe = model
-                .and_then(|m| tiktoken_rs::bpe_for_model(m).ok())
-                .unwrap_or_else(tiktoken_rs::o200k_base_singleton);
-            Ok(Box::new(TiktokenCounter {
-                bpe,
-                label: "tiktoken",
-                exact: true,
-            }))
+            // tiktoken is exact only when it actually knows the model. OpenAI-*shaped* hosts
+            // (groq/llama, deepseek, qwen, mistral…) miss the registry → o200k_base is then a
+            // proxy, not ground truth, so flag it approximate instead of mislabeling the ledger.
+            let (bpe, label, exact): (_, &'static str, bool) =
+                match model.and_then(|m| tiktoken_rs::bpe_for_model(m).ok()) {
+                    Some(bpe) => (bpe, "tiktoken", true),
+                    None => (tiktoken_rs::o200k_base_singleton(), "o200k-approx", false),
+                };
+            Ok(Box::new(TiktokenCounter { bpe, label, exact }))
         }
         // No public tokenizer → the cheap BPE-shaped estimate (flagged approximate). Skips the
         // BPE pass that dominated compress latency while still tracking structural savings.

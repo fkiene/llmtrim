@@ -39,13 +39,16 @@ impl FileDiff<'_> {
         self.hunks.iter().map(Hunk::changes).sum()
     }
 
-    fn text(&self) -> String {
+    /// Every line of the file section in order (header, then each hunk's header + body).
+    /// The elision marker counts these, so a dropped file reports its true line count
+    /// rather than `1` (the bug from passing a single joined string to [`elide`]).
+    fn lines(&self) -> Vec<&str> {
         let mut lines: Vec<&str> = self.header.clone();
         for h in &self.hunks {
             lines.push(h.header);
             lines.extend(&h.body);
         }
-        lines.join("\n")
+        lines
     }
 }
 
@@ -66,7 +69,11 @@ pub fn compress(text: &str, ctx: &Ctx, query: &HashSet<String>) -> Option<String
     // surrounding context kept, only the `+`/`-` lines. Total counts droppable body
     // lines only (file/hunk headers are never dropped, so including them would
     // over-state the noise and trip aggressive on diffs that have little context to cut).
-    let total: usize = files.iter().flat_map(|f| &f.hunks).map(|h| h.body.len()).sum();
+    let total: usize = files
+        .iter()
+        .flat_map(|f| &f.hunks)
+        .map(|h| h.body.len())
+        .sum();
     let changes: usize = files.iter().map(FileDiff::changes).sum();
     let max_context = match pick_mode(ctx.mode, total, changes) {
         Mode::Aggressive => 0,
@@ -85,7 +92,9 @@ pub fn compress(text: &str, ctx: &Ctx, query: &HashSet<String>) -> Option<String
     for (fi, file) in files.iter().enumerate() {
         if !keep_file[fi] {
             out.push(file.header.first().copied().unwrap_or_default().to_string());
-            out.push(elide(&[&file.text()]));
+            // Count the file's real lines (matches the hunk-drop path below), not `1`
+            // from passing a single joined string to `elide`.
+            out.push(elide(&file.lines()));
             changed = true;
             continue;
         }
@@ -97,7 +106,11 @@ pub fn compress(text: &str, ctx: &Ctx, query: &HashSet<String>) -> Option<String
             .hunks
             .iter()
             .map(|h| {
-                let q = h.body.iter().map(|l| query_bonus(l, query)).fold(0.0, f64::max);
+                let q = h
+                    .body
+                    .iter()
+                    .map(|l| query_bonus(l, query))
+                    .fold(0.0, f64::max);
                 (h.changes() as f64 * 0.05).min(0.5) + q
             })
             .collect();
@@ -177,7 +190,9 @@ fn trim_context(body: &[&str], max_context: usize) -> (Vec<String>, bool) {
         }
         dist[i] = dist[i].min(next);
     }
-    let keep: Vec<bool> = (0..n).map(|i| change[i] || dist[i] <= max_context).collect();
+    let keep: Vec<bool> = (0..n)
+        .map(|i| change[i] || dist[i] <= max_context)
+        .collect();
 
     let mut out: Vec<String> = Vec::new();
     let mut trimmed = false;
@@ -202,18 +217,25 @@ fn trim_context(body: &[&str], max_context: usize) -> (Vec<String>, bool) {
 /// otherwise a `--- ` line starts each file (plain `diff -u` output).
 fn parse(text: &str) -> Vec<FileDiff<'_>> {
     let git_mode = text.starts_with("diff --git ") || text.contains("\ndiff --git ");
-    let is_file_start = |line: &str| {
+    let lines: Vec<&str> = text.lines().collect();
+    // In non-git output a `--- ` line opens a file *only* when the next line is its
+    // `+++ ` mate. Without that pairing, a removed source line that itself begins with
+    // `-- ` (an SQL/Lua/Haskell comment, prefixed by the diff's own `-` → `--- `) would
+    // be misread as a new file header, truncating the hunk. `diff --git` mode keys off
+    // the unambiguous `diff --git ` line, so no lookahead is needed there.
+    let is_file_start = |i: usize| {
+        let line = lines[i];
         if git_mode {
             line.starts_with("diff --git ")
         } else {
-            line.starts_with("--- ")
+            line.starts_with("--- ") && lines.get(i + 1).is_some_and(|n| n.starts_with("+++ "))
         }
     };
 
     let mut files: Vec<FileDiff> = Vec::new();
     let mut cur: Option<FileDiff> = None;
-    for line in text.lines() {
-        if is_file_start(line) {
+    for (i, &line) in lines.iter().enumerate() {
+        if is_file_start(i) {
             if let Some(f) = cur.take() {
                 files.push(f);
             }
@@ -272,9 +294,15 @@ mod tests {
         assert!(out.contains("-let removed = 0;"), "removal kept");
         assert!(out.contains("+let added = 1;"), "addition kept");
         assert!(out.contains("@@ -1,30 +1,30 @@"), "hunk header kept");
-        assert!(out.contains(" unchanged context line 0"), "near context kept");
+        assert!(
+            out.contains(" unchanged context line 0"),
+            "near context kept"
+        );
         assert!(!out.contains("context line 24"), "far context trimmed");
-        assert!(out.contains("omitted"), "trimmed context elided by position");
+        assert!(
+            out.contains("omitted"),
+            "trimmed context elided by position"
+        );
     }
 
     #[test]
@@ -283,7 +311,10 @@ mod tests {
         // and at least one tail file, dropping the rest to elision markers.
         let mut sections = vec![format!(
             "diff --git a/hot.rs b/hot.rs\n--- a/hot.rs\n+++ b/hot.rs\n@@ -1,5 +1,5 @@\n{}",
-            (0..5).map(|i| format!("-old{i}\n+new{i}")).collect::<Vec<_>>().join("\n")
+            (0..5)
+                .map(|i| format!("-old{i}\n+new{i}"))
+                .collect::<Vec<_>>()
+                .join("\n")
         )];
         for i in 0..MAX_FILES + 5 {
             sections.push(format!(
@@ -300,7 +331,68 @@ mod tests {
             out.matches("+++ b/").count() <= MAX_FILES,
             "rendered files are capped at MAX_FILES"
         );
-        assert!(out.contains("omitted"), "dropped files became elision markers");
+        assert!(
+            out.contains("omitted"),
+            "dropped files became elision markers"
+        );
+    }
+
+    #[test]
+    fn dropped_file_marker_reports_real_line_count() {
+        // One hot file plus many cold ones. A dropped cold file must report its true line
+        // count in the elision marker, not "1 lines omitted" (the bug: a single joined
+        // string was passed to `elide`, so its slice length was always 1).
+        let mut sections = vec![format!(
+            "diff --git a/hot.rs b/hot.rs\n--- a/hot.rs\n+++ b/hot.rs\n@@ -1,6 +1,6 @@\n{}",
+            (0..6)
+                .map(|i| format!("-old{i}\n+new{i}"))
+                .collect::<Vec<_>>()
+                .join("\n")
+        )];
+        // Each cold file: `diff --git`, `---`, `+++`, `@@`, `-a`, `+b` = 6 lines.
+        for i in 0..MAX_FILES + 5 {
+            sections.push(format!(
+                "diff --git a/c{i}.rs b/c{i}.rs\n--- a/c{i}.rs\n+++ b/c{i}.rs\n@@ -1 +1 @@\n-a\n+b"
+            ));
+        }
+        let diff = sections.join("\n");
+        let out = compress(&diff, &test_ctx(), &HashSet::new()).expect("compresses");
+
+        assert!(
+            out.contains("[… 6 lines omitted …]"),
+            "dropped file reports its 6 lines: {out}"
+        );
+        assert!(
+            !out.contains("[… 1 lines omitted …]"),
+            "no bogus 1-line marker"
+        );
+    }
+
+    #[test]
+    fn removed_sql_comment_line_is_not_a_file_header() {
+        // Non-git `diff -u`. A removed source line `-- drop the column` (SQL/Lua/Haskell
+        // comment) renders as `--- drop the column` after the diff's own `-` prefix. It
+        // must be parsed as hunk body, not mistaken for a `--- a/file` header (which
+        // would split a spurious second file and truncate this hunk).
+        let diff = "--- a/schema.sql\n\
+                    +++ b/schema.sql\n\
+                    @@ -1,4 +1,4 @@\n\
+                     CREATE TABLE t (\n\
+                    --- drop the column\n\
+                    +-- keep the column\n\
+                       id INT\n\
+                     );";
+        let files = parse(diff);
+        assert_eq!(
+            files.len(),
+            1,
+            "one file, the SQL comment did not start a second"
+        );
+        let body = &files[0].hunks[0].body;
+        assert!(
+            body.contains(&"--- drop the column"),
+            "the removed `-- ` comment stayed in the hunk body: {body:?}"
+        );
     }
 
     #[test]
@@ -323,6 +415,9 @@ mod tests {
         assert!(out.contains("-let removed = 0;"), "removal kept");
         assert!(out.contains("+let added = 1;"), "addition kept");
         assert!(out.contains("@@ -1,30 +1,30 @@"), "hunk header kept");
-        assert!(!out.contains(" unchanged context line 0"), "all context dropped");
+        assert!(
+            !out.contains(" unchanged context line 0"),
+            "all context dropped"
+        );
     }
 }

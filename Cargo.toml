@@ -21,15 +21,21 @@ base64 = "0.22.1"
 bm25 = "2.3.2"
 chrono = "0.4.45"
 clap = { version = "4.6.1", features = ["derive"] }
+# Terminal UI: color (owo-colors), width-aware tables (comfy-table without its `tty`
+# default — crossterm 0.29 would duplicate the 0.28 already in-tree via toon-format;
+# `custom_styling` lets ANSI-styled cells measure correctly), display-width (the same
+# unicode-width comfy-table itself uses) for panel borders.
+comfy-table = { version = "7.2.2", default-features = false, features = ["custom_styling"] }
 csv = "1.4.0"
 dotenvy = "0.15.7"
 gaoya = "0.2.0"
 image = { version = "0.25.10", default-features = false, features = ["png", "jpeg"] }
 once_cell = "1.21.4"
+owo-colors = "4.3.0"
 regex = "1.12.3"
 rusqlite = { version = "0.39", features = ["bundled"] }
 serde = { version = "1.0.228", features = ["derive"] }
-serde_json = { version = "1.0.150", features = ["preserve_order"] }
+serde_json = { version = "1.0.150", features = ["preserve_order", "arbitrary_precision"] }
 statrs = "0.18.0"
 stop-words = "0.10.0"
 tiktoken-rs = "0.12.0"
@@ -63,6 +69,9 @@ tree-sitter-ruby = "0.23.1"
 tree-sitter-php = "0.24.2"
 unicode-normalization = "0.1.25"
 unicode-segmentation = "1.13.3"
+# `0.2` exactly: ratatui (via toon-format) pins `=0.2.0`, so anything tighter here
+# fails version selection.
+unicode-width = "0.2"
 ureq = "3.3.0"
 wait-timeout = "0.2.1"
 whatlang = "0.18.0"

@@ -20,20 +20,25 @@ pub fn compress(text: &str, ctx: &Ctx, query: &HashSet<String>) -> Option<String
     // Signal = failure lines; the split goes aggressive when they're sparse in a big log.
     let raw: Vec<&str> = text.lines().collect();
     let errors = raw.iter().filter(|l| priority(l) >= FORCE_PRIORITY).count();
-    if pick_mode(ctx.mode, raw.len(), errors) == Mode::Aggressive {
+    // Errors-only is only safe when there *are* errors to keep. A big level-light dump
+    // (e.g. a 60-line INFO-only status paste) has zero strong lines, so errors-only would
+    // emit nothing but an elision marker and erase the whole thing — fall through to
+    // adaptive windowing instead (head/tail + query hits survive).
+    if errors >= 1 && pick_mode(ctx.mode, raw.len(), errors) == Mode::Aggressive {
         return compress_errors_only(text);
     }
-    let collapsed = if ctx.template {
+    let (collapsed, folded) = if ctx.template {
         template::collapse(text)
     } else {
-        text.to_string()
+        (text.to_string(), false)
     };
     let lines: Vec<&str> = collapsed.lines().collect();
 
     // Below budget after template collapse: keep the (possibly shorter) collapsed form,
-    // but only report a change if collapse actually did something.
+    // but only report a change if collapse actually folded a run (`folded`, not a string
+    // compare — `join("\n")` strips a trailing newline and would falsely read as changed).
     if lines.len() <= ctx.max_lines {
-        return (collapsed != text).then_some(collapsed);
+        return folded.then_some(collapsed);
     }
 
     let scores: Vec<f64> = lines
@@ -46,7 +51,7 @@ pub fn compress(text: &str, ctx: &Ctx, query: &HashSet<String>) -> Option<String
     // If selection kept everything (all lines were forced failures), the windowing was
     // a no-op; still surface the collapse if it shrank the text.
     if keep.iter().all(|&k| k) {
-        return (collapsed != text).then_some(collapsed);
+        return folded.then_some(collapsed);
     }
     Some(rebuild(&lines, &keep))
 }
@@ -60,7 +65,11 @@ fn compress_errors_only(text: &str) -> Option<String> {
     if keep.iter().all(|&k| k) {
         return None;
     }
-    Some(format!("{}\n{}", summary_line(&lines), rebuild(&lines, &keep)))
+    Some(format!(
+        "{}\n{}",
+        summary_line(&lines),
+        rebuild(&lines, &keep)
+    ))
 }
 
 /// Keep only failure lines and the indented stack-trace frames immediately under them.
@@ -69,7 +78,8 @@ fn aggressive_keep(lines: &[&str]) -> Vec<bool> {
     for i in 0..lines.len() {
         if priority(lines[i]) >= FORCE_PRIORITY {
             keep[i] = true;
-        } else if (lines[i].starts_with(' ') || lines[i].starts_with('\t')) && i > 0 && keep[i - 1] {
+        } else if (lines[i].starts_with(' ') || lines[i].starts_with('\t')) && i > 0 && keep[i - 1]
+        {
             keep[i] = true; // stack-trace frame attached to the error kept above
         }
     }
@@ -120,7 +130,10 @@ mod tests {
         assert!(out.lines().count() < log.lines().count(), "log got shorter");
         assert!(out.contains("failed to resolve symbol"), "error 1 survives");
         assert!(out.contains("type mismatch"), "error 2 survives");
-        assert!(out.contains("[×60:"), "repetitive run folded into one template line");
+        assert!(
+            out.contains("[×60:"),
+            "repetitive run folded into one template line"
+        );
         assert!(!out.contains("omitted"), "lossless fold drops nothing");
     }
 
@@ -142,7 +155,10 @@ mod tests {
         assert!(out.contains("type mismatch"), "error 2 survives");
         assert!(out.contains("build started"), "head kept");
         assert!(out.contains("build finished"), "tail kept");
-        assert!(out.contains("omitted"), "dropped noise is elided by position");
+        assert!(
+            out.contains("omitted"),
+            "dropped noise is elided by position"
+        );
     }
 
     #[test]
@@ -156,8 +172,9 @@ mod tests {
     fn aggressive_mode_keeps_only_errors_and_summary() {
         // 100 INFO lines + 2 errors → errors-only output: a summary line, both errors,
         // and an elision for the dropped noise. Far smaller than adaptive windowing.
-        let mut lines: Vec<String> =
-            (0..100).map(|i| format!("INFO  step {i} routine nominal pass")).collect();
+        let mut lines: Vec<String> = (0..100)
+            .map(|i| format!("INFO  step {i} routine nominal pass"))
+            .collect();
         lines.insert(50, "ERROR disk full on volume /dev/sda1".to_string());
         lines.push("ERROR flush failed: broken pipe".to_string());
         let log = lines.join("\n");
@@ -169,22 +186,78 @@ mod tests {
         };
         let out = compress(&log, &ctx, &HashSet::new()).expect("compresses");
 
-        assert!(out.starts_with("[log: 102 lines — 2 error(s)"), "summary header first: {out}");
-        assert!(out.contains("disk full on volume /dev/sda1"), "error 1 kept");
+        assert!(
+            out.starts_with("[log: 102 lines — 2 error(s)"),
+            "summary header first: {out}"
+        );
+        assert!(
+            out.contains("disk full on volume /dev/sda1"),
+            "error 1 kept"
+        );
         assert!(out.contains("flush failed: broken pipe"), "error 2 kept");
         assert!(!out.contains("routine nominal"), "all INFO noise dropped");
         assert!(out.contains("omitted"), "noise elided by position");
         // Errors-only is dramatically smaller than the adaptive cap would keep.
-        assert!(out.lines().count() < 10, "errors-only collapses to a handful of lines");
+        assert!(
+            out.lines().count() < 10,
+            "errors-only collapses to a handful of lines"
+        );
+    }
+
+    #[test]
+    fn aggressive_with_zero_errors_does_not_erase_the_log() {
+        // A 60-line INFO-only status dump (no failure tokens at all) pasted under
+        // Aggressive. Errors-only would keep nothing and emit just an elision marker,
+        // erasing the user's content. Instead it must fall back to adaptive windowing:
+        // head/tail survive and the body is a real (non-empty) window, not a bare marker.
+        let lines: Vec<String> = (0..60)
+            .map(|i| format!("INFO service {i} state healthy uptime {i}h region eu-{i}"))
+            .collect();
+        let log = lines.join("\n");
+        let head = &lines[0];
+        let tail = &lines[59];
+
+        let ctx = Ctx {
+            max_lines: 30,
+            template: false, // distinct lines anyway; force the windowing path, not a fold
+            mode: ModeSetting::Aggressive,
+        };
+        let out = compress(&log, &ctx, &HashSet::new()).expect("windows rather than erasing");
+
+        assert!(
+            out.contains(head.as_str()),
+            "head line survives, not erased: {out}"
+        );
+        assert!(
+            out.contains(tail.as_str()),
+            "tail line survives, not erased"
+        );
+        assert!(
+            out.contains("omitted"),
+            "dropped middle is elided by position"
+        );
+        // The whole thing was NOT reduced to a lone marker (the erase bug).
+        assert!(
+            out.lines().count() > 3,
+            "kept real content, not just a marker: {out}"
+        );
+        assert!(
+            out.lines().count() < log.lines().count(),
+            "still compressed"
+        );
     }
 
     #[test]
     fn query_relevant_lines_are_favored() {
         // A unique INFO line mentioning the query term should survive windowing even
         // though INFO normally scores low.
-        let mut lines: Vec<String> =
-            (0..60).map(|i| format!("INFO  routine step {i} nominal")).collect();
-        lines.insert(30, "INFO  cache subsystem re=widget initialized".to_string());
+        let mut lines: Vec<String> = (0..60)
+            .map(|i| format!("INFO  routine step {i} nominal"))
+            .collect();
+        lines.insert(
+            30,
+            "INFO  cache subsystem re=widget initialized".to_string(),
+        );
         let log = lines.join("\n");
 
         let query: HashSet<String> = ["widget".to_string()].into_iter().collect();

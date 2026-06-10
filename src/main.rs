@@ -17,12 +17,34 @@ use llmtrim::ir::ProviderKind;
 use llmtrim::monitor;
 use llmtrim::tracking::{Period, Record, Tracker};
 use llmtrim::transport::Endpoint;
+use llmtrim::ui::{self, Tone};
+
+/// Coloured `--help` in the dashboard's accent family. clap gates these on
+/// TTY/NO_COLOR itself via anstream, so piped help stays plain.
+const HELP_STYLES: clap::builder::Styles = clap::builder::Styles::styled()
+    .header(
+        clap::builder::styling::AnsiColor::BrightBlue
+            .on_default()
+            .bold(),
+    )
+    .usage(
+        clap::builder::styling::AnsiColor::BrightBlue
+            .on_default()
+            .bold(),
+    )
+    .literal(
+        clap::builder::styling::AnsiColor::BrightCyan
+            .on_default()
+            .bold(),
+    )
+    .placeholder(clap::builder::styling::AnsiColor::Cyan.on_default());
 
 #[derive(Parser)]
 #[command(
     name = "llmtrim",
     version,
-    about = "Static, deterministic LLM prompt/payload compressor"
+    about = "Static, deterministic LLM prompt/payload compressor",
+    styles = HELP_STYLES
 )]
 struct Cli {
     #[command(subcommand)]
@@ -31,22 +53,29 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
-    /// Compress a provider request body read from stdin; write compressed JSON to stdout.
+    /// Compress a request from stdin to stdout
+    ///
+    /// Reads a provider-shaped request body on stdin and writes the compressed
+    /// JSON to stdout — the pipe-friendly core. Savings are recorded to the ledger.
     Compress {
-        /// Target provider: openai|anthropic. Omit to auto-detect from the request shape.
+        /// Target provider: openai|anthropic|google|gemini. Omit to auto-detect from the request shape.
         #[arg(long)]
         provider: Option<String>,
     },
-    /// Compress a request from stdin, send it to the provider, print the response.
-    /// Requires the provider API key in the environment (see `transport`).
+    /// Compress a request, send it to the provider, print the response
+    ///
+    /// Like `compress`, plus the network round-trip. Needs the provider API key in
+    /// the environment (OPENAI_API_KEY / ANTHROPIC_API_KEY / GEMINI_API_KEY).
     Send {
-        /// Target provider: openai|anthropic. Omit to auto-detect from the request shape.
+        /// Target provider: openai|anthropic|google|gemini. Omit to auto-detect from the request shape.
         #[arg(long)]
         provider: Option<String>,
     },
-    /// Run the MITM interceptor: an HTTPS proxy that compresses LLM API requests in
-    /// flight, across every tool and provider. Set HTTPS_PROXY to it and trust the CA
-    /// (`llmtrim ca`). No API key needed — the client's own auth is passed through.
+    /// Run the HTTPS interceptor that compresses LLM traffic in flight
+    ///
+    /// A local MITM proxy covering every tool and provider: set HTTPS_PROXY to it
+    /// and trust the CA (`llmtrim ca`). No API key needed — the client's own auth
+    /// passes through untouched.
     Serve {
         /// Port to listen on (127.0.0.1).
         #[arg(long, default_value_t = 8787)]
@@ -58,17 +87,20 @@ enum Commands {
         #[arg(long, hide = true)]
         supervised: bool,
     },
-    /// One command: ensure the CA, set HTTPS_PROXY + trust the CA in your shell profile,
-    /// enable run-at-login, and start the interceptor. The fastest path from install to
-    /// compressing. No IDE settings are touched — llmtrim is purely a MITM proxy.
+    /// Set everything up and start saving (CA, shell profile, autostart, daemon)
+    ///
+    /// The fastest path from install to compressing: ensures the local CA, writes
+    /// HTTPS_PROXY + CA trust to your shell profile, enables run-at-login, and
+    /// starts the interceptor. No IDE settings are touched, no sudo.
     Setup {
         /// Interceptor port. Omit to auto-select a free port starting at 8787.
         #[arg(long)]
         port: Option<u16>,
     },
-    /// Undo everything `setup` did: stop the daemon, disable autostart, strip the
-    /// shell-profile env block, and remove the CA + state (and the binary). Transparent —
-    /// prints each step.
+    /// Undo everything `setup` did
+    ///
+    /// Stops the daemon, disables autostart, strips the shell-profile env block,
+    /// and removes the CA + state (and the binary). Every step is printed.
     Uninstall {
         /// Also delete the savings ledger (kept by default).
         #[arg(long)]
@@ -77,14 +109,18 @@ enum Commands {
         #[arg(long)]
         keep_binary: bool,
     },
-    /// Stop the background interceptor daemon.
+    /// Stop the background interceptor daemon
     Stop,
-    /// Update to the latest release (channel-aware: binary self-updates via the installer;
-    /// cargo/Homebrew print their command) and restart the daemon onto the new binary.
+    /// Update llmtrim to the latest release
+    ///
+    /// Channel-aware: a binary install self-updates via the installer; cargo and
+    /// Homebrew installs print their package manager's command.
     Update,
-    /// Savings dashboard from the ledger + interceptor state. Default: a snapshot;
-    /// `--watch` for a live view; `--daily/--weekly/--monthly` for time-series;
-    /// `--json/--csv` to export. Aliased as `status` and `gain`.
+    /// Show the savings dashboard
+    ///
+    /// Savings from the ledger + interceptor state. Default: a snapshot; `--watch`
+    /// for a live view; `--daily/--weekly/--monthly` for time-series; `--json/--csv`
+    /// to export for scripts and dashboards.
     #[command(visible_aliases = ["status", "gain"])]
     Monitor {
         /// Live refreshing dashboard (Ctrl-C to exit).
@@ -109,7 +145,9 @@ enum Commands {
         #[arg(long)]
         csv: bool,
     },
-    /// Run the interceptor at login (`--off` to disable). systemd (Linux) / launchd (macOS).
+    /// Run the interceptor at login (`--off` to disable)
+    ///
+    /// systemd (Linux) / launchd (macOS) / registry run-key (Windows).
     Autostart {
         /// Disable autostart instead of enabling it.
         #[arg(long)]
@@ -118,24 +156,31 @@ enum Commands {
         #[arg(long, default_value_t = 8787)]
         port: u16,
     },
-    /// Print the local CA certificate path (generating it on first run) and how to trust
-    /// it. Required once before `serve` can intercept HTTPS.
+    /// Print the local CA certificate path and how to trust it
+    ///
+    /// Generates the CA on first run. Required once before `serve` can intercept
+    /// HTTPS; the CA is name-constrained to LLM API domains only.
     Ca,
-    /// Evaluate Stage B retrieval recall + savings on a held-out corpus JSONL (§6).
+    /// Measure retrieval recall + token savings on a corpus
+    ///
+    /// Runs the lexical-retrieval stage over a held-out corpus JSONL and reports
+    /// per-case recall against the gold answers.
     Eval {
         /// Corpus JSONL: lines with {context|input, question|query, answers|answer}.
         #[arg(long)]
         corpus: PathBuf,
-        /// Provider for the cases: openai|anthropic.
+        /// Provider for the cases: openai|anthropic|google|gemini.
         #[arg(long, default_value = "openai")]
         provider: String,
-        /// Stage B keep_ratio to evaluate.
+        /// Retrieval keep_ratio to evaluate (clamped to [0,1]).
         #[arg(long, default_value_t = 0.5)]
         keep_ratio: f64,
     },
-    /// A/B benchmark (§6 quality axis): tokens saved vs quality retained, on a real
-    /// corpus + model. Sends ORIGINAL and COMPRESSED requests, scores both, prices the
-    /// round-trip. Credentials come from the env or a local `.env` (OpenRouter preferred).
+    /// A/B benchmark: tokens saved vs quality retained, on a real model
+    ///
+    /// Sends ORIGINAL and COMPRESSED requests, scores both, and prices the
+    /// round-trip. Credentials come from the env or a local `.env` (OpenRouter).
+    /// `--offline`/`--ablate` measure tokens without any network calls.
     Bench(BenchArgs),
 }
 
@@ -144,15 +189,20 @@ struct BenchArgs {
     /// Normalized corpus JSONL (friendly {context,question,gold,scorer} or explicit {request,…}).
     #[arg(long)]
     corpus: PathBuf,
-    /// Provider: openai|anthropic.
+    /// Request shape to compress: openai|anthropic|google|gemini. The live A/B path talks to
+    /// OpenRouter (OpenAI-shaped), so only `openai` runs live; the rest work `--offline`/`--ablate`.
     #[arg(long, default_value = "openai")]
     provider: String,
-    /// Preset to evaluate: auto|safe|rag|agent|code|aggressive|cache|reasoning.
+    /// Preset to evaluate: auto|safe|lossless|rag|agent|code|aggressive|cache|reasoning.
     #[arg(long, default_value = "auto")]
     preset: String,
     /// Model id to send (OpenRouter style, e.g. openai/gpt-oss-20b).
     #[arg(long, default_value = "openai/gpt-oss-20b")]
     model: String,
+    /// LLM-judge model (open-ended scorers only). Defaults to a DIFFERENT model than `--model`
+    /// so the judge doesn't grade its own answers; recorded in `--json-out` for reproducibility.
+    #[arg(long, default_value = "openai/gpt-4o-mini")]
+    judge_model: String,
     /// Pin OpenRouter to one upstream as `provider` or `provider/quant`
     /// (e.g. `groq`). Empty = let OpenRouter choose.
     #[arg(long, default_value = "groq")]
@@ -185,7 +235,14 @@ fn read_stdin() -> Result<String> {
     Ok(buf)
 }
 
-fn main() -> Result<()> {
+fn main() {
+    if let Err(e) = run() {
+        eprint!("{}", ui::render_error(ui::color_stderr(), &e));
+        std::process::exit(1);
+    }
+}
+
+fn run() -> Result<()> {
     let cli = Cli::parse();
     match cli.command {
         Commands::Compress { provider } => {
@@ -262,9 +319,24 @@ fn main() -> Result<()> {
         } => {
             if daemon {
                 let pid = llmtrim::daemon::spawn_detached(port)?;
-                println!("llmtrim: interceptor running in background (pid {pid}, port {port})");
-                println!("  logs:   {}", llmtrim::daemon::logfile()?.display());
-                println!("  status: llmtrim status     stop: llmtrim stop");
+                let color = ui::color_stdout();
+                println!(
+                    "{}",
+                    ui::ok(
+                        color,
+                        &format!("Interceptor running in background · pid {pid} · port {port}")
+                    )
+                );
+                for (label, value) in [
+                    ("logs", llmtrim::daemon::logfile()?.display().to_string()),
+                    ("watch", "llmtrim status".to_string()),
+                    ("stop", "llmtrim stop".to_string()),
+                ] {
+                    println!(
+                        "    {}  {value}",
+                        ui::paint(color, Tone::Dim, &format!("{label:<5}"))
+                    );
+                }
             } else if supervised {
                 llmtrim::serve::run_supervised(port)?;
             } else {
@@ -277,16 +349,29 @@ fn main() -> Result<()> {
         }
         Commands::Stop => match llmtrim::daemon::stop()? {
             Some(pid) => {
-                println!("Stopped interceptor (pid {pid}).");
+                println!(
+                    "{}",
+                    ui::ok(
+                        ui::color_stdout(),
+                        &format!("Stopped interceptor (pid {pid}).")
+                    )
+                );
                 if llmtrim::setup::profile_has_block() {
                     eprintln!(
-                        "⚠ HTTPS_PROXY still points at llmtrim in your shell profile — \
-                         new HTTPS to LLM hosts will fail until you start it again \
-                         (`llmtrim serve --daemon`) or run `llmtrim uninstall`."
+                        "{}",
+                        ui::warn(
+                            ui::color_stderr(),
+                            "HTTPS_PROXY still points at llmtrim in your shell profile — \
+                             new HTTPS to LLM hosts will fail until you start it again \
+                             (llmtrim serve --daemon) or run llmtrim uninstall."
+                        )
                     );
                 }
             }
-            None => println!("No interceptor daemon was running."),
+            None => println!(
+                "{}",
+                ui::note(ui::color_stdout(), "No interceptor daemon was running.")
+            ),
         },
         Commands::Update => llmtrim::update::run()?,
         Commands::Monitor {
@@ -298,11 +383,33 @@ fn main() -> Result<()> {
             json,
             csv,
         } => run_monitor(watch, interval, daily, weekly, monthly, json, csv)?,
-        Commands::Autostart { off, port } => llmtrim::autostart::configure(!off, port)?,
+        Commands::Autostart { off, port } => {
+            llmtrim::autostart::configure(!off, port)?;
+            let color = ui::color_stdout();
+            if off {
+                println!("{}", ui::ok(color, "Autostart disabled."));
+            } else {
+                println!(
+                    "{}",
+                    ui::ok(
+                        color,
+                        &format!("Autostart enabled — llmtrim serve --port {port} runs at login.")
+                    )
+                );
+                println!(
+                    "    {}  llmtrim autostart --off",
+                    ui::paint(color, Tone::Dim, "undo ")
+                );
+            }
+        }
         Commands::Ca => {
             let path = llmtrim::serve::ca_cert_path()?;
             llmtrim::serve::ensure_ca()?; // generate on first run
-            println!("llmtrim local CA: {}", path.display());
+            let color = ui::color_stdout();
+            print!(
+                "{}",
+                ui::panel(color, "llmtrim local CA", &[path.display().to_string()])
+            );
             println!();
             println!("Trust it for your tool, then route its traffic through llmtrim:");
             #[cfg(windows)]
@@ -321,7 +428,13 @@ fn main() -> Result<()> {
                 println!("  llmtrim serve");
             }
             println!();
-            println!("The CA is name-constrained to LLM API domains only.");
+            println!(
+                "{}",
+                ui::note(
+                    ui::color_stdout(),
+                    "The CA is name-constrained to LLM API domains only."
+                )
+            );
         }
         Commands::Eval {
             corpus,
@@ -332,6 +445,8 @@ fn main() -> Result<()> {
             let jsonl = std::fs::read_to_string(&corpus)
                 .with_context(|| format!("failed to read corpus {}", corpus.display()))?;
             let cases = llmtrim::quality::load_corpus(&jsonl, kind)?;
+            // Clamp the user-supplied keep ratio to its valid [0,1] domain at the boundary.
+            let keep_ratio = keep_ratio.clamp(0.0, 1.0);
             let config = llmtrim::config::DenseConfig {
                 retrieve: true,
                 retrieve_keep_ratio: keep_ratio,
@@ -340,15 +455,27 @@ fn main() -> Result<()> {
                 ..Default::default()
             };
             let results = llmtrim::quality::run_recall(&cases, &config)?;
+            let color = ui::color_stdout();
+            // "-36.7%" for a real saving, plain dim "0.0%" when nothing was cut —
+            // a literal "-" prefix would render the odd-looking "-0.0%".
+            let saved_cell = |pct: f64| {
+                if pct > 0.0 {
+                    ui::paint(color, Tone::Accent, &format!("-{pct:.1}%"))
+                } else {
+                    ui::paint(color, Tone::Dim, &format!("{:.1}%", pct.abs()))
+                }
+            };
+            let mut t = ui::table(color, &["case", "recall", "tokens", "saved"]);
             for r in &results {
-                println!(
-                    "  {:<12} recall={:.2}  {} -> {} tok ({:.1}%)",
-                    r.name,
-                    r.recall,
-                    r.tokens_before,
-                    r.tokens_after,
-                    r.savings_pct()
-                );
+                t.add_row(vec![
+                    comfy_table::Cell::new(&r.name),
+                    ui::right(format!("{:.2}", r.recall)),
+                    ui::right(format!("{} → {}", r.tokens_before, r.tokens_after)),
+                    ui::right(saved_cell(r.savings_pct())),
+                ]);
+            }
+            for line in t.to_string().lines() {
+                println!(" {line}");
             }
             let recall = llmtrim::quality::mean_recall(&results);
             let savings = if results.is_empty() {
@@ -356,24 +483,23 @@ fn main() -> Result<()> {
             } else {
                 results.iter().map(|r| r.savings_pct()).sum::<f64>() / results.len() as f64
             };
-            println!(
-                "corpus: {} cases  mean recall={recall:.2}  mean savings={savings:.1}%  (keep_ratio={keep_ratio})",
-                results.len()
+            print!(
+                "\n{}",
+                ui::panel(
+                    color,
+                    "eval",
+                    &[format!(
+                        "{} cases   mean recall {}   mean savings {}   keep_ratio {keep_ratio}",
+                        results.len(),
+                        ui::paint(color, Tone::Bold, &format!("{recall:.2}")),
+                        saved_cell(savings),
+                    )]
+                )
             );
         }
         Commands::Bench(args) => run_bench(args)?,
     }
     Ok(())
-}
-
-/// Percent reduction from `before` to `after` (0 when `before` is 0). The savings
-/// formula shared by the bench/offline/gain reporting paths.
-fn saved_pct(before: f64, after: f64) -> f64 {
-    if before > 0.0 {
-        (before - after) / before * 100.0
-    } else {
-        0.0
-    }
 }
 
 /// Read a key from the process env, falling back to a local `.env` parsed by `dotenvy`
@@ -437,7 +563,7 @@ fn run_bench(args: BenchArgs) -> Result<()> {
     }
     // `--config FILE` overrides the preset with an explicit config (isolates a single flag
     // for measurement); otherwise resolve the named preset.
-    let config = match &args.config {
+    let mut config = match &args.config {
         Some(path) => {
             let t = std::fs::read_to_string(path)
                 .with_context(|| format!("failed to read config {}", path.display()))?;
@@ -446,11 +572,15 @@ fn run_bench(args: BenchArgs) -> Result<()> {
         }
         None => DenseConfig::preset(&args.preset).with_context(|| {
             format!(
-                "unknown preset '{}' (safe|rag|agent|code|aggressive)",
+                "unknown preset '{}' (auto|safe|lossless|rag|agent|code|aggressive|cache|reasoning)",
                 args.preset
             )
         })?,
     };
+    // Clamp ratio knobs to their valid [0,1] domain at the boundary, so an out-of-range
+    // config/preset value can't drive a nonsensical keep fraction downstream.
+    config.retrieve_keep_ratio = config.retrieve_keep_ratio.clamp(0.0, 1.0);
+    config.retrieve_mmr_lambda = config.retrieve_mmr_lambda.clamp(0.0, 1.0);
 
     if args.ablate {
         run_ablation(&cases, &config, &args.preset)
@@ -467,22 +597,39 @@ fn run_ablation(cases: &[BenchCase], config: &DenseConfig, preset: &str) -> Resu
     let configs = bench::ablation_configs(config);
     let rows = bench::run_token_ablation(cases, &configs)?;
     let full_after = rows.first().map(|(_, _, a)| *a).unwrap_or(0) as f64;
+    let color = ui::color_stdout();
     println!(
-        "ablation — input tokens, offline, preset={preset}, {} cases",
-        cases.len()
+        "{}",
+        ui::paint(
+            color,
+            Tone::Bold,
+            &format!(
+                "ablation — input tokens, offline, preset={preset}, {} cases",
+                cases.len()
+            )
+        )
     );
-    println!(
-        "  {:<18} {:>7} {:>7} {:>8} {:>12}",
-        "config", "before", "after", "saved%", "stage saves"
+    let mut t = ui::table(
+        color,
+        &["config", "before", "after", "saved", "stage saves"],
     );
     for (label, before, after) in &rows {
-        let saved = saved_pct(*before as f64, *after as f64);
+        let saved = ui::saved_pct(*before as f64, *after as f64);
         let contribution = if label == "full" {
             String::new()
         } else {
             format!("{:+.0} tok", *after as f64 - full_after)
         };
-        println!("  {label:<18} {before:>7} {after:>7} {saved:>7.1}% {contribution:>12}");
+        t.add_row(vec![
+            comfy_table::Cell::new(label),
+            ui::right(before.to_string()),
+            ui::right(after.to_string()),
+            ui::right(ui::paint(color, Tone::Accent, &format!("{saved:.1}%"))),
+            ui::right(contribution),
+        ]);
+    }
+    for line in t.to_string().lines() {
+        println!(" {line}");
     }
     Ok(())
 }
@@ -500,10 +647,12 @@ fn run_offline(
         before += r.input_tokens_before.0;
         after += r.input_tokens_after.0;
     }
+    // FROZEN wording: bench/scripts/vs_headroom.py regex-parses this exact line
+    // (`input (\d+) -> (\d+) tok \(([\d.]+)% saved\)`). Restyle only in lockstep with it.
     println!(
         "offline: {} cases  input {before} -> {after} tok ({:.1}% saved)  preset={preset}",
         cases.len(),
-        saved_pct(before as f64, after as f64),
+        ui::saved_pct(before as f64, after as f64),
     );
     Ok(())
 }
@@ -517,6 +666,40 @@ fn run_live(
     config: &DenseConfig,
     args: &BenchArgs,
 ) -> Result<()> {
+    // The live A/B talks to OpenRouter's OpenAI-compatible endpoint, and answers are extracted
+    // with the adapter for `kind`. For a non-OpenAI shape the request would post OpenAI-style
+    // but be parsed with the wrong adapter → every case errors → an empty frontier with no
+    // signal. Fail loudly instead, pointing at the paths that DO work for other shapes.
+    if kind != ProviderKind::OpenAi {
+        anyhow::bail!(
+            "live A/B bench only supports --provider openai (the OpenRouter endpoint is \
+             OpenAI-shaped; a {} request would be sent OpenAI-style and mis-parsed, scoring \
+             nothing). Use --offline or --ablate to measure {}-shaped input-token savings, \
+             or re-run with --provider openai.",
+            args.provider,
+            args.provider
+        );
+    }
+    // Guard the obvious self-judging footgun: an LLM-judge corpus where the judge IS the model
+    // under test grades its own answers (optimistic bias). The default judge differs by design.
+    if args.judge_model == args.model
+        && cases
+            .iter()
+            .any(|c| matches!(c.scorer, bench::Scorer::LlmJudge))
+    {
+        eprintln!(
+            "{}",
+            ui::warn(
+                ui::color_stderr(),
+                &format!(
+                    "--judge-model == --model ({}) — the model is grading its own answers; \
+                     pass a different --judge-model for an unbiased judge.",
+                    args.model
+                )
+            )
+        );
+    }
+
     let table = std::fs::read_to_string(&args.pricing)
         .map(|s| bench::load_pricing(&s))
         .unwrap_or_default();
@@ -526,45 +709,92 @@ fn run_live(
         .context("OPENROUTER_API_KEY not set (in env or a local .env)")?;
     let llm = llmtrim::quality::OpenRouterModel::new(api_key, kind)?;
     // BenchScorer covers pass@1 (runs tests), tool-call match, and the LLM judge
-    // (reusing this endpoint), plus resource-free text scoring.
+    // (reusing this endpoint), plus resource-free text scoring. The judge uses a fixed
+    // DIFFERENT model from the one under test so it doesn't grade its own answers.
     let scorer = bench::BenchScorer {
         exec_timeout: 10,
         judge: Some(&llm),
-        judge_model: args.model.clone(),
+        judge_model: args.judge_model.clone(),
         route: args.route.clone(),
     };
 
-    let outcomes = bench::run_ab(cases, config, &llm, counter.as_ref(), &scorer, price)?;
-    for o in &outcomes {
-        println!(
-            "  {:<16} q {:.2}->{:.2}  in {}->{}  out {}->{}",
-            o.name,
-            o.quality_orig,
-            o.quality_comp,
-            o.tokens_in_before,
-            o.tokens_in_after,
-            o.tokens_out_orig,
-            o.tokens_out_comp,
-        );
+    let run = bench::run_ab(cases, config, &llm, counter.as_ref(), &scorer, price)?;
+    let color = ui::color_stdout();
+    let mut t = ui::table(color, &["case", "quality", "input", "output"]);
+    for o in &run.outcomes {
+        let q_tone = if o.quality_comp < o.quality_orig {
+            Tone::Warn
+        } else {
+            Tone::Accent
+        };
+        t.add_row(vec![
+            comfy_table::Cell::new(ui::truncate(&o.name, 24)),
+            ui::right(ui::paint(
+                color,
+                q_tone,
+                &format!("{:.2} → {:.2}", o.quality_orig, o.quality_comp),
+            )),
+            ui::right(format!("{} → {}", o.tokens_in_before, o.tokens_in_after)),
+            ui::right(format!("{} → {}", o.tokens_out_orig, o.tokens_out_comp)),
+        ]);
     }
-    let f = bench::summarize(&outcomes);
-    println!(
-        "\n{} on {} (model={}, n={})\n  input saved   {:.1}%\n  output saved  {:.1}%\n  cost saved    {:.1}%\n  cache used    {:.1}%  (compressed input served from prompt cache)\n  quality       {:.1}% -> {:.1}%  (retention {:+.1}pp, 95%CI ±{:.1})",
-        args.preset,
-        args.corpus.display(),
-        args.model,
-        f.n,
-        f.tokens_in_saved_pct,
-        f.tokens_out_saved_pct,
-        f.cost_saved_pct,
-        f.cache_used_pct,
-        f.quality_orig.mean * 100.0,
-        f.quality_comp.mean * 100.0,
-        f.retention_pp,
-        f.quality_comp.ci95 * 100.0,
+    for line in t.to_string().lines() {
+        println!(" {line}");
+    }
+    let f = bench::summarize(&run);
+    let cache_note = if f.cache_busted {
+        "cache busted (per-arm nonce; cache stage off)"
+    } else {
+        "cache stage under test"
+    };
+    let metric = |v: f64| ui::paint(color, Tone::Accent, &format!("{v:.1}%"));
+    let lines = vec![
+        ui::paint(
+            color,
+            Tone::Dim,
+            &format!(
+                "{} · model {} · judge {}",
+                args.corpus.display(),
+                args.model,
+                args.judge_model
+            ),
+        ),
+        String::new(),
+        format!("input saved   {}", metric(f.tokens_in_saved_pct)),
+        format!("output saved  {}", metric(f.tokens_out_saved_pct)),
+        format!("cost saved    {}", metric(f.cost_saved_pct)),
+        format!("cache used    {:.1}%  ({cache_note})", f.cache_used_pct),
+        format!(
+            "quality       {} → {}  (retention {:+.1}pp, paired 95%CI ±{:.1})",
+            ui::paint(
+                color,
+                Tone::Bold,
+                &format!("{:.1}%", f.quality_orig.mean * 100.0)
+            ),
+            ui::paint(
+                color,
+                Tone::Bold,
+                &format!("{:.1}%", f.quality_comp.mean * 100.0)
+            ),
+            f.retention_pp,
+            f.retention_ci95_pp,
+        ),
+        format!(
+            "cases         {} scored, {} failed (compressed 4xx → 0), {} skipped (transient)",
+            f.n, f.failed, f.skipped
+        ),
+    ];
+    print!(
+        "\n{}",
+        ui::panel(
+            color,
+            &format!("bench · {} · n={}", args.preset, f.n),
+            &lines
+        )
     );
     if let Some(path) = &args.json_out {
-        let rows: Vec<_> = outcomes
+        let rows: Vec<_> = run
+            .outcomes
             .iter()
             .map(|o| {
                 serde_json::json!({
@@ -578,19 +808,35 @@ fn run_live(
             })
             .collect();
         let doc = serde_json::json!({
-            "preset": args.preset, "model": args.model, "corpus": args.corpus.display().to_string(),
+            // Reproducibility: record the config SOURCE (the path when --config overrode the
+            // preset; else the preset name) AND the actually-resolved settings, so two runs
+            // with the same metadata are genuinely the same run (#15).
+            "preset": args.preset,
+            "config_path": args.config.as_ref().map(|p| p.display().to_string()),
+            "config_resolved": config,
+            "model": args.model,
+            "judge_model": args.judge_model,
+            "route": args.route,
+            "corpus": args.corpus.display().to_string(),
             "n": f.n,
+            "failed": f.failed,
+            "skipped": f.skipped,
+            "cache_busted": f.cache_busted,
             "tokens_in_saved_pct": f.tokens_in_saved_pct,
             "tokens_out_saved_pct": f.tokens_out_saved_pct,
             "cost_saved_pct": f.cost_saved_pct,
             "cache_used_pct": f.cache_used_pct,
             "quality_orig": f.quality_orig.mean, "quality_comp": f.quality_comp.mean,
-            "retention_pp": f.retention_pp, "ci95": f.quality_comp.ci95,
+            "retention_pp": f.retention_pp,
+            "retention_ci95_pp": f.retention_ci95_pp,
             "cases": rows,
         });
         std::fs::write(path, serde_json::to_string_pretty(&doc)?)
             .with_context(|| format!("failed to write {}", path.display()))?;
-        eprintln!("wrote {}", path.display());
+        eprintln!(
+            "{}",
+            ui::note(ui::color_stderr(), &format!("wrote {}", path.display()))
+        );
     }
     Ok(())
 }
@@ -609,13 +855,6 @@ fn run_live(
          `cargo run --features live -- bench …`. Use `--offline` (or `--ablate`) for \
          token-only measurement, which needs no extra feature."
     )
-}
-
-/// Rich `status`: daemon state, CA presence, and savings (tokens + input-side cost).
-/// Colour the dashboard only for an interactive terminal that hasn't opted out.
-fn should_color() -> bool {
-    use std::io::IsTerminal;
-    std::env::var_os("NO_COLOR").is_none() && std::io::stdout().is_terminal()
 }
 
 fn period_flag(daily: bool, weekly: bool, monthly: bool) -> Option<Period> {
@@ -684,7 +923,7 @@ fn model_views(tracker: &Tracker) -> Result<Vec<monitor::ModelView>> {
                     .model
                     .unwrap_or_else(|| format!("{} · unknown model", m.provider)),
                 events: m.events,
-                saved_pct: saved_pct(m.input_before as f64, m.input_after as f64),
+                saved_pct: ui::saved_pct(m.input_before as f64, m.input_after as f64),
                 cost_saved,
                 spend,
                 out_spend,
@@ -705,7 +944,8 @@ fn render_snapshot(tracker: &Tracker, color: bool) -> Result<String> {
     // Passive, cached (≤24h), opt-out update notice (LLMTRIM_NO_UPDATE_CHECK to disable).
     if let Some(v) = llmtrim::update::check(false) {
         out.push_str(&format!(
-            "\n  ↑ llmtrim v{v} available — run `llmtrim update`\n"
+            "\n  {} llmtrim v{v} available — run llmtrim update\n",
+            ui::paint(color, Tone::Accent, "↑")
         ));
     }
     Ok(out)
@@ -714,11 +954,18 @@ fn render_snapshot(tracker: &Tracker, color: bool) -> Result<String> {
 /// Live dashboard: clear + repaint each tick, with an input-token save-rate once we have
 /// two samples. Exits on Ctrl-C (default SIGINT).
 fn run_watch(tracker: &Tracker, interval: u64) -> Result<()> {
-    let color = should_color();
+    let color = ui::color_stdout();
+    // Screen-control escapes (clear + home) are for interactive terminals only —
+    // piped/redirected watch output gets appended frames instead of raw escapes.
+    let tty = ui::stdout_is_tty();
     let mut prev: Option<i64> = None;
     loop {
         let summary = tracker.summary()?;
-        let mut frame = String::from("\x1b[2J\x1b[H"); // clear screen + cursor home
+        let mut frame = if tty {
+            String::from("\x1b[2J\x1b[H") // clear screen + cursor home
+        } else {
+            String::new()
+        };
         frame.push_str(&render_snapshot(tracker, color)?);
         if let Some(p) = prev {
             let rate = (summary.saved() - p) as f64 / interval as f64;
@@ -729,11 +976,18 @@ fn run_watch(tracker: &Tracker, interval: u64) -> Result<()> {
             }
         }
         prev = Some(summary.saved());
-        frame.push_str(&format!(
-            "  refreshing every {interval}s · Ctrl-C to exit\n"
+        frame.push_str(&ui::paint(
+            color,
+            Tone::Dim,
+            &format!("  refreshing every {interval}s · Ctrl-C to exit\n"),
         ));
-        print!("{frame}");
-        std::io::stdout().flush().ok();
+        // Write, don't print!: a piped reader that exits (e.g. `| head`) closes the
+        // pipe, and print! would panic on the broken pipe — exit cleanly instead.
+        let mut stdout = std::io::stdout();
+        if stdout.write_all(frame.as_bytes()).is_err() {
+            return Ok(());
+        }
+        stdout.flush().ok();
         std::thread::sleep(std::time::Duration::from_secs(interval));
     }
 }
@@ -764,7 +1018,7 @@ fn run_monitor(
         } else {
             print!(
                 "{}",
-                monitor::period_report(should_color(), period.label(), &rows)
+                monitor::period_report(ui::color_stdout(), period.label(), &rows)
             );
         }
         return Ok(());
@@ -789,7 +1043,7 @@ fn run_monitor(
     if watch {
         run_watch(&tracker, interval.max(1))
     } else {
-        print!("{}", render_snapshot(&tracker, should_color())?);
+        print!("{}", render_snapshot(&tracker, ui::color_stdout())?);
         Ok(())
     }
 }

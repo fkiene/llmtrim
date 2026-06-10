@@ -64,29 +64,26 @@ impl Transform for RetrieveStage {
         // Role-aware classification: prune only bulk *context*, never the
         // instruction (system) or the live question (final user turn). The token
         // gate can't see that dropping the instruction/question breaks the task, so
-        // the protection has to be structural. Decisions computed up front (one
-        // immutable pass) before any mutation.
-        let role_of = |s: &Seg| -> Option<String> {
-            s.idx.and_then(|i| {
-                req.raw()
-                    .pointer(&format!("/messages/{i}/role"))
-                    .and_then(Value::as_str)
-                    .map(str::to_string)
-            })
-        };
+        // the protection has to be structural. Roles come from the provider seam
+        // (`turn_index` + `role_at`), so this works on every wire shape — `/messages`,
+        // Google `/contents`, OpenAI Responses `/input` — not just `/messages`.
+        // Decisions computed up front (one immutable pass) before any mutation.
+        use crate::provider::Role;
         let segs: Vec<Seg> = pointers
             .iter()
             .map(|p| Seg {
-                idx: msg_index(p),
-                len: req.get_str(p).map(str::len).unwrap_or(0),
+                idx: crate::provider::turn_index(p),
+                role: provider.role_at(req, p),
+                len: req.get_str(p).map(|s| s.chars().count()).unwrap_or(0),
                 ptr: p.clone(),
             })
             .collect();
-        // Non-message text (e.g. Anthropic's top-level `system`) is instruction.
-        let is_system = |s: &Seg| role_of(s).as_deref() == Some("system") || s.idx.is_none();
+        // Top-level text (`role_at` → None, e.g. Anthropic `system`) or an explicit
+        // System role is instruction.
+        let is_system = |s: &Seg| s.role.is_none() || s.role == Some(Role::System);
         let last_user = segs
             .iter()
-            .filter(|s| role_of(s).as_deref() == Some("user"))
+            .filter(|s| s.role == Some(Role::User))
             .filter_map(|s| s.idx)
             .max();
         let is_last_user = |s: &Seg| s.idx.is_some() && s.idx == last_user;
@@ -101,12 +98,14 @@ impl Transform for RetrieveStage {
             .map(|s| is_system(s) || (is_last_user(s) && other_long_context))
             .collect();
 
-        // Query anchor = instruction + question (pinned) + any short segments.
+        // Query anchor = the final user turn + any genuinely short segments. Large pinned
+        // system text (a multi-KB instruction / CLAUDE.md) is deliberately excluded: folding
+        // it into the query makes nearly every context sentence "overlap", so pruning
+        // underperforms. The question carries the actual information need.
         let query_text: String = segs
             .iter()
-            .enumerate()
-            .filter(|(k, s)| pinned[*k] || s.len < min)
-            .filter_map(|(_, s)| req.get_str(&s.ptr))
+            .filter(|s| is_last_user(s) || s.len < min)
+            .filter_map(|s| req.get_str(&s.ptr))
             .collect::<Vec<_>>()
             .join(" ");
         let query = lex_words(&query_text);
@@ -120,7 +119,8 @@ impl Transform for RetrieveStage {
             };
             // Prose pruning would corrupt a JSON array/object — leave those to serialize /
             // json_crush, which encode them by shape.
-            if serde_json::from_str::<Value>(text.trim()).is_ok_and(|v| v.is_array() || v.is_object())
+            if serde_json::from_str::<Value>(text.trim())
+                .is_ok_and(|v| v.is_array() || v.is_object())
             {
                 continue;
             }
@@ -220,7 +220,7 @@ fn rebuild_sentence(text: &str, query: &[String], keep_ratio: f64) -> Option<Str
     if kept.len() >= chunks.len() {
         return None; // nothing dropped
     }
-    Some(rebuild(&chunks, &kept))
+    Some(rebuild(&chunks, &kept, PARA_SEP))
 }
 
 /// Chunk-grained retrieval for one context segment: split into chunks, rank (BM25 with
@@ -228,7 +228,7 @@ fn rebuild_sentence(text: &str, query: &[String], keep_ratio: f64) -> Option<Str
 /// a U-shape reorder — always keeping the boundary chunks. `None` when the segment is
 /// too small to prune.
 fn rebuild_chunked(text: &str, query: &[String], cfg: &RetrieveStage) -> Option<String> {
-    let chunks = chunk(text);
+    let (chunks, sep) = chunk_with_sep(text);
     if chunks.len() < 2 {
         return None;
     }
@@ -236,13 +236,20 @@ fn rebuild_chunked(text: &str, query: &[String], cfg: &RetrieveStage) -> Option<
     if keep >= chunks.len() {
         return None; // nothing to drop
     }
+    // Query-less ranking uses TextRank, whose dense n×n similarity matrix is O(n²) memory —
+    // tens of thousands of line-chunks (a large log) would allocate gigabytes and abort the
+    // process. Above the cap, skip centrality entirely and fall back to a head+tail keep
+    // (boundary-safe, O(n)). Never block the user.
     let ranked = if query.is_empty() {
+        if chunks.len() > TEXTRANK_MAX_CHUNKS {
+            return Some(rebuild(&chunks, &head_tail_keep(keep, chunks.len()), sep));
+        }
         textrank_rank(&chunks)
     } else {
         bm25_rank(&chunks, query)
     };
     if !cfg.reorder && !cfg.mmr {
-        return Some(rebuild(&chunks, &select(&ranked, keep, chunks.len())));
+        return Some(rebuild(&chunks, &select(&ranked, keep, chunks.len()), sep));
     }
     let mut chosen = if cfg.mmr {
         mmr_order(&ranked, &chunks, keep, cfg.mmr_lambda)
@@ -251,12 +258,32 @@ fn rebuild_chunked(text: &str, query: &[String], cfg: &RetrieveStage) -> Option<
     };
     pin_boundaries(&mut chosen, chunks.len());
     if cfg.reorder {
-        Some(rebuild_ordered(&chunks, &u_shape(&chosen)))
+        Some(rebuild_ordered(&chunks, &u_shape(&chosen), sep))
     } else {
         chosen.sort_unstable();
         chosen.dedup();
-        Some(rebuild(&chunks, &chosen))
+        Some(rebuild(&chunks, &chosen, sep))
     }
+}
+
+/// Maximum chunk count for which TextRank's dense O(n²) centrality matrix is built. Above
+/// this, the query-less path falls back to a head+tail keep so a huge query-less input can
+/// never allocate unboundedly. ~2000² f64 ≈ 32 MB, a safe ceiling.
+const TEXTRANK_MAX_CHUNKS: usize = 2000;
+
+/// Boundary-safe head+tail selection (no ranking): keep the first ~⅔ and last ~⅓ of the
+/// budget. Used as the O(n) fallback when there are too many chunks for TextRank. Always
+/// includes the boundary chunks (instruction/question live at the edges).
+fn head_tail_keep(keep: usize, n: usize) -> Vec<usize> {
+    let keep = keep.min(n);
+    let head = (keep * 2 / 3).max(1);
+    let tail = keep.saturating_sub(head);
+    let mut idx: Vec<usize> = (0..head.min(n)).collect();
+    idx.extend((n.saturating_sub(tail))..n);
+    pin_boundaries(&mut idx, n);
+    idx.sort_unstable();
+    idx.dedup();
+    idx
 }
 
 /// Ensure the first and last chunk are always kept — a prompt's instruction/question
@@ -270,19 +297,14 @@ fn pin_boundaries(chosen: &mut Vec<usize>, n: usize) {
     }
 }
 
-/// A classified text segment: its JSON pointer, owning message index (when it
-/// lives under `/messages/{i}`), and char length.
+/// A classified text segment: its JSON pointer, owning conversational turn index
+/// (wire-shape agnostic, `None` for top-level system text), normalized role, and char
+/// length.
 struct Seg {
     ptr: String,
     idx: Option<usize>,
+    role: Option<crate::provider::Role>,
     len: usize,
-}
-
-/// The `/messages/{i}` index a content pointer belongs to, if any.
-fn msg_index(pointer: &str) -> Option<usize> {
-    let rest = pointer.strip_prefix("/messages/")?;
-    let end = rest.find('/').unwrap_or(rest.len());
-    rest[..end].parse().ok()
 }
 
 /// Split text into sentence chunks (terminal punctuation followed by space/newline),
@@ -384,15 +406,22 @@ fn prune_sentences(
     (0..n).filter(|&i| keep[i]).collect()
 }
 
-/// Split text into chunks: by blank-line paragraphs, falling back to lines.
-fn chunk(text: &str) -> Vec<String> {
+/// The separator used to rejoin kept chunks — the grain the text was split on, so a
+/// line-chunked log isn't reassembled with paragraph gaps (which would *add* tokens and
+/// often flip the gate to revert).
+const PARA_SEP: &str = "\n\n";
+const LINE_SEP: &str = "\n";
+
+/// Split text into chunks: by blank-line paragraphs, falling back to lines. Returns the
+/// chunks and the matching join separator (so [`rebuild`] rejoins at the same grain).
+fn chunk_with_sep(text: &str) -> (Vec<String>, &'static str) {
     let paras: Vec<String> = text
         .split("\n\n")
         .map(|p| p.trim().to_string())
         .filter(|p| !p.is_empty())
         .collect();
     if paras.len() > 1 {
-        return paras;
+        return (paras, PARA_SEP);
     }
     let lines: Vec<String> = text
         .lines()
@@ -400,10 +429,15 @@ fn chunk(text: &str) -> Vec<String> {
         .filter(|l| !l.is_empty())
         .collect();
     if lines.len() > 1 {
-        lines
+        (lines, LINE_SEP)
     } else {
-        vec![text.trim().to_string()]
+        (vec![text.trim().to_string()], PARA_SEP)
     }
+}
+
+/// Chunks only, when the grain doesn't matter (ranking/centrality/recall tests).
+fn chunk(text: &str) -> Vec<String> {
+    chunk_with_sep(text).0
 }
 
 /// Map the corpus's detected language to the BM25 tokenizer's language (Snowball
@@ -457,9 +491,16 @@ fn bm25_rank(chunks: &[String], query: &[String]) -> Vec<usize> {
     }
     let q = embedder.embed(&query.join(" "));
     let mut order: Vec<usize> = scorer.matches(&q).into_iter().map(|m| m.id).collect();
-    // Append chunks the scorer dropped (score 0) so callers get a full permutation.
-    for i in 0..chunks.len() {
-        if !order.contains(&i) {
+    // Append chunks the scorer dropped (score 0) so callers get a full permutation. Track
+    // seen indices in a bitset so completion is O(n), not O(n²) via `Vec::contains`.
+    let mut seen = vec![false; chunks.len()];
+    for &i in &order {
+        if i < seen.len() {
+            seen[i] = true;
+        }
+    }
+    for (i, &was_seen) in seen.iter().enumerate() {
+        if !was_seen {
             order.push(i);
         }
     }
@@ -553,8 +594,17 @@ fn mmr_order(ranked: &[usize], chunks: &[String], keep: usize, lambda: f64) -> V
         .collect();
     let total = ranked.len();
     let denom = total.max(1) as f64;
+    // Precompute each chunk's rank position once: the MMR loop is k·n and called
+    // `rel()` via a linear `position()` scan, making selection O(k·n²). `rank[i]` is
+    // chunk i's place in `ranked` (or `total` if absent), so `rel` is now O(1).
+    let mut rank = vec![total; chunks.len()];
+    for (pos, &i) in ranked.iter().enumerate() {
+        if i < rank.len() {
+            rank[i] = pos;
+        }
+    }
     let rel = |idx: usize| -> f64 {
-        let pos = ranked.iter().position(|&x| x == idx).unwrap_or(total);
+        let pos = rank.get(idx).copied().unwrap_or(total);
         (total - pos) as f64 / denom
     };
     let sim = |a: usize, b: usize| -> f64 {
@@ -607,8 +657,8 @@ fn u_shape(ranked: &[usize]) -> Vec<usize> {
 
 /// Reassemble chunks in an explicit (reordered) order, with one summary note for
 /// dropped chunks. Used when `reorder` scrambles positions, so per-position elision
-/// markers no longer apply.
-fn rebuild_ordered(chunks: &[String], order: &[usize]) -> String {
+/// markers no longer apply. `sep` is the original chunk grain.
+fn rebuild_ordered(chunks: &[String], order: &[usize], sep: &str) -> String {
     let dropped = chunks.len() - order.len();
     let mut parts: Vec<String> = order.iter().map(|&i| chunks[i].clone()).collect();
     if dropped > 0 {
@@ -616,11 +666,13 @@ fn rebuild_ordered(chunks: &[String], order: &[usize]) -> String {
             "[… {dropped} chunk(s) omitted, kept chunks reordered by relevance …]"
         ));
     }
-    parts.join("\n\n")
+    parts.join(sep)
 }
 
-/// Reassemble kept chunks in order, collapsing each dropped run into one marker.
-fn rebuild(chunks: &[String], keep_idx: &[usize]) -> String {
+/// Reassemble kept chunks in order, collapsing each dropped run into one marker. `sep` is
+/// the original chunk grain ("\n\n" for paragraphs, "\n" for lines) so a line-chunked log
+/// isn't re-expanded with paragraph gaps.
+fn rebuild(chunks: &[String], keep_idx: &[usize], sep: &str) -> String {
     let keep_set: HashSet<usize> = keep_idx.iter().copied().collect();
     let mut parts: Vec<String> = Vec::new();
     let mut dropped = 0usize;
@@ -638,7 +690,7 @@ fn rebuild(chunks: &[String], keep_idx: &[usize]) -> String {
     if dropped > 0 {
         parts.push(format!("[… {dropped} chunk(s) omitted …]"));
     }
-    parts.join("\n\n")
+    parts.join(sep)
 }
 
 #[cfg(test)]
@@ -703,11 +755,44 @@ mod tests {
     #[test]
     fn rebuild_collapses_dropped_runs() {
         let chunks: Vec<String> = (0..5).map(|i| format!("chunk{i}")).collect();
-        let out = rebuild(&chunks, &[0, 3]);
+        let out = rebuild(&chunks, &[0, 3], PARA_SEP);
         assert_eq!(
             out,
             "chunk0\n\n[… 2 chunk(s) omitted …]\n\nchunk3\n\n[… 1 chunk(s) omitted …]"
         );
+    }
+
+    #[test]
+    fn rebuild_rejoins_line_chunks_at_line_grain() {
+        // A log split by LINES must rejoin with "\n", not "\n\n" — doubling newlines
+        // would add tokens and often flip the gate to revert.
+        let log = (0..6)
+            .map(|i| format!("line{i}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let (chunks, sep) = chunk_with_sep(&log);
+        assert_eq!(sep, "\n", "line-chunked text remembers the line grain");
+        let out = rebuild(&chunks, &[0, 1, 5], sep);
+        assert!(
+            !out.contains("\n\n"),
+            "no paragraph gaps in a line-chunked rejoin: {out:?}"
+        );
+        assert!(out.contains("line0\nline1"), "kept lines stay line-joined");
+    }
+
+    #[test]
+    fn head_tail_keep_is_boundary_safe_and_bounded() {
+        // The TextRank OOM fallback: keeps a head+tail slice, always including both edges,
+        // and never more than the budget (plus the two pinned boundaries).
+        let n = 10_000;
+        let keep = head_tail_keep(30, n);
+        assert!(keep.contains(&0) && keep.contains(&(n - 1)), "edges pinned");
+        assert!(
+            keep.len() <= 32,
+            "bounded to the budget, got {}",
+            keep.len()
+        );
+        assert!(keep.windows(2).all(|w| w[0] < w[1]), "sorted, deduped");
     }
 
     #[test]
@@ -960,6 +1045,45 @@ mod tests {
                 .unwrap()
                 .contains("omitted"),
             "bulk context is pruned"
+        );
+    }
+
+    #[test]
+    fn role_aware_works_on_google_contents_shape() {
+        // Gemini wire shape (`/contents/...`, not `/messages/...`). Before the seam fix the
+        // hardcoded `/messages/` parse made every segment look like system → all pinned →
+        // the stage silently no-opped. With `turn_index` + `role_at` it must prune the bulk
+        // context turn while pinning the final short user question.
+        use crate::provider::GoogleProvider;
+        let big = std::iter::repeat_n(doc(), 3)
+            .collect::<Vec<_>>()
+            .join("\n\n");
+        let body = json!({"contents":[
+            {"role":"user","parts":[{"text":big}]},
+            {"role":"user","parts":[{"text":"what was the quarterly revenue for logistics?"}]}],
+            "generationConfig":{"maxOutputTokens":64}});
+        let mut req = Request::from_value(ProviderKind::Google, body);
+        let counter = counter_for(ProviderKind::Google, Some("gemini-1.5-pro")).unwrap();
+        let stages: Vec<Box<dyn Transform>> = vec![Box::new(RetrieveStage {
+            keep_ratio: 0.4,
+            min_segment_chars: 200,
+            reorder: false,
+            mmr: false,
+            mmr_lambda: 0.5,
+            sentence: false,
+        })];
+        let out = pipeline::run(&mut req, &GoogleProvider, counter.as_ref(), &stages);
+        assert!(
+            out.stages[0].applied,
+            "retrieval must run on the Google shape, not no-op"
+        );
+        let kept = req.get_str("/contents/0/parts/0/text").unwrap();
+        assert!(kept.contains("revenue"), "answer chunk retained");
+        assert!(kept.contains("omitted"), "bulk context pruned");
+        assert_eq!(
+            req.get_str("/contents/1/parts/0/text").unwrap(),
+            "what was the quarterly revenue for logistics?",
+            "final user question pinned verbatim"
         );
     }
 

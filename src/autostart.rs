@@ -4,7 +4,9 @@
 use anyhow::{Context, Result};
 use auto_launch::AutoLaunchBuilder;
 
-/// Enable (or disable) running `llmtrim serve --port <port>` at login.
+/// Enable (or disable) running `llmtrim serve --port <port>` at login. Silent on
+/// success — callers (the `autostart` command, `setup`, `uninstall`) own the
+/// messaging so each flow keeps its own voice.
 pub fn configure(enable: bool, port: u16) -> Result<()> {
     let exe = std::env::current_exe().context("could not find the llmtrim executable")?;
     let path = exe.to_string_lossy();
@@ -20,12 +22,9 @@ pub fn configure(enable: bool, port: u16) -> Result<()> {
     if enable {
         auto.enable()
             .map_err(|e| anyhow::anyhow!("failed to enable autostart: {e}"))?;
-        println!("✓ Autostart enabled — `llmtrim serve --port {port}` runs at login.");
-        println!("  disable: llmtrim autostart --off");
     } else {
         auto.disable()
             .map_err(|e| anyhow::anyhow!("failed to disable autostart: {e}"))?;
-        println!("Autostart disabled.");
     }
     Ok(())
 }

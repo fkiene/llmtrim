@@ -100,6 +100,13 @@ fn dedup_lines(text: &str, near: bool, max_dist: u32) -> String {
         group_of[i] = Some(g);
     }
 
+    // Nothing collapsed (every group is a singleton) → return the input verbatim. Joining
+    // `lines()` would otherwise drop a trailing newline / collapse blank runs, making the
+    // caller see a spurious change and pay a needless rewrite + re-tokenization.
+    if counts.iter().all(|&n| n <= 1) {
+        return text.to_string();
+    }
+
     let mut emitted = vec![false; reps.len()];
     let mut out: Vec<String> = Vec::with_capacity(lines.len());
     for (i, line) in lines.iter().enumerate() {
@@ -157,6 +164,25 @@ mod tests {
     fn no_change_when_all_unique() {
         let out = dedup_lines("alpha\nbeta\ngamma", false, 0);
         assert_eq!(out, "alpha\nbeta\ngamma");
+    }
+
+    #[test]
+    fn unique_input_with_trailing_newline_is_returned_verbatim() {
+        // No collapse: must return the input byte-for-byte (incl. the trailing newline),
+        // so the stage doesn't pay a spurious rewrite + re-tokenization.
+        let input = "alpha\nbeta\ngamma\n";
+        let out = dedup_lines(input, false, 0);
+        assert_eq!(
+            out, input,
+            "trailing newline preserved when nothing collapses"
+        );
+        // And the stage-level guard: `deduped != s` must be false here.
+        let input2 = "one\ntwo\n\nthree\n";
+        assert_eq!(
+            dedup_lines(input2, false, 0),
+            input2,
+            "blank runs preserved too"
+        );
     }
 
     #[test]

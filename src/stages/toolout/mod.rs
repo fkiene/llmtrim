@@ -26,16 +26,17 @@
 
 mod detect;
 mod diff;
+mod generated;
 mod grep;
 mod log;
+mod normalize;
 mod plaintext;
+mod signals;
 mod template;
 
 use std::collections::HashSet;
 
 use anyhow::Result;
-use once_cell::sync::Lazy;
-use regex::Regex;
 use serde_json::Value;
 
 use crate::gate::{GateKind, PlanEntry, Scope, Transform};
@@ -146,13 +147,19 @@ impl Transform for ToolOutputStage {
         _plan: &mut Vec<PlanEntry>,
     ) -> Result<()> {
         let pointers = crate::cache_zone::compressible_pointers(req, provider);
-        let texts: Vec<Option<String>> = pointers
+
+        // Pre-pass (feature #6): strip ANSI escapes and collapse carriage-return progress
+        // on each candidate *before* detection. This is lossless for the model and lets
+        // colored cargo/pytest output be detected/scored at all (level tokens are no longer
+        // hidden inside escapes). `changed` flags segments the pre-pass altered so a
+        // normalized-but-not-windowed segment still ships its (smaller) cleaned form.
+        let texts: Vec<Option<(String, bool)>> = pointers
             .iter()
-            .map(|p| req.get_str(p).map(str::to_string))
+            .map(|p| req.get_str(p).map(normalize::normalize))
             .collect();
         let kinds: Vec<Option<OutKind>> = texts
             .iter()
-            .map(|t| t.as_deref().and_then(detect::detect))
+            .map(|t| t.as_ref().and_then(|(t, _)| detect::detect(t)))
             .collect();
 
         // The "ask" = the short segments (instruction / question). Tool-output lines
@@ -160,7 +167,7 @@ impl Transform for ToolOutputStage {
         // the question even when the long segments are unrecognized (PlainText) output.
         let query: HashSet<String> = texts
             .iter()
-            .filter_map(|t| t.as_deref())
+            .filter_map(|t| t.as_ref().map(|(t, _)| t.as_str()))
             .filter(|t| t.lines().count() < self.min_lines)
             .flat_map(lex_words)
             .collect();
@@ -172,33 +179,39 @@ impl Transform for ToolOutputStage {
         };
 
         for ((ptr, text), kind) in pointers.iter().zip(&texts).zip(&kinds) {
-            let Some(text) = text else {
+            let Some((text, normalized)) = text else {
                 continue;
             };
             if text.lines().count() < self.min_lines {
+                // Too small to window, but if the pre-pass cleaned it, ship the cleaner
+                // form (the gate reverts if it didn't actually save tokens).
+                if *normalized {
+                    req.set(ptr, Value::String(text.clone()));
+                }
                 continue;
             }
             let compressed = match kind {
                 Some(OutKind::Log) => log::compress(text, &ctx, &query),
                 Some(OutKind::Grep) => grep::compress(text, &ctx, &query),
                 Some(OutKind::Diff) => diff::compress(text, &ctx, &query),
-                // Unrecognized shape → the redundancy-gated generic fallback ("any tool").
-                None => plaintext::compress(text, &ctx, &query),
+                // Unrecognized shape. First try the generated/lockfile near-total elision
+                // (feature #7, high-confidence machine-noise shapes only); otherwise the
+                // redundancy-gated generic fallback ("any tool").
+                None => {
+                    generated::compress(text).or_else(|| plaintext::compress(text, &ctx, &query))
+                }
             };
             if let Some(compressed) = compressed {
                 req.set(ptr, Value::String(compressed));
+            } else if *normalized {
+                // No per-kind compression, but the pre-pass cleaned it → ship the cleaned
+                // form so the ANSI/CR savings aren't lost.
+                req.set(ptr, Value::String(text.clone()));
             }
         }
         Ok(())
     }
 }
-
-static STRONG: Lazy<Regex> = Lazy::new(|| {
-    Regex::new(r"(?i)\b(error|fatal|fail(?:ed|ure)?|panic(?:ked)?|exception|traceback|segfault|assert(?:ion)?)\b")
-        .unwrap()
-});
-
-static WARN: Lazy<Regex> = Lazy::new(|| Regex::new(r"(?i)\b(warn(?:ing)?|deprecat)").unwrap());
 
 /// Priority assigned to a warning line (also the floor for "this is a warning" in the
 /// summary count).
@@ -207,9 +220,9 @@ pub(crate) const WARN_PRIORITY: f64 = 0.6;
 /// Intrinsic importance of a log/output line in `[0,1]`: failures dominate, warnings
 /// next, indented stack-frame continuations kept above plain noise.
 pub(crate) fn priority(line: &str) -> f64 {
-    if STRONG.is_match(line) {
+    if signals::STRONG.is_match(line) {
         FORCE_PRIORITY
-    } else if WARN.is_match(line) {
+    } else if signals::WARN.is_match(line) {
         WARN_PRIORITY
     } else if line.starts_with(' ') || line.starts_with('\t') {
         0.5 // stack-trace / continuation line — keep with its error
@@ -224,7 +237,10 @@ pub(crate) fn query_bonus(line: &str, query: &HashSet<String>) -> f64 {
     if query.is_empty() {
         return 0.0;
     }
-    let hits = lex_words(line).into_iter().filter(|w| query.contains(w)).count();
+    let hits = lex_words(line)
+        .into_iter()
+        .filter(|w| query.contains(w))
+        .count();
     (hits as f64 * 0.1).min(0.3)
 }
 
@@ -309,9 +325,21 @@ mod tests {
 
     #[test]
     fn auto_goes_aggressive_only_when_big_and_sparse() {
-        assert_eq!(pick_mode(ModeSetting::Auto, 100, 5), Mode::Aggressive, "big + sparse");
-        assert_eq!(pick_mode(ModeSetting::Auto, 100, 40), Mode::Adaptive, "big but dense");
-        assert_eq!(pick_mode(ModeSetting::Auto, 30, 1), Mode::Adaptive, "too small");
+        assert_eq!(
+            pick_mode(ModeSetting::Auto, 100, 5),
+            Mode::Aggressive,
+            "big + sparse"
+        );
+        assert_eq!(
+            pick_mode(ModeSetting::Auto, 100, 40),
+            Mode::Adaptive,
+            "big but dense"
+        );
+        assert_eq!(
+            pick_mode(ModeSetting::Auto, 30, 1),
+            Mode::Adaptive,
+            "too small"
+        );
     }
 
     #[test]

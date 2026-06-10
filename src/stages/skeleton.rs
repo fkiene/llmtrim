@@ -19,9 +19,14 @@ use crate::gate::{GateKind, PlanEntry, Transform};
 use crate::ir::Request;
 use crate::provider::Provider;
 
-/// Fenced code block: ```lang\n…code…``` (DOTALL, non-greedy).
+/// Fenced code block: ```lang[ info-string]\r?\n…code…``` (DOTALL, non-greedy). The info
+/// line may carry a CRLF and a *whitespace-delimited* info string (```` ```rust title=x ````);
+/// group 1 is the language tag (first token), group 2 the rest of the info line including
+/// its leading space (kept on reconstruction), group 3 the code. The info string must start
+/// at whitespace, so a `c#`-style tag isn't silently split into `c`. Without `\r?` and the
+/// info-string allowance, CRLF / titled fences never matched and passed through uncompressed.
 static FENCE: Lazy<Regex> =
-    Lazy::new(|| Regex::new(r"(?s)```([A-Za-z0-9_+-]*)\n(.*?)```").unwrap());
+    Lazy::new(|| Regex::new(r"(?s)```([A-Za-z0-9_+-]*)([ \t][^\r\n]*)?\r?\n(.*?)```").unwrap());
 
 /// Brace-language body stub (valid wherever `/* … */` block comments are).
 const BRACE: &str = "{ /* … */ }";
@@ -265,9 +270,11 @@ fn rewrite_fenced_code(
         };
         let rewritten = FENCE.replace_all(&s, |caps: &regex::Captures| {
             let tag = &caps[1];
-            let code = &caps[2];
+            // Rest of the info line (e.g. " title=x"); optional, preserved on reconstruction.
+            let info = caps.get(2).map_or("", |m| m.as_str());
+            let code = &caps[3];
             match lang_for(tag) {
-                Some(cfg) => format!("```{tag}\n{}```", f(code, &cfg)),
+                Some(cfg) => format!("```{tag}{info}\n{}```", f(code, &cfg)),
                 None => caps[0].to_string(),
             }
         });
@@ -590,6 +597,49 @@ mod tests {
         let now = req.get_str("/messages/0/content").unwrap();
         assert!(now.contains("fn process()") && now.contains("/* … */"));
         assert!(!now.contains("step"), "repeated body lines gone");
+    }
+
+    #[test]
+    fn crlf_and_info_string_fences_are_skeletonized() {
+        use crate::ir::ProviderKind;
+        use crate::pipeline;
+        use crate::provider::OpenAiProvider;
+        use crate::tokenizer::counter_for;
+        use serde_json::json;
+
+        let body_lines = "    let s = a + b;\n    s\n";
+        // CRLF fence with an info string after the language tag — previously never matched.
+        let content = format!(
+            "Look:\r\n```rust title=add.rs\r\nfn add(a: i32, b: i32) -> i32 {{\r\n{body_lines}}}\r\n```"
+        );
+        let body = json!({"model":"gpt-4o","messages":[{"role":"user","content":content}]});
+        let mut req = Request::from_value(ProviderKind::OpenAi, body);
+        let counter = counter_for(ProviderKind::OpenAi, Some("gpt-4o")).unwrap();
+        let stages: Vec<Box<dyn Transform>> = vec![Box::new(SkeletonStage)];
+        let _ = pipeline::run(&mut req, &OpenAiProvider, counter.as_ref(), &stages);
+        let now = req.get_str("/messages/0/content").unwrap();
+        assert!(
+            now.contains("fn add(a: i32, b: i32) -> i32"),
+            "signature kept"
+        );
+        assert!(
+            now.contains("/* … */"),
+            "CRLF + info-string fence was skeletonized"
+        );
+        assert!(now.contains("title=add.rs"), "info string preserved");
+        assert!(!now.contains("let s = a + b"), "body elided");
+    }
+
+    #[test]
+    fn fence_with_unmatched_info_tag_is_left_alone() {
+        // `c#` is not a whitespace-delimited info string after `c`, so the fence must NOT be
+        // misread as plain C — it passes through (lang tag `c#` isn't followed by `\n`).
+        let out = FENCE
+            .replace_all("```c#\nint x;\n```", |c: &regex::Captures| {
+                format!("HIT:{}", &c[1])
+            })
+            .into_owned();
+        assert_eq!(out, "```c#\nint x;\n```", "c# fence not split into c");
     }
 
     #[test]

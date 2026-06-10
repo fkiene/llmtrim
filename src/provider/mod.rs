@@ -17,6 +17,63 @@ pub use anthropic::AnthropicProvider;
 pub use google::GoogleProvider;
 pub use openai::OpenAiProvider;
 
+/// Normalized conversational role of the turn a content pointer belongs to. Lets
+/// role-aware stages (retrieve) work across every wire shape instead of hard-coding
+/// `/messages/{i}`. `None` from [`Provider::role_at`] means top-level system text.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Role {
+    System,
+    User,
+    Assistant,
+    Tool,
+}
+
+impl Role {
+    /// Map a raw provider role string to the neutral role. Unknown → `User` (the
+    /// conservative "compressible context" bucket).
+    pub(crate) fn from_str(s: &str) -> Role {
+        match s {
+            "system" | "developer" => Role::System,
+            "assistant" | "model" => Role::Assistant,
+            "tool" | "function" => Role::Tool,
+            _ => Role::User,
+        }
+    }
+}
+
+/// The conversational turn index a content pointer addresses — the `i` in
+/// `messages[i]` / `input[i]` / `contents[i]` — or `None` for top-level text
+/// (`/system`, `/instructions`, `/systemInstruction/...`). Wire-shape agnostic.
+pub fn turn_index(pointer: &str) -> Option<usize> {
+    let rest = pointer
+        .strip_prefix("/messages/")
+        .or_else(|| pointer.strip_prefix("/input/"))
+        .or_else(|| pointer.strip_prefix("/contents/"))?;
+    rest.split('/').next()?.parse().ok()
+}
+
+/// Append pointers to every JSON string leaf under `value`, rooted at `prefix`
+/// (RFC 6901-escaped). Used for free-form object payloads — tool-call arguments,
+/// `tool_use.input`, Gemini `functionResponse.response` — where the model-readable
+/// text lives in arbitrary string leaves rather than a known field.
+pub(crate) fn string_leaf_pointers(value: &Value, prefix: &str, out: &mut Vec<String>) {
+    match value {
+        Value::String(_) => out.push(prefix.to_string()),
+        Value::Array(a) => {
+            for (i, v) in a.iter().enumerate() {
+                string_leaf_pointers(v, &format!("{prefix}/{i}"), out);
+            }
+        }
+        Value::Object(m) => {
+            for (k, v) in m {
+                let ek = k.replace('~', "~0").replace('/', "~1");
+                string_leaf_pointers(v, &format!("{prefix}/{ek}"), out);
+            }
+        }
+        _ => {}
+    }
+}
+
 /// Provider-specific structural accessors used by the stages.
 pub trait Provider {
     fn kind(&self) -> ProviderKind;
@@ -24,6 +81,18 @@ pub trait Provider {
     /// JSON pointers to every text segment in the request (Stage D scan targets).
     /// Each pointer addresses a JSON string.
     fn content_text_pointers(&self, req: &Request) -> Vec<String>;
+
+    /// The conversational role of the turn a content pointer belongs to, or `None`
+    /// for top-level system text (no enclosing turn — always pinned). Wire-shape
+    /// agnostic seam for role-aware stages; default resolves `/messages/{i}/role`.
+    fn role_at(&self, req: &Request, pointer: &str) -> Option<Role> {
+        let i = turn_index(pointer)?;
+        let role = req
+            .raw()
+            .pointer(&format!("/messages/{i}/role"))
+            .and_then(Value::as_str)?;
+        Some(Role::from_str(role))
+    }
 
     /// Set the maximum output tokens using the provider's field name.
     fn set_max_tokens(&self, req: &mut Request, max_tokens: u64);
@@ -99,10 +168,12 @@ pub(crate) fn message_text_pointers(messages: &Value, out: &mut Vec<String>) {
                     let prefix = format!("/messages/{i}/content/{j}");
                     if let Some(p) = text_block_ptr(block, &prefix) {
                         out.push(p);
-                    } else if block.get("type").and_then(Value::as_str) == Some("tool_result") {
+                        continue;
+                    }
+                    match block.get("type").and_then(Value::as_str) {
                         // Tool results carry the bulk of agent context (file reads, command
                         // output). Their content is a string or an array of text blocks.
-                        match block.get("content") {
+                        Some("tool_result") => match block.get("content") {
                             Some(Value::String(_)) => out.push(format!("{prefix}/content")),
                             Some(Value::Array(inner)) => {
                                 for (k, ib) in inner.iter().enumerate() {
@@ -114,11 +185,43 @@ pub(crate) fn message_text_pointers(messages: &Value, out: &mut Vec<String>) {
                                 }
                             }
                             _ => {}
+                        },
+                        // Anthropic `tool_use` echoes the assistant's call arguments — for
+                        // Write/Edit tools the whole file lives in `input` (resent every turn).
+                        Some("tool_use") => {
+                            if let Some(input) = block.get("input") {
+                                string_leaf_pointers(input, &format!("{prefix}/input"), out);
+                            }
                         }
+                        // Anthropic text `document` blocks: plain-text data we can compress.
+                        Some("document") => {
+                            let textual = block
+                                .pointer("/source/media_type")
+                                .and_then(Value::as_str)
+                                .is_none_or(|m| m.starts_with("text/"));
+                            if textual
+                                && block.pointer("/source/data").is_some_and(Value::is_string)
+                            {
+                                out.push(format!("{prefix}/source/data"));
+                            }
+                        }
+                        _ => {}
                     }
                 }
             }
             _ => {}
+        }
+        // OpenAI assistant history: `tool_calls[].function.arguments` is a JSON-in-a-string
+        // (file writes, patches), model-readable and resent every turn.
+        if let Some(calls) = msg.get("tool_calls").and_then(Value::as_array) {
+            for (j, call) in calls.iter().enumerate() {
+                if call
+                    .pointer("/function/arguments")
+                    .is_some_and(Value::is_string)
+                {
+                    out.push(format!("/messages/{i}/tool_calls/{j}/function/arguments"));
+                }
+            }
         }
     }
 }
@@ -183,7 +286,9 @@ pub fn detect(body: &Value) -> Option<ProviderKind> {
     // under `systemInstruction`, output controls under `generationConfig`.
     if obj.contains_key("contents")
         || obj.contains_key("systemInstruction")
+        || obj.contains_key("system_instruction")
         || obj.contains_key("generationConfig")
+        || obj.contains_key("generation_config")
     {
         return Some(ProviderKind::Google);
     }

@@ -263,9 +263,19 @@ fn gold_of(v: &Value) -> String {
         match v.get(key) {
             Some(Value::String(s)) => return s.clone(),
             Some(Value::Array(a)) => {
-                return a.first().and_then(Value::as_str).unwrap_or("").to_string();
+                // First element as text: a string verbatim, a scalar via to_string()
+                // (so a numeric/bool array gold isn't silently dropped).
+                return match a.first() {
+                    Some(Value::String(s)) => s.clone(),
+                    Some(n @ (Value::Number(_) | Value::Bool(_))) => n.to_string(),
+                    _ => String::new(),
+                };
             }
+            // Objects (e.g. pass@1 `{test, entry_point}`) stay verbatim JSON for the exec scorer.
             Some(obj @ Value::Object(_)) => return obj.to_string(),
+            // Scalars: a numeric/bool gold (`{"gold": 7}`) is a valid reference — render it
+            // so numeric/contains scorers see "7", not "" (which scores 0 on BOTH arms).
+            Some(n @ (Value::Number(_) | Value::Bool(_))) => return n.to_string(),
             _ => {}
         }
     }
@@ -314,10 +324,15 @@ fn extract_code(answer: &str) -> String {
 /// pass@1: run the model's function against HumanEval's `test` harness (`gold` is JSON
 /// `{"test":…, "entry_point":…}`). Returns 1.0 iff the assembled program exits cleanly.
 ///
-/// Runs untrusted model code in a subprocess bounded by `wait-timeout` (no dependency
-/// on an external `timeout` binary; killed if it overruns). A small import preamble
-/// covers the typing/math names HumanEval prompts assume, so a correct body isn't
-/// failed for an import the chat model omitted.
+/// SECURITY: this executes **untrusted, model-generated code**. It is sandboxed only by
+/// best-effort, defense-in-depth measures — NOT a security boundary. Run the bench on
+/// throwaway/CI hosts, never against secrets or production credentials. The hardening:
+/// `python3 -I` (isolated: ignore `PYTHON*` env, user site-packages, and `$CWD` on the
+/// import path), POSIX `setrlimit` caps (CPU seconds, address space, file size, no new
+/// processes) injected as a preamble, and a hard `wait-timeout` wall-clock kill (no
+/// dependency on an external `timeout` binary). A small import preamble covers the
+/// typing/math names HumanEval prompts assume, so a correct body isn't failed for an
+/// import the chat model omitted.
 fn pass_at_one(answer: &str, gold: &str, timeout_secs: u64) -> f64 {
     let Ok(g) = serde_json::from_str::<Value>(gold) else {
         return 0.0;
@@ -329,8 +344,22 @@ fn pass_at_one(answer: &str, gold: &str, timeout_secs: u64) -> f64 {
         return 0.0;
     };
     let code = extract_code(answer);
+    // Best-effort in-process resource caps (POSIX): CPU time ~= the wall budget, 512 MiB
+    // address space, no file writes, no forked subprocesses. Wrapped in try/except so a
+    // platform without `resource` (e.g. Windows) still runs under the wall-clock bound.
+    let limits = format!(
+        "import resource as _r\n\
+         try:\n\
+         \x20   _r.setrlimit(_r.RLIMIT_CPU, ({cpu}, {cpu}))\n\
+         \x20   _r.setrlimit(_r.RLIMIT_AS, (512*1024*1024, 512*1024*1024))\n\
+         \x20   _r.setrlimit(_r.RLIMIT_FSIZE, (0, 0))\n\
+         \x20   _r.setrlimit(_r.RLIMIT_NPROC, (0, 0))\n\
+         except Exception:\n\
+         \x20   pass\n",
+        cpu = timeout_secs.max(1)
+    );
     let preamble = "from typing import List, Dict, Tuple, Optional, Any\nimport math, re, collections, itertools, functools\n";
-    let program = format!("{preamble}\n{code}\n\n{test}\n\ncheck({entry})\n");
+    let program = format!("{limits}{preamble}\n{code}\n\n{test}\n\ncheck({entry})\n");
 
     let seq = EXEC_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let path = std::env::temp_dir().join(format!("dp_passk_{}_{}.py", std::process::id(), seq));
@@ -338,6 +367,7 @@ fn pass_at_one(answer: &str, gold: &str, timeout_secs: u64) -> f64 {
         return 0.0;
     }
     let spawned = std::process::Command::new("python3")
+        .arg("-I") // isolated mode: ignore env/user-site/cwd on the import path
         .arg(&path)
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
@@ -358,17 +388,77 @@ fn pass_at_one(answer: &str, gold: &str, timeout_secs: u64) -> f64 {
     passed as u8 as f64
 }
 
+/// The function name from a tool call, across the common chat shapes:
+/// `{"name":…}`, `{"function":{"name":…}}`, or `{"tool_calls":[{"function":{"name":…}}]}`.
+fn tool_call_name(v: &Value) -> Option<&str> {
+    v.get("name")
+        .and_then(Value::as_str)
+        .or_else(|| v.pointer("/function/name").and_then(Value::as_str))
+        .or_else(|| {
+            v.pointer("/tool_calls/0/function/name")
+                .and_then(Value::as_str)
+        })
+}
+
+/// The argument object keys from a tool call (sorted), for optional arg-key matching.
+/// `arguments` may be a nested object or a JSON-encoded string (OpenAI emits the latter).
+fn tool_call_arg_keys(v: &Value) -> Option<Vec<String>> {
+    let args = v
+        .pointer("/arguments")
+        .or_else(|| v.pointer("/function/arguments"))
+        .or_else(|| v.pointer("/tool_calls/0/function/arguments"))?;
+    let obj = match args {
+        Value::Object(_) => args.clone(),
+        Value::String(s) => serde_json::from_str::<Value>(s).ok()?,
+        _ => return None,
+    };
+    let mut keys: Vec<String> = obj.as_object()?.keys().cloned().collect();
+    keys.sort();
+    Some(keys)
+}
+
 /// Match the model's tool call against the gold call (agent corpora). `gold` is JSON
-/// `{"name":…}`; the answer is the serialized tool call (or prose). Scores 1.0 iff the
-/// expected function name was invoked — the primary tool-selection signal.
+/// `{"name":…}` (optionally `{"arguments":…}`); the answer is the serialized tool call (or
+/// prose). Scores 1.0 iff the expected function name was invoked — the primary tool-selection
+/// signal. The name is matched by **equality** on the extracted call (not substring, which
+/// would let gold `get_weather` match a different `get_weather_forecast`); when the gold
+/// pins argument keys and the answer is a parseable call, those keys must match too.
 fn tool_call_match(answer: &str, gold: &str) -> f64 {
-    let want = serde_json::from_str::<Value>(gold)
-        .ok()
-        .and_then(|g| g.get("name").and_then(Value::as_str).map(str::to_string));
-    match want {
-        Some(name) if answer.contains(&name) => 1.0,
-        _ => 0.0,
+    let Some(gold_v) = serde_json::from_str::<Value>(gold).ok() else {
+        return 0.0;
+    };
+    let Some(want_name) = tool_call_name(&gold_v).map(str::to_string) else {
+        return 0.0;
+    };
+    let want_keys = tool_call_arg_keys(&gold_v);
+
+    // Preferred path: the answer is (or contains) a structured call — compare by equality.
+    if let Ok(ans_v) = serde_json::from_str::<Value>(answer.trim())
+        && let Some(got_name) = tool_call_name(&ans_v)
+    {
+        if got_name != want_name {
+            return 0.0;
+        }
+        // Arg keys only gate when the gold specifies them and the answer carries args.
+        if let (Some(want), Some(got)) = (&want_keys, tool_call_arg_keys(&ans_v))
+            && *want != got
+        {
+            return 0.0;
+        }
+        return 1.0;
     }
+
+    // Fallback for prose answers ("I'll call generate_password now"): whole-word match on the
+    // name (a word boundary, so it won't match a longer different tool name as a substring).
+    let bytes = answer.as_bytes();
+    let is_word = |b: u8| b.is_ascii_alphanumeric() || b == b'_';
+    let matched = answer.match_indices(&want_name).any(|(i, _)| {
+        let before_ok = i == 0 || !is_word(bytes[i - 1]);
+        let after = i + want_name.len();
+        let after_ok = after >= bytes.len() || !is_word(bytes[after]);
+        before_ok && after_ok
+    });
+    if matched { 1.0 } else { 0.0 }
 }
 
 /// Ask a cheap judge model whether `answer` is equivalent to the reference `gold`
@@ -409,11 +499,36 @@ fn judge_score(judge: &dyn Model, judge_model: &str, route: &str, answer: &str, 
         obj.insert("provider".to_string(), routing);
     }
     match judge.answer(&req.to_string()) {
-        // Take the LAST 0/1 the judge emits — its verdict, after any brief reasoning.
-        Ok(t) => match t.chars().rev().find(|c| *c == '0' || *c == '1') {
-            Some('1') => 1.0,
-            _ => 0.0,
-        },
+        Ok(t) => parse_judge_verdict(&t),
+        Err(_) => 0.0,
+    }
+}
+
+/// Interpret a judge reply as 1.0 (correct/equivalent) or 0.0. We constrain the judge to end
+/// with a single digit, so parse the **final standalone token**: the last maximal run of digit
+/// characters in the reply, read as a whole number. This avoids the old last-0/1-char bug where
+/// "score: 10" → '0' → fail and "1.5" → '1'…'5' picks a stray digit. A trailing "1"/"10"/… reads
+/// as correct; "0" reads as incorrect; anything else (no digits) is treated as not-correct.
+fn parse_judge_verdict(reply: &str) -> f64 {
+    // Walk from the end, skipping trailing non-digits (punctuation/whitespace), then take the
+    // contiguous digit run as the verdict token.
+    let chars: Vec<char> = reply.chars().collect();
+    let mut end = chars.len();
+    while end > 0 && !chars[end - 1].is_ascii_digit() {
+        end -= 1;
+    }
+    let mut start = end;
+    while start > 0 && chars[start - 1].is_ascii_digit() {
+        start -= 1;
+    }
+    if start == end {
+        return 0.0; // no digit token at all
+    }
+    let token: String = chars[start..end].iter().collect();
+    // Any non-zero whole number ("1", "10", …) = correct; "0"/"00" = incorrect.
+    match token.parse::<u64>() {
+        Ok(0) => 0.0,
+        Ok(_) => 1.0,
         Err(_) => 0.0,
     }
 }
@@ -566,10 +681,74 @@ pub struct CaseOutcome {
     pub cost_comp: f64,
 }
 
+/// True if an upstream send error is **transient** (worth skipping, not scoring as a
+/// regression): rate limits (429) and server errors (5xx). A deterministic 4xx (e.g. a 400
+/// from a body the compression broke) is NOT transient — that's the worst regression and must
+/// be counted, not silently dropped. Matched on the error message text (the live transport
+/// surfaces the status/string; there's no typed status here).
+fn is_transient_error(msg: &str) -> bool {
+    let m = msg.to_lowercase();
+    [
+        "429",
+        "rate",
+        "temporarily",
+        "overloaded",
+        "timeout",
+        "timed out",
+    ]
+    .iter()
+    .any(|p| m.contains(p))
+        || ["500", "502", "503", "504"].iter().any(|p| m.contains(p))
+}
+
+/// Prepend a unique per-arm nonce as a leading system message, to bust the provider's prefix
+/// cache between the back-to-back ORIGINAL and COMPRESSED sends. Without it, the 2nd call reuses
+/// the 1st's cached prefix and gets a cache discount even when the preset's `cache` stage is OFF,
+/// inflating cost/cache numbers by run ordering. A tiny leading marker shifts the cached prefix
+/// so neither arm hits the other's cache. Non-fatal: returns the input unchanged if it can't parse.
+fn cache_bust(request_json: &str, nonce: &str) -> String {
+    let Ok(mut v) = serde_json::from_str::<Value>(request_json) else {
+        return request_json.to_string();
+    };
+    let Some(obj) = v.as_object_mut() else {
+        return request_json.to_string();
+    };
+    let marker = json!({"role": "system", "content": format!("[bench-nonce {nonce}]")});
+    if let Some(Value::Array(msgs)) = obj.get_mut("messages") {
+        msgs.insert(0, marker);
+    } else if let Some(Value::Array(input)) = obj.get_mut("input") {
+        // Responses-style payloads use `input` instead of `messages`.
+        input.insert(0, marker);
+    }
+    v.to_string()
+}
+
+/// Result of an A/B run: the scored case outcomes plus what happened to cases that didn't
+/// complete cleanly, and whether cache-busting was applied — surfaced so the frontier is honest.
+#[derive(Debug, Clone, Default)]
+pub struct AbRun {
+    pub outcomes: Vec<CaseOutcome>,
+    /// Cases where ORIGINAL succeeded but COMPRESSED failed with a deterministic 4xx
+    /// (compression broke the body): scored `quality_comp = 0.0` and KEPT in `outcomes`.
+    pub failed: usize,
+    /// Cases dropped for a transient reason (429/5xx/timeout on either arm), not scored.
+    pub skipped: usize,
+    /// Whether a per-arm cache-busting nonce was injected (preset's `cache` stage OFF).
+    pub cache_busted: bool,
+}
+
 /// Run the A/B benchmark: for each case, compress with `config`, ask the model on
 /// BOTH the original and the compressed request, score each answer, and price the
 /// round-trip. Output tokens are counted on the answer text with the same tokenizer,
 /// so input and output savings are on one consistent scale.
+///
+/// Measurement hygiene:
+/// - **Cache fairness (#3):** when the preset's `cache` stage is OFF we inject a per-arm nonce
+///   to bust the cross-arm prefix cache AND zero the cached-token discount in costing, so the
+///   compressed arm isn't credited a cache hit it only got from running second.
+/// - **Failure honesty (#4):** a COMPRESSED 4xx after a successful ORIGINAL is the worst
+///   regression — it's scored `quality_comp = 0.0` and counted, not dropped. Only transient
+///   429/5xx are skipped.
 pub fn run_ab(
     cases: &[BenchCase],
     config: &DenseConfig,
@@ -577,37 +756,83 @@ pub fn run_ab(
     counter: &dyn TokenCounter,
     scorer: &BenchScorer,
     pricing: Pricing,
-) -> Result<Vec<CaseOutcome>> {
-    let mut out = Vec::with_capacity(cases.len());
-    for case in cases {
+) -> Result<AbRun> {
+    // When the cache stage is NOT under test, neutralize the cross-arm cache-warm artifact.
+    let cache_under_test =
+        config.cache || (config.auto && cases.iter().any(|c| c.request.contains("cache_control")));
+    let bust = !cache_under_test;
+    let mut run = AbRun {
+        cache_busted: bust,
+        ..Default::default()
+    };
+    for (i, case) in cases.iter().enumerate() {
         let compressed = compress_with_config(&case.request, Some(case.provider), config)?;
 
-        // A single transient API failure shouldn't sink the whole corpus — skip the
-        // case and keep going, so the frontier reflects whatever completed.
-        let (answer_orig, usage_orig) = match model.answer_with_usage(&case.request) {
+        // Per-arm cache-busting nonces (distinct between arms and across cases).
+        let (req_orig, req_comp) = if bust {
+            (
+                cache_bust(&case.request, &format!("o{i}")),
+                cache_bust(&compressed.request_json, &format!("c{i}")),
+            )
+        } else {
+            (case.request.clone(), compressed.request_json.clone())
+        };
+
+        // ORIGINAL is the baseline: if it fails we have nothing to compare against, so skip
+        // the case regardless of cause (can't attribute a regression without the baseline).
+        let (answer_orig, usage_orig) = match model.answer_with_usage(&req_orig) {
             Ok(x) => x,
             Err(e) => {
                 eprintln!("  skip {} (original send): {e}", case.name);
+                run.skipped += 1;
                 continue;
             }
         };
-        let (answer_comp, usage_comp) = match model.answer_with_usage(&compressed.request_json) {
-            Ok(x) => x,
+
+        // COMPRESSED: a transient failure → skip; a deterministic 4xx (compression broke the
+        // request) → score the case 0 and KEEP it, so the worst regression can't vanish.
+        let (answer_comp, usage_comp, comp_failed) = match model.answer_with_usage(&req_comp) {
+            Ok((a, u)) => (a, u, false),
             Err(e) => {
-                eprintln!("  skip {} (compressed send): {e}", case.name);
-                continue;
+                let msg = e.to_string();
+                if is_transient_error(&msg) {
+                    eprintln!("  skip {} (compressed send, transient): {e}", case.name);
+                    run.skipped += 1;
+                    continue;
+                }
+                eprintln!(
+                    "  FAIL {} (compressed send broke the request, scoring 0): {e}",
+                    case.name
+                );
+                run.failed += 1;
+                (String::new(), crate::quality::Usage::default(), true)
             }
         };
 
         let tokens_out_orig = counter.count(&answer_orig);
         let tokens_out_comp = counter.count(&answer_comp);
-        let cached_in_orig = usage_orig.cached_tokens.unwrap_or(0) as usize;
-        let cached_in_comp = usage_comp.cached_tokens.unwrap_or(0) as usize;
+        // Zero the cache discount when busting (cache not under test) so a residual hit can't
+        // inflate savings; keep the real cached counts when the cache stage IS being measured.
+        let cached_in_orig = if bust {
+            0
+        } else {
+            usage_orig.cached_tokens.unwrap_or(0) as usize
+        };
+        let cached_in_comp = if bust {
+            0
+        } else {
+            usage_comp.cached_tokens.unwrap_or(0) as usize
+        };
         let quality_orig = scorer.score(case.scorer, &answer_orig, &case.gold);
-        let quality_comp = scorer.score(case.scorer, &answer_comp, &case.gold);
+        // A broken compressed request scores 0 outright (no answer to grade).
+        let quality_comp = if comp_failed {
+            0.0
+        } else {
+            scorer.score(case.scorer, &answer_comp, &case.gold)
+        };
 
         // Prefer the provider's own token counts for billing/cache; fall back to our
-        // tiktoken counts when the provider doesn't report usage.
+        // tiktoken counts when the provider doesn't report usage (incl. the failed comp arm).
         let prompt_orig = usage_orig.prompt_tokens.map(|x| x as usize);
         let prompt_comp = usage_comp.prompt_tokens.map(|x| x as usize);
         let billed_in_orig = prompt_orig.unwrap_or(compressed.input_tokens_before.0);
@@ -621,7 +846,7 @@ pub fn run_ab(
             .map(|x| x as usize)
             .unwrap_or(tokens_out_comp);
 
-        out.push(CaseOutcome {
+        run.outcomes.push(CaseOutcome {
             name: case.name.clone(),
             tokens_in_before: compressed.input_tokens_before.0,
             tokens_in_after: compressed.input_tokens_after.0,
@@ -637,7 +862,7 @@ pub fn run_ab(
             cost_comp: pricing.cost_cached(billed_in_comp, cached_in_comp, billed_out_comp),
         });
     }
-    Ok(out)
+    Ok(run)
 }
 
 /// A mean with a 95% confidence half-width (normal approximation of the standard
@@ -688,8 +913,17 @@ pub struct Frontier {
     pub quality_comp: Stat,
     /// (compressed − original) quality, in percentage points. Negative = harm.
     pub retention_pp: f64,
+    /// 95% CI half-width (pp) of the **paired** per-case retention delta (comp−orig) — the
+    /// correct interval for the retention number, not the CI of the compressed mean.
+    pub retention_ci95_pp: f64,
     /// Share of compressed input tokens served from the prompt cache (Stage A), %.
     pub cache_used_pct: f64,
+    /// Cases scored 0 because the compressed send failed with a deterministic 4xx (#4).
+    pub failed: usize,
+    /// Cases dropped for a transient reason (429/5xx), not scored (#4).
+    pub skipped: usize,
+    /// Whether a per-arm cache-busting nonce neutralized the cross-arm cache artifact (#3).
+    pub cache_busted: bool,
 }
 
 fn pct_drop(before: f64, after: f64) -> f64 {
@@ -700,8 +934,17 @@ fn pct_drop(before: f64, after: f64) -> f64 {
     }
 }
 
-/// Roll case outcomes into one frontier point.
-pub fn summarize(outcomes: &[CaseOutcome]) -> Frontier {
+/// Roll an A/B run into one frontier point, carrying its failure/skip/cache-busting flags.
+pub fn summarize(run: &AbRun) -> Frontier {
+    let mut f = summarize_outcomes(&run.outcomes);
+    f.failed = run.failed;
+    f.skipped = run.skipped;
+    f.cache_busted = run.cache_busted;
+    f
+}
+
+/// Roll case outcomes into one frontier point (without the run-level flags).
+pub fn summarize_outcomes(outcomes: &[CaseOutcome]) -> Frontier {
     let sum = |f: &dyn Fn(&CaseOutcome) -> f64| outcomes.iter().map(f).sum::<f64>();
     let in_before = sum(&|o| o.tokens_in_before as f64);
     let in_after = sum(&|o| o.tokens_in_after as f64);
@@ -715,6 +958,15 @@ pub fn summarize(outcomes: &[CaseOutcome]) -> Frontier {
     let prompt_comp = sum(&|o| o.prompt_comp as f64);
     let q_orig = mean_ci(&outcomes.iter().map(|o| o.quality_orig).collect::<Vec<_>>());
     let q_comp = mean_ci(&outcomes.iter().map(|o| o.quality_comp).collect::<Vec<_>>());
+    // Paired retention: per-case (comp − orig). Its mean equals the unpaired difference, but
+    // its CI is computed over the per-case deltas (a paired design), which is the honest
+    // interval for "did compression change quality?" — far tighter than the compressed mean's
+    // CI when orig/comp are correlated (they usually are: same case, same gold).
+    let deltas: Vec<f64> = outcomes
+        .iter()
+        .map(|o| o.quality_comp - o.quality_orig)
+        .collect();
+    let delta = mean_ci(&deltas);
     Frontier {
         n: outcomes.len(),
         tokens_in_saved_pct: pct_drop(in_before, in_after),
@@ -722,12 +974,16 @@ pub fn summarize(outcomes: &[CaseOutcome]) -> Frontier {
         cost_saved_pct: pct_drop(cost_orig, cost_comp),
         quality_orig: q_orig,
         quality_comp: q_comp,
-        retention_pp: (q_comp.mean - q_orig.mean) * 100.0,
+        retention_pp: delta.mean * 100.0,
+        retention_ci95_pp: delta.ci95 * 100.0,
         cache_used_pct: if prompt_comp > 0.0 {
             (cached_comp / prompt_comp * 100.0).min(100.0)
         } else {
             0.0
         },
+        failed: 0,
+        skipped: 0,
+        cache_busted: false,
     }
 }
 
@@ -741,8 +997,30 @@ pub fn ablation_configs(base: &DenseConfig) -> Vec<(String, DenseConfig)> {
     let stages: &[(&str, On, Off)] = &[
         ("retrieve", |c| c.retrieve, |c| c.retrieve = false),
         ("serialize", |c| c.serialize, |c| c.serialize = false),
+        (
+            "serialize_flatten",
+            |c| c.serialize_flatten,
+            |c| c.serialize_flatten = false,
+        ),
+        (
+            "serialize_buckets",
+            |c| c.serialize_buckets,
+            |c| c.serialize_buckets = false,
+        ),
         ("dedup", |c| c.dedup, |c| c.dedup = false),
+        ("dedup_near", |c| c.dedup_near, |c| c.dedup_near = false),
         ("hygiene", |c| c.hygiene, |c| c.hygiene = false),
+        (
+            "strip_base64",
+            |c| c.strip_base64,
+            |c| c.strip_base64 = false,
+        ),
+        (
+            "normalize_unicode",
+            |c| c.normalize_unicode,
+            |c| c.normalize_unicode = false,
+        ),
+        ("json_crush", |c| c.json_crush, |c| c.json_crush = false),
         (
             "output_control",
             |c| c.output_control,
@@ -752,6 +1030,9 @@ pub fn ablation_configs(base: &DenseConfig) -> Vec<(String, DenseConfig)> {
         ("minify_code", |c| c.minify_code, |c| c.minify_code = false),
         ("ngram", |c| c.ngram, |c| c.ngram = false),
         ("tool_select", |c| c.tool_select, |c| c.tool_select = false),
+        ("toolout", |c| c.toolout, |c| c.toolout = false),
+        ("multimodal", |c| c.multimodal, |c| c.multimodal = false),
+        ("cache", |c| c.cache, |c| c.cache = false),
     ];
     let mut out = vec![("full".to_string(), base.clone())];
     for (name, is_on, turn_off) in stages {
@@ -785,15 +1066,17 @@ pub fn run_token_ablation(
     Ok(rows)
 }
 
-/// Render frontier rows (one per corpus×preset) as a Markdown table for the README.
+/// Render frontier rows (one per corpus×preset) as a Markdown table for the README. The
+/// retention column carries the **paired** delta CI; `fail/skip` surfaces broken-compressed
+/// (scored 0) and transient-dropped case counts so a clean table can't hide regressions.
 pub fn frontier_markdown(rows: &[(String, Frontier)]) -> String {
     let mut s = String::from(
-        "| run | n | input saved | output saved | cost saved | cache used | quality (orig→comp) | retention |\n\
-         |---|--:|--:|--:|--:|--:|:--:|--:|\n",
+        "| run | n | input saved | output saved | cost saved | cache used | quality (orig→comp) | retention | fail/skip |\n\
+         |---|--:|--:|--:|--:|--:|:--:|--:|--:|\n",
     );
     for (label, f) in rows {
         s.push_str(&format!(
-            "| {label} | {} | {:.1}% | {:.1}% | {:.1}% | {:.1}% | {:.0}%→{:.0}% | {:+.1}pp |\n",
+            "| {label} | {} | {:.1}% | {:.1}% | {:.1}% | {:.1}% | {:.0}%→{:.0}% | {:+.1}±{:.1}pp | {}/{} |\n",
             f.n,
             f.tokens_in_saved_pct,
             f.tokens_out_saved_pct,
@@ -802,6 +1085,9 @@ pub fn frontier_markdown(rows: &[(String, Frontier)]) -> String {
             f.quality_orig.mean * 100.0,
             f.quality_comp.mean * 100.0,
             f.retention_pp,
+            f.retention_ci95_pp,
+            f.failed,
+            f.skipped,
         ));
     }
     s
@@ -911,7 +1197,7 @@ mod tests {
             judge_model: String::new(),
             route: String::new(),
         };
-        let outcomes = run_ab(
+        let run = run_ab(
             &cases,
             &cfg,
             &model,
@@ -920,17 +1206,152 @@ mod tests {
             pricing_for("gpt-4o"),
         )
         .unwrap();
-        assert_eq!(outcomes.len(), 1);
-        let o = &outcomes[0];
+        assert_eq!(run.outcomes.len(), 1);
+        assert_eq!(run.failed, 0);
+        assert_eq!(run.skipped, 0);
+        assert!(
+            run.cache_busted,
+            "default preset has cache off → busting on"
+        );
+        let o = &run.outcomes[0];
         assert_eq!(o.quality_orig, 1.0);
         assert_eq!(o.quality_comp, 1.0);
         assert!(o.tokens_out_orig > 0);
         assert!(o.cost_orig > 0.0, "gpt-4o is priced");
+        assert_eq!(o.cached_in_comp, 0, "cache discount zeroed when busting");
 
-        let f = summarize(&outcomes);
+        let f = summarize(&run);
         assert_eq!(f.n, 1);
         assert_eq!(f.retention_pp, 0.0, "stub answers identically → no harm");
+        assert_eq!(f.retention_ci95_pp, 0.0, "n=1 paired delta → CI 0");
         assert_eq!(f.quality_comp.mean, 1.0);
+    }
+
+    /// A stub model that fails the COMPRESSED arm (second `answer_with_usage` call) with a
+    /// chosen error — to drive the #4 fail-vs-skip classification deterministically.
+    struct FailCompModel {
+        ok_answer: String,
+        comp_error: String,
+        calls: std::cell::Cell<u32>,
+    }
+    impl Model for FailCompModel {
+        fn answer(&self, _req: &str) -> Result<String> {
+            unreachable!("bench uses answer_with_usage")
+        }
+        fn answer_with_usage(&self, _req: &str) -> Result<(String, crate::quality::Usage)> {
+            let n = self.calls.get();
+            self.calls.set(n + 1);
+            if n == 0 {
+                Ok((self.ok_answer.clone(), crate::quality::Usage::default()))
+            } else {
+                Err(anyhow::anyhow!("{}", self.comp_error))
+            }
+        }
+    }
+
+    fn one_case() -> Vec<BenchCase> {
+        use serde_json::json;
+        vec![BenchCase {
+            name: "a".into(),
+            request: json!({"model":"m","messages":[{"role":"user","content":"q"}]}).to_string(),
+            provider: ProviderKind::OpenAi,
+            gold: "42".into(),
+            scorer: Scorer::NumericExact,
+        }]
+    }
+
+    #[test]
+    fn compressed_4xx_is_scored_zero_not_dropped() {
+        use crate::tokenizer::counter_for;
+        let counter = counter_for(ProviderKind::OpenAi, Some("gpt-4o")).unwrap();
+        let model = FailCompModel {
+            ok_answer: "The answer is 42.".into(),
+            comp_error: "OpenRouter request failed: 400 Bad Request (invalid body)".into(),
+            calls: std::cell::Cell::new(0),
+        };
+        let scorer = BenchScorer {
+            exec_timeout: 5,
+            judge: None,
+            judge_model: String::new(),
+            route: String::new(),
+        };
+        let run = run_ab(
+            &one_case(),
+            &DenseConfig::default(),
+            &model,
+            counter.as_ref(),
+            &scorer,
+            pricing_for("gpt-4o"),
+        )
+        .unwrap();
+        // The worst regression is COUNTED, not silently skipped.
+        assert_eq!(run.outcomes.len(), 1, "4xx case kept");
+        assert_eq!(run.failed, 1, "counted as failed");
+        assert_eq!(run.skipped, 0);
+        assert_eq!(
+            run.outcomes[0].quality_comp, 0.0,
+            "broken compressed scores 0"
+        );
+        assert_eq!(run.outcomes[0].quality_orig, 1.0, "original still graded");
+        let f = summarize(&run);
+        assert_eq!(f.failed, 1);
+        assert!(
+            f.retention_pp < 0.0,
+            "regression shows as negative retention"
+        );
+    }
+
+    #[test]
+    fn compressed_transient_error_is_skipped() {
+        use crate::tokenizer::counter_for;
+        let counter = counter_for(ProviderKind::OpenAi, Some("gpt-4o")).unwrap();
+        let model = FailCompModel {
+            ok_answer: "The answer is 42.".into(),
+            comp_error: "OpenRouter request failed: 429 Too Many Requests".into(),
+            calls: std::cell::Cell::new(0),
+        };
+        let scorer = BenchScorer {
+            exec_timeout: 5,
+            judge: None,
+            judge_model: String::new(),
+            route: String::new(),
+        };
+        let run = run_ab(
+            &one_case(),
+            &DenseConfig::default(),
+            &model,
+            counter.as_ref(),
+            &scorer,
+            pricing_for("gpt-4o"),
+        )
+        .unwrap();
+        assert_eq!(run.outcomes.len(), 0, "transient case dropped");
+        assert_eq!(run.skipped, 1, "counted as skipped");
+        assert_eq!(run.failed, 0);
+    }
+
+    #[test]
+    fn transient_error_classifier() {
+        assert!(is_transient_error("429 Too Many Requests"));
+        assert!(is_transient_error("503 Service Unavailable"));
+        assert!(is_transient_error("upstream temporarily overloaded"));
+        assert!(!is_transient_error("400 Bad Request"));
+        assert!(!is_transient_error("422 Unprocessable Entity"));
+    }
+
+    #[test]
+    fn cache_bust_prepends_unique_nonce() {
+        use serde_json::json;
+        let req = json!({"model":"m","messages":[{"role":"user","content":"hi"}]}).to_string();
+        let a = cache_bust(&req, "o0");
+        let b = cache_bust(&req, "c0");
+        assert!(a.contains("bench-nonce o0") && b.contains("bench-nonce c0"));
+        assert_ne!(a, b, "arms get distinct leading nonces");
+        let v: Value = serde_json::from_str(&a).unwrap();
+        assert_eq!(
+            v["messages"][0]["role"], "system",
+            "nonce is the new leading message"
+        );
     }
 
     #[test]
@@ -1014,13 +1435,18 @@ mod tests {
                 cost_comp: 0.5,
             },
         ];
-        let f = summarize(&outcomes);
+        let f = summarize_outcomes(&outcomes);
         assert_eq!(f.tokens_in_saved_pct, 40.0);
         assert_eq!(f.tokens_out_saved_pct, 40.0);
         assert_eq!(f.cost_saved_pct, 50.0);
         assert_eq!(f.quality_orig.mean, 1.0);
         assert_eq!(f.quality_comp.mean, 0.5);
-        assert_eq!(f.retention_pp, -50.0, "one case broke → 50pp drop");
+        assert_eq!(
+            f.retention_pp, -50.0,
+            "one case broke → 50pp drop (paired mean)"
+        );
+        // Paired delta CI over [0, -1]: non-zero (n=2), the honest interval for the delta.
+        assert!(f.retention_ci95_pp > 0.0, "paired retention CI is reported");
         assert_eq!(f.cache_used_pct, 50.0, "60 cached / 120 compressed input");
     }
 
@@ -1200,12 +1626,122 @@ mod tests {
                 n: 10,
             },
             retention_pp: -2.0,
+            retention_ci95_pp: 1.5,
             cache_used_pct: 25.0,
+            failed: 1,
+            skipped: 2,
+            cache_busted: true,
         };
         let md = frontier_markdown(&[("gsm8k-aggressive".into(), f)]);
         assert!(md.contains("| run |"));
         assert!(md.contains("cache used"));
+        assert!(md.contains("fail/skip"));
         assert!(md.contains("gsm8k-aggressive"));
-        assert!(md.contains("-2.0pp"));
+        assert!(md.contains("-2.0±1.5pp"), "paired retention CI rendered");
+        assert!(md.contains("1/2"), "fail/skip counts rendered");
+    }
+
+    #[test]
+    fn gold_of_handles_scalar_and_array_numbers() {
+        use serde_json::json;
+        // Numeric gold: {"gold": 7} → "7" (not "", which would score 0 on both arms).
+        assert_eq!(gold_of(&json!({"gold": 7})), "7");
+        assert_eq!(gold_of(&json!({"gold": true})), "true");
+        // Numeric array gold → first element stringified.
+        assert_eq!(gold_of(&json!({"answer": [7, 8]})), "7");
+        // String and object forms still work.
+        assert_eq!(gold_of(&json!({"gold": "paris"})), "paris");
+        assert!(gold_of(&json!({"gold": {"test": "x"}})).contains("test"));
+    }
+
+    #[test]
+    fn tool_call_match_requires_name_equality_not_substring() {
+        // gold get_weather must NOT match a different, longer tool name as a substring.
+        let gold = serde_json::json!({"name": "get_weather"}).to_string();
+        assert_eq!(
+            tool_call_match("{\"name\":\"get_weather_forecast\"}", &gold),
+            0.0,
+            "substring of a different tool name is not a match"
+        );
+        assert_eq!(tool_call_match("{\"name\":\"get_weather\"}", &gold), 1.0);
+        // nested function shape
+        assert_eq!(
+            tool_call_match("{\"function\":{\"name\":\"get_weather\"}}", &gold),
+            1.0
+        );
+        // prose word-boundary match still works; a longer word does not.
+        assert_eq!(tool_call_match("I'll call get_weather now", &gold), 1.0);
+        assert_eq!(tool_call_match("calling get_weatherly", &gold), 0.0);
+    }
+
+    #[test]
+    fn tool_call_match_checks_arg_keys_when_gold_pins_them() {
+        let gold =
+            serde_json::json!({"name": "f", "arguments": {"city": "x", "unit": "c"}}).to_string();
+        // Same name + same arg keys → match (values are free).
+        assert_eq!(
+            tool_call_match(
+                "{\"name\":\"f\",\"arguments\":{\"city\":\"paris\",\"unit\":\"k\"}}",
+                &gold
+            ),
+            1.0
+        );
+        // Same name but missing an arg key → no match.
+        assert_eq!(
+            tool_call_match("{\"name\":\"f\",\"arguments\":{\"city\":\"paris\"}}", &gold),
+            0.0
+        );
+        // OpenAI emits arguments as a JSON-encoded string — handled.
+        assert_eq!(
+            tool_call_match(
+                "{\"name\":\"f\",\"arguments\":\"{\\\"city\\\":\\\"x\\\",\\\"unit\\\":\\\"c\\\"}\"}",
+                &gold
+            ),
+            1.0
+        );
+    }
+
+    #[test]
+    fn judge_verdict_parses_final_token_robustly() {
+        // The old last-0/1-char bug: "score: 10" → must be correct (10), not fail on '0'.
+        assert_eq!(parse_judge_verdict("score: 10"), 1.0);
+        assert_eq!(parse_judge_verdict("Verdict: 1"), 1.0);
+        assert_eq!(parse_judge_verdict("0"), 0.0);
+        assert_eq!(parse_judge_verdict("The answer is wrong. 0"), 0.0);
+        assert_eq!(parse_judge_verdict("reasoning... finally 1."), 1.0);
+        // No digit → not correct (never panics).
+        assert_eq!(parse_judge_verdict("undecided"), 0.0);
+        assert_eq!(parse_judge_verdict(""), 0.0);
+    }
+
+    #[test]
+    fn ablation_covers_newer_stages() {
+        // A config with the newer stages on should produce ablation rows for each.
+        let cfg = DenseConfig {
+            toolout: true,
+            json_crush: true,
+            strip_base64: true,
+            normalize_unicode: true,
+            dedup_near: true,
+            multimodal: true,
+            cache: true,
+            serialize_flatten: true,
+            serialize_buckets: true,
+            ..DenseConfig::default()
+        };
+        let labels: Vec<String> = ablation_configs(&cfg).into_iter().map(|(l, _)| l).collect();
+        for stage in [
+            "-toolout",
+            "-json_crush",
+            "-strip_base64",
+            "-normalize_unicode",
+            "-dedup_near",
+            "-multimodal",
+            "-cache",
+            "-serialize_flatten",
+            "-serialize_buckets",
+        ] {
+            assert!(labels.contains(&stage.to_string()), "ablates {stage}");
+        }
     }
 }
