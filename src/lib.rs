@@ -85,7 +85,11 @@ fn stages_for(_provider: ProviderKind, config: &config::DenseConfig) -> Vec<Box<
     }
     // Stage C (input, lossy): skeletonize non-focus code in fenced blocks.
     if config.skeletonize {
-        stages.push(Box::new(stages::SkeletonStage));
+        stages.push(Box::new(stages::SkeletonStage {
+            keep_full_top_k: config.skeleton_keep_full_top_k,
+            drop_unmatched: config.skeleton_drop_unmatched,
+            drop_min_body_lines: config.skeleton_drop_min_body_lines,
+        }));
     }
     // Stage C (input, lossless): minify brace-language code (strip whitespace).
     if config.minify_code {

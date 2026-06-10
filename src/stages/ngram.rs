@@ -154,7 +154,9 @@ fn boundary_ok(t: &str, at: usize, before: bool) -> bool {
 }
 
 /// Count whole-word occurrences of `phrase` in `t`: substring matches whose surrounding
-/// chars are both word boundaries. Non-overlapping, scanning left to right.
+/// chars are both word boundaries. Non-overlapping, scanning left to right. Production
+/// counting moved into the suffix-array miner; kept as the word-boundary test oracle.
+#[cfg(test)]
 fn count_word_bounded(t: &str, phrase: &str) -> usize {
     let mut n = 0;
     let mut start = 0;

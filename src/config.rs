@@ -129,6 +129,19 @@ pub struct DenseConfig {
     /// Stage C — skeletonize fenced code blocks (drop function bodies to stubs).
     /// Lossy; off by default.
     pub skeletonize: bool,
+    /// Stage C — relevance-graded skeletonization (HCP, arXiv:2406.18294): the N
+    /// functions whose identifiers most overlap the conversation query keep their full
+    /// bodies; the rest are skeletonized. Counted across the whole request; 0 disables
+    /// the keep-full tier (pure uniform skeletonization). Default 5.
+    pub skeleton_keep_full_top_k: usize,
+    /// Stage C — drop the *signature too* (not just the body) for functions with zero
+    /// query overlap whose body exceeds `skeleton_drop_min_body_lines`. More aggressive
+    /// than skeletonization; OFF by default (conservative — preserves the signature tier).
+    pub skeleton_drop_unmatched: bool,
+    /// Stage C — minimum body line count before a zero-overlap function is eligible to be
+    /// dropped entirely (only when `skeleton_drop_unmatched`). Guards small functions whose
+    /// signature is most of their tokens. Default 8.
+    pub skeleton_drop_min_body_lines: usize,
     /// Stage C — minify fenced brace-language code: strip indentation + blank lines,
     /// protecting string literals (arXiv:2508.13666). Semantically lossless; opt-in.
     pub minify_code: bool,
@@ -187,6 +200,9 @@ impl Default for DenseConfig {
             toolout_template: true,
             toolout_mode: "auto".to_string(),
             skeletonize: false,
+            skeleton_keep_full_top_k: 5,
+            skeleton_drop_unmatched: false,
+            skeleton_drop_min_body_lines: 8,
             minify_code: false,
             multimodal: false,
             image_detail: None,
@@ -340,6 +356,10 @@ impl DenseConfig {
                 c.retrieve_sentence = true;
                 c.retrieve_keep_ratio = 0.35;
                 c.skeletonize = true;
+                // Most aggressive skeleton tier: drop zero-overlap large bodies signature
+                // and all (HCP — cross-file non-dependency code is mostly noise). Bundled
+                // here only; the keep-full top-k upgrade is on for every skeletonizing preset.
+                c.skeleton_drop_unmatched = true;
                 c.minify_code = true;
                 c.dedup_near = true;
                 c.ngram = true;
