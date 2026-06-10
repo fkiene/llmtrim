@@ -203,14 +203,21 @@ fn select_tools(req: &mut Request, provider: &dyn Provider) {
     }
 }
 
-/// Names of tools already invoked in the conversation — OpenAI `tool_calls[].function.name`
-/// and Anthropic `{type: tool_use, name}` content blocks.
+/// Names of tools already invoked in the conversation — OpenAI `tool_calls[].function.name`,
+/// Anthropic `{type: tool_use, name}` content blocks, and Google `parts[].functionCall.name`.
 fn tools_used_in_history(req: &Request) -> HashSet<String> {
     let mut used = HashSet::new();
-    let Some(messages) = req.raw().get("messages").and_then(Value::as_array) else {
+    let raw = req.raw();
+    // OpenAI/Anthropic use "messages"; Google uses "contents".
+    let turns = raw
+        .get("messages")
+        .or_else(|| raw.get("contents"))
+        .and_then(Value::as_array);
+    let Some(turns) = turns else {
         return used;
     };
-    for m in messages {
+    for m in turns {
+        // OpenAI: tool_calls[].function.name
         if let Some(calls) = m.get("tool_calls").and_then(Value::as_array) {
             for c in calls {
                 if let Some(n) = c.pointer("/function/name").and_then(Value::as_str) {
@@ -218,11 +225,20 @@ fn tools_used_in_history(req: &Request) -> HashSet<String> {
                 }
             }
         }
+        // Anthropic: content[].{type:tool_use, name}
         if let Some(blocks) = m.get("content").and_then(Value::as_array) {
             for b in blocks {
                 if b.get("type").and_then(Value::as_str) == Some("tool_use")
                     && let Some(n) = b.get("name").and_then(Value::as_str)
                 {
+                    used.insert(n.to_string());
+                }
+            }
+        }
+        // Google: parts[].functionCall.name
+        if let Some(parts) = m.get("parts").and_then(Value::as_array) {
+            for p in parts {
+                if let Some(n) = p.pointer("/functionCall/name").and_then(Value::as_str) {
                     used.insert(n.to_string());
                 }
             }
@@ -536,6 +552,31 @@ mod tests {
         assert!(
             desc.chars().count() <= 51,
             "description trimmed to max+ellipsis"
+        );
+    }
+
+    #[test]
+    fn google_function_call_not_dropped() {
+        // tools_used_in_history must find Google functionCall parts so select_tools
+        // never orphans a tool already invoked in a Gemini conversation.
+        let body = json!({
+            "contents": [
+                {"role": "user", "parts": [{"text": "what is the weather?"}]},
+                {"role": "model", "parts": [{"functionCall": {"name": "get_weather", "args": {"city": "Paris"}}}]},
+                {"role": "user", "parts": [{"functionResponse": {"name": "get_weather", "response": {"temp": "15°C"}}}]}
+            ],
+            "tools": [{"functionDeclarations": [
+                {"name": "get_weather", "description": "weather forecast"},
+                {"name": "run_sql", "description": "database query"}
+            ]}]
+        });
+        // Ensure get_weather is recognised as already-used; a full pipeline run would
+        // keep it even if the keyword selector otherwise wouldn't.
+        let req = Request::from_value(ProviderKind::Google, body);
+        let used = tools_used_in_history(&req);
+        assert!(
+            used.contains("get_weather"),
+            "Google functionCall must be tracked"
         );
     }
 }

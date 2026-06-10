@@ -80,8 +80,9 @@ impl Transform for SerializeStage {
                 // neither beats JSON). Otherwise TOON only.
                 let toon = to_toon(&value).context("TOON encode failed")?;
                 if self.csv {
-                    let csv = to_csv(&value);
-                    if csv.len() <= toon.len() {
+                    if let Some(csv) = to_csv(&value)
+                        && csv.len() <= toon.len()
+                    {
                         csv_used = true;
                         Some(csv)
                     } else {
@@ -94,11 +95,18 @@ impl Transform for SerializeStage {
                 }
             } else if is_columnar_array(&value, self.min_rows) {
                 // Near-uniform records (a few rows carry extra/missing keys): one CSV
-                // table with a *union* header, missing cells left empty. Lossless —
-                // nothing dropped — and the big win on real arrays that aren't strictly
+                // table with a *union* header, missing cells left empty. Lossy at the
+                // type level: null, "", and a missing key all render as an empty cell,
+                // and "5" vs 5 are identical in CSV — the model can read the values but
+                // cannot distinguish these cases. InputTokens-gated so the stage reverts
+                // if it doesn't save tokens. Big win on arrays that aren't strictly
                 // identical (the case `is_uniform_flat_array` rejects).
-                csv_used = true;
-                Some(to_csv(&value))
+                if let Some(csv) = to_csv(&value) {
+                    csv_used = true;
+                    Some(csv)
+                } else {
+                    None
+                }
             } else if let Some(blocks) = self
                 .buckets
                 .then(|| bucket_encode(&value, self.min_rows))
@@ -308,23 +316,16 @@ const CSV_LEGEND: &str = include_str!("../../prompts/csv_legend.txt");
 /// across the array, frequency-ordered); a row missing a key gets an empty cell, so a few
 /// anomaly rows with extra keys don't break it and nothing is dropped. The model reads the
 /// table, so no rehydration is recorded.
-fn to_csv(v: &Value) -> String {
-    let Some(arr) = v.as_array() else {
-        return String::new();
-    };
-    if arr.is_empty() {
-        return String::new();
-    }
+fn to_csv(v: &Value) -> Option<String> {
+    let arr = v.as_array().filter(|a| !a.is_empty())?;
     let keys = union_keys(arr);
     if keys.is_empty() {
-        return String::new();
+        return None;
     }
     let mut wtr = csv::WriterBuilder::new()
         .terminator(csv::Terminator::Any(b'\n'))
         .from_writer(Vec::new());
-    if wtr.write_record(&keys).is_err() {
-        return String::new();
-    }
+    wtr.write_record(&keys).ok()?;
     for row in arr {
         let obj = row.as_object();
         let cells: Vec<String> = keys
@@ -335,16 +336,14 @@ fn to_csv(v: &Value) -> String {
                     .unwrap_or_default()
             })
             .collect();
-        if wtr.write_record(&cells).is_err() {
-            return String::new();
-        }
+        wtr.write_record(&cells).ok()?;
     }
-    match wtr.into_inner() {
-        Ok(bytes) => String::from_utf8_lossy(&bytes)
+    let bytes = wtr.into_inner().ok()?;
+    Some(
+        String::from_utf8_lossy(&bytes)
             .trim_end_matches('\n')
             .to_string(),
-        Err(_) => String::new(),
-    }
+    )
 }
 
 fn scalar_str(v: &Value) -> String {
@@ -579,7 +578,10 @@ mod tests {
     #[test]
     fn format_routing_keeps_smaller_encoding() {
         let arr = records(25);
-        let smaller = to_toon(&arr).unwrap().len().min(to_csv(&arr).len());
+        let smaller = to_toon(&arr)
+            .unwrap()
+            .len()
+            .min(to_csv(&arr).map(|s| s.len()).unwrap_or(usize::MAX));
         let content = serde_json::to_string(&arr).unwrap();
         let body = json!({"model":"gpt-4o","messages":[{"role":"user","content":content}],"max_tokens":200});
         let mut req = Request::from_value(ProviderKind::OpenAi, body);
@@ -700,7 +702,7 @@ mod tests {
             is_columnar_array(&arr, 2),
             "but it's columnar (shared core schema)"
         );
-        let csv = to_csv(&arr);
+        let csv = to_csv(&arr).expect("to_csv must succeed for valid columnar data");
         assert!(
             csv.lines().next().unwrap().contains("detail"),
             "union header keeps the extra key: {csv}"

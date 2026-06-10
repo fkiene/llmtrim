@@ -6,7 +6,6 @@
 //! functions here are the **pure transform core** — no network calls live in this
 //! crate. The CLI (`main.rs`), and later a proxy/library surface, wrap them.
 //!
-//! See `claude.md` (llmtrim Architecture Guide) for the stage design.
 
 use anyhow::{Context, Result};
 use serde_json::Value;

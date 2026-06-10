@@ -605,12 +605,20 @@ pub fn load_pricing(json: &str) -> PriceTable {
     };
     for (id, m) in models {
         let per_1k = |k: &str| m.get(k).and_then(Value::as_f64).unwrap_or(0.0) / 1000.0;
+        let input_per_1k = per_1k("input");
+        // Conservative fallback: if cache_read is absent, bill cached tokens at the
+        // full input rate so benchmark savings estimates are never overstated.
+        let cache_per_1k = m
+            .get("cache_read")
+            .and_then(Value::as_f64)
+            .map(|v| v / 1000.0)
+            .unwrap_or(input_per_1k);
         table.insert(
             id.clone(),
             Pricing {
-                input_per_1k: per_1k("input"),
+                input_per_1k,
                 output_per_1k: per_1k("output"),
-                cache_per_1k: per_1k("cache_read"),
+                cache_per_1k,
             },
         );
     }

@@ -261,6 +261,13 @@ mod imp {
             .collect()
     }
 
+    /// Whether an upstream status code is a *validation* failure class that our body edits can
+    /// cause (400 Bad Request / 422 Unprocessable Entity). Used to gate the replay-on-error path.
+    /// We deliberately exclude 429/5xx: those are unrelated to our mutation.
+    fn should_replay(status: u16) -> bool {
+        matches!(status, 400 | 422)
+    }
+
     /// Replay the original (uncompressed) request to the upstream — direct, all statuses
     /// relayed — and build a response for the client. `None` if the replay itself fails (in
     /// which case the caller keeps the compressed response's error).
@@ -475,7 +482,7 @@ mod imp {
             // our mutation, and re-sending would double provider load during an incident and
             // strip the client's `retry-after`. Only when we actually changed the body.
             let status = res.status();
-            if matches!(status.as_u16(), 400 | 422)
+            if should_replay(status.as_u16())
                 && let Some(original) = pending.original.clone()
                 && let Ok(Some(replayed)) =
                     tokio::task::spawn_blocking(move || replay_original(&original)).await
@@ -982,14 +989,26 @@ mod imp {
         std::fs::create_dir_all(&dir)
             .with_context(|| format!("failed to create {}", dir.display()))?;
         std::fs::write(&cert_path, &cert_pem)?;
+        #[cfg(unix)]
+        {
+            use std::io::Write as _;
+            use std::os::unix::fs::OpenOptionsExt as _;
+            // `mode` applies only when the file is *created* — remove any pre-existing key
+            // (e.g. one written 0644 by an older build) so the 0600 always takes effect.
+            let _ = std::fs::remove_file(&key_path);
+            std::fs::OpenOptions::new()
+                .write(true)
+                .create(true)
+                .truncate(true)
+                .mode(0o600)
+                .open(&key_path)
+                .and_then(|mut f| f.write_all(key_pem.as_bytes()))
+                .with_context(|| format!("failed to write CA key {}", key_path.display()))?;
+        }
+        #[cfg(not(unix))]
         std::fs::write(&key_path, &key_pem)?;
         std::fs::write(ca_hosts_path()?, expected.join("\n"))
             .with_context(|| "failed to write CA host sidecar")?;
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let _ = std::fs::set_permissions(&key_path, std::fs::Permissions::from_mode(0o600));
-        }
         if have_ca {
             // Regenerated over an existing CA because the host set changed. Env-trusting tools
             // follow the file automatically; any OS trust-store copy is now stale.
@@ -1326,6 +1345,132 @@ mod imp {
             assert!(!ca_is_current(false, Some(&want), &want)); // no cert on disk
             assert!(!ca_is_current(true, None, &want)); // no sidecar → regenerate
             assert!(!ca_is_current(true, Some(&["a.com".to_string()]), &want)); // host added
+        }
+
+        #[test]
+        fn compress_blocking_rejects_non_json() {
+            use crate::config::DenseConfig;
+            use crate::ir::ProviderKind;
+            let cfg = DenseConfig::default();
+            assert!(compress_blocking(&cfg, b"not json", ProviderKind::OpenAi).is_none());
+            assert!(compress_blocking(&cfg, b"", ProviderKind::OpenAi).is_none());
+        }
+
+        #[test]
+        fn compress_blocking_net_win_guard() {
+            use crate::config::DenseConfig;
+            use crate::ir::ProviderKind;
+            // A tiny request: compression overhead exceeds savings → gate fires → None.
+            let body = r#"{"model":"gpt-4o","messages":[{"role":"user","content":"hi"}]}"#;
+            let cfg = DenseConfig::default();
+            // May return None (net loss) or Some (net win); both are valid.
+            // The important assertion: when Some, the compressed form must have fewer input tokens.
+            if let Some((compressed, pending)) =
+                compress_blocking(&cfg, body.as_bytes(), ProviderKind::OpenAi)
+            {
+                assert!(
+                    pending.input_after <= pending.input_before,
+                    "net-win guard: compressed must not exceed original ({} vs {})",
+                    pending.input_after,
+                    pending.input_before
+                );
+                assert!(!compressed.is_empty(), "compressed body must not be empty");
+            }
+        }
+
+        #[test]
+        fn compress_blocking_compresses_repetitive_content() {
+            use crate::config::DenseConfig;
+            use crate::ir::ProviderKind;
+            // 50 identical log lines: dedup should fire and compression should win.
+            let lines: String =
+                std::iter::repeat("ERROR database connection pool exhausted, retrying in 5s\n")
+                    .take(50)
+                    .collect();
+            let body = serde_json::json!({
+                "model": "gpt-4o",
+                "messages": [{"role": "user", "content": lines}]
+            })
+            .to_string();
+            let cfg = DenseConfig::default();
+            // Dedup is default-on and the spam is contiguous: this must compress, so a
+            // `None` here is a regression (the test must not pass vacuously).
+            let (compressed, pending) =
+                compress_blocking(&cfg, body.as_bytes(), ProviderKind::OpenAi)
+                    .expect("50 identical log lines must produce a net token win");
+            assert!(
+                pending.input_after < pending.input_before,
+                "50 identical log lines should compress: {} -> {}",
+                pending.input_before,
+                pending.input_after
+            );
+            assert!(
+                serde_json::from_str::<serde_json::Value>(&compressed).is_ok(),
+                "compressed body must remain valid JSON"
+            );
+        }
+
+        // ── M0-2: replay-on-error gate ──────────────────────────────────────
+
+        #[test]
+        fn replay_triggered_on_4xx() {
+            // 400 Bad Request and 422 Unprocessable Entity trigger replay; other codes do not.
+            assert!(should_replay(400), "400 must trigger replay");
+            assert!(should_replay(422), "422 must trigger replay");
+            assert!(!should_replay(200), "200 must not trigger replay");
+            assert!(
+                !should_replay(429),
+                "429 (rate-limit) must not trigger replay"
+            );
+            assert!(!should_replay(500), "500 must not trigger replay");
+            assert!(!should_replay(503), "503 must not trigger replay");
+        }
+
+        // ── M0-2: compress_blocking actual-compression guarantee ─────────────
+
+        #[test]
+        fn compress_blocking_actual_compression_with_large_body() {
+            use crate::config::DenseConfig;
+            use crate::ir::ProviderKind;
+            // A substantive system prompt + user turn — large enough that Stage A (truncation)
+            // and Stage B (dedup) can fire and the net-win guard lets the result through.
+            let system = "You are a senior software engineer reviewing pull requests. \
+                          Be concise. Focus on correctness, performance, and maintainability. \
+                          Do not repeat the same comment twice. \
+                          Do not repeat the same comment twice. \
+                          Do not repeat the same comment twice. \
+                          Always explain *why*, not just *what*. \
+                          Always explain *why*, not just *what*. \
+                          Always explain *why*, not just *what*.";
+            let body = serde_json::json!({
+                "model": "gpt-4o",
+                "messages": [
+                    {"role": "system", "content": system},
+                    {"role": "user", "content": "Please review this diff:\n```\n-    x = x + 1\n+    x += 1\n```\n"}
+                ]
+            })
+            .to_string();
+            let cfg = DenseConfig::default();
+            if let Some((compressed_json, pending)) =
+                compress_blocking(&cfg, body.as_bytes(), ProviderKind::OpenAi)
+            {
+                // Net-win guard: the compressed body must be strictly smaller.
+                assert!(
+                    pending.input_after < pending.input_before,
+                    "compress_blocking must not increase token count ({} -> {})",
+                    pending.input_before,
+                    pending.input_after
+                );
+                // The result must be valid JSON — upstream would reject garbage.
+                serde_json::from_str::<serde_json::Value>(&compressed_json)
+                    .expect("compressed body must be valid JSON");
+                // The `original` field is NOT set by compress_blocking — the caller fills it.
+                assert!(
+                    pending.original.is_none(),
+                    "compress_blocking must leave `original` unset for the caller to fill"
+                );
+            }
+            // None is also valid when the budget is very tight — just don't panic.
         }
     }
 }

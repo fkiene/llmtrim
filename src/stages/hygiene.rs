@@ -138,12 +138,24 @@ fn minify_json_str(s: &str) -> Option<String> {
     (min.len() < s.len()).then_some(min)
 }
 
+/// Per-attempt lookahead cap for the balanced-bracket scan. A span longer than this is
+/// left unminified (rare; embedded JSON blobs that large dominate their request anyway).
+const MAX_JSON_SCAN: usize = 256 * 1024;
+
 /// Replace each balanced top-level `{…}`/`[…]` span that is valid JSON (and shrinks) with
 /// its minified form, leaving prose and fenced code blocks untouched.
+///
+/// Pathology guard: a *truncated* JSON blob (open bracket, no close) makes every inner
+/// bracket re-scan ahead and fail — O(n²) unguarded. Two bounds make the worst case
+/// linear: each attempt scans at most [`MAX_JSON_SCAN`] bytes, and the total bytes spent
+/// on *failed* attempts is budgeted at ~1× the input length, after which the remaining
+/// text is copied verbatim (successful minifies advance past their span, so they are
+/// amortized linear and never charged).
 fn minify_balanced_spans(text: &str) -> String {
     let bytes = text.as_bytes();
     let mut out = String::with_capacity(text.len());
     let mut i = 0;
+    let mut failed_scan_budget = bytes.len().max(MAX_JSON_SCAN);
     while i < bytes.len() {
         // Skip fenced code blocks verbatim (``` … ```), so we don't parse code braces.
         if bytes[i..].starts_with(b"```") {
@@ -154,13 +166,23 @@ fn minify_balanced_spans(text: &str) -> String {
             continue;
         }
         if (bytes[i] == b'{' || bytes[i] == b'[')
+            && failed_scan_budget > 0
             && looks_like_json_open(bytes, i)
-            && let Some(end) = balanced_json_end(bytes, i)
-            && let Some(min) = minify_json_str(&text[i..end])
         {
-            out.push_str(&min);
-            i = end;
-            continue;
+            let limit = (i + MAX_JSON_SCAN).min(bytes.len());
+            match balanced_json_end(&bytes[..limit], i) {
+                Some(end) => {
+                    if let Some(min) = minify_json_str(&text[i..end]) {
+                        out.push_str(&min);
+                        i = end;
+                        continue;
+                    }
+                    // Balanced but not valid/smaller JSON: charge the wasted scan.
+                    failed_scan_budget = failed_scan_budget.saturating_sub(end - i);
+                }
+                // Never balanced within the cap: charge the full lookahead.
+                None => failed_scan_budget = failed_scan_budget.saturating_sub(limit - i),
+            }
         }
         // Ordinary prose char: copy one whole UTF-8 char (structural bytes are ASCII, so the
         // branches above always land on char boundaries).
@@ -292,7 +314,11 @@ fn round_sig(x: f64, sig: u32) -> f64 {
 fn quantize_value(v: &mut Value, sig: u32) {
     match v {
         Value::Number(n) if !n.is_i64() && !n.is_u64() => {
-            if let Some(x) = n.as_f64()
+            // A raw repr with no '.'/'e' is a plain integer that merely overflows u64
+            // (arbitrary_precision) — leave exact per the doc contract.
+            let raw = n.to_string();
+            if (raw.contains('.') || raw.contains('e') || raw.contains('E'))
+                && let Some(x) = n.as_f64()
                 && let Some(r) = serde_json::Number::from_f64(round_sig(x, sig))
             {
                 *n = r;
@@ -578,5 +604,13 @@ mod tests {
         assert!(applied, "folding full-width + dropping ZWSP cuts tokens");
         let now = req.get_str("/messages/0/content").unwrap();
         assert!(now.starts_with("CPU") && !now.contains('\u{200B}'));
+    }
+
+    #[test]
+    fn quantize_preserves_large_integers() {
+        let mut v = serde_json::from_str::<Value>(r#"{"id": 12345678901234567890}"#).unwrap();
+        quantize_value(&mut v, 4);
+        // Must not have been rounded to scientific notation
+        assert_eq!(v["id"].to_string(), "12345678901234567890");
     }
 }

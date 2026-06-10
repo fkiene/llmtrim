@@ -816,6 +816,13 @@ fn write_profile_block(proxy: &str, ca: &str) -> Result<Option<PathBuf>> {
 
 /// Remove any existing llmtrim managed block (between the markers, inclusive).
 fn strip_block(s: &str) -> String {
+    // If BEGIN exists but END is missing (e.g. user deleted it), return original
+    // unchanged rather than silently erasing everything from BEGIN to EOF.
+    let has_begin = s.lines().any(|l| l.trim() == BEGIN);
+    let has_end = s.lines().any(|l| l.trim() == END);
+    if has_begin && !has_end {
+        return s.to_string();
+    }
     let mut out = String::new();
     let mut skip = false;
     for line in s.lines() {
@@ -898,6 +905,22 @@ mod tests {
     }
 
     #[test]
+    fn strip_block_missing_end_marker_returns_original() {
+        let input = "before\n# >>> llmtrim >>>\nexport HTTPS_PROXY=http://127.0.0.1:8787\n";
+        // BEGIN present but END absent → return unchanged (don't erase everything after BEGIN)
+        assert_eq!(strip_block(input), input);
+    }
+
+    #[test]
+    fn strip_block_normal_removes_block() {
+        let input = "before\n# >>> llmtrim >>>\nexport HTTPS_PROXY=http://127.0.0.1:8787\n# <<< llmtrim <<<\nafter\n";
+        let result = strip_block(input);
+        assert!(result.contains("before"));
+        assert!(result.contains("after"));
+        assert!(!result.contains("HTTPS_PROXY"));
+    }
+
+    #[test]
     fn env_block_posix_uses_export() {
         let b = env_block("http://127.0.0.1:8787", "/home/u/ca.pem", Syntax::Posix);
         assert!(b.contains("export HTTPS_PROXY=\"http://127.0.0.1:8787\""));
@@ -921,6 +944,40 @@ mod tests {
     fn strip_block_reverses_powershell_block() {
         let withblock = format!("keep\n{}", env_block("p", "c", Syntax::PowerShell));
         assert_eq!(strip_block(&withblock), "keep\n");
+    }
+
+    #[test]
+    fn write_then_strip_is_idempotent() {
+        // Writing a block then stripping it returns to the original content.
+        let original = "export FOO=bar\n";
+        let proxy = "http://127.0.0.1:8787";
+        let ca = "/home/user/.llmtrim/ca.crt";
+        let block = env_block(proxy, ca, Syntax::Posix);
+        let written = format!("{original}{block}");
+        let stripped = strip_block(&written);
+        assert_eq!(
+            stripped.trim_end(),
+            original.trim_end(),
+            "strip after write returns original"
+        );
+    }
+
+    #[test]
+    fn double_write_does_not_duplicate_block() {
+        // Calling the write-then-strip flow twice should not duplicate the block.
+        let proxy = "http://127.0.0.1:8787";
+        let ca = "/home/user/.llmtrim/ca.crt";
+        let original = "export FOO=bar\n";
+        let block = env_block(proxy, ca, Syntax::Posix);
+        let after_first = format!("{original}{block}");
+        // Simulate a second write: strip then re-add (the real setup flow)
+        let after_second = format!("{}{}", strip_block(&after_first), block);
+        // The block should appear exactly once
+        let begin_count = after_second.matches(">>> llmtrim >>>").count();
+        assert_eq!(
+            begin_count, 1,
+            "block must appear exactly once after double write"
+        );
     }
 
     // Exercise the registry set/has/clear cycle against a throwaway subkey under HKCU so

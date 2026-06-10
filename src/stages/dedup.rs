@@ -45,17 +45,57 @@ impl Transform for DedupStage {
             let Some(s) = req.get_str(&ptr).map(str::to_string) else {
                 continue;
             };
-            // Near-dup collapse is lossy: on structured/positional data (CSV, tables,
-            // record arrays) it merges distinct rows. Restrict those segments to exact
-            // dedup (lossless `[×N]`); prose still gets near-dup.
-            let near = self.near && !crate::stages::tools::is_structured_segment(&s);
-            let deduped = dedup_lines(&s, near, self.near_max_distance);
+            // On structured/positional data (CSV, tables, record arrays, event logs)
+            // both near-dup merging and global first-occurrence exact merging are lossy:
+            // they reorder records and hide row counts. Restrict those segments to
+            // *adjacent-run* collapse — order-preserving, and contiguous log spam (the
+            // big win) still folds. Prose gets the full global exact + optional near.
+            let deduped = if crate::stages::tools::is_structured_segment(&s) {
+                dedup_adjacent_lines(&s)
+            } else {
+                dedup_lines(&s, self.near, self.near_max_distance)
+            };
             if deduped != s {
                 req.set(&ptr, Value::String(deduped));
             }
         }
         Ok(())
     }
+}
+
+/// Collapse only *adjacent* runs of identical lines (`line [×N]`), keeping every
+/// distinct line in its original position. The safe variant for structured segments,
+/// where [`dedup_lines`]'s global first-occurrence merge would reorder records or
+/// hide row counts. Blank-line runs pass through (they are structure, not content).
+fn dedup_adjacent_lines(text: &str) -> String {
+    let lines: Vec<&str> = text.lines().collect();
+    if lines.len() < 2 {
+        return text.to_string();
+    }
+    let mut out: Vec<String> = Vec::with_capacity(lines.len());
+    let mut collapsed = false;
+    let mut i = 0;
+    while i < lines.len() {
+        let line = lines[i];
+        let mut n = 1;
+        if !line.trim().is_empty() {
+            while i + n < lines.len() && lines[i + n] == line {
+                n += 1;
+            }
+        }
+        if n > 1 {
+            collapsed = true;
+            out.push(format!("{line} [×{n}]"));
+        } else {
+            out.push(line.to_string());
+        }
+        i += n;
+    }
+    // Nothing collapsed → input verbatim (same trailing-newline rationale as dedup_lines).
+    if !collapsed {
+        return text.to_string();
+    }
+    out.join("\n")
 }
 
 /// Collapse repeated lines, keeping each group once with a `[×N]` count. Blank
@@ -71,7 +111,7 @@ fn dedup_lines(text: &str, near: bool, max_dist: u32) -> String {
     let mut reps: Vec<u64> = Vec::new(); // representative SimHash per group
     let mut counts: Vec<usize> = Vec::new();
     let mut exact: HashMap<&str, usize> = HashMap::new();
-    let hasher = SimHash::<SimSipHasher64, u64, 64>::new(SimSipHasher64::new(1, 2));
+    let hasher = make_simhasher();
 
     for (i, line) in lines.iter().enumerate() {
         if line.trim().is_empty() {
@@ -126,6 +166,13 @@ fn dedup_lines(text: &str, near: bool, max_dist: u32) -> String {
         }
     }
     out.join("\n")
+}
+
+/// Construct the shared 64-bit SimHash instance (SipHash seed 1/2, matching Stage E
+/// and the sizing knee). Centralised here so both dedup and sizing use the same hasher
+/// configuration without repeating the generic turbofish.
+pub(crate) fn make_simhasher() -> SimHash<SimSipHasher64, u64, 64> {
+    SimHash::<SimSipHasher64, u64, 64>::new(SimSipHasher64::new(1, 2))
 }
 
 /// 64-bit SimHash of a line's lexical word tokens, via gaoya (Charikar). Tokens come
@@ -187,7 +234,7 @@ mod tests {
 
     #[test]
     fn simhash_distance_small_for_similar_large_for_different() {
-        let hasher = SimHash::<SimSipHasher64, u64, 64>::new(SimSipHasher64::new(1, 2));
+        let hasher = make_simhasher();
         let a = line_simhash(&hasher, "the quick brown fox jumps over the lazy dog");
         let b = line_simhash(&hasher, "the quick brown fox jumps over the lazy dogs");
         let c = line_simhash(
@@ -236,6 +283,38 @@ mod tests {
             "distinct CSV rows survive (near-dup disabled on structured data)"
         );
         assert!(!now.contains("[×"), "no near-dup collapse on a CSV");
+    }
+
+    #[test]
+    fn structured_segment_keeps_non_adjacent_duplicates() {
+        // A CSV with an identical row at positions 2 and 4: global merge would pull the
+        // second occurrence onto the first, reordering records and hiding the row count.
+        // On structured segments only adjacent runs may collapse — so this is untouched.
+        let csv = "id,name,role\n1,Ann,Sales\n2,Bob,Ops\n1,Ann,Sales\n3,Cy,Ops";
+        let body = json!({"model":"gpt-4o","messages":[{"role":"user","content":csv}]});
+        let mut req = Request::from_value(ProviderKind::OpenAi, body);
+        let counter = counter_for(ProviderKind::OpenAi, Some("gpt-4o")).unwrap();
+        let stages: Vec<Box<dyn Transform>> = vec![Box::new(DedupStage {
+            near: false,
+            near_max_distance: 0,
+        })];
+        let _ = pipeline::run(&mut req, &OpenAiProvider, counter.as_ref(), &stages);
+        let now = req.get_str("/messages/0/content").unwrap();
+        assert_eq!(
+            now, csv,
+            "non-adjacent duplicate rows in a CSV must not merge"
+        );
+    }
+
+    #[test]
+    fn adjacent_collapse_preserves_order() {
+        // Adjacent runs fold in place; distinct lines keep their relative order.
+        let log = "a,1\nb,2\nb,2\nb,2\nc,3";
+        let out = dedup_adjacent_lines(log);
+        assert_eq!(out, "a,1\nb,2 [×3]\nc,3");
+        // Non-adjacent repeats stay separate.
+        let interleaved = "x\ny\nx\ny";
+        assert_eq!(dedup_adjacent_lines(interleaved), interleaved);
     }
 
     #[test]

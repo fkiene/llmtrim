@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Download + normalize the 7 benchmark corpora into bench/data/<name>.jsonl.
+"""Download + normalize the 8 benchmark corpora into bench/data/<name>.jsonl.
 
 Each output line is a llmtrim bench case (see bench::load_bench_corpus):
 friendly `{context?, question, gold, scorer, system?}` or explicit `{request, gold, scorer}`.
@@ -236,6 +236,51 @@ def norm_dolly(rows):
     return out
 
 
+def norm_cache(rows):
+    """Synthetic cache corpus: conversations with a long shared system prompt.
+
+    Re-uses ultrachat conversations but wraps each in a long static system prompt
+    so Stage A (cache-zone marking) has a shared prefix to annotate. Tests that
+    the cache preset leaves quality intact while allowing providers to bill at
+    the cached-input rate.
+    """
+    # A ~1280-token (≈5120-char) shared system prompt — representative of real
+    # agent/RAG deployments where a long context is amortised across many turns.
+    SYSTEM = (
+        "You are a knowledgeable AI assistant. You provide accurate, helpful, "
+        "and concise answers. When answering questions: be direct and clear; "
+        "cite sources when relevant; admit uncertainty rather than guessing; "
+        "use examples to clarify abstract concepts; and keep responses focused "
+        "on what was asked. " * 40  # ~1280 tokens
+    ).strip()
+    out = []
+    for i, row in enumerate(rows):
+        if len(out) >= 40:
+            break
+        msgs = row.get("messages") or row.get("conversation") or []
+        if len(msgs) < 2:
+            continue
+        # ultrachat turns alternate and end on assistant: the final assistant turn is
+        # the gold, the user turn before it is the question.
+        if msgs[-1].get("role") != "assistant" or msgs[-2].get("role") != "user":
+            continue
+        gold = (msgs[-1].get("content") or "").strip()
+        question = (msgs[-2].get("content") or "").strip()
+        if not gold or not question or len(question) > 300:
+            continue
+        request = {"model": "x", "messages": [
+            {"role": "system", "content": SYSTEM},
+            {"role": "user", "content": question},
+        ]}
+        out.append({
+            "name": f"cache-{i}",
+            "request": json.dumps(request, ensure_ascii=False),
+            "gold": gold,
+            "scorer": "judge",
+        })
+    return out
+
+
 def norm_chat(rows):
     """Multi-turn chat (the most common real LLM workload): the conversation history is
     the request, the final assistant turn is the gold. Output-heavy + long shared
@@ -273,6 +318,7 @@ CORPORA = [
     ("glaive", "glaiveai/glaive-function-calling-v2", "default", "train", norm_glaive),
     ("chat", "HuggingFaceH4/ultrachat_200k", "default", "train_sft", norm_chat),
     ("cnn", "abisee/cnn_dailymail", "3.0.0", "validation", norm_cnn),
+    ("cache", "HuggingFaceH4/ultrachat_200k", "default", "train_sft", norm_cache),
 ]
 
 

@@ -1,5 +1,5 @@
 #!/bin/bash
-# Live A/B benchmark across all 7 corpora, each with a shape-matched preset.
+# Live A/B benchmark across all 8 corpora, each with a shape-matched preset.
 # Writes per-corpus JSON to bench/results/ for README synthesis.
 # Credentials: OPENROUTER_API_KEY (env or .env). Model+route: defaults (gpt-oss-20b / groq).
 cd "$(dirname "$0")/../.." || exit 1

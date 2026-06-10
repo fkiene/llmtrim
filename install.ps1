@@ -79,6 +79,24 @@ function Install-Prebuilt($target) {
         return $null
     }
 
+    # Verify SHA-256 checksum against the .sha256 sidecar uploaded by CI.
+    $sha256Url = "$url.sha256"
+    try {
+        $expectedLine = (Invoke-WebRequest $sha256Url -UseBasicParsing).Content.Trim()
+        $expectedHash = ($expectedLine -split '\s+')[0].ToUpper()
+        $actualHash = (Get-FileHash $zip -Algorithm SHA256).Hash.ToUpper()
+        if ($actualHash -ne $expectedHash) {
+            Write-Error "Checksum mismatch! Expected $expectedHash, got $actualHash. Aborting."
+            Remove-Item -Recurse -Force $tmp -ErrorAction SilentlyContinue
+            exit 1
+        }
+        Info "Checksum verified."
+    } catch {
+        Write-Error "Failed to fetch or verify checksum from $sha256Url"
+        Remove-Item -Recurse -Force $tmp -ErrorAction SilentlyContinue
+        exit 1
+    }
+
     # Reject absolute or parent-traversal paths before extracting (CWE-22).
     Add-Type -AssemblyName System.IO.Compression.FileSystem
     $archive = [System.IO.Compression.ZipFile]::OpenRead($zip)

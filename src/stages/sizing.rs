@@ -20,7 +20,9 @@
 
 use std::collections::HashSet;
 
-use gaoya::simhash::{SimHash, SimHashBits, SimSipHasher64};
+use gaoya::simhash::SimHashBits;
+
+use crate::stages::dedup::make_simhasher;
 
 use crate::stages::tools::lex_words;
 
@@ -119,7 +121,7 @@ fn knee_index(curve: &[usize]) -> Option<usize> {
 /// [`SIMHASH_NEAR_DIST`] Hamming bits onto an existing representative. Mirrors Stage
 /// E's near-duplicate detection so the two stages agree on what "the same" means.
 fn distinct_clusters(items: &[&str]) -> usize {
-    let hasher = SimHash::<SimSipHasher64, u64, 64>::new(SimSipHasher64::new(1, 2));
+    let hasher = make_simhasher();
     let mut reps: Vec<u64> = Vec::new();
     for item in items {
         let words = lex_words(item);

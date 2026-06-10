@@ -183,12 +183,16 @@ pub fn run() -> Result<()> {
             ],
         ),
         Channel::Binary => {
+            let tag = latest
+                .as_deref()
+                .map(|v| format!("v{v}"))
+                .unwrap_or_else(|| "main".to_string());
             #[cfg(windows)]
             instructions(
                 "update via the installer",
                 &[
                     &format!(
-                        "iwr -useb https://raw.githubusercontent.com/{}/main/install.ps1 | iex",
+                        "iwr -useb https://raw.githubusercontent.com/{}/{tag}/install.ps1 | iex",
                         repo()
                     ),
                     "llmtrim setup    # restart the daemon on the new binary",
@@ -197,14 +201,20 @@ pub fn run() -> Result<()> {
             #[cfg(not(windows))]
             {
                 let url = format!(
-                    "https://raw.githubusercontent.com/{}/main/install.sh",
+                    "https://raw.githubusercontent.com/{}/{tag}/install.sh",
                     repo()
                 );
                 println!(
                     "Updating via the installer (downloads the latest release; `setup` restarts the daemon)…"
                 );
-                let status = std::process::Command::new("sh")
-                    .args(["-c", &format!("curl -fsSL {url} | sh")])
+                let mut cmd = std::process::Command::new("sh");
+                cmd.args(["-c", &format!("curl -fsSL {url} | sh")]);
+                // Pin the *installed* version to the same resolved tag as the script, so the
+                // whole update is deterministic (no second "latest" lookup inside install.sh).
+                if tag != "main" {
+                    cmd.env("LLMTRIM_VERSION", &tag);
+                }
+                let status = cmd
                     .status()
                     .context("failed to launch the installer (curl + sh required)")?;
                 if !status.success() {

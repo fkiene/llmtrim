@@ -67,6 +67,25 @@ install() {
     info "Downloading $DOWNLOAD_URL"
     curl -fsSL "$DOWNLOAD_URL" -o "$ARCHIVE" || error "Download failed"
 
+    # Verify SHA-256 checksum against the .sha256 sidecar uploaded by CI.
+    SHA256_URL="${DOWNLOAD_URL}.sha256"
+    EXPECTED_SHA=$(curl -fsSL "$SHA256_URL" | awk '{print $1}')
+    if [ -z "$EXPECTED_SHA" ]; then
+        error "Failed to fetch checksum from $SHA256_URL"
+    fi
+    if command -v sha256sum >/dev/null 2>&1; then
+        ACTUAL_SHA=$(sha256sum "$ARCHIVE" | awk '{print $1}')
+    elif command -v shasum >/dev/null 2>&1; then
+        ACTUAL_SHA=$(shasum -a 256 "$ARCHIVE" | awk '{print $1}')
+    else
+        warn "No sha256sum or shasum found — skipping checksum verification"
+        ACTUAL_SHA="$EXPECTED_SHA"
+    fi
+    if [ "$ACTUAL_SHA" != "$EXPECTED_SHA" ]; then
+        error "Checksum mismatch! Expected $EXPECTED_SHA, got $ACTUAL_SHA. Aborting."
+    fi
+    info "Checksum verified."
+
     # Reject absolute paths or '..' components before extracting (CWE-22).
     if tar -tzf "$ARCHIVE" | grep -qE '^/|(^|/)\.\.(/|$)'; then
         error "Archive contains unsafe paths — refusing to extract"

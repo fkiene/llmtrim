@@ -326,7 +326,7 @@ fn minify_code(code: &str, cfg: &LangCfg) -> String {
     let mut protected: Vec<(usize, usize)> = Vec::new();
     let mut stack = vec![tree.root_node()];
     while let Some(n) = stack.pop() {
-        if n.kind().contains("string") {
+        if n.kind().contains("string") || n.kind().contains("heredoc") {
             protected.push((n.start_byte(), n.end_byte()));
         }
         let mut c = n.walk();
@@ -651,5 +651,34 @@ mod tests {
         assert!(lang_for("haskell").is_none(), "unsupported → passthrough");
         assert!(lang_for("text").is_none());
         assert!(lang_for("").is_none(), "untagged fence → passthrough");
+    }
+
+    #[test]
+    fn minify_protects_heredoc_body() {
+        // Ruby heredoc — indentation inside the body is part of the string value.
+        let ruby = "def greet(name)\n  msg = <<~HEREDOC\n    Hello,   #{name}!\n    Welcome.\n  HEREDOC\n  puts msg\nend\n";
+        let cfg = lang_for("ruby").unwrap();
+        let out = minify_code(ruby, &cfg);
+        assert!(
+            out.contains("Hello,   "),
+            "heredoc body whitespace must be preserved; got:\n{out}"
+        );
+        assert!(
+            out.contains("Welcome."),
+            "heredoc body content must be preserved; got:\n{out}"
+        );
+
+        // PHP heredoc — same requirement.
+        let php = "<?php\nfunction greet($name) {\n  $msg = <<<EOT\n    Hello,   $name!\n    Welcome.\nEOT;\n  echo $msg;\n}\n";
+        let cfg_php = lang_for("php").unwrap();
+        let out_php = minify_code(php, &cfg_php);
+        assert!(
+            out_php.contains("Hello,   "),
+            "PHP heredoc body whitespace must be preserved; got:\n{out_php}"
+        );
+        assert!(
+            out_php.contains("Welcome."),
+            "PHP heredoc body content must be preserved; got:\n{out_php}"
+        );
     }
 }

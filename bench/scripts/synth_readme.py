@@ -123,7 +123,7 @@ def main():
         if not r:
             continue
         ret = r.get("retention_pp", 0)
-        ci = r.get("ci95", 0) * 100.0
+        ci = r.get("retention_ci95_pp", 0)
         cost = r.get("cost_saved_pct", 0)
         # "Confirmed" only if the interval clears zero by a ≥3pp margin — at small n the
         # CIs are wide, so a delta whose CI merely grazes zero is not a real effect.

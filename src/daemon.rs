@@ -76,6 +76,19 @@ fn tasklist_reports_pid(stdout: &str, pid: u32) -> bool {
     })
 }
 
+/// True if the process at `pid` is the llmtrim binary (guards against killing a foreign process
+/// that recycled a stale pidfile entry). Permissive on I/O errors and unknown platforms — it
+/// is better to attempt a kill on an uncertain match than to leave a real daemon running.
+fn pid_is_llmtrim(pid: u32) -> bool {
+    #[cfg(target_os = "linux")]
+    {
+        let comm = std::fs::read_to_string(format!("/proc/{pid}/comm")).unwrap_or_default();
+        return comm.trim().starts_with("llmtrim");
+    }
+    #[allow(unreachable_code)]
+    true
+}
+
 /// Is a process with this pid alive? `kill -0` on Unix, `tasklist` on Windows — both report
 /// whether the process exists without touching it.
 pub fn is_alive(pid: u32) -> bool {
@@ -133,6 +146,12 @@ pub fn spawn_detached(port: u16) -> Result<u32> {
     let exe = std::env::current_exe().context("could not find the llmtrim executable")?;
     let dir = home_dir()?;
     std::fs::create_dir_all(&dir).with_context(|| format!("failed to create {}", dir.display()))?;
+    if let Ok(log_path) = logfile()
+        && std::fs::metadata(&log_path).map(|m| m.len()).unwrap_or(0) > 10 * 1024 * 1024
+    {
+        let rotated = log_path.with_extension("log.1");
+        let _ = std::fs::rename(&log_path, rotated);
+    }
     let log = std::fs::File::create(logfile()?)?;
     let log_err = log.try_clone()?;
 
@@ -171,20 +190,27 @@ pub fn stop() -> Result<Option<u32>> {
         return Ok(None);
     };
     if is_alive(state.pid) {
-        #[cfg(unix)]
-        {
-            let _ = std::process::Command::new("kill")
-                .arg(state.pid.to_string())
-                .status();
-        }
-        #[cfg(windows)]
-        {
-            // /T kills the child tree, /F forces termination.
-            let _ = std::process::Command::new("taskkill")
-                .args(["/PID", &state.pid.to_string(), "/T", "/F"])
-                .stdout(std::process::Stdio::null())
-                .stderr(std::process::Stdio::null())
-                .status();
+        if !pid_is_llmtrim(state.pid) {
+            eprintln!(
+                "llmtrim: pidfile points to foreign process (pid {}), skipping kill",
+                state.pid
+            );
+        } else {
+            #[cfg(unix)]
+            {
+                let _ = std::process::Command::new("kill")
+                    .arg(state.pid.to_string())
+                    .status();
+            }
+            #[cfg(windows)]
+            {
+                // /T kills the child tree, /F forces termination.
+                let _ = std::process::Command::new("taskkill")
+                    .args(["/PID", &state.pid.to_string(), "/T", "/F"])
+                    .stdout(std::process::Stdio::null())
+                    .stderr(std::process::Stdio::null())
+                    .status();
+            }
         }
     }
     let _ = std::fs::remove_file(pidfile()?);
