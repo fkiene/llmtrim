@@ -138,67 +138,25 @@ fn tool_call_shaped(req: &Request) -> bool {
         && raw.get("tool_choice").and_then(Value::as_str) != Some("none")
 }
 
-/// True when the request targets a reasoning model — one that emits an internal
-/// thinking/chain-of-thought pass. Soft numeric token budgets are counter-productive
-/// on these (arXiv:2511.04108); the caller skips that one lever when this returns true.
+/// True when the request has opted into a reasoning pass — detected ONLY from explicit,
+/// provider-set request fields, never from model-id lists (model names are not universal:
+/// any hardcoded family table is wrong for the next provider and rots as models ship):
 ///
-/// Detection is deterministic, two-pronged, and tuned for PRECISION over recall: a
-/// missed reasoning model just keeps today's behavior (a soft budget that may be
-/// ignored), whereas a false positive silently disables a working lever on a
-/// non-reasoning model. Each signal:
+/// - `reasoning`         — OpenRouter / OpenAI Responses reasoning config object.
+/// - `reasoning_effort`  — OpenAI effort knob.
+/// - `thinking`          — Anthropic extended-thinking block.
 ///
-/// 1. Explicit reasoning request fields (provider-set, unambiguous). Presence of ANY
-///    means the caller has opted the request into a reasoning pass:
-///    - `reasoning`         — OpenRouter / OpenAI Responses reasoning config object.
-///    - `reasoning_effort`  — OpenAI o-series / gpt-5 effort knob.
-///    - `thinking`          — Anthropic extended-thinking block.
-///
-/// 2. Model-id families that are reasoning-only or reasoning-by-default, matched on the
-///    lowercased `model` string:
-///    - OpenAI o-series (`o1`/`o3`/`o4`): matched per `/`-segment as an exact token or a
-///      `oN-…` prefix, NEVER as a bare substring — so `openai/o3-mini`, `o1`, `o1-mini`
-///      hit while `gpt-4o`, `phi-4`, `solar-pro` (which merely contain `o4`/`o1`/`o3`
-///      as substrings) do NOT.
-///    - `gpt-5` family — reasoning-default.
-///    - `-r1` / `deepseek-r1` — DeepSeek-R1 line.
-///    - `-reasoner` — DeepSeek `deepseek-reasoner` alias and similar.
-///    - `-thinking` — explicit thinking variants (e.g. `…-thinking`).
-///    - `gpt-oss` — reasoning model (the repo's own bench validated draft on it).
-///    - `qwq` — Qwen QwQ reasoning line.
-///
-///    `grok-` is deliberately OMITTED: only Grok 3+ reason by default and the family
-///    prefix is too broad, so including it would risk false positives (precision rule).
+/// Soft numeric token budgets are counter-productive on reasoning passes
+/// (arXiv:2511.04108: ignored, or accuracy drops when followed); the caller skips that
+/// one lever when this returns true. Known limitation, accepted deliberately: a
+/// reasoning-by-default model invoked WITHOUT any of these fields is not detected — the
+/// soft budget then ships exactly as it does today (status quo; per the paper it is
+/// most likely ignored). That trade keeps detection universal and maintenance-free.
 fn reasoning_model_request(req: &Request) -> bool {
     let raw = req.raw();
-    if raw.get("reasoning").is_some()
+    raw.get("reasoning").is_some()
         || raw.get("reasoning_effort").is_some()
         || raw.get("thinking").is_some()
-    {
-        return true;
-    }
-    let Some(model) = raw.get("model").and_then(Value::as_str) else {
-        return false;
-    };
-    let model = model.to_ascii_lowercase();
-    is_o_series(&model)
-        || model.contains("gpt-5")
-        || model.contains("-r1")
-        || model.contains("-reasoner")
-        || model.contains("-thinking")
-        || model.contains("gpt-oss")
-        || model.contains("qwq")
-}
-
-/// Match an OpenAI o-series id (`o1`/`o3`/`o4`) as a bounded token, not a substring.
-/// A model id may be slash-namespaced (`openai/o3-mini`); we test each `/`-segment for
-/// an exact `oN` or an `oN-…` prefix. This rejects ids that merely contain the digits,
-/// e.g. `gpt-4o` (segment `gpt-4o`), `phi-4`, `solar-pro`.
-fn is_o_series(model: &str) -> bool {
-    model.split('/').any(|seg| {
-        ["o1", "o3", "o4"]
-            .iter()
-            .any(|p| seg == *p || seg.starts_with(&format!("{p}-")))
-    })
 }
 
 #[cfg(test)]
@@ -379,12 +337,13 @@ mod tests {
     }
 
     #[test]
-    fn reasoning_model_skips_soft_budget_keeps_terse_and_cap() {
-        // arXiv:2511.04108: soft numeric budgets are ignored / hurt on reasoning models.
+    fn reasoning_request_skips_soft_budget_keeps_terse_and_cap() {
+        // arXiv:2511.04108: soft numeric budgets are ignored / hurt on reasoning passes.
         // Skip ONLY the soft budget; terse stays (Chain-of-Draft validates it on reasoning
-        // models) and the server-enforced hard cap stays.
+        // models) and the server-enforced hard cap stays. Detection is by the explicit
+        // `reasoning` request field — never by model-id lists (not universal).
         let req = run_one(
-            json!({"model":"deepseek/deepseek-r1",
+            json!({"model":"deepseek/deepseek-r1","reasoning":{"effort":"high"},
                    "messages":[{"role":"user","content":"hi"}]}),
             OutputControlStage {
                 level: OutputLevel::Terse,
@@ -459,50 +418,24 @@ mod tests {
     }
 
     #[test]
-    fn detects_reasoning_model_ids() {
+    fn model_id_alone_never_marks_reasoning() {
+        // Detection is fields-only by design: model names are not universal, so NO id —
+        // however reasoning-flavored it looks — flips the guard without an explicit field.
         for id in [
             "deepseek/deepseek-r1",
-            "deepseek-reasoner",
-            "o1",
             "o1-mini",
-            "openai/o3-mini",
-            "o4-mini",
             "openai/gpt-5",
-            "gpt-5-mini",
-            "openai/gpt-oss-20b",
             "qwen/qwq-32b",
-            "qwen3-235b-thinking",
-        ] {
-            assert!(
-                reasoning_model_request(&req_with(json!({"model": id}))),
-                "{id} should be detected as reasoning"
-            );
-        }
-    }
-
-    #[test]
-    fn does_not_false_positive_on_non_reasoning_ids() {
-        // `o4`/`o1`/`o3` substrings must NOT trip the o-series matcher, and no field/family
-        // signal should fire on these plain chat models.
-        for id in [
             "gpt-4o",
-            "gpt-4o-mini",
             "phi-4",
             "solar-pro",
-            "claude-3-5-sonnet-20241022",
-            "mistral-large",
-            "gemini-2.0-flash",
-            "grok-2",
         ] {
             assert!(
                 !reasoning_model_request(&req_with(json!({"model": id}))),
-                "{id} must NOT be detected as reasoning"
+                "{id}: id-based detection must never fire (fields-only)"
             );
         }
-    }
-
-    #[test]
-    fn missing_model_is_not_reasoning() {
+        // And with no model at all.
         assert!(!reasoning_model_request(&req_with(
             json!({"messages":[{"role":"user","content":"hi"}]})
         )));
