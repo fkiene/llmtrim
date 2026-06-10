@@ -700,7 +700,24 @@ mod imp {
         ) else {
             return;
         };
-        let reused = crate::memo::apply(memo, &original, &mut compressed);
+        // Scope the memo to this request's compression context: the same conversation under a
+        // different provider kind or effective config produces different compressed bytes —
+        // replaying across contexts would splice one preset's compression into another's output.
+        // The top-level config alone is NOT enough: under `auto` it is identical every turn even
+        // when per-request routing flips presets (a turn that adds tools routes `rag` → `agent`),
+        // so the salt also folds in the effective STAGE LINEUP this run executed (routing-
+        // determined, content-independent). Any context flip = cold start, never a cross-splice.
+        let lineup: String = result
+            .stages
+            .iter()
+            .map(|s| s.name.as_str())
+            .collect::<Vec<_>>()
+            .join(",");
+        let salt = format!(
+            "{kind:?}|{lineup}|{}",
+            serde_json::to_string(config).unwrap_or_default()
+        );
+        let reused = crate::memo::apply(memo, salt.as_bytes(), &original, &mut compressed);
         if reused == 0 {
             // Either nothing matched (cold prefix) or an unmodelled shape: `compressed` is
             // unchanged from `result.request_json`, so leave the result (and its counts) as-is.

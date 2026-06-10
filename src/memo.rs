@@ -101,15 +101,20 @@ struct PrefixHasher {
 }
 
 impl PrefixHasher {
-    fn new() -> Self {
+    /// `salt` scopes the whole chain to a compression context (provider kind + effective
+    /// config): the same conversation compressed under a different preset/provider produces
+    /// different bytes, so replaying across contexts would splice one preset's compression
+    /// into another's output. Salting makes such entries simply not match (cold start on any
+    /// config flip — correct, since byte-stability is only achievable within one context).
+    fn new(salt: &[u8]) -> Self {
+        let mut lo = std::collections::hash_map::DefaultHasher::new();
         let mut hi = std::collections::hash_map::DefaultHasher::new();
+        salt.hash(&mut lo);
+        salt.hash(&mut hi);
         // Salt the second pass so the two 64-bit halves are independent (else both halves are
         // equal and the key is effectively 64-bit).
         0xA5A5_5A5A_u64.hash(&mut hi);
-        Self {
-            lo: std::collections::hash_map::DefaultHasher::new(),
-            hi,
-        }
+        Self { lo, hi }
     }
 
     /// Fold one original message (its canonical JSON bytes) into the chain and read off the
@@ -238,7 +243,7 @@ struct PrefixPlan {
 /// Build the [`PrefixPlan`] linking each original message to the compressed `content` at its
 /// aligned slot. Returns `None` (→ fallback) if either side lacks a conversation array or the
 /// arrays don't align by a 0/1 leading-system offset.
-fn plan(original: &Value, compressed: &Value) -> Option<PrefixPlan> {
+fn plan(salt: &[u8], original: &Value, compressed: &Value) -> Option<PrefixPlan> {
     let (_, orig_msgs) = conversation(original)?;
     let (key, comp_msgs) = conversation(compressed)?;
 
@@ -264,7 +269,7 @@ fn plan(original: &Value, compressed: &Value) -> Option<PrefixPlan> {
         _ => return None,
     };
 
-    let mut hasher = PrefixHasher::new();
+    let mut hasher = PrefixHasher::new(salt);
     let mut entries = Vec::with_capacity(orig_msgs.len());
     for orig in orig_msgs.iter() {
         let i = entries.len();
@@ -298,11 +303,11 @@ fn plan(original: &Value, compressed: &Value) -> Option<PrefixPlan> {
 /// Returns the number of prefix messages whose content was reused verbatim (0 = nothing
 /// reused, i.e. behavior identical to no memo). Pure and synchronous; never panics; on any
 /// structural surprise it makes no change and returns 0 (full stateless fallback).
-pub fn apply(memo: &Memo, original: &Value, compressed: &mut Value) -> usize {
+pub fn apply(memo: &Memo, salt: &[u8], original: &Value, compressed: &mut Value) -> usize {
     if memo.cap == 0 {
         return 0;
     }
-    let Some(plan) = plan(original, compressed) else {
+    let Some(plan) = plan(salt, original, compressed) else {
         return 0;
     };
     let offset = plan.offset;
@@ -401,6 +406,34 @@ mod tests {
     }
 
     #[test]
+    fn different_salt_never_reuses_across_contexts() {
+        // Same conversation, different compression context (auto-routing flipped the preset,
+        // or the provider kind changed): the fingerprint chain is salted with the context, so
+        // one context's entries must never splice into another's output — cold start instead.
+        let memo = Memo::with_capacity(DEFAULT_CAPACITY);
+        let a = json!({"messages": [
+            user("the revenue report grew across all regions. lots of detail here"),
+            user("what was the revenue"),
+        ]});
+        let mut ca = fake_compress(&a);
+        assert_eq!(apply(&memo, b"ctx-rag", &a, &mut ca), 0); // records under one context
+        let b = json!({"messages": [
+            user("the revenue report grew across all regions. lots of detail here"),
+            user("what was the revenue"),
+            user("now also tell me about costs"),
+        ]});
+        let mut cb = fake_compress(&b);
+        assert_eq!(
+            apply(&memo, b"ctx-agent", &b, &mut cb),
+            0,
+            "a different context salt must not reuse the other context's bytes"
+        );
+        // Same context still works (the salt isn't accidentally over-invalidating).
+        let mut cb2 = fake_compress(&b);
+        assert_eq!(apply(&memo, b"ctx-rag", &b, &mut cb2), 2);
+    }
+
+    #[test]
     fn headline_two_turn_prefix_is_byte_identical() {
         let memo = Memo::with_capacity(DEFAULT_CAPACITY);
 
@@ -411,7 +444,7 @@ mod tests {
         ]});
         let mut ca = fake_compress(&a);
         // First turn: nothing to reuse, but it records A's prefix.
-        assert_eq!(apply(&memo, &a, &mut ca), 0);
+        assert_eq!(apply(&memo, b"t", &a, &mut ca), 0);
         let a_msg0 = prefix_contents(&ca, 1);
 
         // Turn B = A + one appended user turn (the agent-loop shape).
@@ -431,7 +464,7 @@ mod tests {
 
         // WITH the memo: the two shared messages reuse turn A's bytes verbatim.
         let mut cb = fake_compress(&b);
-        let reused = apply(&memo, &b, &mut cb);
+        let reused = apply(&memo, b"t", &b, &mut cb);
         assert_eq!(reused, 2, "both shared messages frozen from turn A");
 
         // THE HEADLINE PROPERTY: every compressed byte of A's messages inside B equals A's.
@@ -461,13 +494,13 @@ mod tests {
 
         let a = json!({ "messages": base });
         let mut ca = fake_compress(&a);
-        apply(&memo, &a, &mut ca);
+        apply(&memo, b"t", &a, &mut ca);
 
         let mut b_msgs = base.clone();
         b_msgs.push(user("gamma follow up question number two"));
         let b = json!({ "messages": b_msgs.clone() });
         let mut cb = fake_compress(&b);
-        assert_eq!(apply(&memo, &b, &mut cb), 2);
+        assert_eq!(apply(&memo, b"t", &b, &mut cb), 2);
 
         let mut c_msgs = b_msgs.clone();
         c_msgs.push(user(
@@ -477,7 +510,7 @@ mod tests {
         let mut cc = fake_compress(&c);
         // Turn C freezes all THREE earlier messages (the prefix grew by one each turn).
         assert_eq!(
-            apply(&memo, &c, &mut cc),
+            apply(&memo, b"t", &c, &mut cc),
             3,
             "the frozen prefix extends transitively as the conversation grows"
         );
@@ -494,7 +527,7 @@ mod tests {
             user("a question"),
         ]});
         let mut ca = fake_compress(&a);
-        apply(&memo, &a, &mut ca);
+        apply(&memo, b"t", &a, &mut ca);
 
         // Same prefix LENGTH, but one byte changed in the OLD (first) message → the prefix
         // fingerprint diverges at message 0, so nothing reuses; fresh compression, no panic.
@@ -505,7 +538,7 @@ mod tests {
         ]});
         let mut cb = fake_compress(&b);
         assert_eq!(
-            apply(&memo, &b, &mut cb),
+            apply(&memo, b"t", &b, &mut cb),
             0,
             "a changed old message busts the prefix → no reuse (correctness over caching)"
         );
@@ -522,13 +555,13 @@ mod tests {
         let memo = Memo::with_capacity(DEFAULT_CAPACITY);
         let a = json!({"messages": [user("AAAA first"), user("BBBB second shared verbatim")]});
         let mut ca = fake_compress(&a);
-        apply(&memo, &a, &mut ca);
+        apply(&memo, b"t", &a, &mut ca);
 
         let b =
             json!({"messages": [user("ZZZZ first changed"), user("BBBB second shared verbatim")]});
         let mut cb = fake_compress(&b);
         assert_eq!(
-            apply(&memo, &b, &mut cb),
+            apply(&memo, b"t", &b, &mut cb),
             0,
             "message 1 is identical but message 0 diverged → no contiguous prefix from the front"
         );
@@ -542,7 +575,7 @@ mod tests {
             // Each request is a unique single-message conversation → one new prefix entry.
             let req = json!({"messages": [user(&format!("unique conversation number {i}"))]});
             let mut c = fake_compress(&req);
-            apply(&memo, &req, &mut c);
+            apply(&memo, b"t", &req, &mut c);
         }
         assert!(
             memo.len() <= 8,
@@ -557,11 +590,11 @@ mod tests {
         let memo = Memo::with_capacity(0);
         let a = json!({"messages": [user("first"), user("second")]});
         let mut ca = fake_compress(&a);
-        assert_eq!(apply(&memo, &a, &mut ca), 0);
+        assert_eq!(apply(&memo, b"t", &a, &mut ca), 0);
         let b = json!({"messages": [user("first"), user("second"), user("third")]});
         let mut cb = fake_compress(&b);
         assert_eq!(
-            apply(&memo, &b, &mut cb),
+            apply(&memo, b"t", &b, &mut cb),
             0,
             "cap 0 never reuses or stores — a hard off-switch (flag off ⇒ stateless behavior)"
         );
@@ -586,7 +619,7 @@ mod tests {
 
         let a = json!({"messages": [user("context here. plenty of it"), user("the query")]});
         let mut ca = compress_with_system(&a);
-        assert_eq!(apply(&memo, &a, &mut ca), 0);
+        assert_eq!(apply(&memo, b"t", &a, &mut ca), 0);
 
         let b = json!({"messages": [
             user("context here. plenty of it"),
@@ -595,7 +628,7 @@ mod tests {
         ]});
         let mut cb = compress_with_system(&b);
         assert_eq!(
-            apply(&memo, &b, &mut cb),
+            apply(&memo, b"t", &b, &mut cb),
             2,
             "alignment across the injected leading system message freezes both shared turns"
         );
@@ -626,7 +659,7 @@ mod tests {
         // No `messages` / `input` / `contents` array → no memo, no change, no panic.
         let weird = json!({"prompt": "just a string completion request", "max_tokens": 5});
         let mut c = weird.clone();
-        assert_eq!(apply(&memo, &weird, &mut c), 0);
+        assert_eq!(apply(&memo, b"t", &weird, &mut c), 0);
         assert_eq!(c, weird, "untouched when there's no conversation array");
     }
 
@@ -638,7 +671,7 @@ mod tests {
         let original = json!({"messages": [user("a"), user("b"), user("c")]});
         // Compressed output dropped a message (no stage does this, but guard it anyway).
         let mut compressed = json!({"messages": [user("a"), user("c")]});
-        assert_eq!(apply(&memo, &original, &mut compressed), 0);
+        assert_eq!(apply(&memo, b"t", &original, &mut compressed), 0);
     }
 
     #[test]
@@ -662,7 +695,7 @@ mod tests {
             out
         };
         let mut ca = comp(&a);
-        assert_eq!(apply(&memo, &a, &mut ca), 0);
+        assert_eq!(apply(&memo, b"t", &a, &mut ca), 0);
 
         let b = json!({"input": [
             {"role": "user", "content": "first turn long context here"},
@@ -671,7 +704,7 @@ mod tests {
         ]});
         let mut cb = comp(&b);
         assert_eq!(
-            apply(&memo, &b, &mut cb),
+            apply(&memo, b"t", &b, &mut cb),
             2,
             "the `input` (Responses) shape is memoized like `messages`"
         );
