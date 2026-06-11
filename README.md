@@ -71,7 +71,7 @@ Measured live, not estimated. Every one of the 112 A/B cases is sent twice (orig
 
 ## 🔍 What compression looks like
 
-One real agent request, walked through the five biggest levers. Each stage fires only where it pays, and only if the token gate nets a win:
+Each stage fires only where it pays, and only if the token gate nets a win:
 
 <p align="center">
   <picture>
