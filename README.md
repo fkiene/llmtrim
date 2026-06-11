@@ -79,8 +79,10 @@ rtk and caveman each compress one layer; [Headroom](https://github.com/chopratej
 | **Can't increase your bill** (auto-revert gate) | ✅ | ❌ | ✅ | ❌ |
 | Quality measured **live** (A/B: saved *and* kept) | ✅ | offline evals | ❌ | tokens only |
 | No Python · no models · single binary | ✅ | ❌ | ✅ | ✅ |
-| **Overhead it adds / request** | **<10 ms** | ~236 ms | <10 ms | n/a |
+| **Overhead it adds / request** | **<10 ms** | 52 ms median\* | <10 ms | n/a |
 | Deterministic (no ML variance, no downloads) | ✅ | ❌ | ✅ | ✅ |
+
+<sub>\* Headroom's own production telemetry (161 ms mean, 4.2 s P99) — sources in the comparison below.</sub>
 
 **Stack them:** llmtrim adds −35% on Claude Code's resent tool schemas *on top of* rtk, and hits **93–98%** on agentic tool-output with the bill measured both ways.
 
@@ -92,7 +94,7 @@ The trade is **pure-Rust simplicity + cache-correctness** vs **ML reach**:
 | | llmtrim | Headroom |
 |---|---|---|
 | Runtime | single 47 MB static binary, 0 deps | Python + numpy / onnxruntime / transformers / magika / fastembed (100s MB – GB) |
-| Latency it adds | **<10 ms per request** (0.5 ms at 5 KB → 7 ms at 49k tokens; tokenizer-bound, faster on Anthropic), negligible next to the model round-trip, and the smaller prompt often makes the call *faster* overall. ~110 ms one-time startup. Measured | **~236 ms** on its own 10,144-token demo\* (llmtrim does ~11k tokens in **2.7 ms**, so **~80× faster on the same workload**); per-request ONNX/magika inference + Python |
+| Latency it adds | **<10 ms per request** (0.5 ms at 5 KB → 7 ms at 49k tokens; tokenizer-bound, faster on Anthropic), negligible next to the model round-trip, and the smaller prompt often makes the call *faster* overall. ~110 ms one-time startup. Measured | **52 ms median / 161 ms mean** proxy overhead, P99 4.2 s (its own production telemetry\*); on its 10.2K-token search-results scenario, compression alone is **189 ms p50** — llmtrim does a comparable ~11k-token request in **2.7 ms**, ~**70× faster** |
 | Models | none (deterministic) | ONNX detection (magika) + learned text compressor (Kompress) + embeddings |
 | Tool output | log / diff / grep + repetitive fallback, adaptive↔aggressive auto-split | SmartCrusher / log / diff / search (ML-assisted) |
 | Cache discipline | frozen-zone guard (never busts the `cache_control` prefix) + tool/schema sort + OpenAI `prompt_cache_key` | live-zone byte-range surgery + cache stabilization |
@@ -100,7 +102,7 @@ The trade is **pure-Rust simplicity + cache-correctness** vs **ML reach**:
 
 **Where Headroom leads** (honest): ML content detection, semantic relevance, a learned text compressor, cross-agent memory, an MCP server, more providers (Bedrock / Vertex). Savings are in the same league (llmtrim 93–98%; Headroom ~92%).
 
-<sub>\* llmtrim's latencies are measured here (`cargo bench --bench latency`). Headroom's ~236 ms is the time shown in its own README demo (10,144 → 1,260 tokens); llmtrim compresses a comparable ~11k-token request in 2.7 ms (measured).</sub>
+<sub>\* llmtrim's latencies are measured here (`cargo bench --bench latency`). Headroom's numbers are self-reported in its [benchmarks page](https://headroom-docs.vercel.app/docs/benchmarks): 52 ms median / 161 ms mean / 4.2 s P99 proxy overhead from its production telemetry, and 189 ms p50 to compress its 10.2K-token search-results scenario; llmtrim compresses a comparable ~11k-token request in 2.7 ms (measured).</sub>
 
 </details>
 
