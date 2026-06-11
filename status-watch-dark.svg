@@ -1,0 +1,71 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="760" height="442" viewBox="0 0 760 442" font-family="ui-monospace,SFMono-Regular,Menlo,Consolas,monospace" font-size="15">
+  <style>
+    .t{fill:#e6edf3}.dim{fill:#8b949e}.acc{fill:#3fb950}.bold{fill:#e6edf3;font-weight:bold}
+    .accb{fill:#3fb950;font-weight:bold}.bar{fill:#3fb950}.trk{fill:#30363d}
+    .fine{fill:#8b949e;font-size:13px}
+  </style>
+  <!-- terminal chrome -->
+  <rect width="760" height="442" rx="10" fill="#0d1117" stroke="#6e7681"/>
+  <circle cx="22" cy="20" r="6" fill="#ff5f57"/><circle cx="42" cy="20" r="6" fill="#febc2e"/><circle cx="62" cy="20" r="6" fill="#28c840"/>
+  <text x="380" y="25" class="dim" text-anchor="middle" font-size="13">llmtrim status --watch</text>
+
+  <!-- header -->
+  <text x="24" y="58" class="t"><tspan class="acc">llmtrim ●</tspan> running :8443 · <tspan class="acc">✓</tspan> port <tspan class="acc">✓</tspan> env <tspan class="acc">✓</tspan> ca · traffic <tspan class="acc">✓</tspan></text>
+
+  <!-- hero panel -->
+  <rect x="24" y="74" width="712" height="46" rx="6" fill="none" stroke="#6e7681"/>
+  <text x="36" y="70" class="fine">llmtrim</text>
+
+  <!-- animated hero frames (8s loop, 4 steps, 3 loops then freeze) -->
+  <g>
+    <animate attributeName="opacity" calcMode="discrete" dur="8s" repeatCount="3" fill="freeze" keyTimes="0;0.25" values="1;0"/>
+    <text x="40" y="103"><tspan class="accb">1.38M tokens</tspan><tspan class="t"> trimmed</tspan><tspan class="dim"> · today $1.74 · </tspan><tspan class="bold">$14.02 off your bill</tspan><tspan class="t"> · 3,481 req</tspan></text>
+  </g>
+  <g opacity="0">
+    <animate attributeName="opacity" calcMode="discrete" dur="8s" repeatCount="3" fill="freeze" keyTimes="0;0.25;0.5" values="0;1;0"/>
+    <text x="40" y="103"><tspan class="accb">1.41M tokens</tspan><tspan class="t"> trimmed</tspan><tspan class="dim"> · today $1.83 · </tspan><tspan class="bold">$14.19 off your bill</tspan><tspan class="t"> · 3,502 req</tspan></text>
+  </g>
+  <g opacity="0">
+    <animate attributeName="opacity" calcMode="discrete" dur="8s" repeatCount="3" fill="freeze" keyTimes="0;0.5;0.75" values="0;1;0"/>
+    <text x="40" y="103"><tspan class="accb">1.44M tokens</tspan><tspan class="t"> trimmed</tspan><tspan class="dim"> · today $1.95 · </tspan><tspan class="bold">$14.41 off your bill</tspan><tspan class="t"> · 3,529 req</tspan></text>
+  </g>
+  <g opacity="0">
+    <animate attributeName="opacity" calcMode="discrete" dur="8s" repeatCount="3" fill="freeze" keyTimes="0;0.75" values="0;1"/>
+    <text x="40" y="103"><tspan class="accb">1.47M tokens</tspan><tspan class="t"> trimmed</tspan><tspan class="dim"> · today $2.08 · </tspan><tspan class="bold">$14.66 off your bill</tspan><tspan class="t"> · 3,560 req</tspan></text>
+  </g>
+
+  <text x="32" y="144" class="fine">floor $14.02 measured off the bill · $38.70 at list value</text>
+
+  <!-- savings axes -->
+  <text x="28" y="178" class="dim">savings</text>
+  <text x="36" y="202" class="t">input</text>
+  <rect x="116" y="191" width="220" height="12" rx="3" class="trk"/>
+  <rect x="116" y="191" width="75" height="12" rx="3" class="bar">
+    <animate attributeName="width" dur="8s" repeatCount="3" fill="freeze" calcMode="discrete" keyTimes="0;0.25;0.5;0.75" values="73;74;75;76"/>
+  </rect>
+  <text x="350" y="202" class="accb">−34%</text>
+  <text x="408" y="202" class="fine">(cache excluded)</text>
+
+  <text x="36" y="228" class="t">output</text>
+  <rect x="116" y="217" width="220" height="12" rx="3" class="trk"/>
+  <rect x="116" y="217" width="163" height="12" rx="3" class="bar" opacity="0.55"/>
+  <text x="350" y="228" class="accb">~−74%</text>
+  <text x="416" y="228" class="t">2.1M billed</text>
+  <text x="522" y="228" class="fine">(est · if shaped)</text>
+
+  <!-- by model -->
+  <text x="28" y="262" class="dim">by model</text>
+  <text x="36" y="286" class="dim">model</text><text x="340" y="286" class="dim" text-anchor="end">requests</text><text x="436" y="286" class="dim" text-anchor="end">saved</text><text x="544" y="286" class="dim" text-anchor="end">$ saved</text>
+  <line x1="36" y1="294" x2="544" y2="294" stroke="#6e7681"/>
+  <text x="36" y="316" class="t">claude-sonnet-4-6</text><text x="340" y="316" class="t" text-anchor="end">2,981</text><text x="436" y="316" class="acc" text-anchor="end">−35%</text><text x="544" y="316" class="acc" text-anchor="end">$11.92</text>
+  <text x="36" y="340" class="t">gpt-4o</text><text x="340" y="340" class="t" text-anchor="end">531</text><text x="436" y="340" class="acc" text-anchor="end">−31%</text><text x="544" y="340" class="acc" text-anchor="end">$2.39</text>
+  <text x="36" y="364" class="fine">saved % measured without the cached prefix</text>
+
+  <text x="28" y="394" class="fine">added latency ~0.41 ms/req · llmtrim overhead</text>
+
+  <!-- blinking watch cursor -->
+  <text x="28" y="422" class="fine">refreshing every 2s - Ctrl-C to exit</text>
+  <rect x="304" y="411" width="9" height="14" fill="#8b949e">
+    <animate attributeName="opacity" dur="1s" repeatCount="3" fill="freeze" values="1;1;0;0"/>
+  </rect>
+</svg>

@@ -1,0 +1,106 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="880" height="754" viewBox="0 0 880 754" font-family="ui-monospace,SFMono-Regular,Menlo,Consolas,monospace">
+  <defs>
+    <linearGradient id="bill" x1="0" y1="0" x2="1" y2="0"><stop offset="0%" stop-color="#6e93b6"/><stop offset="100%" stop-color="#9fb8d2"/></linearGradient>
+  </defs>
+  <style>
+    .bg{fill:#ffffff}.panel{fill:#f6f8fa;stroke:#d0d7de;stroke-width:1}
+    .chip{fill:#0969da14;stroke:#0969da;stroke-width:1}
+    .letter{fill:#0969da;font-size:17px;font-weight:bold;text-anchor:middle}
+    .stage{fill:#1f2328;font-size:17px;font-weight:bold}
+    .lever{fill:#57606a;font-size:14px}
+    .before{fill:#cf222e;font-size:16px}
+    .after{fill:#1a7f37;font-size:16px}
+    .tok{fill:#1f2328;font-size:16px;font-weight:bold;text-anchor:end}
+    .delta{fill:#1a7f37;font-size:13px;text-anchor:end}
+    .title{fill:#1f2328;font-size:20px;font-weight:bold}
+    .subtitle{fill:#57606a;font-size:14px}
+    .foot{fill:#57606a;font-size:14px;text-anchor:middle}
+    .cut{fill:#1a7f37;fill-opacity:0.09;stroke:#1a7f37;stroke-opacity:0.55;stroke-width:1.4;stroke-dasharray:5 4}
+    .barlbl{fill:#222b33;font-size:10.5px;letter-spacing:0.4px}
+    .cutout{fill:#9a6700;fill-opacity:0.09;stroke:#9a6700;stroke-opacity:0.55;stroke-width:1.4;stroke-dasharray:5 4}
+  </style>
+  <rect class="bg" width="880" height="754"/>
+
+  <text class="title" x="24" y="36">One agent request, biggest levers first</text>
+  <text class="subtitle" x="24" y="60">5 of 10 stages shown</text>
+  <text class="tok" x="846" y="36">11,240 &#8594; 3,914 tokens</text>
+  <text class="delta" x="846" y="60">&#8722;65% &#183; all ten stages</text>
+
+  <!-- T tool-output -->
+  <g transform="translate(20,84)">
+    <rect class="panel" width="840" height="104" rx="8"/>
+    <rect class="chip" x="14" y="14" width="28" height="24" rx="6"/><text class="letter" x="28" y="32">T</text>
+    <text class="stage" x="54" y="32">tool-output</text><text class="lever" x="190" y="32">fold logs &#183; diffs &#183; grep to the signal</text>
+    <text class="before" x="54" y="60">- npm WARN deprecated &#8230; (386 near-identical lines)</text>
+    <text class="after" x="54" y="86">+ [386 lines folded] &#183; 2 error lines kept verbatim</text>
+    <rect x="600" y="40" width="53.9" height="10" rx="3" class="cut"/>
+    <rect x="653.9" y="40" width="172.1" height="10" rx="3" fill="url(#bill)"/>
+    <text class="tok" x="826" y="32">11,240 &#8594; 8,560</text>
+    <text class="delta" x="826" y="64">&#8722;2,680</text>
+  </g>
+
+  <!-- B retrieve -->
+  <g transform="translate(20,198)">
+    <rect class="panel" width="840" height="104" rx="8"/>
+    <rect class="chip" x="14" y="14" width="28" height="24" rx="6"/><text class="letter" x="28" y="32">B</text>
+    <text class="stage" x="54" y="32">lexical retrieval</text><text class="lever" x="250" y="32">keep what answers the question</text>
+    <text class="before" x="54" y="60">- 6,000-token doc pasted whole; answer in 3 &#182;</text>
+    <text class="after" x="54" y="86">+ 7 relevant, non-redundant chunks &#183; question protected</text>
+    <rect x="653.9" y="40" width="27.3" height="10" rx="3" class="cut"/>
+    <rect x="681.2" y="40" width="144.8" height="10" rx="3" fill="url(#bill)"/>
+    <text class="tok" x="826" y="32">8,560 &#8594; 7,200</text>
+    <text class="delta" x="826" y="64">&#8722;1,360</text>
+  </g>
+
+  <!-- A cache -->
+  <g transform="translate(20,312)">
+    <rect class="panel" width="840" height="104" rx="8"/>
+    <rect class="chip" x="14" y="14" width="28" height="24" rx="6"/><text class="letter" x="28" y="32">A</text>
+    <text class="stage" x="54" y="32">cache discipline</text><text class="lever" x="240" y="32">the invariant prefix stays byte-identical</text>
+    <text class="before" x="54" y="60">- tools reordered &#8594; cache busted &#8594; re-billed in full</text>
+    <text class="after" x="54" y="86">+ frozen zone: cache_control kept &#183; ~90% discount intact</text>
+    <rect x="681.2" y="40" width="144.8" height="10" rx="3" fill="#c8d4e0" stroke="#0969da" stroke-opacity="0.45" stroke-width="1" stroke-dasharray="5 4"/>
+    <text class="delta" x="826" y="64" fill="#57606a">protects the cache</text>
+    <text class="tok" x="826" y="32">7,200 &#8594; 7,200</text>
+  </g>
+
+  <!-- D serialize -->
+  <g transform="translate(20,426)">
+    <rect class="panel" width="840" height="104" rx="8"/>
+    <rect class="chip" x="14" y="14" width="28" height="24" rx="6"/><text class="letter" x="28" y="32">D</text>
+    <text class="stage" x="54" y="32">serialization</text><text class="lever" x="210" y="32">lossless &#183; JSON minify &#183; TOON encoding</text>
+    <text class="before" x="54" y="60">- [{"id":1,"region":"eu-west","status":"ok"}, &#8230;</text>
+    <text class="after" x="54" y="86">+ rows[120]{id,region,status}: 1,eu-west,ok &#8629; 2,eu-west,ok &#8629; &#8230;</text>
+    <rect x="681.2" y="40" width="8.7" height="10" rx="3" class="cut"/>
+    <rect x="689.9" y="40" width="136.1" height="10" rx="3" fill="url(#bill)"/>
+    <text class="tok" x="826" y="32">7,200 &#8594; 6,770</text>
+    <text class="delta" x="826" y="64">&#8722;430</text>
+  </g>
+
+  <!-- +5 more stages -->
+  <g transform="translate(20,540)">
+    <rect class="panel" width="840" height="64" rx="8"/>
+    <rect class="chip" x="14" y="16" width="28" height="24" rx="6"/><text class="letter" x="28" y="34">+5</text>
+    <text class="lever" x="54" y="34">code skeleton &#183; json sample &#183; dedup &#183; tool trim &#183; image downscale</text>
+    <text class="tok" x="826" y="28">&#8594; 3,914 total</text>
+    <rect x="689.9" y="38" width="57.4" height="10" rx="3" class="cut"/>
+    <rect x="747.3" y="38" width="78.7" height="10" rx="3" fill="url(#bill)"/>
+    <text class="delta" x="826" y="60">&#8722;2,856</text>
+  </g>
+
+  <!-- F output -->
+  <g transform="translate(20,614)">
+    <rect class="panel" width="840" height="104" rx="8"/>
+    <rect class="chip" x="14" y="14" width="28" height="24" rx="6"/><text class="letter" x="28" y="32">F</text>
+    <text class="stage" x="54" y="32">output control</text><text class="lever" x="220" y="32">the expensive half: the reply</text>
+    <text class="before" x="54" y="60">- "Sure! I'd be happy to help. Let me walk you&#8230;"</text>
+    <text class="after" x="54" y="86">+ terse instruction + token budget &#8594; reply &#8722;74% (live A/B)</text>
+    <rect x="716" y="40" width="82" height="10" rx="3" class="cutout"/>
+    <rect x="798" y="40" width="28" height="10" rx="3" fill="#9a6700"/>
+    <text class="tok" x="826" y="32">output side</text>
+    <text class="delta" x="826" y="64" fill="#9a6700">&#8722;74%</text>
+  </g>
+
+
+  <text class="foot" x="440" y="744">No net token win at any stage &#8594; auto-revert. The cache_control prefix is never rewritten.</text>
+</svg>
