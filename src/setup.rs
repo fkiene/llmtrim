@@ -17,8 +17,10 @@ use crate::ui::{self, Tone};
 const BEGIN: &str = "# >>> llmtrim >>>";
 const END: &str = "# <<< llmtrim <<<";
 
-/// Default interceptor port; the scan for a free port starts here.
-const DEFAULT_PORT: u16 = 8787;
+/// Default interceptor port; the scan for a free port starts here. Chosen to be unassigned
+/// by IANA and below the OS ephemeral range (so it isn't grabbed as a transient client port),
+/// avoiding clashes with common dev servers. Single source of truth — `main.rs` references it.
+pub const DEFAULT_PORT: u16 = 43117;
 
 /// First loopback port that actually binds, scanning `start..=start+span`. A successful bind
 /// (immediately dropped) proves the port is usable *right now*; because we accept only `Ok`,
@@ -331,7 +333,7 @@ pub fn uninstall(purge: bool, keep_binary: bool) -> Result<()> {
     }
 
     // 2. Disable run-at-login (matched by app name, so the port is irrelevant here).
-    match crate::autostart::configure(false, 8787) {
+    match crate::autostart::configure(false, DEFAULT_PORT) {
         Ok(()) => rows.push((ui::OK, "Autostart".into(), "disabled".into())),
         Err(e) => rows.push((ui::WARN, "Autostart".into(), format!("not changed: {e}"))),
     }
@@ -405,6 +407,38 @@ pub fn uninstall(purge: bool, keep_binary: bool) -> Result<()> {
         ));
     }
 
+    // 4b. Untrust the CA from the OS trust store. Deleting ca.pem (step 4) leaves any
+    //     system-wide trust (`llmtrim ca` → certutil -addstore) dangling — a keyless root CA
+    //     still trusted. Pull it out so uninstall actually reverses `llmtrim ca`.
+    #[cfg(windows)]
+    match untrust_ca_root() {
+        Ok(true) => rows.push((
+            ui::OK,
+            "Trust".into(),
+            "removed the CA from your user Root store".into(),
+        )),
+        Ok(false) => rows.push((
+            ui::NOTE,
+            "Trust".into(),
+            "CA was not trusted system-wide".into(),
+        )),
+        Err(e) => rows.push((ui::WARN, "Trust".into(), format!("not untrusted: {e}"))),
+    }
+    #[cfg(target_os = "macos")]
+    match untrust_ca_keychain() {
+        Ok(true) => rows.push((
+            ui::OK,
+            "Trust".into(),
+            "removed the CA from your login keychain".into(),
+        )),
+        Ok(false) => rows.push((
+            ui::NOTE,
+            "Trust".into(),
+            "CA was not in the login keychain".into(),
+        )),
+        Err(e) => rows.push((ui::WARN, "Trust".into(), format!("not untrusted: {e}"))),
+    }
+
     // 5. The savings ledger — kept by default (it's your history), removed with --purge.
     match crate::tracking::db_path() {
         Ok(db) if db.exists() && purge => {
@@ -457,10 +491,13 @@ pub fn uninstall(purge: bool, keep_binary: bool) -> Result<()> {
                     format!("scheduled removal of {} after exit", dir.display()),
                 ));
             } else {
+                // Not an installer build (e.g. `cargo install` → ~/.cargo/bin). A running
+                // .exe can't unlink itself, so schedule the lone file's deletion after exit.
+                schedule_file_removal(&exe);
                 rows.push((
-                    ui::NOTE,
+                    ui::OK,
                     "Binary".into(),
-                    format!("remove manually: {}", exe.display()),
+                    format!("scheduled removal of {} after exit", exe.display()),
                 ));
             }
             broadcast_env_change(); // re-broadcast so the dropped PATH entry takes effect
@@ -488,6 +525,21 @@ pub fn uninstall(purge: bool, keep_binary: bool) -> Result<()> {
             "Done. Open a new shell so the environment changes take effect."
         )
     );
+    // The env is gone from disk, but processes that were already running inherited it at
+    // launch and keep the now-dead `127.0.0.1:<port>` proxy until they restart — on Windows
+    // that includes GUI apps and services (browsers, media servers like Plex), which fail
+    // every outbound request with "couldn't connect to 127.0.0.1". We can't reach into a
+    // running process's environment, so the only honest fix is: restart them, or reboot.
+    #[cfg(windows)]
+    println!(
+        "{}",
+        ui::note(
+            color,
+            "Apps already running (browsers, Plex/media servers, anything networked) keep the \
+             old proxy until you restart them — reboot to clear them all at once."
+        )
+    );
+    #[cfg(not(windows))]
     println!(
         "{}",
         ui::note(
@@ -700,6 +752,47 @@ fn has_proxy_in(env: &winreg::RegKey) -> bool {
         .is_ok_and(|v| v.contains("127.0.0.1"))
 }
 
+// ── Windows OS trust-store cleanup ───────────────────────────────────────────────
+// `llmtrim ca` tells GUI/non-Node apps to trust the CA system-wide via
+// `certutil -addstore -user Root`. Removing ~/.llmtrim/ca.pem does NOT untrust that copy —
+// a stale, now-keyless root CA would linger in the store. Uninstall must pull it back out.
+
+/// The CA's subject CommonName, matched verbatim with the value set at generation in
+/// `serve.rs` (`dn.push(DnType::CommonName, "llmtrim local CA")`). Keep the two in sync.
+#[cfg(any(windows, target_os = "macos"))]
+const CA_SUBJECT_CN: &str = "llmtrim local CA";
+
+/// Remove the llmtrim CA from the current-user **Root** trust store if it was trusted
+/// system-wide (via `llmtrim ca` / `certutil -addstore`). Matched by subject CN.
+///
+/// `Remove-Item Cert:\CurrentUser\Root\..` refuses to run non-interactively ("the operation
+/// occurred in the user's main store and the UI is not allowed"), so we shell out to
+/// `certutil -delstore`, which deletes from the user store without a prompt and without
+/// elevation. Best-effort and idempotent: a non-zero exit is almost always "no certificate
+/// matched" — i.e. it was never trusted system-wide — and is reported as `Ok(false)`.
+#[cfg(windows)]
+fn untrust_ca_root() -> Result<bool> {
+    let out = std::process::Command::new("certutil")
+        .args(["-user", "-delstore", "Root", CA_SUBJECT_CN])
+        .output()
+        .context("failed to run certutil -delstore")?;
+    Ok(out.status.success())
+}
+
+/// macOS: remove the llmtrim CA from the **login** keychain if it was trusted there (via
+/// `llmtrim ca` → `security add-trusted-cert`). Matched by common name; no sudo, since the
+/// login keychain is the user's own. Best-effort and idempotent: a non-zero exit is "no such
+/// certificate" — i.e. it was never trusted — and is reported as `Ok(false)`. A *system*
+/// keychain trust (sudo-installed) is left to the printed manual note, as on Linux.
+#[cfg(target_os = "macos")]
+fn untrust_ca_keychain() -> Result<bool> {
+    let out = std::process::Command::new("security")
+        .args(["delete-certificate", "-c", CA_SUBJECT_CN])
+        .output()
+        .context("failed to run security delete-certificate")?;
+    Ok(out.status.success())
+}
+
 // ── Windows binary + PATH cleanup (the installer's footprint) ────────────────────
 // install.ps1 drops llmtrim.exe in %LOCALAPPDATA%\llmtrim\bin and adds that dir to the user
 // PATH. Uninstall has to reverse both, or `llmtrim` keeps resolving as a command afterwards.
@@ -772,6 +865,25 @@ fn schedule_dir_removal(dir: &std::path::Path) {
         "ping 127.0.0.1 -n 3 >nul & rmdir /s /q \"{}\"",
         dir.display()
     );
+    let _ = std::process::Command::new("cmd")
+        .args(["/c", &script])
+        .creation_flags(DETACHED_PROCESS | CREATE_NO_WINDOW)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn();
+}
+
+/// Schedule deletion of a single file once we've exited — the running-`.exe` self-delete for
+/// builds that live outside `%LOCALAPPDATA%\llmtrim` (e.g. a `cargo install` binary under
+/// `~/.cargo/bin`). Same detached-`cmd` trick as [`schedule_dir_removal`], `del` not `rmdir`.
+#[cfg(windows)]
+fn schedule_file_removal(file: &std::path::Path) {
+    use std::os::windows::process::CommandExt;
+    use std::process::Stdio;
+    const DETACHED_PROCESS: u32 = 0x0000_0008;
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+    let script = format!("ping 127.0.0.1 -n 3 >nul & del /f /q \"{}\"", file.display());
     let _ = std::process::Command::new("cmd")
         .args(["/c", &script])
         .creation_flags(DETACHED_PROCESS | CREATE_NO_WINDOW)

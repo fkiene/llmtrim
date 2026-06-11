@@ -78,7 +78,7 @@ enum Commands {
     /// passes through untouched.
     Serve {
         /// Port to listen on (127.0.0.1).
-        #[arg(long, default_value_t = 8787)]
+        #[arg(long, default_value_t = llmtrim::setup::DEFAULT_PORT)]
         port: u16,
         /// Run detached in the background; manage with `status` / `stop`.
         #[arg(long)]
@@ -95,7 +95,7 @@ enum Commands {
     /// interceptor. Idempotent — re-running reuses the same port and won't restart a
     /// healthy daemon. No IDE settings are touched, no sudo.
     Setup {
-        /// Interceptor port. Omit to auto-select a free port starting at 8787.
+        /// Interceptor port. Omit to auto-select a free port starting at 43117.
         #[arg(long)]
         port: Option<u16>,
     },
@@ -117,7 +117,7 @@ enum Commands {
     /// `setup`. Reuses the port already wired into your environment (or `--port`), so it
     /// matches what your tools point at. Run `setup` first if you haven't.
     Start {
-        /// Port to listen on. Omit to reuse the configured port (or 8787).
+        /// Port to listen on. Omit to reuse the configured port (or 43117).
         #[arg(long)]
         port: Option<u16>,
     },
@@ -174,7 +174,7 @@ enum Commands {
         #[arg(long)]
         off: bool,
         /// Port the autostarted interceptor listens on.
-        #[arg(long, default_value_t = 8787)]
+        #[arg(long, default_value_t = llmtrim::setup::DEFAULT_PORT)]
         port: u16,
     },
     /// Print the local CA certificate path and how to trust it
@@ -389,7 +389,7 @@ fn run() -> Result<()> {
                 );
             } else {
                 // No live daemon → resolve the port the same way `setup` does (explicit, else
-                // the one already wired into the env, else 8787) so we match existing clients.
+                // the one already wired into the env, else DEFAULT_PORT) so we match clients.
                 let port = llmtrim::setup::resolve_port(port, None)?;
                 let pid = llmtrim::daemon::spawn_detached(port)?;
                 println!(
@@ -496,7 +496,10 @@ fn run() -> Result<()> {
             #[cfg(windows)]
             {
                 println!("  $env:NODE_EXTRA_CA_CERTS = \"{}\"", path.display());
-                println!("  $env:HTTPS_PROXY = \"http://127.0.0.1:8787\"");
+                println!(
+                    "  $env:HTTPS_PROXY = \"http://127.0.0.1:{}\"",
+                    llmtrim::setup::DEFAULT_PORT
+                );
                 println!("  llmtrim serve");
                 println!();
                 println!("System-wide trust (non-PowerShell / GUI apps):");
@@ -505,7 +508,10 @@ fn run() -> Result<()> {
             #[cfg(not(windows))]
             {
                 println!("  export NODE_EXTRA_CA_CERTS={}", path.display());
-                println!("  export HTTPS_PROXY=http://127.0.0.1:8787");
+                println!(
+                    "  export HTTPS_PROXY=http://127.0.0.1:{}",
+                    llmtrim::setup::DEFAULT_PORT
+                );
                 println!("  llmtrim serve");
             }
             println!();
