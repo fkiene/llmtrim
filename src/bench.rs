@@ -348,8 +348,8 @@ fn pass_at_one(answer: &str, gold: &str, timeout_secs: u64) -> f64 {
     // address space, no file writes, no forked subprocesses. Wrapped in try/except so a
     // platform without `resource` (e.g. Windows) still runs under the wall-clock bound.
     let limits = format!(
-        "import resource as _r\n\
-         try:\n\
+        "try:\n\
+         \x20   import resource as _r\n\
          \x20   _r.setrlimit(_r.RLIMIT_CPU, ({cpu}, {cpu}))\n\
          \x20   _r.setrlimit(_r.RLIMIT_AS, (512*1024*1024, 512*1024*1024))\n\
          \x20   _r.setrlimit(_r.RLIMIT_FSIZE, (0, 0))\n\

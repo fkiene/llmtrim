@@ -1809,16 +1809,34 @@ mod imp {
             let response_body = response_body.to_string();
             std::thread::spawn(move || {
                 if let Ok((mut stream, _)) = listener.accept() {
-                    // Drain request headers so ureq doesn't see ECONNRESET before reading
-                    // the response; read until the blank-line header terminator.
+                    // Drain the FULL request (headers + Content-Length body), not just the
+                    // headers: closing a socket with unread data sends RST on Windows, and
+                    // the client then errors before it can read the response.
                     let mut buf = [0u8; 4096];
                     let mut acc: Vec<u8> = Vec::new();
+                    let mut want: Option<usize> = None;
                     loop {
                         match stream.read(&mut buf) {
                             Ok(0) | Err(_) => break,
                             Ok(n) => {
                                 acc.extend_from_slice(&buf[..n]);
-                                if acc.windows(4).any(|w| w == b"\r\n\r\n") {
+                                if want.is_none()
+                                    && let Some(pos) = acc.windows(4).position(|w| w == b"\r\n\r\n")
+                                {
+                                    let headers = String::from_utf8_lossy(&acc[..pos]);
+                                    let cl = headers
+                                        .lines()
+                                        .find_map(|l| {
+                                            l.split_once(':').and_then(|(k, v)| {
+                                                k.eq_ignore_ascii_case("content-length")
+                                                    .then(|| v.trim().parse::<usize>().ok())
+                                                    .flatten()
+                                            })
+                                        })
+                                        .unwrap_or(0);
+                                    want = Some(pos + 4 + cl);
+                                }
+                                if want.is_some_and(|w| acc.len() >= w) {
                                     break;
                                 }
                             }
