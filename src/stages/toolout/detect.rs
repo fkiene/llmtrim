@@ -63,21 +63,28 @@ fn is_grep(lines: &[&str]) -> bool {
     matches >= MIN_LINES && matches * 4 >= lines.len() * 3
 }
 
-/// Log-shaped: enough lines, and either two outright failure lines or ≥30% of lines
-/// carrying any level token. Conservative, to avoid windowing ordinary prose.
+/// Log-shaped: enough lines, and either ≥30% of lines carrying any level token, or
+/// failure lines dense enough for the segment's length (two outright failure lines is
+/// only enough on short segments — ≥10% of lines must be failures on longer ones).
+/// The density requirement keeps long prose that merely *mentions* failure a couple of
+/// times (e.g. instructions about error handling) out of errors-only windowing, while a
+/// real long log still qualifies via the level-token share.
 fn is_log(lines: &[&str]) -> bool {
     if lines.len() < MIN_LOG_LINES {
         return false;
+    }
+    let level = lines
+        .iter()
+        .filter(|l| super::signals::LEVEL.is_match(l))
+        .count();
+    if level * 100 >= lines.len() * 30 {
+        return true;
     }
     let strong = lines
         .iter()
         .filter(|l| super::signals::STRONG.is_match(l))
         .count();
-    let level = lines
-        .iter()
-        .filter(|l| super::signals::LEVEL.is_match(l))
-        .count();
-    strong >= 2 || level * 100 >= lines.len() * 30
+    strong >= 2 && strong * 10 >= lines.len()
 }
 
 #[cfg(test)]
@@ -124,6 +131,39 @@ mod tests {
                    INFO  compiling module d\n\
                    INFO  done with warnings";
         assert_eq!(detect(log), Some(OutKind::Log));
+    }
+
+    #[test]
+    fn long_prose_mentioning_failures_is_not_log() {
+        // Regression: a long prose instruction segment where only two lines mention
+        // failure keywords must not be windowed as a log (live capture: a 106-line
+        // conversation-compaction prompt was gutted to errors-only).
+        let prose: Vec<String> = (0..104)
+            .map(|i| format!("Step {i}: describe the section thoroughly, capturing every detail of the request in flowing prose."))
+            .chain([
+                "Errors and fixes: list all errors that you ran into, and how you fixed them.".to_string(),
+                "Tool calls will be rejected and you will fail the task entirely.".to_string(),
+            ])
+            .collect();
+        assert_eq!(detect(&prose.join("\n")), None);
+    }
+
+    #[test]
+    fn real_compaction_prompt_is_not_log() {
+        let t = include_str!("../../../tests/fixtures/compaction_prompt.txt");
+        assert_eq!(detect(t), None);
+    }
+
+    #[test]
+    fn long_level_heavy_log_with_few_errors_still_detects() {
+        // 100 INFO lines + 2 ERROR lines: low strong density, but every line carries a
+        // level token, so the level-share arm keeps it a log.
+        let mut lines: Vec<String> = (0..100)
+            .map(|i| format!("INFO  compiling module {i}"))
+            .collect();
+        lines.push("ERROR failed to resolve symbol foo".to_string());
+        lines.push("ERROR type mismatch in bar".to_string());
+        assert_eq!(detect(&lines.join("\n")), Some(OutKind::Log));
     }
 
     #[test]
