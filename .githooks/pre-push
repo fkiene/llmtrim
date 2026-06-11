@@ -1,11 +1,9 @@
-#!/bin/sh
-# Mirror of .github/workflows/ci.yml — fail locally before CI does.
-# Enabled per-clone with: git config core.hooksPath .githooks
-set -e
-export RUSTFLAGS="-D warnings"
-
-echo "pre-push: cargo fmt --all -- --check"
+#!/usr/bin/env bash
+# Mirror CI gates locally so a push never fails the pipeline on style/lint.
+set -euo pipefail
+echo "pre-push: cargo fmt --check"
 cargo fmt --all -- --check
-
-echo "pre-push: cargo clippy --all-targets -- -D warnings"
+echo "pre-push: cargo clippy -D warnings"
 cargo clippy --all-targets -- -D warnings
+echo "pre-push: cargo test"
+cargo test --quiet
