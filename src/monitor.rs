@@ -266,7 +266,8 @@ fn render_header(color: bool, d: &DaemonView) -> String {
                 Tone::Warn,
                 &format!(
                     "  {} port :{} not accepting connections — check log: {log}\n",
-                    ui::WARN, d.port
+                    ui::WARN,
+                    d.port
                 ),
             ));
         }
@@ -276,7 +277,8 @@ fn render_header(color: bool, d: &DaemonView) -> String {
                 Tone::Warn,
                 &format!(
                     "  {} env points at :{p} but the daemon listens on :{} — run: llmtrim setup\n",
-                    ui::WARN, d.port
+                    ui::WARN,
+                    d.port
                 ),
             )),
             None => o.push_str(&ui::paint(
@@ -314,7 +316,8 @@ fn render_header(color: bool, d: &DaemonView) -> String {
                 Tone::Warn,
                 &format!(
                     "  {} crashed and restarted {}× since start — check log: {log}\n",
-                    ui::WARN, d.restarts
+                    ui::WARN,
+                    d.restarts
                 ),
             ));
         }
@@ -415,7 +418,11 @@ pub fn snapshot(
             };
             format!(
                 "{} trimmed{}   {}   {} requests",
-                ui::paint(color, Tone::Accent, &format!("{} tokens", ui::human(s.saved()))),
+                ui::paint(
+                    color,
+                    Tone::Accent,
+                    &format!("{} tokens", ui::human(s.saved()))
+                ),
                 today,
                 ui::paint(color, Tone::Bold, &real),
                 ui::commas(s.events),
@@ -724,7 +731,7 @@ mod tests {
             saved: 12.47,
             spend: 9.0,
             out_spend: 3.0,
-            net_saved: 12.47,      // no cache discount → net line hidden
+            net_saved: 12.47, // no cache discount → net line hidden
             live_saved: 12.47,
             out_spend_shaped: 3.0, // shaped → an output estimate exists to surface separately
         };
@@ -779,7 +786,10 @@ mod tests {
             "headline = measured net saving"
         );
         assert!(
-            !out.contains(&format!("${:.2} off your real bill", cost.projected_saved())),
+            !out.contains(&format!(
+                "${:.2} off your real bill",
+                cost.projected_saved()
+            )),
             "projected total ({:.2}) is not the headline",
             cost.projected_saved()
         );
@@ -1024,7 +1034,10 @@ mod tests {
                 ..dv()
             },
         );
-        assert!(out.contains(":8787") && out.contains(":8788"), "names both ports");
+        assert!(
+            out.contains(":8787") && out.contains(":8788"),
+            "names both ports"
+        );
     }
 
     #[test]

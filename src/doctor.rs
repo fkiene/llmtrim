@@ -93,7 +93,9 @@ pub fn gather() -> Report {
         ledger_rows,
         ledger_error,
         last_request,
-        log_path: crate::daemon::logfile().ok().map(|p| p.display().to_string()),
+        log_path: crate::daemon::logfile()
+            .ok()
+            .map(|p| p.display().to_string()),
         update_available: crate::update::check(false),
     };
     build(&state)
@@ -131,7 +133,10 @@ pub fn build(s: &State) -> Report {
             rows.push((
                 ui::WARN,
                 "stability".into(),
-                format!("crashed and restarted {}× since start — check log: {log}", s.restarts),
+                format!(
+                    "crashed and restarted {}× since start — check log: {log}",
+                    s.restarts
+                ),
             ));
         }
     } else {
@@ -224,10 +229,7 @@ pub fn build(s: &State) -> Report {
         (None, err) => rows.push((
             ui::WARN,
             "ledger".into(),
-            format!(
-                "unreadable — {}",
-                err.as_deref().unwrap_or("unknown error")
-            ),
+            format!("unreadable — {}", err.as_deref().unwrap_or("unknown error")),
         )),
     }
 
@@ -262,10 +264,7 @@ pub fn render(color: bool, report: &Report) -> String {
     let lines = ui::kv_rows(color, &report.rows);
     let mut o = ui::panel(color, "llmtrim doctor", &lines);
     if report.problems == 0 {
-        o.push_str(&format!(
-            "{}\n",
-            ui::ok(color, "all checks passed")
-        ));
+        o.push_str(&format!("{}\n", ui::ok(color, "all checks passed")));
     } else {
         o.push_str(&format!(
             "{}\n",
