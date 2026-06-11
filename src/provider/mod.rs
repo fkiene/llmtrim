@@ -260,11 +260,45 @@ pub(crate) fn retain_tools_array(req: &mut Request, keep: &[bool]) {
 }
 
 /// Truncate `s` to at most `max` chars, appending `…` when shortened.
+///
+/// Boundary-aware: fills the budget with whole sentences (Unicode sentence
+/// segmentation, so any script works), falling back to whole lines, then whole
+/// words — never cutting mid-word. Slight undershoot of the budget is expected.
 pub(crate) fn truncate_chars(s: &mut String, max: usize) {
-    if s.chars().count() > max {
-        let truncated: String = s.chars().take(max).collect();
-        *s = format!("{truncated}…");
+    use unicode_segmentation::UnicodeSegmentation;
+
+    if s.chars().count() <= max {
+        return;
     }
+    let keep_bytes = fit_units(s.split_sentence_bounds(), max)
+        .or_else(|| fit_units(s.split_inclusive('\n'), max))
+        .or_else(|| fit_units(s.split_word_bounds(), max));
+    match keep_bytes {
+        Some(n) => {
+            s.truncate(n);
+            s.truncate(s.trim_end().len());
+        }
+        // Degenerate case: the very first word exceeds the budget. Hard char
+        // cut rather than emptying the description entirely.
+        None => *s = s.chars().take(max).collect(),
+    }
+    s.push('…');
+}
+
+/// Byte length of the longest prefix of contiguous `units` whose total char
+/// count fits in `max`. `None` when not even the first unit fits.
+fn fit_units<'a>(units: impl Iterator<Item = &'a str>, max: usize) -> Option<usize> {
+    let mut chars = 0;
+    let mut bytes = 0;
+    for u in units {
+        let c = u.chars().count();
+        if chars + c > max {
+            break;
+        }
+        chars += c;
+        bytes += u.len();
+    }
+    (bytes > 0).then_some(bytes)
 }
 
 /// Construct the adapter for a known provider kind.
@@ -343,5 +377,75 @@ pub(crate) fn append_stop(root: &mut Value, key: &str, stop: &str) {
                 Value::Array(vec![Value::String(stop.to_string())]),
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::truncate_chars;
+
+    fn trunc(s: &str, max: usize) -> String {
+        let mut s = s.to_string();
+        truncate_chars(&mut s, max);
+        s
+    }
+
+    #[test]
+    fn short_input_untouched() {
+        assert_eq!(trunc("Short description.", 300), "Short description.");
+    }
+
+    #[test]
+    fn cuts_at_sentence_boundary() {
+        let input =
+            "First sentence here. Second sentence is longer. Third one overflows the budget.";
+        // Budget admits the first two sentences but not the third.
+        assert_eq!(
+            trunc(input, 50),
+            "First sentence here. Second sentence is longer.…"
+        );
+    }
+
+    #[test]
+    fn falls_back_to_line_boundary() {
+        // One run-on "sentence" spread over lines: sentence segmentation can't
+        // fit a unit, line fallback can.
+        let input = "alpha beta gamma\ndelta epsilon zeta\neta theta iota kappa lambda";
+        assert_eq!(trunc(input, 40), "alpha beta gamma\ndelta epsilon zeta…");
+    }
+
+    #[test]
+    fn single_long_sentence_falls_back_to_words() {
+        let input = "one two three four five six seven eight nine ten eleven twelve";
+        let out = trunc(input, 30);
+        assert!(out.ends_with('…'), "{out}");
+        let body = out.trim_end_matches('…');
+        // Never mid-word: the kept prefix must end on a word from the input.
+        assert!(input.starts_with(body));
+        assert!(body.split_whitespace().all(|w| input.contains(w)));
+        assert_eq!(body, "one two three four five six");
+    }
+
+    #[test]
+    fn no_mid_word_cut() {
+        let out = trunc("Avoid cutting important words in the middle always", 20);
+        assert_eq!(out, "Avoid cutting…");
+    }
+
+    #[test]
+    fn japanese_sentences() {
+        let input = "これは最初の文です。これは二番目の文です。これは三番目のとても長い文です。";
+        // 10 + 11 = 21 chars for the first two sentences; third doesn't fit.
+        assert_eq!(
+            trunc(input, 25),
+            "これは最初の文です。これは二番目の文です。…"
+        );
+    }
+
+    #[test]
+    fn degenerate_giant_word_hard_cuts() {
+        let input = "a".repeat(50);
+        let out = trunc(&input, 10);
+        assert_eq!(out, format!("{}…", "a".repeat(10)));
     }
 }
