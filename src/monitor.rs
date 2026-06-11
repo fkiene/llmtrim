@@ -552,7 +552,7 @@ pub fn snapshot(
             o.push_str(&ui::paint(
                 color,
                 Tone::Dim,
-                " saved % measured on new content (outside the cached prefix) where metered\n",
+                " saved % measured without the cached prefix where metered\n",
             ));
         }
     }
