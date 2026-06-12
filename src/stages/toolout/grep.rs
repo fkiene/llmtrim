@@ -141,13 +141,11 @@ mod tests {
         for file in ["src/a.rs:", "src/b.rs:", "src/target.rs:"] {
             assert!(out.contains(file), "{file} still represented");
         }
-        for i in 0..40 {
-            assert!(
-                out.contains(&format!("({},{})", i + 1, i)),
-                "match at line {} lost from the fold",
-                i + 1
-            );
-        }
+        // Regular columns range-fold (lossless: line numbers 1..40 step 1, args 0..39).
+        assert!(
+            out.contains("(1..40; 0..39)"),
+            "both columns range-folded losslessly: {out}"
+        );
     }
 
     #[test]
@@ -196,13 +194,10 @@ mod tests {
             mode: ModeSetting::Aggressive,
         };
         let out = compress(&dump, &ctx, &HashSet::new()).expect("folds");
-        for i in 0..40 {
-            assert!(
-                out.contains(&format!("({},{})", i + 1, i)),
-                "aggressive mode must not lose match {}",
-                i + 1
-            );
-        }
+        assert!(
+            out.contains("(1..40; 0..39)"),
+            "aggressive mode must keep every match (range-folded): {out}"
+        );
     }
 
     #[test]
