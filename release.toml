@@ -3,6 +3,9 @@
 # v{{version}}, pushes (workflow takes over: binaries, crates.io via OIDC, tap bump),
 # then bumps main to the next -dev version. Install: cargo install cargo-release --locked
 allow-branch = ["main"]
+# Hard gate: HEAD must be pushed and every CI check on it green before anything is
+# committed or tagged (needs `gh` authenticated).
+pre-release-hook = ["sh", "tools/check_ci_green.sh"]
 publish = false      # crates.io publish happens in release.yml via Trusted Publishing
 verify = false       # CI is the verifier; keep the release command fast
 push = true
