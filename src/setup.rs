@@ -935,7 +935,7 @@ fn remove_bin_dir_from_path() -> Result<bool> {
         return Ok(false);
     }
     let new_raw = winreg::RegValue {
-        bytes: encode_utf16_nul(&stripped),
+        bytes: encode_utf16_nul(&stripped).into(),
         vtype: raw.vtype,
     };
     env.set_raw_value("Path", &new_raw)
