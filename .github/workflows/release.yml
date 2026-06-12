@@ -140,6 +140,131 @@ jobs:
         env:
           CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}
 
+  # Multi-arch proxy image on GHCR from the released (attested) binaries — not rebuilt.
+  # amd64 ← x86_64-musl (fully static), arm64 ← aarch64-gnu (distroless cc has glibc).
+  docker:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      packages: write
+      contents: read
+    steps:
+      - uses: actions/checkout@v6
+      - name: Stage released binaries per arch
+        env:
+          TAG: ${{ github.ref_name }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          mkdir -p binaries/amd64 binaries/arm64
+          gh release download "$TAG" -p 'llmtrim-x86_64-unknown-linux-musl.tar.gz' -O - | tar -xz -C binaries/amd64 llmtrim
+          gh release download "$TAG" -p 'llmtrim-aarch64-unknown-linux-gnu.tar.gz' -O - | tar -xz -C binaries/arm64 llmtrim
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: |
+            ghcr.io/fkiene/llmtrim:latest
+            ghcr.io/fkiene/llmtrim:${{ github.ref_name }}
+
+  # Scoop manifest in fkiene/scoop-bucket (`scoop bucket add llmtrim
+  # https://github.com/fkiene/scoop-bucket && scoop install llmtrim`). Same PAT as the tap.
+  bump-scoop:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Update bucket manifest
+        env:
+          TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          V="${TAG#v}"
+          base="https://github.com/fkiene/llmtrim/releases/download/${TAG}"
+          sha() { curl -fsSL "$base/llmtrim-$1.sha256" | cut -d' ' -f1; }
+          X64SHA=$(sha x86_64-pc-windows-msvc) A64SHA=$(sha aarch64-pc-windows-msvc)
+          git clone "https://x-access-token:${TAP_TOKEN}@github.com/fkiene/scoop-bucket.git" bucket
+          mkdir -p bucket/bucket
+          cat > bucket/bucket/llmtrim.json <<EOF
+          {
+              "version": "$V",
+              "description": "Cut your LLM bill: drop-in proxy that compresses input, output, and cache",
+              "homepage": "https://github.com/fkiene/llmtrim",
+              "license": "AGPL-3.0-only",
+              "architecture": {
+                  "64bit": {
+                      "url": "$base/llmtrim-x86_64-pc-windows-msvc.zip",
+                      "hash": "$X64SHA"
+                  },
+                  "arm64": {
+                      "url": "$base/llmtrim-aarch64-pc-windows-msvc.zip",
+                      "hash": "$A64SHA"
+                  }
+              },
+              "bin": "llmtrim.exe",
+              "checkver": { "github": "https://github.com/fkiene/llmtrim" },
+              "autoupdate": {
+                  "architecture": {
+                      "64bit": { "url": "https://github.com/fkiene/llmtrim/releases/download/v\$version/llmtrim-x86_64-pc-windows-msvc.zip" },
+                      "arm64": { "url": "https://github.com/fkiene/llmtrim/releases/download/v\$version/llmtrim-aarch64-pc-windows-msvc.zip" }
+                  },
+                  "hash": { "url": "\$url.sha256", "regex": "^([a-fA-F0-9]{64})" }
+              }
+          }
+          EOF
+          cd bucket
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add bucket/llmtrim.json
+          git commit -m "llmtrim $V" || { echo "manifest already current"; exit 0; }
+          git push origin main
+
+  # npm: meta package `llmtrim` + per-platform binary packages (esbuild pattern).
+  # Skipped while the NPM_TOKEN secret is absent.
+  publish-npm:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          registry-url: "https://registry.npmjs.org"
+      - name: Build and publish npm packages
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+          TAG: ${{ github.ref_name }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          if [ -z "$NODE_AUTH_TOKEN" ]; then echo "NPM_TOKEN not set — skipping npm publish"; exit 0; fi
+          mkdir -p assets
+          for t in x86_64-unknown-linux-musl aarch64-unknown-linux-gnu x86_64-apple-darwin aarch64-apple-darwin; do
+            mkdir -p "assets/$t"
+            gh release download "$TAG" -p "llmtrim-$t.tar.gz" -O - | tar -xz -C "assets/$t" llmtrim
+          done
+          for t in x86_64-pc-windows-msvc aarch64-pc-windows-msvc; do
+            mkdir -p "assets/$t"
+            gh release download "$TAG" -p "llmtrim-$t.zip" -O "/tmp/$t.zip"
+            unzip -j -o "/tmp/$t.zip" llmtrim.exe -d "assets/$t"
+          done
+          sh tools/npm/build_npm_packages.sh "$TAG" assets out
+          # Platform packages first so the meta package's optionalDependencies resolve.
+          for d in out/llmtrim-*; do npm publish "$d" --access public; done
+          npm publish out/llmtrim --access public
+          # Verify the channel like the others: install from the registry and run it.
+          sleep 30
+          npm install -g "llmtrim@${TAG#v}"
+          llmtrim --version | grep -F "${TAG#v}"
+
   # Self-verify the cargo channel: install from the real crates.io index, exactly as a
   # user would. Retries because the index propagates with a small delay after publish.
   verify-crate:

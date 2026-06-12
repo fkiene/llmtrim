@@ -17,6 +17,19 @@ categories = ["command-line-utilities", "development-tools", "compression"]
 # gitignore-style negation effective — a file can't be re-included under an excluded dir.
 exclude = ["bench/*", "!bench/pricing.json", "tools/", ".github/", ".claude/", "*.png"]
 
+# `cargo binstall llmtrim` → prebuilt release binaries instead of a source build.
+# Archive names match taiki-e/upload-rust-binary-action in release.yml (tar.gz, zip on
+# Windows); binstall's gnu→musl fallback maps x86_64 Linux onto the musl asset.
+[package.metadata.binstall]
+pkg-url = "{ repo }/releases/download/v{ version }/{ name }-{ target }{ archive-suffix }"
+pkg-fmt = "tgz"
+
+[package.metadata.binstall.overrides.x86_64-pc-windows-msvc]
+pkg-fmt = "zip"
+
+[package.metadata.binstall.overrides.aarch64-pc-windows-msvc]
+pkg-fmt = "zip"
+
 [dependencies]
 anyhow = "1.0.102"
 async-openai = { version = "0.41.0", features = ["chat-completion", "byot"], optional = true }

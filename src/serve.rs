@@ -1173,7 +1173,15 @@ mod imp {
             pending: None,
         };
 
-        let addr = SocketAddr::from(([127, 0, 0, 1], port));
+        // Loopback by default — a MITM proxy must not be reachable off-host unless asked.
+        // LLMTRIM_BIND=0.0.0.0 opts in (containers: port mapping can't reach loopback).
+        let bind_ip: std::net::IpAddr = match std::env::var("LLMTRIM_BIND") {
+            Ok(s) => s
+                .parse()
+                .with_context(|| format!("LLMTRIM_BIND is not a valid IP address: {s}"))?,
+            Err(_) => std::net::IpAddr::from([127, 0, 0, 1]),
+        };
+        let addr = SocketAddr::from((bind_ip, port));
         // Pre-flight bind: hudsucker's `Proxy::start` collapses a bind failure to a bare
         // "io error", hiding whether the port is in use or OS-reserved. Bind once ourselves
         // first so the real cause reaches the log, then drop it microseconds before hudsucker
@@ -1182,8 +1190,8 @@ mod imp {
             std::net::TcpListener::bind(addr)
                 .with_context(|| format!("cannot bind {addr} — port in use or reserved"))?,
         );
-        eprintln!("llmtrim: MITM interceptor on http://127.0.0.1:{port}");
-        eprintln!("  export HTTPS_PROXY=http://127.0.0.1:{port}");
+        eprintln!("llmtrim: MITM interceptor on http://{addr}");
+        eprintln!("  export HTTPS_PROXY=http://{addr}");
         eprintln!(
             "  trust the CA: NODE_EXTRA_CA_CERTS={}",
             ca_cert_path()?.display()
