@@ -80,7 +80,7 @@ function Install-Prebuilt($target) {
     }
 
     # Verify SHA-256 checksum against the .sha256 sidecar uploaded by CI.
-    $sha256Url = "$url.sha256"
+    $sha256Url = ($url -replace '\.zip$', '.sha256')
     try {
         $expectedLine = (Invoke-WebRequest $sha256Url -UseBasicParsing).Content.Trim()
         $expectedHash = ($expectedLine -split '\s+')[0].ToUpper()
