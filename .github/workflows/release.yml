@@ -258,11 +258,12 @@ jobs:
           done
           sh tools/npm/build_npm_packages.sh "$TAG" assets out
           # Platform packages first so the meta package's optionalDependencies resolve.
-          for d in out/llmtrim-*; do npm publish "$d" --access public; done
-          npm publish out/llmtrim --access public
+          # NOTE the ./ prefix: a bare `a/b` argument is npm's GitHub-repo shorthand.
+          for d in out/*; do [ "$d" = "out/cli" ] && continue; npm publish "./$d" --access public; done
+          npm publish ./out/cli --access public
           # Verify the channel like the others: install from the registry and run it.
           sleep 30
-          npm install -g "llmtrim@${TAG#v}"
+          npm install -g "@llmtrim/cli@${TAG#v}"
           llmtrim --version | grep -F "${TAG#v}"
 
   # Self-verify the cargo channel: install from the real crates.io index, exactly as a

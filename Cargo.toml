@@ -15,7 +15,9 @@ categories = ["command-line-utilities", "development-tools", "compression"]
 # bench/pricing.json is re-included: main.rs embeds it (include_str!) as the dashboard's
 # pricing fallback, so the package must carry it. `bench/*` (not `bench/`) keeps the
 # gitignore-style negation effective — a file can't be re-included under an excluded dir.
-exclude = ["bench/*", "!bench/pricing.json", "tools/", ".github/", ".claude/", "*.png"]
+# .cargo/ carries the local mold-linker config — shipping it breaks `cargo install` on
+# machines without mold (publish-verify caught this on v0.1.2).
+exclude = ["bench/*", "!bench/pricing.json", "tools/", ".github/", ".claude/", ".cargo/", "*.png"]
 
 # `cargo binstall llmtrim` → prebuilt release binaries instead of a source build.
 # Archive names match taiki-e/upload-rust-binary-action in release.yml (tar.gz, zip on

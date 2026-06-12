@@ -109,7 +109,7 @@ Default `auto` switches each stage on only where it pays. `safe` runs the lossle
 
 ```bash
 # 1 - Install (any OS, prebuilt binary, no Rust needed)
-npm install -g llmtrim && llmtrim setup
+npm install -g @llmtrim/cli && llmtrim setup
 
 # 2 - Open a new shell. Your tools now route through llmtrim.
 

@@ -13,7 +13,7 @@ All notable changes to this project are documented here. The format follows
   `cargo binstall llmtrim` (prebuilt, seconds instead of a source build), a multi-arch
   Docker image (`ghcr.io/fkiene/llmtrim`, distroless, built from the attested release
   binaries), Scoop (`scoop bucket add llmtrim https://github.com/fkiene/scoop-bucket`),
-  and npm (`npx llmtrim` — meta package + per-platform prebuilt binaries).
+  and npm (`npm i -g @llmtrim/cli` — meta package + per-platform prebuilt binaries; the unscoped `llmtrim` name belongs to an unrelated package).
 - **`LLMTRIM_BIND`**: `serve` binds an explicit IP (default stays loopback — a MITM
   proxy must not be reachable off-host unless asked). The Docker image sets `0.0.0.0`
   so port mapping works.
