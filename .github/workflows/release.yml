@@ -100,16 +100,27 @@ jobs:
           CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}
 
   # Bump the Homebrew tap (fkiene/homebrew-tap) to this tag: rewrites url + sha256 in the
-  # formula. Build-from-source, so the download URL is the git source tarball. Needs a PAT
-  # with write access to the tap repo in the HOMEBREW_TAP_TOKEN secret.
+  # formula. Build-from-source, so the download URL is the git source tarball. Plain
+  # script (mislav/bump-homebrew-formula-action kept failing with HTTP 303 on this URL).
+  # Needs a PAT with write access to the tap repo in the HOMEBREW_TAP_TOKEN secret.
   bump-homebrew:
     needs: create-release
     runs-on: ubuntu-latest
     steps:
-      - uses: mislav/bump-homebrew-formula-action@v4
-        with:
-          formula-name: llmtrim
-          homebrew-tap: fkiene/homebrew-tap
-          download-url: https://github.com/fkiene/llmtrim/archive/refs/tags/${{ github.ref_name }}.tar.gz
+      - name: Update tap formula
         env:
-          COMMITTER_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+          TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          URL="https://github.com/fkiene/llmtrim/archive/refs/tags/${TAG}.tar.gz"
+          SHA=$(curl -fsSL "$URL" | sha256sum | cut -d' ' -f1)
+          git clone "https://x-access-token:${TAP_TOKEN}@github.com/fkiene/homebrew-tap.git" tap
+          cd tap
+          sed -i -E "s|^(  url \").*(\")$|\1${URL}\2|" Formula/llmtrim.rb
+          sed -i -E "s|^(  sha256 \").*(\")$|\1${SHA}\2|" Formula/llmtrim.rb
+          ruby -c Formula/llmtrim.rb
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git commit -am "llmtrim ${TAG#v}" || { echo "formula already current"; exit 0; }
+          git push origin main
