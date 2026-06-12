@@ -138,3 +138,5 @@ strip = true
 [lints.rust]
 # The compression core is pure-safe Rust; keep it that way (CI denies warnings).
 unsafe_code = "forbid"
+# Deny here instead of `-- -D warnings` on the CLI so clippy/check/test share one cache.
+warnings = "deny"
