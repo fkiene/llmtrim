@@ -304,6 +304,9 @@ struct Unit<'a> {
     start: usize, // byte offsets into the source
     end: usize,
     list: Option<ListInfo<'a>>,
+    /// Fenced code block (``` or ~~~): atomic — never sentence-split — and
+    /// ranked below every prose/list unit regardless of identifier density.
+    fence: bool,
 }
 
 struct ListInfo<'a> {
@@ -338,9 +341,17 @@ fn select_salient_sentences(s: &str, max: usize) -> Option<String> {
     // Lists are scored on their compactable core (intro + heads).
     let scores: Vec<f64> = units
         .iter()
-        .map(|u| match &u.list {
-            Some(l) => identifier_density(&compact_core(l)),
-            None => identifier_density(&s[u.start..u.end]),
+        .map(|u| {
+            if u.fence {
+                // Code examples lose to all prose/list units: their identifier
+                // density is high by construction but they carry usage samples,
+                // not API constraints.
+                return -1.0;
+            }
+            match &u.list {
+                Some(l) => identifier_density(&compact_core(l)),
+                None => identifier_density(&s[u.start..u.end]),
+            }
         })
         .collect();
     let mut ranked: Vec<usize> = (1..units.len()).collect();
@@ -432,18 +443,66 @@ fn separator(last_kept: Option<usize>, i: usize) -> &'static str {
     }
 }
 
-/// Split the source into selectable units: list blocks (detected structurally
-/// by line shape, never by content language) interleaved with sentence spans.
+/// Split the source into selectable units: fenced code blocks (each one
+/// atomic unit), list blocks, and sentence spans — all detected structurally
+/// by line shape, never by content language.
 fn segment_units(s: &str) -> Vec<Unit<'_>> {
-    let mut lines: Vec<(usize, &str)> = Vec::new();
+    let mut units = Vec::new();
+    let mut pos = 0usize;
+    for (start, end) in fence_regions(s) {
+        segment_prose(s, pos, start, &mut units);
+        units.push(Unit {
+            start,
+            end,
+            list: None,
+            fence: true,
+        });
+        pos = end;
+    }
+    segment_prose(s, pos, s.len(), &mut units);
+    units
+}
+
+/// Byte ranges of fenced code blocks: a line starting (after indentation)
+/// with three or more ``` ` ``` or `~` opens a fence; the next line starting
+/// with the same fence char closes it. An unclosed fence extends to the end.
+fn fence_regions(s: &str) -> Vec<(usize, usize)> {
+    let mut regions = Vec::new();
+    let mut open: Option<(usize, char)> = None;
     let mut off = 0usize;
-    for l in s.split_inclusive('\n') {
+    for line in s.split_inclusive('\n') {
+        let t = line.trim_start();
+        if let Some(c) = t.chars().next()
+            && (c == '`' || c == '~')
+            && t.chars().take_while(|&x| x == c).count() >= 3
+        {
+            match open {
+                Some((start, oc)) if oc == c => {
+                    regions.push((start, off + line.len()));
+                    open = None;
+                }
+                Some(_) => {}
+                None => open = Some((off, c)),
+            }
+        }
+        off += line.len();
+    }
+    if let Some((start, _)) = open {
+        regions.push((start, s.len()));
+    }
+    regions
+}
+
+/// Segment `s[start..end]` (a fence-free span) into list blocks interleaved
+/// with sentence spans.
+fn segment_prose<'a>(s: &'a str, start: usize, end: usize, units: &mut Vec<Unit<'a>>) {
+    let mut lines: Vec<(usize, &str)> = Vec::new();
+    let mut off = start;
+    for l in s[start..end].split_inclusive('\n') {
         lines.push((off, l));
         off += l.len();
     }
-
-    let mut units = Vec::new();
-    let mut plain_start = 0usize;
+    let mut plain_start = start;
     let mut i = 0usize;
     while i < lines.len() {
         // A block starts at an item line, or at an intro line ending with ':'
@@ -463,14 +522,20 @@ fn segment_units(s: &str) -> Vec<Unit<'_>> {
             continue;
         };
         let mut j = first_item;
+        let mut items = 0usize;
         let mut heads = Vec::new();
         while j < lines.len()
             && let Some(h) = item_head(lines[j].1)
         {
-            heads.push(h);
+            items += 1;
+            // Dedup repeated identical heads — the compacted form must not
+            // emit "x, x, x" when several items share a head.
+            if !heads.contains(&h) {
+                heads.push(h);
+            }
             j += 1;
         }
-        if heads.len() < 2 {
+        if items < 2 {
             // A lone marker line is ordinary text, not a list.
             i = j;
             continue;
@@ -481,17 +546,17 @@ fn segment_units(s: &str) -> Vec<Unit<'_>> {
             lines[first_item].0
         };
         let block_end = lines[j - 1].0 + lines[j - 1].1.len();
-        push_sentences(s, plain_start, block_start, &mut units);
+        push_sentences(s, plain_start, block_start, units);
         units.push(Unit {
             start: block_start,
             end: block_end,
             list: Some(ListInfo { intro, heads }),
+            fence: false,
         });
         plain_start = block_end;
         i = j;
     }
-    push_sentences(s, plain_start, s.len(), &mut units);
-    units
+    push_sentences(s, plain_start, end, units);
 }
 
 /// Byte offset of the last non-whitespace sentence within `line`.
@@ -518,6 +583,7 @@ fn push_sentences<'a>(s: &'a str, start: usize, end: usize, units: &mut Vec<Unit
                 start: off,
                 end: off + sent.len(),
                 list: None,
+                fence: false,
             });
         }
         off += sent.len();
@@ -888,6 +954,67 @@ mod tests {
         // Heads are never cut inside: every kept head appears verbatim, and
         // item bodies are gone.
         assert!(!out.contains("Use this agent when"), "{out}");
+    }
+
+    #[test]
+    fn fenced_code_loses_to_constraint_prose() {
+        // Identity sentence + constraint prose + long identifier-dense code
+        // example: with a tight budget the constraints must win and no
+        // fragment of the fence may leak into the output.
+        let mut input = String::from(
+            "Runs project workflows and reports their status. \
+             Long-running flows are queued and surface progress events. \
+             You must pass `workflow_id` and `timeout_ms`; paths are resolved \
+             relative to the repo root.\n\nExample:\n```js\n",
+        );
+        for i in 0..20 {
+            input.push_str(&format!(
+                "const flaky_{i} = await runWorkflow({{ name: 'find-flaky-tests', \
+                 retries: {i} }});\nlog(`${{bugs.length}}/10 found`);\n"
+            ));
+        }
+        input.push_str("```\n");
+        let out = trunc(&input, 300);
+        assert!(
+            out.starts_with("Runs project workflows and reports their status."),
+            "{out}"
+        );
+        assert!(out.contains("`workflow_id`"), "{out}");
+        assert!(!out.contains("find-flaky-tests"), "{out}");
+        assert!(!out.contains("runWorkflow"), "{out}");
+        assert!(!out.contains("```"), "{out}");
+    }
+
+    #[test]
+    fn unclosed_fence_is_atomic_to_end() {
+        // A trailing unclosed fence extends to the end of the text: nothing
+        // inside it may be selected as a sentence fragment.
+        let input = "Tool identity sentence here. \
+            Use `apply_patch` only on tracked files.\n\
+            ```\ngit commit -m \"msg\"\n\nCo-Authored-By: Bot <bot@example.com>\n";
+        let out = trunc(input, 90);
+        assert!(out.contains("`apply_patch`"), "{out}");
+        assert!(!out.contains("Co-Authored-By"), "{out}");
+        assert!(!out.contains("git commit"), "{out}");
+    }
+
+    #[test]
+    fn repeated_list_heads_deduped() {
+        let mut input = String::from("Pick an agent for the task. Agent types:\n");
+        for _ in 0..3 {
+            input.push_str(
+                "- feature-dev: guided feature development with codebase \
+                 understanding, architecture focus and a very long body that \
+                 prevents the block from fitting whole in the leftover budget\n",
+            );
+        }
+        input.push_str(
+            "- code-reviewer: reviews diffs for correctness bugs and reuse \
+             cleanups at the requested effort level, also deliberately long\n",
+        );
+        let out = trunc(&input, 110);
+        assert_eq!(out.matches("feature-dev").count(), 1, "{out}");
+        assert!(out.contains("code-reviewer"), "{out}");
     }
 
     #[test]
