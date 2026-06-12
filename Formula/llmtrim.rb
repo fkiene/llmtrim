@@ -1,6 +1,6 @@
 # Homebrew formula for llmtrim (build-from-source).
 # Set the sha256 once the first release is tagged.
-class llmtrim < Formula
+class Llmtrim < Formula
   desc "Static, deterministic LLM prompt/payload compressor"
   homepage "https://github.com/fkiene/llmtrim"
   url "https://github.com/fkiene/llmtrim/archive/refs/tags/v0.1.0.tar.gz"
