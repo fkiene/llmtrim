@@ -6,6 +6,23 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+- **Four new install channels**, each self-verified by the release pipeline:
+  `cargo binstall llmtrim` (prebuilt, seconds instead of a source build), a multi-arch
+  Docker image (`ghcr.io/fkiene/llmtrim`, distroless, built from the attested release
+  binaries), Scoop (`scoop bucket add llmtrim https://github.com/fkiene/scoop-bucket`),
+  and npm (`npx llmtrim` — meta package + per-platform prebuilt binaries).
+- **`LLMTRIM_BIND`**: `serve` binds an explicit IP (default stays loopback — a MITM
+  proxy must not be reachable off-host unless asked). The Docker image sets `0.0.0.0`
+  so port mapping works.
+
+### Fixed
+- **Windows uninstall self-delete**: a single delete attempt 2 s after exit lost the
+  race when the shell or Defender still held the fresh exe; now retried for ~60 s.
+- **`install.ps1` checksum verification**: GitHub serves the `.sha256` sidecar as
+  octet-stream, making PowerShell's `.Content` a byte array; now downloaded to a file.
+  Errors in that block also report the underlying exception.
+
 ## [0.1.1] - 2026-06-12
 
 ### Fixed
