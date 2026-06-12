@@ -1987,7 +1987,7 @@ dependencies = [
 
 [[package]]
 name = "llmtrim"
-version = "0.1.2"
+version = "0.1.3-dev"
 dependencies = [
  "anyhow",
  "async-openai",
