@@ -91,7 +91,7 @@ auto-launch = "0.6.0"
 # autostart via HKCU\Software\Microsoft\Windows\CurrentVersion\Run. winreg confines its own
 # unsafe to the crate, leaving our `unsafe_code = "forbid"` lint intact.
 [target.'cfg(windows)'.dependencies]
-winreg = "0.55"
+winreg = "0.56"
 
 [features]
 default = ["intercept"]
