@@ -39,6 +39,7 @@ for entry in $TARGETS; do
     mkdir -p "$dir/bin"
     cp "$src" "$dir/bin/$bin"
     chmod +x "$dir/bin/$bin"
+    printf '# %s\n\nPrebuilt llmtrim binary for %s. Install [@llmtrim/cli](https://www.npmjs.com/package/@llmtrim/cli) instead of this package directly.\n' "$pkg" "$os-$cpu" > "$dir/README.md"
     cat > "$dir/package.json" <<EOF
 {
   "name": "$pkg",
@@ -48,7 +49,8 @@ for entry in $TARGETS; do
   "license": "AGPL-3.0-only",
   "os": ["$os"],
   "cpu": ["$cpu"],
-  "files": ["bin"]
+  "files": ["bin"],
+  "readme": "README.md"
 }
 EOF
     OPTIONAL_DEPS="$OPTIONAL_DEPS    \"$pkg\": \"$VERSION\",\n"
@@ -75,6 +77,8 @@ try {
 const r = spawnSync(exe, process.argv.slice(2), { stdio: "inherit" });
 process.exit(r.status === null ? 1 : r.status);
 EOF
+cp "$(dirname "$0")/README.md" "$META/README.md"
+
 DEPS=$(printf "$OPTIONAL_DEPS" | sed '$s/,$//')
 cat > "$META/package.json" <<EOF
 {
@@ -86,7 +90,7 @@ cat > "$META/package.json" <<EOF
   "license": "AGPL-3.0-only",
   "keywords": ["llm", "tokens", "compression", "proxy", "openai", "anthropic", "claude"],
   "bin": { "llmtrim": "bin/llmtrim.js" },
-  "files": ["bin"],
+  "files": ["bin", "README.md"],
   "optionalDependencies": {
 $DEPS
   }
