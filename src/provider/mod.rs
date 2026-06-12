@@ -308,6 +308,11 @@ struct Unit<'a> {
     /// atomic (never sentence-split) and ranked below every prose/list unit
     /// regardless of identifier density.
     fence: bool,
+    /// For a list-item unit (marker line + its continuation body): byte
+    /// offset where the body begins. The unit is scored on the marker line
+    /// alone, and when the whole item does not fit the marker line is
+    /// emitted by itself — the body (payload/example) elides first.
+    body_start: Option<usize>,
 }
 
 struct ListInfo<'a> {
@@ -349,9 +354,12 @@ fn select_salient_sentences(s: &str, max: usize) -> Option<String> {
                 // not API constraints.
                 return -1.0;
             }
-            match &u.list {
-                Some(l) => identifier_density(&compact_core(l)),
-                None => identifier_density(&s[u.start..u.end]),
+            match (&u.list, u.body_start) {
+                (Some(l), _) => identifier_density(&compact_core(l)),
+                // Item units score on their marker line only: the marker is
+                // the contract, the body is payload.
+                (None, Some(b)) => marker_score(&s[u.start..b]),
+                (None, None) => identifier_density(&s[u.start..u.end]),
             }
         })
         .collect();
@@ -380,6 +388,22 @@ fn select_salient_sentences(s: &str, max: usize) -> Option<String> {
             if let Some(text) = compact_list(list, budget) {
                 used += text.chars().count() + elision_chars;
                 keep[i] = Keep::Compact(text);
+            }
+        } else if let Some(b) = units[i].body_start {
+            // Item fallback: the whole item does not fit — emit its marker
+            // line alone with an elision marker; the body elides first. A
+            // marker line itself over budget is trimmed at sentence bounds.
+            use unicode_segmentation::UnicodeSegmentation;
+            let marker = s[units[i].start..b].trim_end();
+            let budget = max.saturating_sub(used + elision_chars + 1);
+            let text = if marker.chars().count() <= budget {
+                Some(marker)
+            } else {
+                fit_units(marker.split_sentence_bounds(), budget).map(|n| marker[..n].trim_end())
+            };
+            if let Some(t) = text {
+                used += t.chars().count() + 1 + elision_chars;
+                keep[i] = Keep::Compact(format!("{t}…"));
             }
         }
     }
@@ -465,6 +489,7 @@ fn segment_units(s: &str) -> Vec<Unit<'_>> {
             end,
             list: None,
             fence: true,
+            body_start: None,
         });
         pos = end;
     }
@@ -602,9 +627,25 @@ fn segment_prose<'a>(s: &'a str, start: usize, end: usize, base: usize, units: &
                 end: block_end,
                 list: None,
                 fence: true,
+                body_start: None,
             });
             plain_start = block_end;
             i = last + 1;
+            continue;
+        } else if marker_body(lines[i].1).is_some() {
+            // Item unit: a marker line whose head is not code-like (no
+            // compactable list possible). Its body — following non-marker
+            // lines at ANY indentation, up to the next marker line, blank
+            // line or block end — belongs to the item, never to prose.
+            let mut j = i + 1;
+            while j < lines.len()
+                && !lines[j].1.trim().is_empty()
+                && marker_body(lines[j].1).is_none()
+            {
+                j += 1;
+            }
+            push_item_unit(s, lines[i].0, &lines[i..j], &mut plain_start, units);
+            i = j;
             continue;
         } else {
             i += 1;
@@ -622,20 +663,26 @@ fn segment_prose<'a>(s: &'a str, start: usize, end: usize, base: usize, units: &
             if !heads.contains(&h) {
                 heads.push(h);
             }
-            let item_indent = indent_width(lines[j].1);
             j += 1;
-            // Deeper-indented non-item lines after a bullet are the item's
-            // body (continuations) — never independent units.
+            // Non-marker lines after a bullet — at any indentation — are the
+            // item's body (continuations), never independent units.
             while j < lines.len()
                 && !lines[j].1.trim().is_empty()
-                && indent_width(lines[j].1) > item_indent
-                && item_head(lines[j].1).is_none()
+                && marker_body(lines[j].1).is_none()
             {
                 j += 1;
             }
         }
         if items < 2 {
-            // A lone marker line is ordinary text, not a list.
+            // A lone item is not a compactable list: keep it as a single
+            // item unit (marker line + body) so its body cannot leak.
+            push_item_unit(
+                s,
+                lines[first_item].0,
+                &lines[first_item..j],
+                &mut plain_start,
+                units,
+            );
             i = j;
             continue;
         }
@@ -651,11 +698,37 @@ fn segment_prose<'a>(s: &'a str, start: usize, end: usize, base: usize, units: &
             end: block_end,
             list: Some(ListInfo { intro, heads }),
             fence: false,
+            body_start: None,
         });
         plain_start = block_end;
         i = j;
     }
     push_sentences(s, plain_start, end, units);
+}
+
+/// Append an item unit — marker line plus its continuation body — covering
+/// `lines` (non-empty; first line is the marker), flushing pending prose
+/// from `plain_start` first.
+fn push_item_unit<'a>(
+    s: &'a str,
+    start: usize,
+    lines: &[(usize, &str)],
+    plain_start: &mut usize,
+    units: &mut Vec<Unit<'a>>,
+) {
+    let (last_off, last_line) = lines[lines.len() - 1];
+    let end = last_off + last_line.len();
+    let marker_end = lines[0].0 + lines[0].1.len();
+    push_sentences(s, *plain_start, start, units);
+    units.push(Unit {
+        start,
+        end,
+        list: None,
+        fence: false,
+        // Body-less items use `end`: the whole unit is the marker line.
+        body_start: Some(marker_end.min(end)),
+    });
+    *plain_start = end;
 }
 
 /// Byte offset of the last non-whitespace sentence within `line`.
@@ -683,6 +756,7 @@ fn push_sentences<'a>(s: &'a str, start: usize, end: usize, units: &mut Vec<Unit
                 end: off + sent.len(),
                 list: None,
                 fence: false,
+                body_start: None,
             });
         }
         off += sent.len();
@@ -693,6 +767,42 @@ fn push_sentences<'a>(s: &'a str, start: usize, end: usize, units: &mut Vec<Unit
 /// bullet/dash/numbered line, up to the first `:`, `(` or `—`. `None` when
 /// the line is not item-shaped or its head is not code-like.
 fn item_head(line: &str) -> Option<&str> {
+    let body = marker_body(line)?;
+    let end = body.find([':', '(', '—']).unwrap_or(body.len());
+    let head = body[..end].trim();
+    if head.is_empty() || !head.split_whitespace().all(is_code_like) {
+        return None;
+    }
+    Some(head)
+}
+
+/// Salience of an item unit's marker line. Three structural tiers:
+/// call-signature-shaped markers (`- agent(prompt: …`, `- budget: {…`) are
+/// API/example payload and rank with fences; markers carrying an all-caps
+/// admonition label (an explicit author salience signal: `IMPORTANT:`,
+/// `WARNING:`, `NOTE:` — an all-caps token ending in `:`) rank above every
+/// plain unit; the rest score by identifier density like ordinary sentences.
+fn marker_score(marker: &str) -> f64 {
+    let body = marker_body(marker).unwrap_or(marker);
+    if body
+        .split_whitespace()
+        .take(2)
+        .any(|t| t.contains(['(', '{']))
+    {
+        return -1.0;
+    }
+    let emphasis = body.split_whitespace().any(|t| {
+        t.strip_suffix(':')
+            .is_some_and(|w| w.chars().count() >= 2 && w.chars().all(char::is_uppercase))
+    });
+    identifier_density(marker) + if emphasis { 1.0 } else { 0.0 }
+}
+
+/// Trimmed body of a bullet/dash/numbered marker line, regardless of whether
+/// its head is code-like. `None` when the line is not marker-shaped.
+/// Whitespace is required after the marker so prose like "--flag" or "3.14"
+/// never reads as an item.
+fn marker_body(line: &str) -> Option<&str> {
     let t = line.trim_start();
     let body = if let Some(r) = t.strip_prefix(['-', '*', '•', '–']) {
         r
@@ -703,18 +813,7 @@ fn item_head(line: &str) -> Option<&str> {
         }
         t[digits..].strip_prefix(['.', ')'])?
     };
-    // Require whitespace after the marker so prose like "--flag" or "3.14"
-    // never reads as an item.
-    if !body.starts_with([' ', '\t']) {
-        return None;
-    }
-    let body = body.trim();
-    let end = body.find([':', '(', '—']).unwrap_or(body.len());
-    let head = body[..end].trim();
-    if head.is_empty() || !head.split_whitespace().all(is_code_like) {
-        return None;
-    }
-    Some(head)
+    body.starts_with([' ', '\t']).then(|| body.trim())
 }
 
 /// Compacted core of a list: intro (if any) + item heads joined by ", ".
@@ -1152,6 +1251,35 @@ mod tests {
         }
         // Retains at least one behavioral constraint sentence.
         assert!(out.chars().filter(|c| *c == '.').count() >= 2, "{out}");
+    }
+
+    #[test]
+    fn real_compact_bash_description_drops_column_zero_continuations() {
+        // Continuation lines at the SAME indentation as their bullets
+        // (column 0) must stay inside the item unit: boilerplate payload
+        // elides while behavioral constraints survive.
+        let input = include_str!("../../tests/fixtures/tool_desc_bash_compact.txt");
+        let out = trunc(input, 300);
+        assert!(
+            out.starts_with("Executes a bash command and returns its output."),
+            "{out}"
+        );
+        for frag in ["Co-Authored-By", "Generated with"] {
+            assert!(!out.contains(frag), "{frag} leaked: {out}");
+        }
+        assert!(out.contains("IMPORTANT: Avoid using this tool"), "{out}");
+    }
+
+    #[test]
+    fn salient_marker_line_kept_without_body() {
+        // An item is scored on its marker line: a salient marker survives
+        // even when the budget cannot hold its body, which elides first.
+        let input = "Tool identity sentence here. Some plain filler prose sits in the middle.\n\
+            - IMPORTANT: pass `--safe-mode` and `--max-depth=3` to `scan_tree` like:\n\
+            scan_tree --safe-mode --max-depth=3 ./src ./tests ./benches ./fixtures\n";
+        let out = trunc(input, 110);
+        assert!(out.contains("`--safe-mode`"), "{out}");
+        assert!(!out.contains("./benches"), "{out}");
     }
 
     #[test]
