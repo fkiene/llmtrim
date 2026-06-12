@@ -6,6 +6,8 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.1.5] - 2026-06-12
+
 ### Added
 - **`setup` reclaims orphaned daemons**: when the default port is busy, setup now
   identifies the holder (native OS tools); an old llmtrim daemon — e.g. left running
@@ -163,7 +165,8 @@ bill, never a broken call.
   (6 targets with SLSA build provenance), CI on Linux/macOS/Windows with secret
   scanning, license compliance, and MSRV gates.
 
-[Unreleased]: https://github.com/fkiene/llmtrim/compare/v0.1.4...HEAD
+[Unreleased]: https://github.com/fkiene/llmtrim/compare/v0.1.5...HEAD
+[0.1.5]: https://github.com/fkiene/llmtrim/compare/v0.1.4...v0.1.5
 [0.1.4]: https://github.com/fkiene/llmtrim/compare/v0.1.3...v0.1.4
 [0.1.3]: https://github.com/fkiene/llmtrim/compare/v0.1.2...v0.1.3
 [0.1.2]: https://github.com/fkiene/llmtrim/compare/v0.1.1...v0.1.2

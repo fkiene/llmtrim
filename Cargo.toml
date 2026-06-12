@@ -1,6 +1,6 @@
 [package]
 name = "llmtrim"
-version = "0.1.5-dev"
+version = "0.1.5"
 edition = "2024"
 rust-version = "1.88"
 description = "Static, deterministic LLM prompt/payload compressor — cut input tokens 30-90% with zero extra model calls"
