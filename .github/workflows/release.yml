@@ -50,7 +50,7 @@ jobs:
       - uses: actions/checkout@v6
       # setup-python guarantees `python3` on every runner (Windows ships `python`, not
       # `python3`) for the license-notice generator below.
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: '3.x'
       # aws-lc-rs assembles its x86 asm with NASM. Only x86_64 Windows needs it; the ARM64
@@ -77,7 +77,7 @@ jobs:
       # SLSA build provenance for the compiled binary — users verify with
       # `gh attestation verify <binary> --repo fkiene/llmtrim`.
       - name: Attest build provenance
-        uses: actions/attest-build-provenance@v2
+        uses: actions/attest-build-provenance@v4
         with:
           subject-path: target/${{ matrix.target }}/release/llmtrim${{ runner.os == 'Windows' && '.exe' || '' }}
 
@@ -98,7 +98,7 @@ jobs:
     needs: create-release
     runs-on: ubuntu-latest
     steps:
-      - uses: mislav/bump-homebrew-formula-action@v3
+      - uses: mislav/bump-homebrew-formula-action@v4
         with:
           formula-name: llmtrim
           homebrew-tap: fkiene/homebrew-tap
