@@ -1,0 +1,21 @@
+# cargo-release config — `cargo release patch|minor|major` is the one release command.
+# It: moves CHANGELOG [Unreleased] to the new version, drops -dev, commits, tags
+# v{{version}}, pushes (workflow takes over: binaries, crates.io via OIDC, tap bump),
+# then bumps main to the next -dev version. Install: cargo install cargo-release --locked
+allow-branch = ["main"]
+publish = false      # crates.io publish happens in release.yml via Trusted Publishing
+verify = false       # CI is the verifier; keep the release command fast
+push = true
+tag-name = "v{{version}}"
+pre-release-commit-message = "release: v{{version}}"
+post-release-commit-message = "chore: main is {{next_version}} after the v{{version}} release"
+
+# After tagging, bump to the next patch version with a -dev suffix on main.
+dev-version = true
+dev-version-ext = "dev"
+
+# CHANGELOG: stamp the released section and re-seed [Unreleased] + link refs.
+pre-release-replacements = [
+  { file = "CHANGELOG.md", search = "## \\[Unreleased\\]", replace = "## [Unreleased]\n\n## [{{version}}] - {{date}}", exactly = 1 },
+  { file = "CHANGELOG.md", search = "\\[Unreleased\\]: https://github.com/fkiene/llmtrim/compare/v[0-9.]+\\.\\.\\.HEAD", replace = "[Unreleased]: https://github.com/fkiene/llmtrim/compare/v{{version}}...HEAD\n[{{version}}]: https://github.com/fkiene/llmtrim/compare/v{{prev_version}}...v{{version}}", exactly = 1 },
+]

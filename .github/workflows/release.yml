@@ -10,12 +10,22 @@ permissions:
 jobs:
   # One published GitHub Release per tag, body taken from the matching CHANGELOG.md section.
   # Runs before the build matrix so every binary uploads into a release that already has notes.
-  # NOTE: rename `## [Unreleased]` to `## [x.y.z] - <date>` in CHANGELOG.md before tagging, or
-  # this step fails (no section to extract).
+  # Use `cargo release patch|minor|major` to cut a release — it handles the version/-dev
+  # dance, CHANGELOG section, tag, and push (see release.toml). The guard below makes a
+  # hand-rolled tag fail fast instead of shipping a -dev crate or a notes-less release.
   create-release:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
+      - name: Guard — tag matches Cargo.toml and CHANGELOG has the section
+        run: |
+          set -euo pipefail
+          TAG="${GITHUB_REF_NAME#v}"
+          PKG=$(grep -m1 '^version = ' Cargo.toml | cut -d'"' -f2)
+          if [ "$TAG" != "$PKG" ]; then
+            echo "::error::tag v$TAG != Cargo.toml version $PKG (forgot to drop -dev? use cargo release)"; exit 1
+          fi
+          grep -q "^## \[$TAG\]" CHANGELOG.md || { echo "::error::CHANGELOG.md has no '## [$TAG]' section"; exit 1; }
       - uses: taiki-e/create-gh-release-action@v1
         with:
           changelog: CHANGELOG.md
