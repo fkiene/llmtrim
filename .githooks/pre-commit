@@ -1,8 +1,15 @@
 #!/bin/sh
-# Staged-diff secret scan — catches a leaked key BEFORE it enters history
-# (by pre-push time it already needs a rewrite + rotation even if blocked).
+# Fast checks only (sub-second): formatting + staged-diff secret scan. Anything
+# slower lives in pre-push — a slow pre-commit trains people to use --no-verify.
 # Enabled per-clone with: git config core.hooksPath .githooks
 set -e
+
+# Format check at commit time, while the change is fresh (CI is the enforced backstop).
+echo "pre-commit: cargo fmt --all -- --check"
+cargo fmt --all -- --check
+
+# Staged-diff secret scan — catches a leaked key BEFORE it enters history
+# (by pre-push time it already needs a rewrite + rotation even if blocked).
 
 if command -v gitleaks >/dev/null 2>&1; then
     gitleaks protect --staged --redact --no-banner
