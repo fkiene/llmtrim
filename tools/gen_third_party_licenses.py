@@ -92,6 +92,6 @@ for key, v in sorted(texts.items(), key=lambda kv: (-len(kv[1]["crates"]),
     out.append("```\n</details>\n")
 
 dest = os.path.join(ROOT, "THIRD-PARTY-LICENSES.md")
-open(dest, "w").write("\n".join(out))
+open(dest, "w", encoding="utf-8").write("\n".join(out))
 print(f"wrote {dest}: {len(pkgs)} deps, {len(texts)} license texts, "
       f"{sum(len(s) for s in no_file.values())} crates without embedded file")
