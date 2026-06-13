@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="logo.svg" alt="llmtrim" width="140">
+  <img src="assets/logo.svg" alt="llmtrim" width="140">
 </p>
 
 <h1 align="center">llmtrim</h1>
@@ -146,8 +146,8 @@ llmtrim status --watch
 
 <p align="center">
   <picture>
-    <source media="(prefers-color-scheme: light)" srcset="status-watch-light.svg">
-    <img src="status-watch-dark.svg" alt="llmtrim status --watch: a live dashboard showing tokens trimmed, dollars saved off your real bill, input/output savings bars, and a per-model breakdown" width="760">
+    <source media="(prefers-color-scheme: light)" srcset="assets/status-watch-light.svg">
+    <img src="assets/status-watch-dark.svg" alt="llmtrim status --watch: a live dashboard showing tokens trimmed, dollars saved off your real bill, input/output savings bars, and a per-model breakdown" width="760">
   </picture>
 </p>
 
@@ -303,8 +303,8 @@ The savings are measured live, not estimated. Each of 112 benchmark cases is sen
 
 <p align="center">
   <picture>
-    <source media="(prefers-color-scheme: light)" srcset="bench/frontier-light.svg">
-    <img src="bench/frontier-dark.svg" alt="llmtrim cuts the round-trip bill on both ends: $0.0365 original vs $0.0126 compressed, −66% cost, across 112 live A/B cases" width="840">
+    <source media="(prefers-color-scheme: light)" srcset="assets/frontier-light.svg">
+    <img src="assets/frontier-dark.svg" alt="llmtrim cuts the round-trip bill on both ends: $0.0365 original vs $0.0126 compressed, −66% cost, across 112 live A/B cases" width="840">
   </picture>
 </p>
 
@@ -317,12 +317,12 @@ The savings are measured live, not estimated. Each of 112 benchmark cases is sen
 
 The token cuts are model-independent (−31% input, −74% output); the dollar saving depends on the model's output-to-input price ratio: −66% on the benchmark model, projected −57–59% at GPT-4o / Claude Sonnet rates. On live Claude Code traffic, llmtrim cuts **−68% of compressible input** without ever touching the cached prefix, so your prompt-cache discount stays intact.
 
-Full methodology, per-corpus frontier, and confidence intervals are in [bench/README.md](bench/README.md). Reproduce it:
+Full methodology, per-corpus frontier, and confidence intervals are in [crates/llmtrim-cli/bench/README.md](crates/llmtrim-cli/bench/README.md). Reproduce it:
 
 ```bash
-python3 bench/scripts/download.py 40   # pull real corpora (gsm8k, humaneval, dolly, hotpotqa, …)
-bash    bench/scripts/run_all.sh       # live A/B (needs OPENROUTER_API_KEY)
-python3 bench/scripts/chart.py         # regenerate the chart + table
+python3 crates/llmtrim-cli/bench/scripts/download.py 40   # pull real corpora (gsm8k, humaneval, dolly, hotpotqa, …)
+bash    crates/llmtrim-cli/bench/scripts/run_all.sh       # live A/B (needs OPENROUTER_API_KEY)
+python3 crates/llmtrim-cli/bench/scripts/chart.py         # regenerate the chart + table
 ```
 
 <details>
@@ -339,7 +339,7 @@ Three neighbors each compress one layer of the problem; llmtrim does the whole r
 | Overhead added / request | **<10 ms** | 52 ms median | <10 ms | n/a |
 | Prompt overhead injected | **19 tokens** | n/a | n/a | 949 tokens |
 
-They also **stack**: llmtrim removes another ~35% from Claude Code's resent tool schemas on top of RTK. Detailed head-to-heads with [RTK](https://github.com/rtk-ai/rtk), [Headroom](https://github.com/chopratejas/headroom), and [caveman](https://github.com/JuliusBrussee/caveman) are in [bench/README.md](bench/README.md).
+They also **stack**: llmtrim removes another ~35% from Claude Code's resent tool schemas on top of RTK. Detailed head-to-heads with [RTK](https://github.com/rtk-ai/rtk), [Headroom](https://github.com/chopratejas/headroom), and [caveman](https://github.com/JuliusBrussee/caveman) are in [crates/llmtrim-cli/bench/README.md](crates/llmtrim-cli/bench/README.md).
 
 </details>
 

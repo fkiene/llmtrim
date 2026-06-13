@@ -1,0 +1,27 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="860" height="284" viewBox="0 0 860 284">
+<defs>
+<linearGradient id="bill" x1="0" y1="0" x2="1" y2="0"><stop offset="0%" stop-color="#34506b"/><stop offset="100%" stop-color="#4d7aa3"/></linearGradient>
+<filter id="win" x="-45%" y="-65%" width="190%" height="230%"><feDropShadow dx="0" dy="0" stdDeviation="5" flood-color="#3fb950" flood-opacity="0.5"/></filter>
+</defs>
+<rect width="860" height="284" fill="#0d1117"/>
+<rect x="1" y="1" width="858" height="282" rx="12" fill="none" stroke="#30363d" stroke-width="1"/>
+<text x="44" y="52" font-family="ui-sans-serif,-apple-system,Segoe UI,Helvetica,Arial,sans-serif"><tspan font-size="19" font-weight="800" letter-spacing="0.2" fill="#e6edf3">llmtrim</tspan><tspan font-size="18" font-weight="700" fill="#e6edf3"> cuts the whole LLM bill, </tspan><tspan font-size="18" font-weight="800" fill="#e6edf3">both ends</tspan></text>
+<text x="152.0" y="121.0" font-size="14" font-weight="600" fill="#8b949e" text-anchor="end" font-family="ui-sans-serif,-apple-system,Segoe UI,Helvetica,Arial,sans-serif">original</text>
+<path d="M174.0,96.0 H267.1 V136.0 H174.0 A6.0,6.0 0 0 1 168.0,130.0 V102.0 A6.0,6.0 0 0 1 174.0,96.0 Z" fill="#2b3a48"/>
+<path d="M266.6,96.0 H702.0 A6.0,6.0 0 0 1 708.0,102.0 V130.0 A6.0,6.0 0 0 1 702.0,136.0 H266.6 V96.0 Z" fill="url(#bill)"/>
+<text x="722.0" y="122.0" font-size="17" font-weight="600" fill="#8b949e" text-anchor="start" font-family="ui-monospace,SFMono-Regular,Menlo,monospace">$0.0365</text>
+<text x="217.6" y="120.0" font-size="10.5" font-weight="600" fill="#c3d2de" text-anchor="middle" font-family="ui-sans-serif,-apple-system,Segoe UI,Helvetica,Arial,sans-serif" letter-spacing="0.4">input</text>
+<text x="487.6" y="120.0" font-size="10.5" font-weight="600" fill="#eaf2f8" text-anchor="middle" font-family="ui-sans-serif,-apple-system,Segoe UI,Helvetica,Arial,sans-serif" letter-spacing="0.4">output</text>
+<text x="152.0" y="177.0" font-size="14" font-weight="800" fill="#e6edf3" text-anchor="end" font-family="ui-sans-serif,-apple-system,Segoe UI,Helvetica,Arial,sans-serif">llmtrim</text>
+<path d="M174.0,152.0 H238.1 V192.0 H174.0 A6.0,6.0 0 0 1 168.0,186.0 V158.0 A6.0,6.0 0 0 1 174.0,152.0 Z" fill="#2b3a48"/>
+<path d="M237.6,152.0 H353.9 V192.0 H237.6 V152.0 Z" fill="url(#bill)"/>
+<text x="367.9" y="178.0" font-size="17" font-weight="800" fill="#e6edf3" text-anchor="start" font-family="ui-monospace,SFMono-Regular,Menlo,monospace">$0.0126</text>
+<text x="203.1" y="176.0" font-size="10.5" font-weight="600" fill="#c3d2de" text-anchor="middle" font-family="ui-sans-serif,-apple-system,Segoe UI,Helvetica,Arial,sans-serif" letter-spacing="0.4">−31%</text>
+<text x="296.0" y="176.0" font-size="10.5" font-weight="600" fill="#eaf2f8" text-anchor="middle" font-family="ui-sans-serif,-apple-system,Segoe UI,Helvetica,Arial,sans-serif" letter-spacing="0.4">−74%</text>
+<path d="M353.9,152 H702.0 A6,6 0 0 1 708.0,158 V186.0 A6,6 0 0 1 702.0,192 H353.9" fill="#3fb950" fill-opacity="0.09" stroke="#3fb950" stroke-opacity="0.55" stroke-width="1.4" stroke-dasharray="5 4"/>
+<text x="692.0" y="184.0" font-size="34" font-weight="800" fill="#3fb950" text-anchor="end" font-family="ui-sans-serif,-apple-system,Segoe UI,Helvetica,Arial,sans-serif" letter-spacing="-1" filter="url(#win)">−66%</text>
+<text x="692.0" y="206.0" font-size="12.5" font-weight="600" fill="#56d364" text-anchor="end" font-family="ui-sans-serif,-apple-system,Segoe UI,Helvetica,Arial,sans-serif" letter-spacing="0.2">round-trip cost you don't pay</text>
+<text x="44" y="240" font-size="14.5" font-family="ui-sans-serif,-apple-system,Segoe UI,Helvetica,Arial,sans-serif" fill="#8b949e">caveman cuts <tspan fill="#e6edf3">output</tspan> · rtk cuts <tspan fill="#e6edf3">tool output</tspan> · llmtrim cuts <tspan fill="#3fb950" font-weight="800">both ends</tspan></text>
+<line x1="44" y1="258" x2="816" y2="258" stroke="#21262d" stroke-width="1"/>
+<text x="44.0" y="272.0" font-size="11" font-weight="400" fill="#7d8590" text-anchor="start" font-family="ui-monospace,SFMono-Regular,Menlo,monospace">measured: 112 live A/B cases · qwen/qwen3-next-80b-a3b-instruct · full results in bench/README</text>
+</svg>
