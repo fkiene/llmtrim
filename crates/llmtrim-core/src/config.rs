@@ -349,6 +349,11 @@ impl DenseConfig {
                 c.strip_base64 = true;
             }
             "agent" => {
+                // Tool selection is first-turn-only (see `stages::tools::select_tools`): pruning
+                // the `tools[]` block on later turns would churn the cached prompt prefix and
+                // raise cost on an agent loop (issue #9). It still prunes the opening single-shot
+                // request, where the saving is free. Trim + minify below are deterministic, so
+                // they shrink the block without changing it turn-to-turn.
                 c.tool_select = true;
                 c.tool_trim_desc = true;
                 // Minify tool schemas in place (API-safe TSCG subset): semantics-preserving, so
@@ -397,6 +402,8 @@ impl DenseConfig {
                 c.dedup_near = true;
                 c.ngram = true;
                 c.normalize_unicode = true;
+                // First-turn-only, like `agent` — `select_tools` never prunes mid-loop, so the
+                // cached prefix stays stable even under this preset's heavier compression (#9).
                 c.tool_select = true;
                 c.tool_trim_desc = true;
                 c.tool_minify_schema = true; // API-safe TSCG schema minify (rides with trim)
@@ -581,6 +588,20 @@ mod tests {
         }
         // Default (= `safe`) is off.
         assert!(!DenseConfig::default().tool_minify_schema);
+    }
+
+    #[test]
+    fn agent_shrinks_the_tool_block_without_per_turn_churn() {
+        // Issue #9: the tool block is part of the cached prompt prefix, so it must not change
+        // turn-to-turn on an agent loop. The agent preset keeps the deterministic trim/minify
+        // (cache-stable) and gates selection to the first turn only (byte-stability is proven
+        // end-to-end by `agent_tool_block_is_byte_stable_across_turns` in the crate root). Lock
+        // the flag lineup here.
+        let agent = DenseConfig::preset("agent").unwrap();
+        assert!(
+            agent.tool_select && agent.tool_trim_desc && agent.tool_minify_schema,
+            "agent shrinks the tool block (selection is first-turn-only; trim/minify are cache-stable)"
+        );
     }
 
     #[test]
