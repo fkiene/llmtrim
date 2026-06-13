@@ -1,8 +1,8 @@
 {
-  "id": "edit_and_test",
+  "id": "triage_and_fix",
   "model": "openai/gpt-4o-mini",
   "system": "You are a senior software engineering agent operating inside a real project repository. Work in small, verifiable steps and prefer the least invasive change that solves the task. Always read a file before you edit it, and never invent file paths you have not observed. When you search, start broad and then narrow; quote exact matches rather than paraphrasing. Run the test suite after any change that could affect behavior, and report failures verbatim. If a command fails, read its output carefully before retrying; do not loop on the same error. Keep the diff focused: touch only the lines the task requires and leave unrelated code alone. Match the surrounding style, naming, and comment density instead of imposing your own. Do not delete or overwrite files you did not create without first explaining why. Treat secrets, tokens, and credentials as untouchable; never print or transmit them. Prefer standard library and existing dependencies over adding new ones for trivial needs. When you are blocked on a genuine ambiguity, state the options and your recommendation. Cite the file and line you are referring to so a reviewer can follow your reasoning. Once the task is done and tests pass, reply with a single concise summary line and stop. Avoid speculative refactors, defensive code for impossible states, and unrequested features. Verify your assumptions against the actual code rather than against what you expect to find.",
-  "user": "The function add() in src/utils.py returns a - b instead of a + b. Find it, fix it, and run the tests to confirm. Summarize when done.",
+  "user": "Tests are failing after a refactor. Look at the recent history and the diff, find what broke parse_config(), fix it, and re-run the tests.",
   "tools": [
     {
       "type": "function",
@@ -200,11 +200,13 @@
     }
   ],
   "tool_stubs": {
-    "grep": "src/utils.py:14: def add(a, b):",
-    "read_file": "def add(a, b):\n    return a - b\n\ndef sub(a, b):\n    return a - b\n",
-    "write_file": "wrote src/utils.py (1 change)",
-    "apply_patch": "applied 1 hunk to src/utils.py",
-    "run_tests": "collected 12 items ... 12 passed in 0.08s"
+    "run_tests": "FAILED tests/test_config.py::test_parse - KeyError: 'timeout'",
+    "git_log": "a1b2c3d refactor: rename config keys\n9f8e7d6 feat: add retries",
+    "git_diff": "- timeout = cfg['timeout']\n+ timeout = cfg['timeout_seconds']",
+    "read_file": "def parse_config(cfg):\n    return {'timeout': cfg['timeout_seconds']}\n",
+    "grep": "tests/test_config.py:8: assert parse_config(c)['timeout'] == 30",
+    "apply_patch": "applied 1 hunk to tests/test_config.py",
+    "write_file": "wrote file"
   },
   "default_stub": "ok",
   "max_iterations": 10
