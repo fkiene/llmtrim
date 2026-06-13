@@ -673,7 +673,7 @@ mod imp {
             output_shaped: result.output_shaped,
             frozen_input_tokens: Some(result.frozen_input_tokens.0 as i64),
         };
-        capture_pair(text, &result.request_json, &pending);
+        capture_pair(text, &result.request_json, &pending, &result.stages);
         Some((result.request_json, pending))
     }
 
@@ -681,13 +681,27 @@ mod imp {
     /// bodies of each compressed request as one JSON file so an external reviewer can audit
     /// compression quality. Off (zero work beyond one env read) unless the var is set; any
     /// write failure is logged and swallowed — capture must never break proxying.
-    fn capture_pair(before: &str, after: &str, pending: &Pending) {
+    fn capture_pair(
+        before: &str,
+        after: &str,
+        pending: &Pending,
+        stages: &[llmtrim_core::pipeline::StageReport],
+    ) {
         let Ok(dir) = std::env::var("LLMTRIM_CAPTURE_DIR") else {
             return;
         };
         if dir.is_empty() {
             return;
         }
+        // The names of the stages that actually rewrote this request — what an external auditor
+        // needs to tell a lossless run that dropped content (a bug) from a lossy stage doing its
+        // job. `plan` below is the output-rehydration plan (reversible response-side transforms),
+        // a different axis, so both are recorded.
+        let stages_applied: Vec<&str> = stages
+            .iter()
+            .filter(|s| s.applied)
+            .map(|s| s.name.as_str())
+            .collect();
         let record = serde_json::json!({
             "ts": chrono::Utc::now().to_rfc3339(),
             "provider": pending.provider.as_str(),
@@ -695,6 +709,7 @@ mod imp {
             "input_before": pending.input_before,
             "input_after": pending.input_after,
             "output_shaped": pending.output_shaped,
+            "stages": stages_applied,
             "plan": pending.plan,
             "before": before,
             "after": after,

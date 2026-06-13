@@ -7,6 +7,11 @@ All notable changes to this project are documented here. The format follows
 ## [Unreleased]
 
 ### Added
+- **`LLMTRIM_CAPTURE_DIR` records the applied stages.** Each capture JSON now carries a
+  `stages` array — the names of the compression stages that actually rewrote the request.
+  Previously only `plan` (the output-rehydration plan, a different axis and usually empty)
+  was recorded, so an external auditor could not tell a lossless run that dropped content
+  (a bug) from a lossy stage doing its job.
 - **UniFFI bindings (`llmtrim-uniffi`) + Python wheel.** A new binding crate exposes
   `llmtrim-core` to Python, Ruby, Swift and Kotlin from one Rust definition: a flat
   `compress(input, provider, preset) -> CompressOutput` call with errors mapped to native
