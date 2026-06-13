@@ -209,8 +209,8 @@ The same compression runs with no proxy and no setup, as a one-shot CLI, an embe
 | Rust | `cargo add llmtrim-core` |
 | Python | `pip install llmtrim` |
 | Ruby | `gem install llmtrim` |
-| Kotlin | `implementation("io.github.fkiene:llmtrim:0.1.7")` (Maven Central) |
-| Swift | `.package(url: "https://github.com/fkiene/llmtrim", from: "0.1.7")` (SwiftPM) |
+| Kotlin | `implementation("io.github.fkiene:llmtrim:0.1.8")` (Maven Central) |
+| Swift | `.package(url: "https://github.com/fkiene/llmtrim", from: "0.1.8")` (SwiftPM) |
 
 > [!NOTE]
 > The CLI is published today; the **library packages above ship with the next release**. Until then, build them from source: [`crates/llmtrim-uniffi`](crates/llmtrim-uniffi). *(This note is removed once they're published.)*

@@ -6,6 +6,8 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.1.8] - 2026-06-13
+
 ### Fixed
 - **Language-binding publishes (PyPI / RubyGems / Maven Central) now build their
   `x86_64-apple-darwin` artifacts by cross-compiling on an arm64 macOS runner** instead of
@@ -262,7 +264,8 @@ bill, never a broken call.
   (6 targets with SLSA build provenance), CI on Linux/macOS/Windows with secret
   scanning, license compliance, and MSRV gates.
 
-[Unreleased]: https://github.com/fkiene/llmtrim/compare/v0.1.7...HEAD
+[Unreleased]: https://github.com/fkiene/llmtrim/compare/v0.1.8...HEAD
+[0.1.8]: https://github.com/fkiene/llmtrim/compare/v0.1.7...v0.1.8
 [0.1.7]: https://github.com/fkiene/llmtrim/compare/v0.1.6...v0.1.7
 [0.1.6]: https://github.com/fkiene/llmtrim/compare/v0.1.5...v0.1.6
 [0.1.5]: https://github.com/fkiene/llmtrim/compare/v0.1.4...v0.1.5
