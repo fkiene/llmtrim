@@ -9,9 +9,13 @@
 //   ./gradlew build      # compile + jar
 //   ./gradlew publish    # to the configured Maven repo (creds via env)
 
+import com.vanniktech.maven.publish.SonatypeHost
+
 plugins {
     kotlin("jvm") version "2.0.21"
-    `maven-publish`
+    // Publishes to Maven Central (Central Portal) and handles signing. Credentials/keys
+    // come from ORG_GRADLE_PROJECT_* env at publish time; `build`/`jar` work without them.
+    id("com.vanniktech.maven.publish") version "0.30.0"
 }
 
 group = "io.github.fkiene"
@@ -37,26 +41,30 @@ java {
     targetCompatibility = JavaVersion.VERSION_17
 }
 
-publishing {
-    publications {
-        create<MavenPublication>("maven") {
-            artifactId = "llmtrim"
-            from(components["java"])
-            pom {
-                name.set("llmtrim")
-                description.set("Static, deterministic LLM prompt/payload compression — cut input tokens 30-90% with zero extra model calls.")
-                url.set("https://github.com/fkiene/llmtrim")
-                licenses {
-                    license {
-                        name.set("AGPL-3.0-only")
-                        url.set("https://www.gnu.org/licenses/agpl-3.0.txt")
-                    }
-                }
-                scm { url.set("https://github.com/fkiene/llmtrim") }
+mavenPublishing {
+    publishToMavenCentral(SonatypeHost.CENTRAL_PORTAL, automaticRelease = true)
+    signAllPublications()
+    coordinates("io.github.fkiene", "llmtrim", project.version.toString())
+    pom {
+        name.set("llmtrim")
+        description.set("Static, deterministic LLM prompt/payload compression — cut input tokens 30-90% with zero extra model calls.")
+        url.set("https://github.com/fkiene/llmtrim")
+        licenses {
+            license {
+                name.set("AGPL-3.0-only")
+                url.set("https://www.gnu.org/licenses/agpl-3.0.txt")
             }
         }
+        developers {
+            developer {
+                id.set("fkiene")
+                name.set("François Kiene")
+            }
+        }
+        scm {
+            url.set("https://github.com/fkiene/llmtrim")
+            connection.set("scm:git:https://github.com/fkiene/llmtrim.git")
+            developerConnection.set("scm:git:ssh://git@github.com/fkiene/llmtrim.git")
+        }
     }
-    // Repositories (Maven Central / GitHub Packages) + signing are configured by the
-    // release pipeline via env/secrets; left out here so a local `publishToMavenLocal`
-    // works without credentials.
 }
