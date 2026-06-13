@@ -21,7 +21,9 @@ jobs:
         run: |
           set -euo pipefail
           TAG="${GITHUB_REF_NAME#v}"
-          PKG=$(grep -m1 '^version = ' Cargo.toml | cut -d'"' -f2)
+          # Read the shared version from [workspace.package] specifically — a bare
+          # `grep '^version='` could pick up an entry under [workspace.dependencies].
+          PKG=$(awk -F'"' '/^\[/{s=$0} s=="[workspace.package]" && /^version[[:space:]]*=/{print $2; exit}' Cargo.toml)
           if [ "$TAG" != "$PKG" ]; then
             echo "::error::tag v$TAG != Cargo.toml version $PKG (forgot to drop -dev? use cargo release)"; exit 1
           fi
@@ -151,8 +153,10 @@ jobs:
           set -euo pipefail
           V="${GITHUB_REF_NAME#v}"
           cargo publish -p llmtrim-core
+          # Poll the sparse index (stable, machine-readable) — not `cargo search`, whose
+          # output format isn't a contract — until core's new version is served.
           for i in $(seq 1 20); do
-            if cargo search llmtrim-core 2>/dev/null | grep -qF "llmtrim-core = \"$V\""; then break; fi
+            if curl -fsSL "https://index.crates.io/ll/mt/llmtrim-core" | grep -q "\"vers\":\"$V\""; then break; fi
             [ "$i" = 20 ] && { echo "::error::llmtrim-core $V never appeared on the index"; exit 1; }
             echo "waiting for llmtrim-core $V on the index (attempt $i)"; sleep 30
           done

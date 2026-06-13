@@ -28,9 +28,12 @@ echo "==> base wheel: $wheel"
 
 echo "==> generating UniFFI Python bindings"
 # Locate the cdylib maturin built (.so Linux / .dylib macOS / .dll Windows); never the .a.
+# maturin 1.14 stages it under target/maturin/; cover the plain and per-target
+# (cross-compile / explicit --target) profile dirs too.
 lib=""
 for cand in "$workspace_root"/target/maturin/libllmtrim_ffi.{so,dylib,dll} \
-            "$workspace_root"/target/*/libllmtrim_ffi.{so,dylib,dll}; do
+            "$workspace_root"/target/{release,debug}/libllmtrim_ffi.{so,dylib,dll} \
+            "$workspace_root"/target/*/{release,debug}/libllmtrim_ffi.{so,dylib,dll}; do
     [ -f "$cand" ] && { lib="$cand"; break; }
 done
 [ -n "$lib" ] || { echo "error: could not locate the built libllmtrim_ffi cdylib" >&2; exit 1; }

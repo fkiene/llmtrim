@@ -10,7 +10,9 @@ class Llmtrim < Formula
   depends_on "rust" => :build
 
   def install
-    system "cargo", "install", *std_cargo_args
+    # The workspace root is a virtual manifest (no [package]); point cargo at the CLI
+    # member crate that owns the `llmtrim` binary.
+    system "cargo", "install", *std_cargo_args(path: "crates/llmtrim-cli")
   end
 
   test do
