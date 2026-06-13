@@ -87,6 +87,10 @@ pub struct AgentTask {
     pub default_stub: String,
     #[serde(default = "default_max_iter")]
     pub max_iterations: usize,
+    /// Per-turn output-token cap. Too low truncates the final answer turn, so the loop never
+    /// sees a clean final and keeps calling tools (false iteration drift); 512 leaves room.
+    #[serde(default = "default_max_tokens")]
+    pub max_tokens: u64,
 }
 
 fn default_stub() -> String {
@@ -94,6 +98,9 @@ fn default_stub() -> String {
 }
 fn default_max_iter() -> usize {
     12
+}
+fn default_max_tokens() -> u64 {
+    512
 }
 
 impl AgentTask {
@@ -161,7 +168,7 @@ impl AgentProvider for OpenAiAgent {
                 {"role": "user", "content": task.user},
             ],
             "tools": task.tools,
-            "max_tokens": 64,
+            "max_tokens": task.max_tokens,
             "temperature": 0,
         })
     }
