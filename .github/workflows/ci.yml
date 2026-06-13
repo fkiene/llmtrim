@@ -50,11 +50,118 @@ jobs:
       - name: Build (release)
         run: cargo build --release
       - name: Compile live feature
-        run: cargo build --features live
-      # Guard the tokio-free library path Cargo.toml advertises for embedders
-      # (`default-features = false` drops the interceptor + tokio).
-      - name: Compile embedder core (no default features)
-        run: cargo check --no-default-features --lib
+        run: cargo build -p llmtrim --features live
+      # Guard the embeddable engine: llmtrim-core must build standalone, and the CLI lib
+      # must still compile with the interceptor (+ tokio) dropped. `--features`/`--lib` are
+      # package-scoped — they can't run at the virtual workspace root.
+      - name: Compile embedder core (llmtrim-core)
+        run: cargo check -p llmtrim-core
+      - name: Compile CLI lib without the interceptor
+        run: cargo check -p llmtrim --no-default-features --lib
+
+  # Exercise the UniFFI bindings end-to-end, not just the Rust-side tests in the `test`
+  # job: generating all four languages catches a binding-definition break (incl. Swift +
+  # Kotlin, whose toolchains we don't install), and the Python wheel + Ruby suites prove
+  # the FFI surface actually loads and compresses from each host language.
+  bindings:
+    name: UniFFI bindings
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.x'
+      - uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: '3.3'
+      - run: pip install maturin pytest wheel
+      - run: gem install ffi --no-document
+      # Smoke: all four languages must generate from the one Rust definition (this is the
+      # only coverage Swift/Kotlin get — it fails if the binding API stops being FFI-shaped).
+      - name: Generate bindings (python/ruby/swift/kotlin)
+        run: crates/llmtrim-uniffi/scripts/generate-bindings.sh "$RUNNER_TEMP/bindings"
+      - name: Python — build wheel, install, pytest
+        run: |
+          crates/llmtrim-uniffi/scripts/build-wheel.sh
+          pip install target/wheels/llmtrim-*.whl
+          pytest crates/llmtrim-uniffi/tests/python -q
+      - name: Ruby — minitest against the generated glue
+        env:
+          LD_LIBRARY_PATH: ${{ github.workspace }}/target/debug
+        run: ruby -I"$RUNNER_TEMP/bindings/ruby" crates/llmtrim-uniffi/tests/ruby/test_llmtrim.rb
+
+  # Swift: compile the generated bindings + a smoke against the cdylib on macOS and run it.
+  # This is the compile-and-load verification for the Swift target (the prerequisite to a
+  # SwiftPM package); full xcframework/SwiftPM packaging is a later step.
+  bindings-swift:
+    name: Swift binding (smoke)
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Build cdylib + generate Swift
+        run: |
+          cargo build -p llmtrim-uniffi
+          cargo run -q --bin uniffi-bindgen -p llmtrim-uniffi -- \
+            generate --library target/debug/libllmtrim_ffi.dylib --language swift --out-dir gen/swift
+      - name: Compile and run the Swift smoke
+        run: |
+          swiftc -parse-as-library \
+            -L target/debug -lllmtrim_ffi \
+            -Xcc -fmodule-map-file=gen/swift/llmtrim_ffiFFI.modulemap \
+            -I gen/swift \
+            gen/swift/llmtrim_ffi.swift crates/llmtrim-uniffi/tests/swift/smoke.swift -o swift-smoke
+          DYLD_LIBRARY_PATH=target/debug ./swift-smoke
+
+  # Kotlin: compile the generated bindings (which use JNA) + a smoke and run it on a JVM.
+  # Compile-and-load verification for the Kotlin target; full Gradle/Maven packaging later.
+  bindings-kotlin:
+    name: Kotlin binding (smoke)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+      - name: Install the Kotlin compiler
+        run: |
+          curl -fsSL -o kotlin.zip https://github.com/JetBrains/kotlin/releases/download/v2.0.21/kotlin-compiler-2.0.21.zip
+          unzip -q kotlin.zip -d "$HOME/kotlin"
+          echo "$HOME/kotlin/kotlinc/bin" >> "$GITHUB_PATH"
+      - name: Build cdylib + generate Kotlin + fetch JNA
+        run: |
+          cargo build -p llmtrim-uniffi
+          cargo run -q --bin uniffi-bindgen -p llmtrim-uniffi -- \
+            generate --library target/debug/libllmtrim_ffi.so --language kotlin --out-dir gen/kotlin
+          curl -fsSL -o jna.jar https://repo1.maven.org/maven2/net/java/dev/jna/jna/5.14.0/jna-5.14.0.jar
+      - name: Compile and run the Kotlin smoke
+        run: |
+          kotlinc gen/kotlin/uniffi/llmtrim_ffi/llmtrim_ffi.kt \
+            crates/llmtrim-uniffi/tests/kotlin/Smoke.kt \
+            -cp jna.jar -include-runtime -d smoke.jar
+          java -Djna.library.path="$PWD/target/debug" -cp "smoke.jar:jna.jar" SmokeKt
+
+  # Build the publishable Swift package: assemble the XCFramework (per-Apple-target static
+  # libs + generated FFI headers) and compile the SwiftPM package against it. macOS-only
+  # (XCFrameworks need Xcode). Heavier than the bindings-swift smoke — can be moved to
+  # release-only if macOS minutes get tight.
+  bindings-swift-package:
+    name: Swift package (xcframework)
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Build the XCFramework
+        run: crates/llmtrim-uniffi/scripts/build-xcframework.sh
+      - name: Build + test the SwiftPM package against it
+        run: swift test --package-path crates/llmtrim-uniffi/packaging/swift
 
   # Gate the AGPL-3.0-only relicensing: fail if any dependency carries a license
   # outside deny.toml's allow-list (e.g. GPL/proprietary) or an unknown source.

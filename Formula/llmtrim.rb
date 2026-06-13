@@ -10,7 +10,11 @@ class Llmtrim < Formula
   depends_on "rust" => :build
 
   def install
-    system "cargo", "install", *std_cargo_args
+    # Since the workspace split the root is a virtual manifest (no [package]) and the
+    # binary lives in the llmtrim-cli member. Pre-split tarballs had it at the root, so
+    # fall back to "." — the formula then installs any tagged version, old or new.
+    crate = File.directory?("crates/llmtrim-cli") ? "crates/llmtrim-cli" : "."
+    system "cargo", "install", *std_cargo_args(path: crate)
   end
 
   test do

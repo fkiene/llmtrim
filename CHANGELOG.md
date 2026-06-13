@@ -6,6 +6,27 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+- **UniFFI bindings (`llmtrim-uniffi`) + Python wheel.** A new binding crate exposes
+  `llmtrim-core` to Python, Ruby, Swift and Kotlin from one Rust definition: a flat
+  `compress(input, provider, preset) -> CompressOutput` call with errors mapped to native
+  exceptions, running natively in-process (no server, no extra model calls). Each language
+  ships as a published package with the compiled engine bundled (no Rust toolchain needed
+  by consumers): a Python wheel (PyPI), a Ruby gem (RubyGems), a Kotlin/JVM jar (Maven
+  Central) and a Swift package (SwiftPM/XCFramework), built for Linux, macOS and Windows.
+  All four are exercised in CI. See `crates/llmtrim-uniffi/README.md`.
+
+### Changed
+- **Split into a Cargo workspace: `llmtrim-core` (engine) + `llmtrim` (CLI/proxy).**
+  The deterministic compression engine — `compress`/`compress_with_config`/`route`/
+  `rehydrate`/`CompressResult` plus the pipeline, stage, provider, tokenizer, gate and
+  config modules — now lives in a standalone `llmtrim-core` crate with no async/tokio
+  in its dependency tree, so it can be embedded as a library. The `llmtrim` binary,
+  MITM interceptor, daemon, token ledger, live benchmark and terminal UI move to the
+  `llmtrim` CLI crate, which depends on `llmtrim-core`. No behavior change; the `llmtrim`
+  command and its install paths are unchanged. `rehydrate` is now `pub` (the CLI's
+  interceptor calls it across the crate boundary).
+
 ## [0.1.6] - 2026-06-12
 
 ### Added

@@ -1,144 +1,37 @@
-[package]
-name = "llmtrim"
+[workspace]
+resolver = "3"
+members = ["crates/llmtrim-core", "crates/llmtrim-cli", "crates/llmtrim-uniffi"]
+
+# Shared package metadata — inherited by each member via `field.workspace = true`.
+[workspace.package]
 version = "0.1.7-dev"
 edition = "2024"
 rust-version = "1.88"
-description = "Static, deterministic LLM prompt/payload compressor — cut input tokens 30-90% with zero extra model calls"
 repository = "https://github.com/fkiene/llmtrim"
 homepage = "https://github.com/fkiene/llmtrim"
 license = "AGPL-3.0-only"
-readme = "README.md"
-keywords = ["llm", "tokens", "compression", "openai", "anthropic"]
-categories = ["command-line-utilities", "development-tools", "compression"]
-# Keep the published crate lean — benchmark corpora, the license-notice generator, CI config
-# and editor rules aren't needed to build or use llmtrim. Verify with `cargo package --list`.
-# bench/pricing.json is re-included: main.rs embeds it (include_str!) as the dashboard's
-# pricing fallback, so the package must carry it. `bench/*` (not `bench/`) keeps the
-# gitignore-style negation effective — a file can't be re-included under an excluded dir.
-# .cargo/ carries the local mold-linker config — shipping it breaks `cargo install` on
-# machines without mold (publish-verify caught this on v0.1.2).
-exclude = ["bench/*", "!bench/pricing.json", "tools/", ".github/", ".claude/", ".cargo/", "*.png"]
 
-# `cargo binstall llmtrim` → prebuilt release binaries instead of a source build.
-# Archive names match taiki-e/upload-rust-binary-action in release.yml (tar.gz, zip on
-# Windows); binstall's gnu→musl fallback maps x86_64 Linux onto the musl asset.
-[package.metadata.binstall]
-pkg-url = "{ repo }/releases/download/v{ version }/{ name }-{ target }{ archive-suffix }"
-pkg-fmt = "tgz"
-
-[package.metadata.binstall.overrides.x86_64-pc-windows-msvc]
-pkg-fmt = "zip"
-
-[package.metadata.binstall.overrides.aarch64-pc-windows-msvc]
-pkg-fmt = "zip"
-
-[dependencies]
+# Dependencies shared by more than one member — declared once here, pulled in with
+# `<dep>.workspace = true` so a version bump is a single edit.
+[workspace.dependencies]
 anyhow = "1.0.102"
-async-openai = { version = "0.41.0", features = ["chat-completion", "byot"], optional = true }
-# Same reqwest async-openai uses — needed to hand it a proxy-free client (quality.rs);
-# TLS/json features come from async-openai's own enables via feature unification.
-reqwest = { version = "0.13", default-features = false, optional = true }
 base64 = "0.22.1"
-bm25 = "2.3.2"
-chrono = "0.4.45"
-clap = { version = "4.6.1", features = ["derive"] }
-# Terminal UI: color (owo-colors), width-aware tables (comfy-table without its `tty`
-# default — crossterm 0.29 would duplicate the 0.28 already in-tree via toon-format;
-# `custom_styling` lets ANSI-styled cells measure correctly), display-width (the same
-# unicode-width comfy-table itself uses) for panel borders.
-comfy-table = { version = "7.2.2", default-features = false, features = ["custom_styling"] }
 csv = "1.4.0"
-dotenvy = "0.15.7"
-gaoya = "0.2.0"
-image = { version = "0.25.10", default-features = false, features = ["png", "jpeg"] }
 once_cell = "1.21.4"
-owo-colors = "4.3.0"
 regex = "1.12.3"
-rusqlite = { version = "0.39", features = ["bundled"] }
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = { version = "1.0.150", features = ["preserve_order", "arbitrary_precision"] }
-statrs = "0.18.0"
-stop-words = "0.10.0"
 tiktoken-rs = "0.12.0"
-tokio = { version = "1.52", features = ["rt", "rt-multi-thread", "macros", "net", "io-util", "signal", "time"], optional = true }
-hudsucker = { version = "0.24", default-features = false, features = ["rcgen-ca", "rustls-client", "http2"], optional = true }
-async-trait = { version = "0.1", optional = true }
-http-body-util = { version = "0.1", optional = true }
-bytes = { version = "1", optional = true }
-# Canonical LLM provider registry (compile-time embedded). The interceptor derives its
-# host allowlist + CA name constraints from this, so the provider list stays maintained
-# upstream instead of hand-curated here.
-llm_providers = { version = "0.14", optional = true }
 toml = "1.1.2"
-# Not used directly — caps the transitive `time` (via hudsucker → rcgen) below 0.3.48,
-# whose new blanket impl collides with rcgen 0.14's `impl<T: Into<String>> From<T>`
-# (E0119), breaking un-`--locked` `cargo install`. Drop when rcgen ships a fix.
-time = { version = ">=0.3.36, <0.3.48", default-features = false, optional = true }
-toon-format = "0.5.0"
-tree-sitter = "0.26.9"
-tree-sitter-javascript = "0.25.0"
-tree-sitter-rust = "0.24.2"
-# Stage C skeletonization grammars — top languages (all ABI-verified against ts 0.26).
-tree-sitter-typescript = "0.23.2"
-tree-sitter-python = "0.25.0"
-tree-sitter-go = "0.25.0"
-tree-sitter-java = "0.23.5"
-tree-sitter-c = "0.24.2"
-tree-sitter-cpp = "0.23.4"
-tree-sitter-c-sharp = "0.23.5"
-tree-sitter-kotlin-ng = "1.1.0"
-tree-sitter-swift = "0.7.3"
-tree-sitter-zig = "1.1.2"
-tree-sitter-ruby = "0.23.1"
-tree-sitter-php = "0.24.2"
-unicode-normalization = "0.1.25"
-unicode-segmentation = "1.13.3"
-# `0.2` exactly: ratatui (via toon-format) pins `=0.2.0`, so anything tighter here
-# fails version selection.
-unicode-width = "0.2"
-ureq = "3.3.0"
-wait-timeout = "0.2.1"
-whatlang = "0.18.0"
-ctrlc = "3.5.2"
 
-# macOS / Linux autostart (launchd agent / XDG .desktop entry); Windows uses the
-# registry Run key directly instead (src/autostart.rs).
-[target.'cfg(not(windows))'.dependencies]
-auto-launch = "0.6.0"
-
-# Windows: persist the proxy env (HTTPS_PROXY + NODE_EXTRA_CA_CERTS) in HKCU\Environment and
-# autostart via HKCU\Software\Microsoft\Windows\CurrentVersion\Run. winreg confines its own
-# unsafe to the crate, leaving our `unsafe_code = "forbid"` lint intact.
-[target.'cfg(windows)'.dependencies]
-winreg = "0.56"
-
-[features]
-default = ["intercept"]
-# Live A/B benchmarking (the `bench` command's network path) pulls in async-openai +
-# tokio. Off by default so library embedders get a tokio-free compression core; the
-# bench scripts build with `--features live`.
-live = ["dep:async-openai", "dep:reqwest", "dep:tokio"]
-# The MITM interceptor (`serve`): a man-in-the-middle HTTPS proxy that compresses LLM
-# API requests in flight, modeled on llm-interceptor. Pulls in hudsucker + tokio. Default
-# for the binary; library embedders can opt out with `default-features = false`.
-intercept = ["dep:hudsucker", "dep:tokio", "dep:async-trait", "dep:http-body-util", "dep:bytes", "dep:llm_providers", "dep:time"]
-
-# Latency micro-benchmark — its own `main` (warm timing + attribution), not the libtest
-# bench harness. Lives in bench/ (the one benchmark folder) via an explicit path, so there's
-# no confusing `benches/` beside it. Run: `cargo bench --bench latency [-- request.json [provider]]`.
-[[bench]]
-name = "latency"
-path = "bench/scripts/latency.rs"
-harness = false
+[workspace.lints.rust]
+# The compression core is pure-safe Rust; keep it that way (CI denies warnings).
+unsafe_code = "forbid"
+# Deny here instead of `-- -D warnings` on the CLI so clippy/check/test share one cache.
+warnings = "deny"
 
 [profile.release]
 opt-level = 3
 lto = true
 codegen-units = 1
 strip = true
-
-[lints.rust]
-# The compression core is pure-safe Rust; keep it that way (CI denies warnings).
-unsafe_code = "forbid"
-# Deny here instead of `-- -D warnings` on the CLI so clippy/check/test share one cache.
-warnings = "deny"

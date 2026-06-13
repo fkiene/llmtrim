@@ -1,0 +1,26 @@
+[build-system]
+requires = ["maturin>=1.7,<2.0"]
+build-backend = "maturin"
+
+[project]
+name = "llmtrim"
+description = "Static, deterministic LLM prompt/payload compression — cut input tokens 30-90% with zero extra model calls."
+requires-python = ">=3.9"
+license = { text = "AGPL-3.0-only" }
+keywords = ["llm", "tokens", "compression", "openai", "anthropic"]
+classifiers = [
+    "Programming Language :: Rust",
+    "Programming Language :: Python :: 3",
+    "Topic :: Text Processing",
+    "License :: OSI Approved :: GNU Affero General Public License v3",
+]
+dynamic = ["version"]
+
+[project.urls]
+Repository = "https://github.com/fkiene/llmtrim"
+
+[tool.maturin]
+# UniFFI bindings: maturin builds the cdylib and runs uniffi-bindgen, packaging the
+# generated Python module + native library into the wheel.
+bindings = "uniffi"
+manifest-path = "Cargo.toml"

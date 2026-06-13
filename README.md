@@ -24,7 +24,7 @@
   <a href="#what-it-actually-does">What it does</a> &bull;
   <a href="#see-it-on-real-output">See it in action</a> &bull;
   <a href="#get-started">Get started</a> &bull;
-  <a href="#use-it-without-the-proxy">CLI &amp; library</a> &bull;
+  <a href="#use-it-as-a-cli-or-library">CLI &amp; library</a> &bull;
   <a href="#works-with">Works with</a> &bull;
   <a href="#configuration">Configuration</a> &bull;
   <a href="#the-numbers">Numbers</a>
@@ -200,29 +200,52 @@ llmtrim uninstall   # exact inverse of setup: removes all three changes
 
 </details>
 
-## Use it without the proxy
+## Use it as a CLI or library
 
-The same compression is available as a one-shot CLI or a Rust library, with no proxy and no setup.
+The same compression runs with no proxy and no setup — as a one-shot CLI, an embeddable Rust crate, or native bindings for **Python, Ruby, Swift and Kotlin**. No extra model calls, no network: the deterministic engine runs in your process.
+
+| Language | Install |
+|---|---|
+| Rust | `cargo add llmtrim-core` |
+| Python | `pip install llmtrim` |
+| Ruby | `gem install llmtrim` |
+| Kotlin | `implementation("io.github.fkiene:llmtrim:0.1.7")` — Maven Central |
+| Swift | `.package(url: "https://github.com/fkiene/llmtrim", from: "0.1.7")` — SwiftPM |
+
+> [!NOTE]
+> The CLI is published today; the **library packages above ship with the next release**. Until then, build them from source — see [`crates/llmtrim-uniffi`](crates/llmtrim-uniffi). *(This note is removed once they're published.)*
+
+**CLI** — pipe a request in, get a compressed one out:
 
 ```bash
 echo '{"model":"gpt-4o","messages":[...]}' | llmtrim compress --provider openai > out.json
 echo '{"model":"gpt-4o","messages":[...]}' | llmtrim send     --provider openai   # compress, call, print
 ```
 
+**Rust** — the engine is the [`llmtrim-core`](https://crates.io/crates/llmtrim-core) crate (no `tokio`, no network in its dependency tree):
+
 ```rust
-use llmtrim::{compress, compress_with_config};
-use llmtrim::config::DenseConfig;
-use llmtrim::ir::ProviderKind;
+use llmtrim_core::{compress, compress_with_config, config::DenseConfig, ir::ProviderKind};
 
-// Pass None to auto-detect the provider from the request.
-let result = compress(request_json, Some(ProviderKind::OpenAi))?;
-println!("{} -> {} input tokens", result.input_tokens_before, result.input_tokens_after);
+// None auto-detects the provider from the request shape.
+let out = compress(request_json, Some(ProviderKind::OpenAi))?;
+println!("{} -> {} input tokens", out.input_tokens_before, out.input_tokens_after);
 
-// Or with explicit settings:
-let result = compress_with_config(request_json, Some(ProviderKind::OpenAi), &DenseConfig::default())?;
+// …or pass an explicit preset/config:
+let out = compress_with_config(request_json, Some(ProviderKind::OpenAi), &DenseConfig::preset("agent").unwrap())?;
 ```
 
-The compression core is `tokio`-free; add `default-features = false` if you don't need the proxy.
+**Python / Ruby / Swift / Kotlin** — one flat `compress(input, provider, preset)` call, generated from the same Rust engine via [UniFFI](https://mozilla.github.io/uniffi-rs/). The compiled engine is bundled in each package, so there's no Rust toolchain to install:
+
+```python
+import llmtrim
+
+out = llmtrim.compress(request_json, llmtrim.Provider.OPEN_AI, "aggressive")
+print(out.input_tokens_before, "->", out.input_tokens_after)
+```
+
+> [!NOTE]
+> Every binding returns the compressed `request_json` plus the before/after token counts, and maps errors to native exceptions. Per-language install and usage live in [`crates/llmtrim-uniffi`](crates/llmtrim-uniffi).
 
 ## Works with
 
@@ -235,7 +258,7 @@ Any tool that honors `HTTPS_PROXY` and an env-provided CA, which is essentially 
 | Gemini CLI | ✅ | |
 | Cursor / VS Code extensions | ✅ | Node-based: picks up `NODE_EXTRA_CA_CERTS` |
 | Aider, OpenCode, any `HTTPS_PROXY`-aware CLI | ✅ | |
-| Your own app / SDK | ✅ | or call the [CLI / library](#use-it-without-the-proxy) directly |
+| Your own app / SDK | ✅ | or call the [CLI / library](#use-it-as-a-cli-or-library) directly |
 | GitHub Copilot | ❌ | certificate pinning blocks interception |
 
 Providers come from the [`llm_providers`](https://crates.io/crates/llm_providers) registry (OpenAI, Anthropic, Google, DeepSeek, Mistral, xAI, Moonshot, Zhipu, Qwen, OpenRouter, …) and update with it. Every non-LLM connection passes through untouched.

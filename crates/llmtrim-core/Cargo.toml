@@ -1,0 +1,67 @@
+[package]
+name = "llmtrim-core"
+description = "Static, deterministic LLM prompt/payload compression engine — the zero-LLM-call transform core behind llmtrim. No network, no async."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+homepage.workspace = true
+license.workspace = true
+readme = "README.md"
+keywords = ["llm", "tokens", "compression", "openai", "anthropic"]
+categories = ["compression", "text-processing", "api-bindings"]
+
+# Workspace CHANGELOG stamping (run once, on this crate). cargo-release resolves `file`
+# relative to this manifest, so `../../CHANGELOG.md` is the repo-root changelog shared by
+# the whole workspace. Kept here rather than in release.toml so it fires exactly once
+# instead of per published crate. See release.toml for the rest of the release config.
+[package.metadata.release]
+pre-release-replacements = [
+  { file = "../../CHANGELOG.md", search = "## \\[Unreleased\\]", replace = "## [Unreleased]\n\n## [{{version}}] - {{date}}", exactly = 1 },
+  # $1 captures the previous release tag from the existing link — {{prev_version}} would
+  # give the -dev version, producing a bogus compare URL.
+  { file = "../../CHANGELOG.md", search = "\\[Unreleased\\]: https://github.com/fkiene/llmtrim/compare/(v[0-9.]+)\\.\\.\\.HEAD", replace = "[Unreleased]: https://github.com/fkiene/llmtrim/compare/v{{version}}...HEAD\n[{{version}}]: https://github.com/fkiene/llmtrim/compare/${1}...v{{version}}", exactly = 1 },
+  # Keep the README's versioned install snippets (Maven exact coordinate, SwiftPM `from:`)
+  # current — they'd otherwise pin a stale version after each release. `min = 0` so a
+  # README edit that drops them can't fail the release.
+  { file = "../../README.md", search = "io\\.github\\.fkiene:llmtrim:[0-9]+\\.[0-9]+\\.[0-9]+", replace = "io.github.fkiene:llmtrim:{{version}}", min = 0 },
+  { file = "../../README.md", search = "(fkiene/llmtrim\", from: \")[0-9]+\\.[0-9]+\\.[0-9]+", replace = "${1}{{version}}", min = 0 },
+]
+
+[dependencies]
+anyhow.workspace = true
+base64.workspace = true
+bm25 = "2.3.2"
+csv.workspace = true
+gaoya = "0.2.0"
+image = { version = "0.25.10", default-features = false, features = ["png", "jpeg"] }
+once_cell.workspace = true
+regex.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+stop-words = "0.10.0"
+tiktoken-rs.workspace = true
+toml.workspace = true
+toon-format = "0.5.0"
+tree-sitter = "0.26.9"
+tree-sitter-javascript = "0.25.0"
+tree-sitter-rust = "0.24.2"
+# Stage C skeletonization grammars — top languages (all ABI-verified against ts 0.26).
+tree-sitter-typescript = "0.23.2"
+tree-sitter-python = "0.25.0"
+tree-sitter-go = "0.25.0"
+tree-sitter-java = "0.23.5"
+tree-sitter-c = "0.24.2"
+tree-sitter-cpp = "0.23.4"
+tree-sitter-c-sharp = "0.23.5"
+tree-sitter-kotlin-ng = "1.1.0"
+tree-sitter-swift = "0.7.3"
+tree-sitter-zig = "1.1.2"
+tree-sitter-ruby = "0.23.1"
+tree-sitter-php = "0.24.2"
+unicode-normalization = "0.1.25"
+unicode-segmentation = "1.13.3"
+whatlang = "0.18.0"
+
+[lints]
+workspace = true

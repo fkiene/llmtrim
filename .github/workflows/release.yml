@@ -21,7 +21,9 @@ jobs:
         run: |
           set -euo pipefail
           TAG="${GITHUB_REF_NAME#v}"
-          PKG=$(grep -m1 '^version = ' Cargo.toml | cut -d'"' -f2)
+          # Read the shared version from [workspace.package] specifically — a bare
+          # `grep '^version='` could pick up an entry under [workspace.dependencies].
+          PKG=$(awk -F'"' '/^\[/{s=$0} s=="[workspace.package]" && /^version[[:space:]]*=/{print $2; exit}' Cargo.toml)
           if [ "$TAG" != "$PKG" ]; then
             echo "::error::tag v$TAG != Cargo.toml version $PKG (forgot to drop -dev? use cargo release)"; exit 1
           fi
@@ -140,9 +142,25 @@ jobs:
       # UP into the repo — a committed .cargo/ (e.g. a local linker setting) would poison
       # it even when excluded from the package (broke v0.1.2 and v0.1.3).
       - run: rm -rf .cargo
-      - run: cargo publish
+      # Two crates now: the engine library (llmtrim-core) must land on the index before the
+      # CLI (llmtrim), which depends on it by version. Publish core, wait for it to be
+      # served, then publish the CLI. Both must have Trusted Publishing configured on
+      # crates.io (repo fkiene/llmtrim, workflow release.yml).
+      - name: Publish llmtrim-core, then llmtrim
         env:
           CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}
+        run: |
+          set -euo pipefail
+          V="${GITHUB_REF_NAME#v}"
+          cargo publish -p llmtrim-core
+          # Poll the sparse index (stable, machine-readable) — not `cargo search`, whose
+          # output format isn't a contract — until core's new version is served.
+          for i in $(seq 1 20); do
+            if curl -fsSL "https://index.crates.io/ll/mt/llmtrim-core" | grep -q "\"vers\":\"$V\""; then break; fi
+            [ "$i" = 20 ] && { echo "::error::llmtrim-core $V never appeared on the index"; exit 1; }
+            echo "waiting for llmtrim-core $V on the index (attempt $i)"; sleep 30
+          done
+          cargo publish -p llmtrim
 
   # Multi-arch proxy image on GHCR from the released (attested) binaries — not rebuilt.
   # amd64 ← x86_64-musl (fully static), arm64 ← aarch64-gnu (distroless cc has glibc).
@@ -296,7 +314,10 @@ jobs:
     needs: create-release
     runs-on: ubuntu-latest
     steps:
-      - name: Update tap formula
+      # Need the repo's Formula/llmtrim.rb — it's the source of truth (incl. the
+      # workspace-aware install method); the tap is just a stamped mirror of it.
+      - uses: actions/checkout@v6
+      - name: Sync + stamp the tap formula
         env:
           TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
           TAG: ${{ github.ref_name }}
@@ -305,6 +326,9 @@ jobs:
           URL="https://github.com/fkiene/llmtrim/archive/refs/tags/${TAG}.tar.gz"
           SHA=$(curl -fsSL "$URL" | sha256sum | cut -d' ' -f1)
           git clone "https://x-access-token:${TAP_TOKEN}@github.com/fkiene/homebrew-tap.git" tap
+          # Copy the repo formula into the tap (carries the install method + any formula
+          # change), then stamp this release's url + sha256.
+          cp Formula/llmtrim.rb tap/Formula/llmtrim.rb
           cd tap
           sed -i -E "s|^(  url \").*(\")$|\1${URL}\2|" Formula/llmtrim.rb
           sed -i -E "s|^(  sha256 \").*(\")$|\1${SHA}\2|" Formula/llmtrim.rb

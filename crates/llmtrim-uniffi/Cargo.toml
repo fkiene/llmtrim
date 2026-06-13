@@ -1,0 +1,35 @@
+[package]
+name = "llmtrim-uniffi"
+description = "UniFFI bindings exposing the llmtrim-core compression engine to Python, Ruby, Swift and Kotlin."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+homepage.workspace = true
+license.workspace = true
+publish = false
+
+[lib]
+name = "llmtrim_ffi"
+# cdylib: the loadable native module the bindings dlopen. staticlib: required for iOS/Swift.
+crate-type = ["cdylib", "staticlib"]
+
+# `uniffi-bindgen` CLI for this crate — invoked in library mode against the built cdylib
+# to emit the Python/Ruby/Swift/Kotlin glue. See README for the generate commands.
+[[bin]]
+name = "uniffi-bindgen"
+path = "src/bin/uniffi-bindgen.rs"
+
+[dependencies]
+llmtrim-core = { path = "../llmtrim-core" }
+uniffi = { version = "0.31", features = ["cli"] }
+
+[dev-dependencies]
+serde_json.workspace = true
+
+# UniFFI's generated scaffolding contains the FFI `unsafe` blocks, so this crate cannot
+# inherit the workspace's `unsafe_code = "forbid"`. Cargo has no partial lint inheritance
+# (you can't take `workspace = true` and override one lint), so the workspace lints are
+# re-declared here minus `unsafe_code` — keep this in sync if the workspace adds lints.
+[lints.rust]
+warnings = "deny"
