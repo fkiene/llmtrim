@@ -47,3 +47,6 @@ CLAUDE.md
 # binary tarballs (.github/workflows/release.yml), not committed. Regenerate locally
 # with `python3 tools/gen_third_party_licenses.py`.
 /THIRD-PARTY-LICENSES.md
+
+# UniFFI generated bindings (build artifacts; regenerate per release)
+/crates/llmtrim-uniffi/bindings/

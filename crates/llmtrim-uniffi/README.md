@@ -49,12 +49,32 @@ print(out.input_tokens_before, "->", out.input_tokens_after)
 
 ## Ruby / Swift / Kotlin
 
-Generate from the same built library — no extra Rust:
+All targets generate from the same built library — no extra Rust. The generated glue is a
+build artifact (its checksums are pinned to the library ABI), so it is regenerated per
+release rather than committed:
 
 ```bash
-cargo build --release -p llmtrim-uniffi
-cargo run --bin uniffi-bindgen -p llmtrim-uniffi -- \
-    generate --library target/release/libllmtrim_ffi.so --language <ruby|swift|kotlin> --out-dir out/
+crates/llmtrim-uniffi/scripts/generate-bindings.sh out/   # python, ruby, swift, kotlin
 ```
+
+> **Generation needs an unstripped library.** Library-mode `uniffi-bindgen` reads metadata
+> symbols from the cdylib, but the workspace release profile sets `strip = true`. The script
+> therefore generates from the (unstripped) debug build; the native library you *ship* can be
+> a stripped `cargo build --release -p llmtrim-uniffi` cdylib — the glue loads it by name.
+
+Ruby (verified) — put `libllmtrim_ffi.so` on the load path and:
+
+```ruby
+require_relative "llmtrim_ffi"
+require "json"
+out = LlmtrimFfi.compress(
+  JSON.generate({model: "gpt-4o", messages: [{role: "user", content: "…"}]}),
+  LlmtrimFfi::Provider::OPEN_AI, "aggressive")
+puts "#{out.input_tokens_before} -> #{out.input_tokens_after}"
+```
+
+Swift emits `llmtrim_ffi.swift` + an FFI header and modulemap (wrap in a `Package.swift`
+targeting the cdylib/`staticlib`); Kotlin emits `uniffi/.../llmtrim_ffi.kt` (load via JNA).
+Packaging these as a published gem / SwiftPM package / Gradle artifact is the next step.
 
 [`llmtrim-core`]: ../llmtrim-core

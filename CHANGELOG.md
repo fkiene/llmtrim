@@ -11,8 +11,11 @@ All notable changes to this project are documented here. The format follows
   `llmtrim-core` to Python, Ruby, Swift and Kotlin from one Rust definition: a flat
   `compress(input, provider, preset) -> CompressOutput` surface with mapped error
   variants. Compression runs natively in-process (no server, no async). A reproducible
-  `scripts/build-wheel.sh` produces a self-contained Python wheel; Ruby/Swift/Kotlin
-  glue generate from the same built library. See `crates/llmtrim-uniffi/README.md`.
+  `scripts/build-wheel.sh` produces a self-contained Python wheel, and
+  `scripts/generate-bindings.sh` emits Python/Ruby/Swift/Kotlin glue from the same Rust
+  definition. Python and Ruby are verified end-to-end (compress + error mapping); Swift
+  and Kotlin generate cleanly (packaging as gem/SwiftPM/Gradle is the next step). See
+  `crates/llmtrim-uniffi/README.md`.
 
 ### Changed
 - **Split into a Cargo workspace: `llmtrim-core` (engine) + `llmtrim` (CLI/proxy).**
