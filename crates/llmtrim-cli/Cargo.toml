@@ -35,7 +35,9 @@ name = "llmtrim"
 path = "src/main.rs"
 
 [dependencies]
-llmtrim-core = { path = "../llmtrim-core" }
+# `version` is required for `cargo publish` (path alone isn't publishable) and is kept in
+# lockstep with llmtrim-core by cargo-release's shared-version on every bump.
+llmtrim-core = { path = "../llmtrim-core", version = "0.1.7-dev" }
 anyhow.workspace = true
 base64.workspace = true
 chrono = "0.4.45"

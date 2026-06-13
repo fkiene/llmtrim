@@ -50,11 +50,14 @@ jobs:
       - name: Build (release)
         run: cargo build --release
       - name: Compile live feature
-        run: cargo build --features live
-      # Guard the tokio-free library path Cargo.toml advertises for embedders
-      # (`default-features = false` drops the interceptor + tokio).
-      - name: Compile embedder core (no default features)
-        run: cargo check --no-default-features --lib
+        run: cargo build -p llmtrim --features live
+      # Guard the embeddable engine: llmtrim-core must build standalone, and the CLI lib
+      # must still compile with the interceptor (+ tokio) dropped. `--features`/`--lib` are
+      # package-scoped — they can't run at the virtual workspace root.
+      - name: Compile embedder core (llmtrim-core)
+        run: cargo check -p llmtrim-core
+      - name: Compile CLI lib without the interceptor
+        run: cargo check -p llmtrim --no-default-features --lib
 
   # Gate the AGPL-3.0-only relicensing: fail if any dependency carries a license
   # outside deny.toml's allow-list (e.g. GPL/proprietary) or an unknown source.

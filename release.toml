@@ -3,9 +3,21 @@
 # v{{version}}, pushes (workflow takes over: binaries, crates.io via OIDC, tap bump),
 # then bumps main to the next -dev version. Install: cargo install cargo-release --locked
 allow-branch = ["main"]
+# Workspace split: llmtrim-core + llmtrim share one version (via [workspace.package]) and
+# release together under a single tag + commit. shared-version keeps every member — and the
+# internal `llmtrim-core` version requirement in llmtrim's Cargo.toml — in lockstep;
+# consolidate-commits collapses the per-crate commits into one (a single shared tag-name
+# template likewise yields one tag). llmtrim-uniffi has `publish = false` in its manifest,
+# so cargo-release skips publishing it. The CHANGELOG stamp lives in llmtrim-core's
+# [package.metadata.release] (pointing at the root CHANGELOG) so it runs exactly once
+# instead of once per crate.
+shared-version = true
+consolidate-commits = true
 # Hard gate: HEAD must be pushed and every CI check on it green before anything is
-# committed or tagged (needs `gh` authenticated).
-pre-release-hook = ["sh", "tools/check_ci_green.sh"]
+# committed or tagged (needs `gh` authenticated). The hook runs from each member's
+# directory (crates/<name>/), so the path is workspace-root-relative; the script itself
+# is cwd-agnostic (git/gh resolve the repo from any subdir).
+pre-release-hook = ["sh", "../../tools/check_ci_green.sh"]
 publish = false      # crates.io publish happens in release.yml via Trusted Publishing
 verify = false       # CI is the verifier; keep the release command fast
 push = true
@@ -13,11 +25,7 @@ tag-name = "v{{version}}"
 pre-release-commit-message = "release: v{{version}}"
 # cargo-release 1.x dropped the built-in dev-version bump; after a release, run:
 #   cargo release version <next>-dev -x && git commit -am "chore: main is <next>-dev" && git push
-
-# CHANGELOG: stamp the released section and re-seed [Unreleased] + link refs.
-pre-release-replacements = [
-  { file = "CHANGELOG.md", search = "## \\[Unreleased\\]", replace = "## [Unreleased]\n\n## [{{version}}] - {{date}}", exactly = 1 },
-  # $1 captures the previous release tag from the existing link — {{prev_version}} would
-  # give the -dev version, producing a bogus compare URL.
-  { file = "CHANGELOG.md", search = "\\[Unreleased\\]: https://github.com/fkiene/llmtrim/compare/(v[0-9.]+)\\.\\.\\.HEAD", replace = "[Unreleased]: https://github.com/fkiene/llmtrim/compare/v{{version}}...HEAD\n[{{version}}]: https://github.com/fkiene/llmtrim/compare/${1}...v{{version}}", exactly = 1 },
-]
+#
+# The CHANGELOG replacements that stamp the released section live in
+# crates/llmtrim-core/Cargo.toml [package.metadata.release], targeting ../../CHANGELOG.md,
+# so they fire once (on the core crate) rather than once per workspace member.

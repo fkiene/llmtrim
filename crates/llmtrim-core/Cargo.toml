@@ -11,6 +11,18 @@ readme = "README.md"
 keywords = ["llm", "tokens", "compression", "openai", "anthropic"]
 categories = ["compression", "text-processing", "api-bindings"]
 
+# Workspace CHANGELOG stamping (run once, on this crate). cargo-release resolves `file`
+# relative to this manifest, so `../../CHANGELOG.md` is the repo-root changelog shared by
+# the whole workspace. Kept here rather than in release.toml so it fires exactly once
+# instead of per published crate. See release.toml for the rest of the release config.
+[package.metadata.release]
+pre-release-replacements = [
+  { file = "../../CHANGELOG.md", search = "## \\[Unreleased\\]", replace = "## [Unreleased]\n\n## [{{version}}] - {{date}}", exactly = 1 },
+  # $1 captures the previous release tag from the existing link — {{prev_version}} would
+  # give the -dev version, producing a bogus compare URL.
+  { file = "../../CHANGELOG.md", search = "\\[Unreleased\\]: https://github.com/fkiene/llmtrim/compare/(v[0-9.]+)\\.\\.\\.HEAD", replace = "[Unreleased]: https://github.com/fkiene/llmtrim/compare/v{{version}}...HEAD\n[{{version}}]: https://github.com/fkiene/llmtrim/compare/${1}...v{{version}}", exactly = 1 },
+]
+
 [dependencies]
 anyhow.workspace = true
 base64.workspace = true
