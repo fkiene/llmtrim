@@ -31,7 +31,7 @@ pip install target/wheels/llmtrim-*.whl
 ```
 
 ```python
-import llmtrim_ffi as llmtrim, json
+import llmtrim, json
 
 req = json.dumps({"model": "gpt-4o",
                   "messages": [{"role": "user", "content": "…"}]})

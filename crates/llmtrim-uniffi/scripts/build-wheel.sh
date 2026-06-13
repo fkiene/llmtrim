@@ -26,17 +26,17 @@ maturin build $profile_flag -o "$dist_dir"
 wheel="$(ls -t "$dist_dir"/llmtrim-*.whl | head -1)"
 echo "==> base wheel: $wheel"
 
-echo "==> generating UniFFI Python bindings"
-# Locate the cdylib maturin built (.so Linux / .dylib macOS / .dll Windows); never the .a.
-# maturin 1.14 stages it under target/maturin/; cover the plain and per-target
-# (cross-compile / explicit --target) profile dirs too.
+echo "==> generating UniFFI Python bindings (from the unstripped debug build)"
+# Generate from a debug cdylib, NOT maturin's release lib: the release profile sets
+# `strip = true`, which removes the UniFFI metadata symbols library-mode bindgen reads, so
+# generating from it silently emits nothing. The shipped wheel still carries maturin's
+# optimized library; only the glue is generated here.
+cargo build -p llmtrim-uniffi
 lib=""
-for cand in "$workspace_root"/target/maturin/libllmtrim_ffi.{so,dylib,dll} \
-            "$workspace_root"/target/{release,debug}/libllmtrim_ffi.{so,dylib,dll} \
-            "$workspace_root"/target/*/{release,debug}/libllmtrim_ffi.{so,dylib,dll}; do
-    [ -f "$cand" ] && { lib="$cand"; break; }
+for ext in so dylib dll; do
+    [ -f "$workspace_root/target/debug/libllmtrim_ffi.$ext" ] && { lib="$workspace_root/target/debug/libllmtrim_ffi.$ext"; break; }
 done
-[ -n "$lib" ] || { echo "error: could not locate the built libllmtrim_ffi cdylib" >&2; exit 1; }
+[ -n "$lib" ] || { echo "error: no unstripped cdylib in target/debug/" >&2; exit 1; }
 cargo run -q --bin uniffi-bindgen -p llmtrim-uniffi -- \
     generate --library "$lib" --language python --out-dir "$work_dir/glue"
 
@@ -45,6 +45,11 @@ python3 -m wheel unpack "$wheel" -d "$work_dir/unpacked"
 pkg_dir="$(ls -d "$work_dir"/unpacked/*/llmtrim_ffi 2>/dev/null | head -1 || true)"
 [ -n "$pkg_dir" ] || { echo "error: maturin wheel has no 'llmtrim_ffi' package dir — its layout changed; update this script" >&2; exit 1; }
 cp "$work_dir/glue/llmtrim_ffi.py" "$pkg_dir/__init__.py"
-python3 -m wheel pack "$(dirname "$pkg_dir")" -d "$dist_dir"
+# Friendly top-level package so `pip install llmtrim` is imported as `import llmtrim`
+# (the UniFFI module itself is `llmtrim_ffi`).
+root="$(dirname "$pkg_dir")"
+mkdir -p "$root/llmtrim"
+printf 'from llmtrim_ffi import compress, Provider, CompressOutput, LlmtrimError  # noqa: F401\n' > "$root/llmtrim/__init__.py"
+python3 -m wheel pack "$root" -d "$dist_dir"
 
 echo "==> done: $(ls -t "$dist_dir"/llmtrim-*.whl | head -1)"

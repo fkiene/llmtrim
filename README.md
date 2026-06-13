@@ -204,6 +204,17 @@ llmtrim uninstall   # exact inverse of setup: removes all three changes
 
 The same compression runs with no proxy and no setup — as a one-shot CLI, an embeddable Rust crate, or native bindings for **Python, Ruby, Swift and Kotlin**. No extra model calls, no network: the deterministic engine runs in your process.
 
+| Language | Install |
+|---|---|
+| Rust | `cargo add llmtrim-core` |
+| Python | `pip install llmtrim` |
+| Ruby | `gem install llmtrim` |
+| Kotlin | `implementation("io.github.fkiene:llmtrim:0.1.7")` — Maven Central |
+| Swift | `.package(url: "https://github.com/fkiene/llmtrim", from: "0.1.7")` — SwiftPM |
+
+> [!NOTE]
+> The CLI is published today; the **library packages above ship with the next release**. Until then, build them from source — see [`crates/llmtrim-uniffi`](crates/llmtrim-uniffi). *(This note is removed once they're published.)*
+
 **CLI** — pipe a request in, get a compressed one out:
 
 ```bash
@@ -227,7 +238,7 @@ let out = compress_with_config(request_json, Some(ProviderKind::OpenAi), &DenseC
 **Python / Ruby / Swift / Kotlin** — one flat `compress(input, provider, preset)` call, generated from the same Rust engine via [UniFFI](https://mozilla.github.io/uniffi-rs/). The compiled engine is bundled in each package, so there's no Rust toolchain to install:
 
 ```python
-import llmtrim_ffi as llmtrim
+import llmtrim
 
 out = llmtrim.compress(request_json, llmtrim.Provider.OPEN_AI, "aggressive")
 print(out.input_tokens_before, "->", out.input_tokens_after)

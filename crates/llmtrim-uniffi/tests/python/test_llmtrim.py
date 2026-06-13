@@ -12,7 +12,7 @@ import json
 
 import pytest
 
-import llmtrim_ffi as llmtrim
+import llmtrim
 
 
 def _openai(content="hello world"):
