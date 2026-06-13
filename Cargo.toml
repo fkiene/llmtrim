@@ -4,7 +4,7 @@ members = ["crates/llmtrim-core", "crates/llmtrim-cli", "crates/llmtrim-uniffi"]
 
 # Shared package metadata — inherited by each member via `field.workspace = true`.
 [workspace.package]
-version = "0.1.9"
+version = "0.1.10-dev"
 edition = "2024"
 rust-version = "1.88"
 repository = "https://github.com/fkiene/llmtrim"
