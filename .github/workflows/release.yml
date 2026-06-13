@@ -314,7 +314,10 @@ jobs:
     needs: create-release
     runs-on: ubuntu-latest
     steps:
-      - name: Update tap formula
+      # Need the repo's Formula/llmtrim.rb — it's the source of truth (incl. the
+      # workspace-aware install method); the tap is just a stamped mirror of it.
+      - uses: actions/checkout@v6
+      - name: Sync + stamp the tap formula
         env:
           TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
           TAG: ${{ github.ref_name }}
@@ -323,6 +326,9 @@ jobs:
           URL="https://github.com/fkiene/llmtrim/archive/refs/tags/${TAG}.tar.gz"
           SHA=$(curl -fsSL "$URL" | sha256sum | cut -d' ' -f1)
           git clone "https://x-access-token:${TAP_TOKEN}@github.com/fkiene/homebrew-tap.git" tap
+          # Copy the repo formula into the tap (carries the install method + any formula
+          # change), then stamp this release's url + sha256.
+          cp Formula/llmtrim.rb tap/Formula/llmtrim.rb
           cd tap
           sed -i -E "s|^(  url \").*(\")$|\1${URL}\2|" Formula/llmtrim.rb
           sed -i -E "s|^(  sha256 \").*(\")$|\1${SHA}\2|" Formula/llmtrim.rb
