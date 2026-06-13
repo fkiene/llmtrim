@@ -247,6 +247,19 @@ const BM25_B: f64 = 0.75;
 /// lets a query that names a tool outrank one that only mentions the term in a long description,
 /// which flat overlap (and flat BM25) cannot distinguish.
 fn select_tools(req: &mut Request, provider: &dyn Provider) {
+    // Cache-safety gate (issue #9): prune only on the FIRST turn of a conversation. The kept
+    // tool subset depends on the conversation, so it changes as an agent loop grows — and
+    // providers fold the `tools[]` block into the cached prompt prefix, so a changing block
+    // busts the prefix every turn (cache reads collapse, the prefix is rebilled as fresh input,
+    // costing more than the few schema tokens pruning saved). On the first turn there is no
+    // prior prefix to bust, so pruning is a free saving; from the second turn on the block must
+    // stay byte-stable, so we leave it intact and rely on the deterministic trim/minify stages
+    // to shrink it without churning it. (This also keeps `aggressive`, which likewise enables
+    // the cache stage, from busting its own prefix.)
+    if !is_first_turn(req) {
+        return;
+    }
+
     let descriptors = provider.tool_descriptors(req);
     if descriptors.len() < 2 {
         return; // nothing meaningful to prune
@@ -288,18 +301,14 @@ fn select_tools(req: &mut Request, provider: &dyn Provider) {
         .collect();
     let scores = bm25f_scores(&docs, &query);
 
-    // Never drop a tool the agent already invoked earlier in the conversation: its `tool_use`
-    // block would dangle (and the agent clearly needs it). Multi-turn safety — independent of
-    // the BM25F score.
-    let used = tools_used_in_history(req);
-
     // Explicit-mention rail: a tool whose exact name appears as a standalone token anywhere in
-    // the conversation's content text is kept regardless of score. The BM25F query above is
-    // bounded to the most-recent TOOL_QUERY_MAX_BYTES, so a tool referenced only by an early
-    // instruction ("use ToolSearch before calling deferred tools") would otherwise score 0 and
-    // be dropped — guaranteeing an invalid tool call if the model obeys that instruction. A
-    // false keep costs a few schema tokens; a false drop breaks a tool call, so bias to keep.
-    // One pass over the full content text (cheap substring scan), independent of the query cap.
+    // the (first-turn) content text is kept regardless of score. This is a case-SENSITIVE
+    // exact-name match (`contains_standalone`), so it catches a tool the lowercased BM25F query
+    // tokenizes away — e.g. an underscore-joined `mcp__server__thing`, or a name referenced only
+    // by an instruction ("use ToolSearch before calling deferred tools") whose split doesn't
+    // score the tool. A false keep costs a few schema tokens; a false drop breaks a tool call,
+    // so bias to keep. (The former "keep already-invoked tools" rail is gone: selection now only
+    // runs on the first turn — see the `is_first_turn` gate — where no tool has been invoked yet.)
     let mut mentioned: HashSet<&str> = HashSet::new();
     for p in pointers.iter() {
         if mentioned.len() == descriptors.len() {
@@ -317,7 +326,7 @@ fn select_tools(req: &mut Request, provider: &dyn Provider) {
     let keep: Vec<bool> = descriptors
         .iter()
         .zip(&scores)
-        .map(|((name, _), &s)| used.contains(name) || mentioned.contains(name.as_str()) || s > 0.0)
+        .map(|((name, _), &s)| mentioned.contains(name.as_str()) || s > 0.0)
         .collect();
     if keep.iter().any(|&k| k) {
         provider.retain_tools(req, &keep);
@@ -489,20 +498,52 @@ fn bm25f_scores(docs: &[ToolDoc], query: &HashSet<&str>) -> Vec<f64> {
         .collect()
 }
 
-/// Names of tools already invoked in the conversation — OpenAI `tool_calls[].function.name`,
-/// Anthropic `{type: tool_use, name}` content blocks, and Google `parts[].functionCall.name`.
+/// True when the request is the first turn of a conversation — at most one non-system message
+/// and no tool invoked yet. Tool selection prunes only here (see `select_tools`): later turns
+/// must keep the `tools[]` block byte-stable so the provider prompt-cache prefix stays warm.
+/// Cross-wire-shape: counts non-system turns in `messages` / `input` / `contents` (Anthropic
+/// keeps `system` out of the array, so its first turn is one `user` message; OpenAI's is
+/// `system` + `user`), and treats any already-invoked tool as proof of a live loop.
+fn is_first_turn(req: &Request) -> bool {
+    if !tools_used_in_history(req).is_empty() {
+        return false;
+    }
+    let raw = req.raw();
+    let non_system_turns = ["messages", "input", "contents"]
+        .iter()
+        .filter_map(|k| raw.get(*k).and_then(Value::as_array))
+        .map(|a| {
+            a.iter()
+                .filter(|m| m.get("role").and_then(Value::as_str) != Some("system"))
+                .count()
+        })
+        .max()
+        .unwrap_or(0);
+    non_system_turns <= 1
+}
+
+/// Names of tools already invoked in the conversation — OpenAI Chat `tool_calls[].function.name`,
+/// OpenAI Responses `input[]` items of `{type: function_call, name}`, Anthropic `{type: tool_use,
+/// name}` content blocks, and Google `parts[].functionCall.name`.
 fn tools_used_in_history(req: &Request) -> HashSet<String> {
     let mut used = HashSet::new();
     let raw = req.raw();
-    // OpenAI/Anthropic use "messages"; Google uses "contents".
+    // OpenAI Chat / Anthropic use "messages"; Google uses "contents"; OpenAI Responses uses "input".
     let turns = raw
         .get("messages")
         .or_else(|| raw.get("contents"))
+        .or_else(|| raw.get("input"))
         .and_then(Value::as_array);
     let Some(turns) = turns else {
         return used;
     };
     for m in turns {
+        // OpenAI Responses: a tool call is an input item `{type: function_call, name, ...}`.
+        if m.get("type").and_then(Value::as_str) == Some("function_call")
+            && let Some(n) = m.get("name").and_then(Value::as_str)
+        {
+            used.insert(n.to_string());
+        }
         // OpenAI: tool_calls[].function.name
         if let Some(calls) = m.get("tool_calls").and_then(Value::as_array) {
             for c in calls {
@@ -718,10 +759,11 @@ mod tests {
     }
 
     #[test]
-    fn selection_keeps_tools_invoked_earlier() {
-        // `run_sql` was called earlier; the latest turn is about weather. Multi-turn safety:
-        // a tool already invoked must survive even when irrelevant to the current turn,
-        // else its `tool_use` dangles and the agent loses it.
+    fn selection_skipped_once_a_tool_was_invoked() {
+        // `run_sql` was called earlier, so the conversation is a live agent loop. Selection is
+        // skipped (issue #9): pruning the `tools[]` block now would change the cached prompt
+        // prefix every turn. The full toolset ships unchanged — which also can't dangle the
+        // earlier `tool_use`.
         let body = json!({
             "model":"gpt-4o",
             "messages":[
@@ -732,12 +774,13 @@ mod tests {
         });
         let mut req = Request::from_value(ProviderKind::OpenAi, body);
         let counter = counter_for(ProviderKind::OpenAi, Some("gpt-4o")).unwrap();
-        let _ = pipeline::run(
+        let out = pipeline::run(
             &mut req,
             &OpenAiProvider,
             counter.as_ref(),
             &[select_stage()],
         );
+        assert!(!out.stages[0].applied, "selection skipped mid-loop");
         let names: Vec<&str> = req
             .raw()
             .get("tools")
@@ -746,14 +789,10 @@ mod tests {
             .iter()
             .filter_map(|t| t.pointer("/function/name").and_then(Value::as_str))
             .collect();
-        assert!(names.contains(&"get_weather"), "relevant tool kept");
-        assert!(
-            names.contains(&"run_sql"),
-            "tool invoked earlier kept despite being irrelevant now"
-        );
-        assert!(
-            !names.contains(&"send_email"),
-            "unused irrelevant tool dropped"
+        assert_eq!(
+            names,
+            vec!["get_weather", "send_email", "run_sql"],
+            "the full toolset ships unchanged mid-loop: {names:?}"
         );
     }
 
@@ -1033,29 +1072,78 @@ mod tests {
         );
     }
 
-    // ── Explicit-mention keep rail ──────────────────────────────────────────────────────
+    // ── Mid-conversation: selection is skipped to keep the cached prefix stable ──────────
 
-    /// Regression (live capture 1781204413588398-27117d): a tool whose only reference is an
-    /// instruction in an early message — beyond the TOOL_QUERY_MAX_BYTES recent window — must
-    /// survive selection. The negative half: an unmentioned, irrelevant tool is still pruned,
-    /// so the stage keeps saving tokens.
+    /// Regression (live capture 1781204413588398-27117d) + issue #9: a deferred tool referenced
+    /// only by an early instruction must not be dropped. Selection is first-turn-only, so on this
+    /// multi-turn conversation it is skipped entirely — the whole toolset (including the
+    /// early-mentioned `ToolSearch`) ships unchanged, both keeping the tool call valid and leaving
+    /// the cached `tools[]` prefix byte-stable.
     #[test]
-    fn explicitly_mentioned_tool_survives_beyond_query_window() {
-        let mut messages = vec![json!({
-            "role":"user",
-            "content":"Use ToolSearch with query select:<name> to load tool schemas before calling them."
-        })];
-        // >16KB of filler prose between the instruction and the recent turn, so the
-        // instruction falls outside the BM25F query window.
-        let filler = "the quiet meadow stretched beneath a pale sky while distant hills slept. ";
-        for _ in 0..12 {
-            messages.push(json!({"role":"user","content": filler.repeat(30)}));
-        }
-        messages
-            .push(json!({"role":"user","content":"what is the weather forecast in Paris today?"}));
+    fn is_first_turn_across_wire_shapes() {
+        use ProviderKind::{Anthropic, Google, OpenAi};
+        let ft = |kind, body: Value| is_first_turn(&Request::from_value(kind, body));
+
+        // OpenAI Chat: leading system + one user message is the first turn.
+        assert!(ft(
+            OpenAi,
+            json!({"messages":[{"role":"system","content":"s"},{"role":"user","content":"hi"}]})
+        ));
+        assert!(!ft(
+            OpenAi,
+            json!({"messages":[
+                {"role":"system","content":"s"},{"role":"user","content":"hi"},
+                {"role":"assistant","tool_calls":[{"function":{"name":"f"}}]},
+                {"role":"tool","tool_call_id":"1","content":"x"},
+                {"role":"user","content":"again"}]})
+        ));
+
+        // Anthropic: `system` is top-level, so the first turn is a single `user` message.
+        assert!(ft(
+            Anthropic,
+            json!({"system":"s","messages":[{"role":"user","content":"hi"}]})
+        ));
+        assert!(!ft(
+            Anthropic,
+            json!({"system":"s","messages":[
+                {"role":"user","content":"hi"},
+                {"role":"assistant","content":[{"type":"tool_use","name":"f","input":{}}]}]})
+        ));
+
+        // Gemini: `contents` with user/model roles; tool calls are `parts[].functionCall`.
+        assert!(ft(
+            Google,
+            json!({"contents":[{"role":"user","parts":[{"text":"hi"}]}]})
+        ));
+        assert!(!ft(
+            Google,
+            json!({"contents":[
+                {"role":"user","parts":[{"text":"hi"}]},
+                {"role":"model","parts":[{"functionCall":{"name":"f"}}]}]})
+        ));
+
+        // OpenAI Responses: `instructions` is system, turns live in `input`.
+        assert!(ft(
+            OpenAi,
+            json!({"instructions":"s","input":[{"role":"user","content":"hi"}]})
+        ));
+        // A lone `function_call` item counts as one turn, but the loop guard
+        // (`tools_used_in_history` scanning `input`) still marks it mid-loop.
+        assert!(!ft(
+            OpenAi,
+            json!({"instructions":"s","input":[
+                {"type":"function_call","name":"f","arguments":"{}","call_id":"1"}]})
+        ));
+    }
+
+    #[test]
+    fn multi_turn_conversation_is_not_pruned() {
         let body = json!({
             "model":"gpt-4o",
-            "messages": messages,
+            "messages":[
+                {"role":"user","content":"Use ToolSearch with query select:<name> to load tool schemas before calling them."},
+                {"role":"user","content":"what is the weather forecast in Paris today?"}
+            ],
             "tools":[
                 {"type":"function","function":{"name":"get_weather","description":"Get the weather forecast for a city","parameters":{}}},
                 {"type":"function","function":{"name":"ToolSearch","description":"Load deferred tool schemas","parameters":{}}},
@@ -1064,11 +1152,15 @@ mod tests {
         });
         let mut req = Request::from_value(ProviderKind::OpenAi, body);
         let counter = counter_for(ProviderKind::OpenAi, Some("gpt-4o")).unwrap();
-        let _ = pipeline::run(
+        let out = pipeline::run(
             &mut req,
             &OpenAiProvider,
             counter.as_ref(),
             &[select_stage()],
+        );
+        assert!(
+            !out.stages[0].applied,
+            "selection is skipped past the first turn (no churn of the cached tool block)"
         );
         let names: Vec<&str> = req
             .raw()
@@ -1078,14 +1170,10 @@ mod tests {
             .iter()
             .filter_map(|t| t.pointer("/function/name").and_then(Value::as_str))
             .collect();
-        assert!(
-            names.contains(&"ToolSearch"),
-            "tool mentioned only in an early instruction must be kept: {names:?}"
-        );
-        assert!(names.contains(&"get_weather"), "relevant tool kept");
-        assert!(
-            !names.contains(&"send_email"),
-            "unmentioned irrelevant tool still pruned: {names:?}"
+        assert_eq!(
+            names,
+            vec!["get_weather", "ToolSearch", "send_email"],
+            "the full toolset ships unchanged mid-conversation: {names:?}"
         );
     }
 

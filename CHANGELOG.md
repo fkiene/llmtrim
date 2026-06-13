@@ -27,6 +27,26 @@ All notable changes to this project are documented here. The format follows
   command and its install paths are unchanged. `rehydrate` is now `pub` (the CLI's
   interceptor calls it across the crate boundary).
 
+### Fixed
+- **Tool selection no longer churns the cached prompt prefix on agent loops** (#9): tool
+  *selection* keeps only the tools its relevance ranking scores against the conversation,
+  so the kept subset changes from turn to turn. Providers fold the `tools[]` block into the
+  cached prompt prefix, so a changing block invalidated the prefix on every turn of an agent
+  loop — provider prompt-cache reads dropped and the prefix was rebilled as fresh input,
+  which on a cache-warm loop can cost *more* than not compressing at all. Selection now runs
+  **only on the first turn** of a conversation (where there is no prior prefix to bust and the
+  saving is free); from the second turn on the tool set is left intact, and only the
+  deterministic description-trim and schema-minify stages shrink the block — they are pure
+  functions of the toolset, so the block stays byte-identical turn to turn (regression-tested).
+  Applies to every preset that selects tools (`agent`, `aggressive`). A single-shot request with
+  a large toolset still gets the full pruning saving. On a cache-warm multi-turn loop this keeps
+  the tool prefix reusable instead of rebilling it each turn (an exploratory `gpt-4o-mini` run
+  showed it roughly halving freshly-billed input once the prefix is warm — indicative, not a
+  committed benchmark). The first turn ships the pruned set and turn two the full set, so there is
+  a one-time prefix change at that boundary (a single extra cache write, ~25% on Anthropic) before
+  it stays warm. This stabilizes the *tool block* on its own; keeping earlier-turn *message
+  content* byte-stable across turns still relies on the turn-stability memo (`memo = true`, default).
+
 ## [0.1.6] - 2026-06-12
 
 ### Added

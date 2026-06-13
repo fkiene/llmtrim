@@ -490,6 +490,57 @@ mod tests {
     }
 
     #[test]
+    fn agent_tool_block_is_byte_stable_across_turns() {
+        // Issue #9: on an agent loop the `tools[]` block is part of the cached prompt prefix, so
+        // it must be byte-identical turn-to-turn or the provider prompt cache is busted. Two
+        // consecutive mid-loop turns (a tool was already invoked, so selection is skipped) must
+        // compress to the exact same tools block.
+        let tools = serde_json::json!([
+            {"type":"function","function":{"name":"read_file","description":"Read a file from disk by path.","parameters":{"type":"object","properties":{"path":{"type":"string"}}}}},
+            {"type":"function","function":{"name":"grep_search","description":"Search files with a regex.","parameters":{"type":"object","properties":{"pattern":{"type":"string"}}}}},
+            {"type":"function","function":{"name":"run_bash","description":"Run a shell command.","parameters":{"type":"object","properties":{"command":{"type":"string"}}}}},
+            {"type":"function","function":{"name":"web_search","description":"Search the web.","parameters":{"type":"object","properties":{"query":{"type":"string"}}}}}
+        ]);
+        let turn_a = serde_json::json!({
+            "model": "gpt-4o-mini", "tools": tools,
+            "messages": [
+                {"role": "system", "content": "You are a coding agent."},
+                {"role": "user", "content": "read main.rs"},
+                {"role": "assistant", "tool_calls": [{"id": "c1", "type": "function", "function": {"name": "read_file", "arguments": "{\"path\":\"main.rs\"}"}}]},
+                {"role": "tool", "tool_call_id": "c1", "content": "fn main() {}"},
+                {"role": "user", "content": "now grep for the word transform"}
+            ]
+        })
+        .to_string();
+        // Turn B = turn A + the grep call/result + a new ask (the agent-loop shape).
+        let turn_b = serde_json::json!({
+            "model": "gpt-4o-mini", "tools": tools,
+            "messages": [
+                {"role": "system", "content": "You are a coding agent."},
+                {"role": "user", "content": "read main.rs"},
+                {"role": "assistant", "tool_calls": [{"id": "c1", "type": "function", "function": {"name": "read_file", "arguments": "{\"path\":\"main.rs\"}"}}]},
+                {"role": "tool", "tool_call_id": "c1", "content": "fn main() {}"},
+                {"role": "user", "content": "now grep for the word transform"},
+                {"role": "assistant", "tool_calls": [{"id": "c2", "type": "function", "function": {"name": "grep_search", "arguments": "{\"pattern\":\"transform\"}"}}]},
+                {"role": "tool", "tool_call_id": "c2", "content": "main.rs:1: transform()"},
+                {"role": "user", "content": "now run the tests with bash"}
+            ]
+        })
+        .to_string();
+
+        let cfg = config::DenseConfig::preset("agent").expect("agent preset");
+        let ra = compress_with_config(&turn_a, Some(ProviderKind::OpenAi), &cfg).unwrap();
+        let rb = compress_with_config(&turn_b, Some(ProviderKind::OpenAi), &cfg).unwrap();
+        let tools_of =
+            |json: &str| -> Value { serde_json::from_str::<Value>(json).unwrap()["tools"].clone() };
+        assert_eq!(
+            tools_of(&ra.request_json),
+            tools_of(&rb.request_json),
+            "the agent preset must emit a byte-identical tools[] block across turns (cache prefix stays warm)"
+        );
+    }
+
+    #[test]
     fn repeated_tool_invocation_ships_full_output() {
         // Rail: repeat → passthrough. The agent re-ran a tool because its first result
         // was compressed — the newest occurrence must ship byte-identical (this is the
