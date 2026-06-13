@@ -88,10 +88,23 @@ jobs:
           token: ${{ secrets.GITHUB_TOKEN }}
       # SLSA build provenance for the compiled binary — users verify with
       # `gh attestation verify <binary> --repo fkiene/llmtrim`.
+      # upload-rust-binary-action builds under target/<triple>/release, except when the host
+      # triple equals the target (native aarch64-windows) it can skip --target and emit to
+      # target/release. Resolve whichever exists so attestation never misses the subject
+      # (an intermittent "Could not find subject at path" on the arm64-windows runner).
+      - name: Locate the built binary
+        id: bin
+        shell: bash
+        run: |
+          name="llmtrim${{ runner.os == 'Windows' && '.exe' || '' }}"
+          for p in "target/${{ matrix.target }}/release/$name" "target/release/$name"; do
+            [ -f "$p" ] && { echo "path=$p" >> "$GITHUB_OUTPUT"; echo "found $p"; exit 0; }
+          done
+          echo "no built binary found for ${{ matrix.target }}" >&2; exit 1
       - name: Attest build provenance
         uses: actions/attest-build-provenance@v4
         with:
-          subject-path: target/${{ matrix.target }}/release/llmtrim${{ runner.os == 'Windows' && '.exe' || '' }}
+          subject-path: ${{ steps.bin.outputs.path }}
 
   # The release verifies itself: run the real installers against the assets just uploaded,
   # on the same three OSes users have. LLMTRIM_VERSION pins to this tag so the test can't

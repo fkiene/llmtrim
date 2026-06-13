@@ -16,6 +16,10 @@ All notable changes to this project are documented here. The format follows
   instead.
 - **Package metadata reads cleanly.** Removed the em-dash from the shared description string
   used by the PyPI summary, the Maven Central description, and the gem summary.
+- **Release no longer stalls on a flaky provenance step.** On the native arm64-Windows
+  runner the binary can land in `target/release` instead of `target/<triple>/release`, so
+  the attestation intermittently failed and cascaded skips onto npm/Docker/Scoop. The step
+  now resolves whichever path holds the binary.
 
 ## [0.1.9] - 2026-06-13
 
