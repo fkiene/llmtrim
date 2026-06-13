@@ -202,27 +202,27 @@ llmtrim uninstall   # exact inverse of setup: removes all three changes
 
 ## Use it as a CLI or library
 
-The same compression runs with no proxy and no setup — as a one-shot CLI, an embeddable Rust crate, or native bindings for **Python, Ruby, Swift and Kotlin**. No extra model calls, no network: the deterministic engine runs in your process.
+The same compression runs with no proxy and no setup, as a one-shot CLI, an embeddable Rust crate, or native bindings for **Python, Ruby, Swift and Kotlin**. No extra model calls, no network: the deterministic engine runs in your process.
 
 | Language | Install |
 |---|---|
 | Rust | `cargo add llmtrim-core` |
 | Python | `pip install llmtrim` |
 | Ruby | `gem install llmtrim` |
-| Kotlin | `implementation("io.github.fkiene:llmtrim:0.1.7")` — Maven Central |
-| Swift | `.package(url: "https://github.com/fkiene/llmtrim", from: "0.1.7")` — SwiftPM |
+| Kotlin | `implementation("io.github.fkiene:llmtrim:0.1.7")` (Maven Central) |
+| Swift | `.package(url: "https://github.com/fkiene/llmtrim", from: "0.1.7")` (SwiftPM) |
 
 > [!NOTE]
-> The CLI is published today; the **library packages above ship with the next release**. Until then, build them from source — see [`crates/llmtrim-uniffi`](crates/llmtrim-uniffi). *(This note is removed once they're published.)*
+> The CLI is published today; the **library packages above ship with the next release**. Until then, build them from source: [`crates/llmtrim-uniffi`](crates/llmtrim-uniffi). *(This note is removed once they're published.)*
 
-**CLI** — pipe a request in, get a compressed one out:
+**CLI.** Pipe a request in, get a compressed one out:
 
 ```bash
 echo '{"model":"gpt-4o","messages":[...]}' | llmtrim compress --provider openai > out.json
 echo '{"model":"gpt-4o","messages":[...]}' | llmtrim send     --provider openai   # compress, call, print
 ```
 
-**Rust** — the engine is the [`llmtrim-core`](https://crates.io/crates/llmtrim-core) crate (no `tokio`, no network in its dependency tree):
+**Rust.** The engine is the [`llmtrim-core`](https://crates.io/crates/llmtrim-core) crate (no `tokio`, no network in its dependency tree):
 
 ```rust
 use llmtrim_core::{compress, compress_with_config, config::DenseConfig, ir::ProviderKind};
@@ -235,7 +235,7 @@ println!("{} -> {} input tokens", out.input_tokens_before, out.input_tokens_afte
 let out = compress_with_config(request_json, Some(ProviderKind::OpenAi), &DenseConfig::preset("agent").unwrap())?;
 ```
 
-**Python / Ruby / Swift / Kotlin** — one flat `compress(input, provider, preset)` call, generated from the same Rust engine via [UniFFI](https://mozilla.github.io/uniffi-rs/). The compiled engine is bundled in each package, so there's no Rust toolchain to install:
+**Python / Ruby / Swift / Kotlin.** One flat `compress(input, provider, preset)` call, generated from the same Rust engine via [UniFFI](https://mozilla.github.io/uniffi-rs/). The compiled engine is bundled in each package, so there's no Rust toolchain to install:
 
 ```python
 import llmtrim

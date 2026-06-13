@@ -1,8 +1,8 @@
 # llmtrim-core
 
-<strong>The static, deterministic compression engine behind [llmtrim](https://github.com/fkiene/llmtrim) — as an embeddable Rust library.</strong>
+<strong>The static, deterministic compression engine behind [llmtrim](https://github.com/fkiene/llmtrim), packaged as an embeddable Rust library.</strong>
 
-It takes a provider-shaped LLM request (OpenAI, Anthropic or Google JSON), strips the wasted tokens out of it with deterministic algorithms only — **no auxiliary model, no embeddings, no network, no `tokio`** — and hands you back a smaller request plus the measured token delta. Typical savings are **30–90% of input tokens**, with no change to the answer.
+It takes a provider-shaped LLM request (OpenAI, Anthropic or Google JSON), strips the wasted tokens out of it with deterministic algorithms only (**no auxiliary model, no embeddings, no network, no `tokio`**), and hands you back a smaller request plus the measured token delta. Typical savings are **30–90% of input tokens**, with no change to the answer.
 
 [![crates.io](https://img.shields.io/crates/v/llmtrim-core)](https://crates.io/crates/llmtrim-core)
 [![docs.rs](https://img.shields.io/docsrs/llmtrim-core)](https://docs.rs/llmtrim-core)
@@ -19,7 +19,7 @@ use llmtrim_core::{compress, compress_with_config, config::DenseConfig, ir::Prov
 // Auto-detect the provider from the request shape (pass Some(ProviderKind::…) to force it).
 let out = compress(&request_json, None)?;
 println!("{} -> {} input tokens", out.input_tokens_before, out.input_tokens_after);
-// `out.request_json` is the compressed body — send it to the provider unchanged.
+// `out.request_json` is the compressed body. Send it to the provider unchanged.
 
 // Or compress with an explicit workload preset:
 let cfg = DenseConfig::preset("agent").unwrap();
@@ -31,7 +31,7 @@ let out = compress_with_config(&request_json, Some(ProviderKind::Anthropic), &cf
 
 ## What it compresses
 
-Each compressor fires only where it pays — `auto` (the default) picks the right ones from the request's shape:
+Each compressor fires only where it pays. `auto` (the default) picks the right ones from the request's shape:
 
 | Where the waste is | What the engine does |
 |---|---|
@@ -46,16 +46,16 @@ Presets: `auto` (shape-routed, default), `aggressive`, `agent`, `code`, `rag`, `
 
 ## API
 
-- `compress` — load configuration from the environment / config file, optionally auto-detect the provider.
-- `compress_with_config` — compress with an explicit `config::DenseConfig`; no environment access, fully deterministic (used by tests and embedders).
-- `route` — pick the workload preset for a request from its structure alone.
-- `CompressResult` — the compressed body, the per-stage report, and the before/after token counts.
+- `compress`: load configuration from the environment / config file, optionally auto-detect the provider.
+- `compress_with_config`: compress with an explicit `config::DenseConfig`; no environment access, fully deterministic (used by tests and embedders).
+- `route`: pick the workload preset for a request from its structure alone.
+- `CompressResult`: the compressed body, the per-stage report, and the before/after token counts.
 
 Full reference on [docs.rs](https://docs.rs/llmtrim-core).
 
 ## Other languages
 
-The same engine is exposed to **Python, Ruby, Swift and Kotlin** via [UniFFI](https://mozilla.github.io/uniffi-rs/) — see [`llmtrim-uniffi`](../llmtrim-uniffi). The [`llmtrim`](https://crates.io/crates/llmtrim) crate is the CLI and drop-in compressing proxy built on this engine.
+The same engine is exposed to **Python, Ruby, Swift and Kotlin** via [UniFFI](https://mozilla.github.io/uniffi-rs/) (see [`llmtrim-uniffi`](../llmtrim-uniffi)). The [`llmtrim`](https://crates.io/crates/llmtrim) crate is the CLI and drop-in compressing proxy built on this engine.
 
 ## License
 

@@ -2,7 +2,7 @@
 
 <strong>llmtrim is a local proxy that compresses your LLM API requests so you pay less, with no change to the answers.</strong>
 
-It sits between your AI tools and the provider, strips the wasted tokens out of every request, and forwards it on — same answers, smaller bill. **−31% input and −74% output tokens**, measured live across 112 A/B cases, with no change in answer quality.
+It sits between your AI tools and the provider, strips the wasted tokens out of every request, and forwards it on. Same answers, smaller bill. **−31% input and −74% output tokens**, measured live across 112 A/B cases, with no change in answer quality.
 
 [![crates.io](https://img.shields.io/crates/v/llmtrim)](https://crates.io/crates/llmtrim)
 [![license](https://img.shields.io/badge/license-AGPL--3.0-blue)](https://www.gnu.org/licenses/agpl-3.0.txt)
@@ -33,7 +33,7 @@ Other channels (same binary): `brew install fkiene/tap/llmtrim` · `scoop instal
 
 ## Use it
 
-After `llmtrim setup`, any tool that honors `HTTPS_PROXY` routes through it automatically — Claude Code, Codex, Cursor, Aider, Gemini CLI, your own app. (GitHub Copilot pins its certificates and can't be intercepted.)
+After `llmtrim setup`, any tool that honors `HTTPS_PROXY` routes through it automatically: Claude Code, Codex, Cursor, Aider, Gemini CLI, your own app. (GitHub Copilot pins its certificates and can't be intercepted.)
 
 Or run the compression directly, no proxy:
 
@@ -42,11 +42,11 @@ echo '{"model":"gpt-4o","messages":[...]}' | llmtrim compress --provider openai 
 echo '{"model":"gpt-4o","messages":[...]}' | llmtrim send     --provider openai   # compress, call, print
 ```
 
-**Zero config needed** — the default `auto` mode inspects each request and picks the right compressors for its shape (tool-heavy → `agent`, code → `code`, long context → `rag`, else `aggressive`). Force one with `LLMTRIM_PRESET=<name>`.
+**Zero config needed.** The default `auto` mode inspects each request and picks the right compressors for its shape (tool-heavy → `agent`, code → `code`, long context → `rag`, else `aggressive`). Force one with `LLMTRIM_PRESET=<name>`.
 
 ## As a library
 
-The compression engine is the [`llmtrim-core`](https://crates.io/crates/llmtrim-core) crate (no network, no async), with native bindings for **Python, Ruby, Swift and Kotlin** — see the [project README](https://github.com/fkiene/llmtrim).
+The compression engine is the [`llmtrim-core`](https://crates.io/crates/llmtrim-core) crate (no network, no async), with native bindings for **Python, Ruby, Swift and Kotlin** (see the [project README](https://github.com/fkiene/llmtrim)).
 
 ## License
 

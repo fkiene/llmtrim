@@ -1,6 +1,6 @@
 # llmtrim-uniffi
 
-[UniFFI](https://mozilla.github.io/uniffi-rs/) bindings over [`llmtrim-core`] — one Rust
+[UniFFI](https://mozilla.github.io/uniffi-rs/) bindings over [`llmtrim-core`]: one Rust
 definition, idiomatic in-process bindings for **Python, Ruby, Swift and Kotlin**. The
 compression runs natively in the caller's process (no server, no async).
 
@@ -49,7 +49,7 @@ print(out.input_tokens_before, "->", out.input_tokens_after)
 
 ## Ruby / Swift / Kotlin
 
-All targets generate from the same built library — no extra Rust. The generated glue is a
+All targets generate from the same built library, no extra Rust. The generated glue is a
 build artifact (its checksums are pinned to the library ABI), so it is regenerated per
 release rather than committed:
 
@@ -60,11 +60,11 @@ crates/llmtrim-uniffi/scripts/generate-bindings.sh out/   # python, ruby, swift,
 > **Generation needs an unstripped library.** Library-mode `uniffi-bindgen` reads metadata
 > symbols from the cdylib, but the workspace release profile sets `strip = true`. The script
 > therefore generates from the (unstripped) debug build; the native library you *ship* can be
-> a stripped `cargo build --release -p llmtrim-uniffi` cdylib — the glue loads it by name.
+> a stripped `cargo build --release -p llmtrim-uniffi` cdylib; the glue loads it by name.
 
-Ruby (verified) — this is the **raw generated binding** (module `LlmtrimFfi`), for a
+Ruby (verified). This is the **raw generated binding** (module `LlmtrimFfi`), for a
 source build with `libllmtrim_ffi.so` on the load path. The published **gem** aliases it to
-`Llmtrim` (`require "llmtrim"` → `Llmtrim.compress(...)`) — see
+`Llmtrim` (`require "llmtrim"` then `Llmtrim.compress(...)`); see
 [`packaging/ruby`](packaging/ruby).
 
 ```ruby
@@ -78,8 +78,8 @@ puts "#{out.input_tokens_before} -> #{out.input_tokens_after}"
 
 Swift emits `llmtrim_ffi.swift` + an FFI header and modulemap; Kotlin emits
 `uniffi/.../llmtrim_ffi.kt` (which loads the cdylib via JNA). CI compiles and runs a smoke
-for both — Swift on macOS (`swiftc` against the modulemap), Kotlin on a JVM (`kotlinc` +
-JNA) — so a binding break is caught in all four languages (see `tests/swift`, `tests/kotlin`
+for both: Swift on macOS (`swiftc` against the modulemap), Kotlin on a JVM (`kotlinc` +
+JNA), so a binding break is caught in all four languages (see `tests/swift`, `tests/kotlin`
 and the `bindings*` jobs in `.github/workflows/ci.yml`).
 
 ## Publishable packages
