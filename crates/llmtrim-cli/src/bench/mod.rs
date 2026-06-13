@@ -12,6 +12,11 @@
 //! Scoring is ground-truth where possible — numeric-exact for GSM8K, pass@1 that runs
 //! the unit tests for HumanEval — so there is no judge noise. Token-F1 / span-EM cover
 //! extractive QA; an LLM judge is reserved for open-ended shapes only.
+//!
+//! The agent-loop benchmark (per-iteration token economics, issue #14) lives in [`agent`];
+//! this module remains the single-shot quality/savings harness.
+
+pub mod agent;
 
 use anyhow::{Context, Result};
 use once_cell::sync::Lazy;

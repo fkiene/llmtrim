@@ -1,0 +1,18 @@
+{
+  "id": "research_qa",
+  "model": "openai/gpt-4o-mini",
+  "system": "You are a research assistant. Use the tools to look things up, then answer concisely with a final message.",
+  "user": "What is the current stable Rust edition, and find any mention of it in the repo's docs.",
+  "tools": [
+    {"type":"function","function":{"name":"web_search","description":"Search the web.","parameters":{"type":"object","properties":{"query":{"type":"string"}},"required":["query"]}}},
+    {"type":"function","function":{"name":"grep","description":"Search the repository with a regex.","parameters":{"type":"object","properties":{"pattern":{"type":"string"}},"required":["pattern"]}}},
+    {"type":"function","function":{"name":"read_file","description":"Read a file by path.","parameters":{"type":"object","properties":{"path":{"type":"string"}},"required":["path"]}}}
+  ],
+  "tool_stubs": {
+    "web_search": "Rust editions: 2015, 2018, 2021, 2024. The current stable edition is 2024.",
+    "grep": "README.md:12: edition = \"2024\"",
+    "read_file": "edition = \"2024\""
+  },
+  "default_stub": "ok",
+  "max_iterations": 10
+}

@@ -1,0 +1,20 @@
+{
+  "id": "edit_and_test",
+  "model": "openai/gpt-4o-mini",
+  "system": "You are a coding agent working in a terminal. Use the tools to read, search, edit, and test code. Make minimal changes and verify with the test tool. When done, reply with a one-line summary.",
+  "user": "In utils.py, the function add() returns a-b instead of a+b. Read the file, fix it, and run the tests.",
+  "tools": [
+    {"type":"function","function":{"name":"read_file","description":"Read a file's contents by path.","parameters":{"type":"object","properties":{"path":{"type":"string"}},"required":["path"]}}},
+    {"type":"function","function":{"name":"write_file","description":"Write content to a file by path.","parameters":{"type":"object","properties":{"path":{"type":"string"},"content":{"type":"string"}},"required":["path","content"]}}},
+    {"type":"function","function":{"name":"grep","description":"Search the repository with a regex.","parameters":{"type":"object","properties":{"pattern":{"type":"string"}},"required":["pattern"]}}},
+    {"type":"function","function":{"name":"run_tests","description":"Run the project's test suite.","parameters":{"type":"object","properties":{}}}}
+  ],
+  "tool_stubs": {
+    "read_file": "def add(a, b):\n    return a - b\n",
+    "write_file": "wrote utils.py",
+    "grep": "utils.py:1: def add(a, b):",
+    "run_tests": "1 passed in 0.02s"
+  },
+  "default_stub": "ok",
+  "max_iterations": 10
+}

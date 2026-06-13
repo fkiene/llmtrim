@@ -288,6 +288,13 @@ impl OpenRouterModel {
 
 #[cfg(feature = "live")]
 impl OpenRouterModel {
+    /// Public raw send: POST the body, return the raw response Value (with `choices`,
+    /// `tool_calls`, `usage`). The agent-loop benchmark needs the full response (tool calls),
+    /// not just the extracted answer text that [`Model::answer`] returns.
+    pub fn send_raw(&self, request_json: &str) -> Result<Value> {
+        self.send(request_json)
+    }
+
     /// POST the raw (compressed) body and return the raw response Value, retrying with
     /// exponential backoff on transient upstream errors (HTTP 429 / rate-limit / 5xx) —
     /// Groq free-tier routing rate-limits in bursts, so a short wait usually clears it.

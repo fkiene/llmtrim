@@ -12,6 +12,14 @@ All notable changes to this project are documented here. The format follows
   Previously only `plan` (the output-rehydration plan, a different axis and usually empty)
   was recorded, so an external auditor could not tell a lossless run that dropped content
   (a bug) from a lossy stage doing its job.
+- **`bench-agent` — agent-loop token benchmark (#14).** A new dev command drives a
+  tool-calling loop with deterministic tool stubs over a small golden task set and records,
+  per iteration, the input / cached / output tokens and tool-call count, plus totals and cost.
+  It compares conditions (`baseline` vs presets, applying the proxy's own compress + turn-memo
+  transform) so a preset's agent-loop value can be measured on a set instead of one noisy live
+  session. A provider-agnostic data contract and loop driver back a single reference provider
+  (OpenAI Chat); `--dry-run` (default) uses a synthetic transport with no API calls, `--live`
+  (needs `--features live`) calls the model.
 - **UniFFI bindings (`llmtrim-uniffi`) + Python wheel.** A new binding crate exposes
   `llmtrim-core` to Python, Ruby, Swift and Kotlin from one Rust definition: a flat
   `compress(input, provider, preset) -> CompressOutput` call with errors mapped to native

@@ -242,6 +242,40 @@ enum Commands {
     /// round-trip. Credentials come from the env or a local `.env` (OpenRouter).
     /// `--offline`/`--ablate` measure tokens without any network calls.
     Bench(Box<BenchArgs>),
+    /// Agent-loop benchmark (issue #14): per-iteration token economics over a golden task set
+    ///
+    /// Drives a tool-calling loop with deterministic tool stubs and records input/cached/output
+    /// tokens + tool-call count per iteration, per condition (baseline vs presets). Default is a
+    /// synthetic `--dry-run` (zero API cost); `--live` calls the model (needs `--features live`).
+    BenchAgent(Box<BenchAgentArgs>),
+}
+
+#[derive(clap::Args)]
+struct BenchAgentArgs {
+    /// Golden task JSON files or directories.
+    #[arg(long = "tasks", default_value = "bench/agent")]
+    tasks: Vec<PathBuf>,
+    /// Comma-separated conditions: `baseline` plus preset names (e.g. `baseline,agent,cache`).
+    #[arg(long, default_value = "baseline,agent")]
+    conditions: String,
+    /// Repeats per (task, condition) — average over noise on live runs.
+    #[arg(long, default_value_t = 1)]
+    repeats: usize,
+    /// Override every task's model id (e.g. `openai/gpt-4o-mini`).
+    #[arg(long)]
+    model: Option<String>,
+    /// Pinned pricing snapshot (models.dev export).
+    #[arg(long, default_value = "bench/pricing.json")]
+    pricing: PathBuf,
+    /// Call the real model. Off by default (synthetic dry-run, no API spend); needs `--features live`.
+    #[arg(long)]
+    live: bool,
+    /// Dry-run only: tool-call rounds before the synthetic model answers.
+    #[arg(long, default_value_t = 2)]
+    tool_turns: usize,
+    /// Write per-run results as JSON here.
+    #[arg(long)]
+    json_out: Option<PathBuf>,
 }
 
 #[derive(clap::Args)]
@@ -607,6 +641,7 @@ fn run() -> Result<()> {
             );
         }
         Commands::Bench(args) => run_bench(*args)?,
+        Commands::BenchAgent(args) => run_bench_agent(*args)?,
     }
     Ok(())
 }
@@ -698,6 +733,168 @@ fn run_bench(args: BenchArgs) -> Result<()> {
     } else {
         run_live(&cases, kind, &config, &args)
     }
+}
+
+fn run_bench_agent(args: BenchAgentArgs) -> Result<()> {
+    use llmtrim::bench::agent::Condition;
+    let mut tasks = load_agent_tasks(&args.tasks)?;
+    if tasks.is_empty() {
+        anyhow::bail!("no agent tasks found under {:?}", args.tasks);
+    }
+    if let Some(m) = &args.model {
+        for t in &mut tasks {
+            t.model = m.clone();
+        }
+    }
+    let conditions: Vec<Condition> = args
+        .conditions
+        .split(',')
+        .map(|s| Condition::parse(s.trim()))
+        .collect();
+    let table = std::fs::read_to_string(&args.pricing)
+        .map(|s| bench::load_pricing(&s))
+        .unwrap_or_default();
+
+    if args.live {
+        run_agent_live(&tasks, &conditions, &args, &table)
+    } else {
+        run_agent_dry(&tasks, &conditions, &args, &table)
+    }
+}
+
+/// Collect agent task files: each path is a `.json` file, or a directory scanned for `*.json`.
+fn load_agent_tasks(paths: &[PathBuf]) -> Result<Vec<llmtrim::bench::agent::AgentTask>> {
+    use llmtrim::bench::agent::AgentTask;
+    let mut files = Vec::new();
+    for p in paths {
+        if p.is_dir() {
+            for entry in
+                std::fs::read_dir(p).with_context(|| format!("read dir {}", p.display()))?
+            {
+                let path = entry?.path();
+                if path.extension().and_then(|e| e.to_str()) == Some("json") {
+                    files.push(path);
+                }
+            }
+        } else {
+            files.push(p.clone());
+        }
+    }
+    files.sort();
+    let mut tasks = Vec::new();
+    for f in files {
+        let s = std::fs::read_to_string(&f).with_context(|| format!("read {}", f.display()))?;
+        tasks.push(AgentTask::from_json(&s).with_context(|| format!("parse {}", f.display()))?);
+    }
+    Ok(tasks)
+}
+
+/// Synthetic, no-API run: drives each task/condition through the dry-run transport.
+fn run_agent_dry(
+    tasks: &[llmtrim::bench::agent::AgentTask],
+    conditions: &[llmtrim::bench::agent::Condition],
+    args: &BenchAgentArgs,
+    table: &bench::PriceTable,
+) -> Result<()> {
+    use llmtrim::bench::agent::{OpenAiAgent, dry_run_transport, run_agent_loop};
+    let provider = OpenAiAgent;
+    let mut results = Vec::new();
+    for task in tasks {
+        let price = bench::resolve_pricing(table, &task.model);
+        for cond in conditions {
+            for _ in 0..args.repeats.max(1) {
+                let mut send = dry_run_transport(args.tool_turns);
+                results.push(run_agent_loop(&provider, task, cond, &price, &mut send)?);
+            }
+        }
+    }
+    print_agent_results(&results, true);
+    write_agent_json(&results, &args.json_out)
+}
+
+/// Live run: same loop, but `send` calls the real model. Behind `--features live`.
+#[cfg(feature = "live")]
+fn run_agent_live(
+    tasks: &[llmtrim::bench::agent::AgentTask],
+    conditions: &[llmtrim::bench::agent::Condition],
+    args: &BenchAgentArgs,
+    table: &bench::PriceTable,
+) -> Result<()> {
+    use llmtrim::bench::agent::{OpenAiAgent, run_agent_loop};
+    let api_key =
+        dotenv_get("OPENROUTER_API_KEY").context("OPENROUTER_API_KEY not set (env or a .env)")?;
+    let model = llmtrim::quality::OpenRouterModel::new(api_key, ProviderKind::OpenAi)?;
+    let provider = OpenAiAgent;
+    let mut results = Vec::new();
+    for task in tasks {
+        let price = bench::resolve_pricing(table, &task.model);
+        for cond in conditions {
+            for _ in 0..args.repeats.max(1) {
+                let mut send = |req: &str| model.send_raw(req);
+                results.push(run_agent_loop(&provider, task, cond, &price, &mut send)?);
+            }
+        }
+    }
+    print_agent_results(&results, false);
+    write_agent_json(&results, &args.json_out)
+}
+
+#[cfg(not(feature = "live"))]
+fn run_agent_live(
+    _tasks: &[llmtrim::bench::agent::AgentTask],
+    _conditions: &[llmtrim::bench::agent::Condition],
+    _args: &BenchAgentArgs,
+    _table: &bench::PriceTable,
+) -> Result<()> {
+    anyhow::bail!(
+        "--live needs the `live` feature: rebuild with `cargo run --features live -- bench-agent --live …`"
+    )
+}
+
+fn print_agent_results(results: &[llmtrim::bench::agent::AgentRunResult], dry: bool) {
+    let color = ui::color_stdout();
+    let mut t = ui::table(
+        color,
+        &[
+            "task",
+            "condition",
+            "iters",
+            "input",
+            "cached",
+            "output",
+            "cost$",
+            "done",
+        ],
+    );
+    for r in results {
+        t.add_row(vec![
+            r.task_id.clone(),
+            r.condition.clone(),
+            r.iterations.to_string(),
+            r.input_tokens.to_string(),
+            r.cached_tokens.to_string(),
+            r.output_tokens.to_string(),
+            format!("{:.4}", r.cost_usd),
+            if r.completed { "yes" } else { "no" }.to_string(),
+        ]);
+    }
+    println!("{t}");
+    if dry {
+        println!(
+            "(dry-run: synthetic usage, cached estimated by prefix overlap — no API calls; use --live for real numbers)"
+        );
+    }
+}
+
+fn write_agent_json(
+    results: &[llmtrim::bench::agent::AgentRunResult],
+    out: &Option<PathBuf>,
+) -> Result<()> {
+    if let Some(path) = out {
+        let json = serde_json::to_string_pretty(results).context("serialize agent results")?;
+        std::fs::write(path, json).with_context(|| format!("write {}", path.display()))?;
+    }
+    Ok(())
 }
 
 /// Offline per-stage input-token ablation: full vs each stage removed. A stage's
