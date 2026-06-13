@@ -6,6 +6,13 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+- **Swift package.** llmtrim is now installable from Swift Package Manager via
+  [`fkiene/llmtrim-swift`](https://github.com/fkiene/llmtrim-swift):
+  `.package(url: "https://github.com/fkiene/llmtrim-swift", from: "0.1.9")`. It wraps the
+  prebuilt `llmtrimFFI.xcframework` attached to each release, so `import Llmtrim` needs no
+  Rust toolchain. This replaces the previous "build the XCFramework yourself" step.
+
 ## [0.1.8] - 2026-06-13
 
 ### Fixed
