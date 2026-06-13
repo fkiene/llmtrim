@@ -147,6 +147,22 @@ jobs:
             -cp jna.jar -include-runtime -d smoke.jar
           java -Djna.library.path="$PWD/target/debug" -cp "smoke.jar:jna.jar" SmokeKt
 
+  # Build the publishable Swift package: assemble the XCFramework (per-Apple-target static
+  # libs + generated FFI headers) and compile the SwiftPM package against it. macOS-only
+  # (XCFrameworks need Xcode). Heavier than the bindings-swift smoke — can be moved to
+  # release-only if macOS minutes get tight.
+  bindings-swift-package:
+    name: Swift package (xcframework)
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Build the XCFramework
+        run: crates/llmtrim-uniffi/scripts/build-xcframework.sh
+      - name: Compile the SwiftPM package against it
+        run: swift build --package-path crates/llmtrim-uniffi/packaging/swift
+
   # Gate the AGPL-3.0-only relicensing: fail if any dependency carries a license
   # outside deny.toml's allow-list (e.g. GPL/proprietary) or an unknown source.
   license-check:
