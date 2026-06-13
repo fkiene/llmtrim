@@ -80,9 +80,12 @@ pub struct AgentTask {
     pub user: String,
     #[serde(default)]
     pub tools: Value,
-    /// Canned output per tool name; unlisted tools fall back to `default_stub`.
+    /// Canned output per tool name; unlisted tools fall back to `default_stub`. A value may be a
+    /// single string (returned every call) or a list of strings — then the Nth call to that tool
+    /// returns the Nth entry (clamped to the last). The list form models state: e.g. `run_tests`
+    /// returns a failing log first and a passing one after the agent's fix, so the loop can end.
     #[serde(default)]
-    pub tool_stubs: HashMap<String, String>,
+    pub tool_stubs: HashMap<String, Stub>,
     #[serde(default = "default_stub")]
     pub default_stub: String,
     #[serde(default = "default_max_iter")]
@@ -91,6 +94,26 @@ pub struct AgentTask {
     /// sees a clean final and keeps calling tools (false iteration drift); 512 leaves room.
     #[serde(default = "default_max_tokens")]
     pub max_tokens: u64,
+}
+
+/// A tool's canned output: a single string (every call) or a per-call sequence.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(untagged)]
+pub enum Stub {
+    One(String),
+    Seq(Vec<String>),
+}
+
+impl Stub {
+    /// Output for the `nth` (0-based) call to this tool. `One` ignores `nth`; `Seq` clamps to
+    /// its last entry, so once a terminal state is reached it sticks.
+    fn at(&self, nth: usize) -> String {
+        match self {
+            Stub::One(s) => s.clone(),
+            Stub::Seq(v) if v.is_empty() => String::new(),
+            Stub::Seq(v) => v[nth.min(v.len() - 1)].clone(),
+        }
+    }
 }
 
 fn default_stub() -> String {
@@ -108,10 +131,11 @@ impl AgentTask {
         serde_json::from_str(s).context("invalid agent task JSON")
     }
 
-    fn stub_for(&self, name: &str) -> String {
+    /// Stub output for the `nth` (0-based) call to tool `name`; falls back to `default_stub`.
+    fn stub_for(&self, name: &str, nth: usize) -> String {
         self.tool_stubs
             .get(name)
-            .cloned()
+            .map(|s| s.at(nth))
             .unwrap_or_else(|| self.default_stub.clone())
     }
 }
@@ -291,6 +315,7 @@ pub fn run_agent_loop(
     });
 
     let mut body = provider.initial_request(task);
+    let mut tool_call_counts: HashMap<String, usize> = HashMap::new();
     let mut result = AgentRunResult {
         task_id: task.id.clone(),
         provider: provider.name().to_string(),
@@ -340,7 +365,13 @@ pub fn run_agent_loop(
             TurnAction::Calls(calls) => {
                 let results: Vec<(String, String)> = calls
                     .iter()
-                    .map(|c| (c.id.clone(), task.stub_for(&c.name)))
+                    .map(|c| {
+                        // Per-tool call index, so sequential stubs advance (e.g. tests fail then pass).
+                        let nth = tool_call_counts.entry(c.name.clone()).or_insert(0);
+                        let out = task.stub_for(&c.name, *nth);
+                        *nth += 1;
+                        (c.id.clone(), out)
+                    })
                     .collect();
                 provider.append_results(&mut body, &turn.assistant_msg, &results);
             }
@@ -481,6 +512,28 @@ mod tests {
         .unwrap();
         assert!(r.completed && r.iterations == 3);
         assert_eq!(r.condition, "agent");
+    }
+
+    #[test]
+    fn sequential_stub_advances_then_clamps() {
+        let t = AgentTask::from_json(
+            r#"{"id":"s","model":"m","system":"s","user":"u",
+                "tool_stubs":{"run_tests":["FAIL","PASS"],"read_file":"x"}}"#,
+        )
+        .unwrap();
+        assert_eq!(t.stub_for("run_tests", 0), "FAIL");
+        assert_eq!(t.stub_for("run_tests", 1), "PASS");
+        assert_eq!(
+            t.stub_for("run_tests", 5),
+            "PASS",
+            "sequence clamps to its last entry"
+        );
+        assert_eq!(
+            t.stub_for("read_file", 3),
+            "x",
+            "single stub ignores the call index"
+        );
+        assert_eq!(t.stub_for("unknown", 0), "ok", "falls back to default_stub");
     }
 
     #[test]
