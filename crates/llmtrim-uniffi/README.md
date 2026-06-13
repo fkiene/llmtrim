@@ -73,8 +73,11 @@ out = LlmtrimFfi.compress(
 puts "#{out.input_tokens_before} -> #{out.input_tokens_after}"
 ```
 
-Swift emits `llmtrim_ffi.swift` + an FFI header and modulemap (wrap in a `Package.swift`
-targeting the cdylib/`staticlib`); Kotlin emits `uniffi/.../llmtrim_ffi.kt` (load via JNA).
-Packaging these as a published gem / SwiftPM package / Gradle artifact is the next step.
+Swift emits `llmtrim_ffi.swift` + an FFI header and modulemap; Kotlin emits
+`uniffi/.../llmtrim_ffi.kt` (which loads the cdylib via JNA). CI compiles and runs a smoke
+for both — Swift on macOS (`swiftc` against the modulemap), Kotlin on a JVM (`kotlinc` +
+JNA) — so a binding break is caught in all four languages (see `tests/swift`, `tests/kotlin`
+and the `bindings*` jobs in `.github/workflows/ci.yml`). What remains is publishable
+packaging: a gem, a SwiftPM package / xcframework, and a Gradle/Maven artifact.
 
 [`llmtrim-core`]: ../llmtrim-core
