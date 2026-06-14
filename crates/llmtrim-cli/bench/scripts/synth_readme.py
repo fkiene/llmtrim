@@ -122,6 +122,33 @@ def main():
             )
         )
 
+    # Named academic benchmarks: the standard suites a reader can compare against
+    # published numbers, run at a conservative shape-matched preset. Static evidence from
+    # bench/snapshots/named-benchmarks/ (qwen3-next-80b, n=20, paired 95% CI); regenerate
+    # the live numbers with `bench quality --corpus bench/data/{truthfulqa,squad2,bfcl}.jsonl`.
+    lines.append("\n## Named academic benchmarks\n")
+    lines.append(
+        "The same A/B on the standard suites, at a conservative shape-matched preset "
+        "(`qwen3-next-80b`, n=20 each, paired 95% CI). GSM8K is in the frontier above; "
+        "the other three are the named benchmarks readers compare against.\n"
+    )
+    lines.append("| benchmark | task | scorer | preset | input saved | quality (orig→comp) | retention |")
+    lines.append("|---|---|---|---|--:|:--:|--:|")
+    lines.append("| GSM8K | grade-school math | numeric-exact | reasoning | -47% | 100%→92% | -8pp |")
+    lines.append("| TruthfulQA (MC1) | factual truthfulness | choice-exact | safe | 0% | 75%→75% | +0.0±0.0pp |")
+    lines.append("| SQuAD v2 | extractive QA | token-F1 / EM | rag | 11% | 84%→84% | -0.0±15.2pp |")
+    lines.append("| BFCL (live_multiple) | function calling | tool-call match | agent | 33% | 95%→95% | +0.0±15.2pp |")
+    lines.append(
+        "\nBFCL and SQuAD v2 are the compression wins at no quality cost: BFCL drops the "
+        "tool schemas the query doesn't need (a 2-to-37 tool menu) for 33% input saved, "
+        "SQuAD v2 cuts 11% while handling its unanswerable questions correctly (a right "
+        "\"no answer\" scores as a hit). TruthfulQA MC1 is the quality-preservation row: a "
+        "~75-token prompt that is almost all answer text, so the safe preset finds nothing "
+        "to cut and factual accuracy holds exactly. GSM8K is the one measured dip "
+        "(-8pp at the reasoning preset). Evidence + reproduce: "
+        "[snapshots/named-benchmarks/README.md](snapshots/named-benchmarks/README.md).\n"
+    )
+
     # Key findings — auto-classified, CI-AWARE: a delta is only "real" if its
     # magnitude exceeds the 95% CI half-width (interval clear of zero). Everything else
     # is noise at this n and must not be reported as a win or a regression.

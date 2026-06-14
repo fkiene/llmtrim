@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Download + normalize the 8 benchmark corpora into bench/data/<name>.jsonl.
+"""Download + normalize the benchmark corpora into bench/data/<name>.jsonl.
 
 Each output line is a llmtrim bench case (see bench::load_bench_corpus):
 friendly `{context?, question, gold, scorer, system?}` or explicit `{request, gold, scorer}`.
@@ -13,12 +13,16 @@ import datetime
 import hashlib
 import json
 import os
+import random
 import re
 import sys
 import time
 import urllib.request
 
 N = int(sys.argv[1]) if len(sys.argv) > 1 else 40
+# Optional comma-list of corpus names to (re)fetch; the rest are left untouched and their
+# manifest entries are preserved. Omit to rebuild every corpus.
+ONLY = set(filter(None, (sys.argv[2].split(",") if len(sys.argv) > 2 else []))) or None
 HERE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))  # bench/ root (this script lives in bench/scripts/)
 DATA = os.path.join(HERE, "data")
 os.makedirs(DATA, exist_ok=True)
@@ -87,18 +91,76 @@ def norm_humaneval(rows):
     return out
 
 
+SQUAD_INSTR = (
+    "\nAnswer with the shortest exact span from the context. "
+    "If the context does not contain the answer, reply with exactly: unanswerable."
+)
+
+
 def norm_squad(rows):
-    out = []
+    """SQuAD v2 extractive QA, keeping BOTH answerable and unanswerable rows. Answerable:
+    token-F1 against the gold span. Unanswerable (no gold text): gold sentinel
+    "unanswerable", scored by containment, so a correct refusal is a hit (the SQuAD v2
+    no-answer contract). Balanced ~50/50 so the no-answer skill is actually measured."""
+    answerable, unanswerable = [], []
     for i, r in enumerate(rows):
         texts = (r.get("answers") or {}).get("text") or []
-        if not texts:
-            continue  # drop SQuAD v2 unanswerable rows for a clean F1
+        if texts:
+            answerable.append({
+                "name": f"squad-{i}",
+                "context": r["context"],
+                "question": r["question"] + SQUAD_INSTR,
+                "gold": texts[0],
+                "scorer": "f1",
+            })
+        else:
+            unanswerable.append({
+                "name": f"squad-{i}-noans",
+                "context": r["context"],
+                "question": r["question"] + SQUAD_INSTR,
+                "gold": "unanswerable",
+                "scorer": "contains",
+            })
+    half = N // 2
+    out = answerable[:half] + unanswerable[:N - half]
+    if len(out) < N:
+        print(f"  WARNING: squad2 has only {len(out)} cases (wanted {N}); "
+              f"answerable={len(answerable)} unanswerable={len(unanswerable)} "
+              f"(raise the fetch multiplier)")
+    return out
+
+
+def norm_truthfulqa(rows):
+    """TruthfulQA MC1: one true answer among distractors. Each case is a lettered
+    constrained choice; gold = the letter of the true option. Choices are shuffled with a
+    per-row deterministic seed so the correct answer isn't always position A. Scored by
+    `choice` (the selected letter), the standard MC1 metric — deterministic, no judge."""
+    out = []
+    for i, r in enumerate(rows):
+        mc1 = r.get("mc1_targets") or {}
+        choices = list(mc1.get("choices") or [])
+        labels = list(mc1.get("labels") or [])
+        if len(choices) < 2 or 1 not in labels:
+            continue
+        correct = choices[labels.index(1)]
+        order = list(range(len(choices)))
+        random.Random(i).shuffle(order)
+        letters = [chr(ord("A") + k) for k in range(len(order))]
+        lines, gold = [], None
+        for letter, idx in zip(letters, order):
+            lines.append(f"{letter}) {choices[idx]}")
+            if choices[idx] == correct:
+                gold = letter
+        question = (
+            r["question"]
+            + "\n\n" + "\n".join(lines)
+            + "\n\nAnswer with the single letter of the correct option."
+        )
         out.append({
-            "name": f"squad-{i}",
-            "context": r["context"],
-            "question": r["question"] + "\nAnswer with the shortest exact span from the context.",
-            "gold": texts[0],
-            "scorer": "f1",
+            "name": f"truthfulqa-{i}",
+            "question": question,
+            "gold": gold,
+            "scorer": "choice",
         })
     return out
 
@@ -173,6 +235,68 @@ def norm_glaive(rows):
             "name": f"glaive-{i}",
             "request": json.dumps(request, ensure_ascii=False),
             "gold": json.dumps({"name": name_m.group(1)}),
+            "scorer": "tool",
+        })
+    return out
+
+
+BFCL_REPO = "https://huggingface.co/datasets/gorilla-llm/Berkeley-Function-Calling-Leaderboard/resolve/main"
+# BFCL Python type names → JSON-schema types, so the tools payload is a valid request.
+_JSON_TYPE = {"dict": "object", "float": "number", "tuple": "array", "any": "string", "bool": "boolean"}
+
+
+def _schemaize(node):
+    """Recursively rewrite BFCL's Python type names into JSON-schema types in place."""
+    if isinstance(node, dict):
+        if isinstance(node.get("type"), str):
+            node["type"] = _JSON_TYPE.get(node["type"], node["type"])
+        for v in node.values():
+            _schemaize(v)
+    elif isinstance(node, list):
+        for v in node:
+            _schemaize(v)
+    return node
+
+
+# `live_multiple` is the multi-tool BFCL slice (2-37 candidate functions per query),
+# where tool selection has irrelevant schemas to drop. The single-tool `simple` slice
+# leaves nothing to compress, so it's not a useful row for a tool-compression claim.
+BFCL_CATEGORY = "BFCL_v3_live_multiple"
+
+
+def fetch_bfcl(n):
+    """Join BFCL's prompt file with its possible_answer file by id (raw HF files; the
+    datasets-server can't view this repo). Returns up to n single-turn cases from the
+    multi-tool category, gold = the function the call must invoke."""
+    def load(path):
+        url = f"{BFCL_REPO}/{path}"
+        with urllib.request.urlopen(url, timeout=60) as r:
+            text = r.read().decode("utf-8")
+        return [json.loads(line) for line in text.splitlines() if line.strip()]
+
+    prompts = load(f"{BFCL_CATEGORY}.json")
+    gold_by_id = {g["id"]: g for g in load(f"possible_answer/{BFCL_CATEGORY}.json")}
+    out = []
+    for p in prompts:
+        if len(out) >= n:
+            break
+        gt = gold_by_id.get(p["id"], {}).get("ground_truth") or []
+        if not gt or not isinstance(gt[0], dict):
+            continue
+        fn_name = next(iter(gt[0]))  # the function the call must invoke
+        messages = p["question"][0]  # single-turn: one message list
+        tools = [
+            {"type": "function", "function": _schemaize(dict(f))}
+            for f in p.get("function", [])
+            if f.get("name")
+        ]
+        if not tools:
+            continue
+        request = {"model": "x", "messages": messages, "tools": tools}
+        out.append({
+            "name": f"bfcl-{p['id']}",
+            "request": json.dumps(request, ensure_ascii=False),
+            "gold": json.dumps({"name": fn_name}),
             "scorer": "tool",
         })
     return out
@@ -320,21 +444,32 @@ CORPORA = [
     ("chat", "HuggingFaceH4/ultrachat_200k", "default", "train_sft", norm_chat),
     ("cnn", "abisee/cnn_dailymail", "3.0.0", "validation", norm_cnn),
     ("cache", "HuggingFaceH4/ultrachat_200k", "default", "train_sft", norm_cache),
+    ("truthfulqa", "truthfulqa/truthful_qa", "multiple_choice", "validation", norm_truthfulqa),
+    ("squad2", "rajpurkar/squad_v2", "squad_v2", "validation", norm_squad),
 ]
 
 
 def main():
-    manifest = {
-        "fetched": datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%d"),
-        "n_requested": N,
-        "corpora": {},
-    }
-    print(f"downloading {len(CORPORA)} corpora, up to {N} cases each:")
-    for name, ds, cfg, split, fn in CORPORA:
+    manifest_path = os.path.join(DATA, "manifest.json")
+    # Merge into the existing manifest when fetching only a subset, so the untouched
+    # corpora keep their pinned sha256 and the diff stays surgical.
+    if ONLY and os.path.exists(manifest_path):
+        manifest = json.load(open(manifest_path))
+        manifest["fetched"] = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%d")
+        manifest.setdefault("corpora", {})
+    else:
+        manifest = {
+            "fetched": datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%d"),
+            "n_requested": N,
+            "corpora": {},
+        }
+    todo = [c for c in CORPORA if ONLY is None or c[0] in ONLY]
+    print(f"downloading {len(todo)} corpora, up to {N} cases each:")
+    for name, ds, cfg, split, fn in todo:
         try:
             # over-fetch where normalizers drop/bundle rows (unanswerable, parse fails,
             # or 12 rows → 1 record-array case).
-            mult = {"glaive": 3, "dolly": 4, "chat": 3}.get(name, 1)
+            mult = {"glaive": 3, "dolly": 4, "chat": 3, "squad2": 6}.get(name, 1)
             raw = fetch(ds, cfg, split, N * mult)
             cases = fn(raw)[:N]
             entry = write(name, cases, f"{ds}:{cfg}:{split}")
@@ -342,8 +477,22 @@ def main():
             manifest["corpora"][name] = entry
         except Exception as e:
             print(f"  {name:12} FAILED: {e}")
-    json.dump(manifest, open(os.path.join(DATA, "manifest.json"), "w"), indent=2)
-    print(f"wrote {DATA}/manifest.json")
+
+    # BFCL ships as raw repo files, not a datasets-server view, so it has its own fetch.
+    if ONLY is None or "bfcl" in ONLY:
+        try:
+            cases = fetch_bfcl(N)
+            entry = write("bfcl", cases, f"{BFCL_REPO} ({BFCL_CATEGORY})")
+            entry.update({
+                "dataset": "gorilla-llm/Berkeley-Function-Calling-Leaderboard",
+                "config": BFCL_CATEGORY,
+                "split": "test",
+            })
+            manifest["corpora"]["bfcl"] = entry
+        except Exception as e:
+            print(f"  {'bfcl':12} FAILED: {e}")
+    json.dump(manifest, open(manifest_path, "w"), indent=2)
+    print(f"wrote {manifest_path}")
 
 
 if __name__ == "__main__":
