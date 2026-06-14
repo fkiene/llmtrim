@@ -1045,7 +1045,12 @@ fn load_agent_tasks(paths: &[PathBuf]) -> Result<Vec<llmtrim::bench::agent::Agen
                 std::fs::read_dir(p).with_context(|| format!("read dir {}", p.display()))?
             {
                 let path = entry?.path();
-                if path.extension().and_then(|e| e.to_str()) == Some("json") {
+                // `_`-prefixed files (e.g. _tools.json) are shared fragments, not tasks.
+                let is_underscore = path
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .is_some_and(|n| n.starts_with('_'));
+                if !is_underscore && path.extension().and_then(|e| e.to_str()) == Some("json") {
                     files.push(path);
                 }
             }
@@ -1054,10 +1059,31 @@ fn load_agent_tasks(paths: &[PathBuf]) -> Result<Vec<llmtrim::bench::agent::Agen
         }
     }
     files.sort();
+    // Tasks that omit `tools` share the tool catalog in `_tools.json` alongside them, so the
+    // ten identical definitions live in one place. Cache per directory.
+    let mut shared: std::collections::HashMap<PathBuf, serde_json::Value> = Default::default();
     let mut tasks = Vec::new();
     for f in files {
         let s = std::fs::read_to_string(&f).with_context(|| format!("read {}", f.display()))?;
-        tasks.push(AgentTask::from_json(&s).with_context(|| format!("parse {}", f.display()))?);
+        let mut task =
+            AgentTask::from_json(&s).with_context(|| format!("parse {}", f.display()))?;
+        if task.tools.is_null() || task.tools.as_array().is_some_and(|a| a.is_empty()) {
+            let dir = f.parent().unwrap_or_else(|| std::path::Path::new("."));
+            let tools = match shared.get(dir) {
+                Some(v) => v.clone(),
+                None => {
+                    let path = dir.join("_tools.json");
+                    let v = std::fs::read_to_string(&path)
+                        .ok()
+                        .and_then(|t| serde_json::from_str(&t).ok())
+                        .unwrap_or(serde_json::Value::Null);
+                    shared.insert(dir.to_path_buf(), v.clone());
+                    v
+                }
+            };
+            task.tools = tools;
+        }
+        tasks.push(task);
     }
     Ok(tasks)
 }
