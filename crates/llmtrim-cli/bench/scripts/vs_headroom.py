@@ -32,7 +32,7 @@ Setup (reproducible):
     python3 bench/scripts/vs_headroom.py                    # deterministic axes (offline)
     OPENROUTER_API_KEY=... python3 bench/scripts/vs_headroom.py --live --live-n 12
 
-Outputs land in bench/results-vs-headroom/: results.json (machine-readable) and README.md
+Outputs land in bench/snapshots/vs-headroom/: results.json (machine-readable) and README.md
 (the rendered tables + the drop-in snippet for the main README "How does it compare").
 """
 import argparse
@@ -48,7 +48,7 @@ from pathlib import Path
 CRATE_ROOT = Path(__file__).resolve().parents[2]  # crates/llmtrim-cli (bench/ lives here)
 WORKSPACE_ROOT = CRATE_ROOT.parents[1]  # the repo root, where .env sits
 DATA_DIR = CRATE_ROOT / "bench" / "data"
-RESULTS_DIR = CRATE_ROOT / "bench" / "results-vs-headroom"
+RESULTS_DIR = CRATE_ROOT / "bench" / "snapshots" / "vs-headroom"
 
 # The model + route the project pins for every OpenRouter call (see CLAUDE.md). Used only
 # by the live A/B (call_model); the deterministic axes make no network calls.

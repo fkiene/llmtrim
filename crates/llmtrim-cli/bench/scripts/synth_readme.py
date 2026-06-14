@@ -229,7 +229,7 @@ def main():
         "Both libraries run through their Python APIs on the same inputs and the same "
         "`o200k_base` denominator. Full tables (input saved, per-stage attribution, latency, "
         "and the live gpt-oss-20b output A/B) are in "
-        "[results-vs-headroom/README.md](results-vs-headroom/README.md).\n"
+        "[snapshots/vs-headroom/README.md](snapshots/vs-headroom/README.md).\n"
     )
     lines.append("```bash")
     lines.append("crates/llmtrim-uniffi/scripts/build-wheel.sh --release   # build the llmtrim wheel")

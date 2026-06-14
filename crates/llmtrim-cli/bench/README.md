@@ -91,7 +91,9 @@ python3 bench/scripts/synth_readme.py      # regenerate this file
 ```
 
 `bench suite` runs the full corpus matrix in one process and writes one enveloped result
-JSON per corpus to `bench/results/`. The other axes share the same dispatcher:
+JSON per corpus to `bench/results/` (gitignored scratch). To keep a run as evidence, copy it
+into `bench/snapshots/` (by date for the corpus frontier, `vs-<tool>` for head-to-heads). The
+other axes share the same dispatcher:
 
 ```bash
 llmtrim bench quality --corpus bench/data/<c>.jsonl --preset aggressive --ablate  # per-stage ablation (offline, free)
@@ -103,7 +105,7 @@ llmtrim bench compare headroom             # head-to-head vs Headroom (dispatche
 
 ## Head-to-head: Headroom
 
-Both libraries run through their Python APIs on the same inputs and the same `o200k_base` denominator. Full tables (input saved, per-stage attribution, latency, and the live gpt-oss-20b output A/B) are in [results-vs-headroom/README.md](results-vs-headroom/README.md).
+Both libraries run through their Python APIs on the same inputs and the same `o200k_base` denominator. Full tables (input saved, per-stage attribution, latency, and the live gpt-oss-20b output A/B) are in [snapshots/vs-headroom/README.md](snapshots/vs-headroom/README.md).
 
 ```bash
 crates/llmtrim-uniffi/scripts/build-wheel.sh --release   # build the llmtrim wheel

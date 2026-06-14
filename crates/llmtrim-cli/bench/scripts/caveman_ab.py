@@ -21,7 +21,7 @@ _SSL_CTX.verify_mode = ssl.CERT_NONE
 # ── Paths ────────────────────────────────────────────────────────────────────
 REPO_ROOT = Path(__file__).resolve().parents[2]
 CAVEMAN_ROOT = REPO_ROOT.parent / "caveman"
-RESULTS_DIR = REPO_ROOT / "bench" / "results-caveman"
+RESULTS_DIR = REPO_ROOT / "bench" / "snapshots" / "vs-caveman"
 RESULTS_DIR.mkdir(parents=True, exist_ok=True)
 
 PROMPTS_FILE = CAVEMAN_ROOT / "benchmarks" / "prompts.json"

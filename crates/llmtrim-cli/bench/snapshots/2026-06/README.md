@@ -17,5 +17,6 @@ byte-for-byte.
   via `bench/scripts/download.py`.
 - **Rerun:** `cargo run -q --features live -- bench suite` (needs an API key; see `bench/README.md`).
 
-`bench/results/` (gitignored) stays the scratch directory for new runs; future
-snapshots get their own dated directory.
+`bench/results/` (gitignored) stays the scratch directory for new runs; committed
+snapshots live under `bench/snapshots/` (by date for the main corpus frontier, by
+`vs-<tool>` for head-to-head comparisons).
