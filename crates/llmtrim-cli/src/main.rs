@@ -1889,3 +1889,72 @@ fn snapshot_prices(model_id: &str) -> Option<(f64, f64)> {
     let (input, output) = (p.input_per_1k * 1000.0, p.output_per_1k * 1000.0);
     (input > 0.0 || output > 0.0).then_some((input, output))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn scratch_dir(tag: &str) -> PathBuf {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!("llmtrim_bench_{tag}_{nanos}"));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn load_agent_tasks_injects_shared_tools_and_skips_underscore_files() {
+        let dir = scratch_dir("dedup");
+        std::fs::write(
+            dir.join("_tools.json"),
+            r#"[{"type":"function","function":{"name":"grep"}}]"#,
+        )
+        .unwrap();
+        // No `tools` key: should inherit the shared catalog.
+        std::fs::write(
+            dir.join("a.json"),
+            r#"{"id":"a","model":"m","system":"s","user":"u"}"#,
+        )
+        .unwrap();
+        // Own `tools`: must be preserved, not overwritten.
+        std::fs::write(
+            dir.join("b.json"),
+            r#"{"id":"b","model":"m","system":"s","user":"u","tools":[{"type":"function","function":{"name":"own"}}]}"#,
+        )
+        .unwrap();
+
+        let tasks = load_agent_tasks(std::slice::from_ref(&dir)).unwrap();
+        assert_eq!(tasks.len(), 2, "_tools.json is a fragment, not a task");
+        let a = tasks.iter().find(|t| t.id == "a").unwrap();
+        let b = tasks.iter().find(|t| t.id == "b").unwrap();
+        assert_eq!(
+            a.tools.pointer("/0/function/name").unwrap(),
+            "grep",
+            "shared catalog injected when tools omitted"
+        );
+        assert_eq!(
+            b.tools.pointer("/0/function/name").unwrap(),
+            "own",
+            "task's own tools left intact"
+        );
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn suite_matrix_covers_the_documented_corpora() {
+        assert_eq!(SUITE_MATRIX.len(), 8, "the eight-corpus matrix");
+        let cnn = SUITE_MATRIX.iter().find(|(c, _, _)| *c == "cnn").unwrap();
+        assert_eq!(cnn.2, 8, "cnn runs fewer cases (long docs)");
+        // Every preset name must resolve, or a live suite run dies mid-matrix.
+        for (corpus, preset, n) in SUITE_MATRIX {
+            assert!(*n > 0, "{corpus}: case count must be positive");
+            assert!(
+                DenseConfig::preset(preset).is_some(),
+                "{corpus}: unknown preset '{preset}'"
+            );
+        }
+    }
+}
