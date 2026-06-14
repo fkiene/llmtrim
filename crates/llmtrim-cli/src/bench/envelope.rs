@@ -38,3 +38,20 @@ fn git_commit() -> String {
         .filter(|s| !s.is_empty())
         .unwrap_or_else(|| "unknown".to_string())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn wrap_namespaces_schema_and_preserves_body() {
+        let doc = wrap("quality-v1", json!({ "preset": "rag" }), json!({ "n": 12 }));
+        assert_eq!(doc["schema"], "llmtrim-bench/quality-v1");
+        assert_eq!(doc["meta"]["preset"], "rag");
+        assert_eq!(doc["result"]["n"], 12, "body carried verbatim under result");
+        assert_eq!(doc["llmtrim_version"], env!("CARGO_PKG_VERSION"));
+        // RFC3339 instant, e.g. 2026-06-14T12:00:00Z
+        assert!(doc["produced_at"].as_str().unwrap().contains('T'));
+        assert!(doc.get("commit").is_some());
+    }
+}
