@@ -6,6 +6,19 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+- **Named academic benchmarks: TruthfulQA, SQuAD v2, BFCL.** The quality A/B now ships
+  three more standard suites alongside GSM8K, so the accuracy-preservation results name
+  the benchmarks a reader already knows. `bench/scripts/download.py` fetches them
+  reproducibly (`download.py 40 truthfulqa,squad2,bfcl`, sha256-pinned in the manifest),
+  `bench suite` runs them at a conservative shape-matched preset, and the results table is
+  in the README. BFCL uses the multi-tool `live_multiple` slice (2 to 37 candidate
+  functions per call), where tool selection cuts 33% of input by dropping the schemas the
+  query doesn't need, at unchanged tool-call accuracy. SQuAD v2's unanswerable questions
+  are handled correctly: a right "no answer" scores as a hit. A new `choice` (MC1) scorer
+  grades TruthfulQA by the selected option letter, not by any letter the model mentions in
+  passing.
+
 ### Changed
 - **The benchmark commands are now one `bench` subcommand group.** `llmtrim bench` and
   `llmtrim bench-agent` are replaced by `llmtrim bench quality` and `llmtrim bench agent`,

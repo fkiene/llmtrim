@@ -314,6 +314,26 @@ The savings are measured live, not estimated. Each of 112 benchmark cases is sen
 
 The token cuts are model-independent (−31% input, −74% output); the dollar saving depends on the model's output-to-input price ratio: −66% on the benchmark model, projected −57–59% at GPT-4o / Claude Sonnet rates. On live Claude Code traffic, llmtrim cuts **−68% of compressible input** without ever touching the cached prefix, so your prompt-cache discount stays intact.
 
+### Accuracy preserved on standard benchmarks
+
+The same A/B, run on the academic suites you already know, at a conservative shape-matched preset. Quality is the score on the original request vs the compressed one (`qwen3-next-80b`, n=20 each, paired 95% CI):
+
+| benchmark | task | scorer | input saved | quality (orig → comp) | retention |
+|---|---|---|--:|:--:|--:|
+| GSM8K | grade-school math | numeric-exact | −47%¹ | 100% → 92% | −8pp |
+| TruthfulQA (MC1) | factual truthfulness | choice-exact | 0% | 75% → 75% | +0.0±0.0pp |
+| SQuAD v2 | extractive QA | token-F1 / EM | 11% | 84% → 84% | −0.0±15.2pp |
+| BFCL (live_multiple) | function calling | tool-call match | 33% | 95% → 95% | +0.0±15.2pp |
+
+BFCL and SQuAD v2 are the compression wins at no quality cost: BFCL cuts 33% of input by dropping the tool schemas the query doesn't need (a multi-tool menu, 2 to 37 candidates per call), and SQuAD v2 cuts 11% while answering its unanswerable questions correctly (a right "no answer" counts as a hit). TruthfulQA MC1 is the quality-preservation row: a ~75-token prompt that is almost all answer text, so a safe preset finds nothing to cut and the factual accuracy is held exactly. GSM8K is the one measured dip: its reasoning preset trades −8pp for a large cost cut, so measure per workload before enabling it. ¹GSM8K input goes negative because that preset injects a Chain-of-Draft instruction whose payoff is output-side (see the frontier table). Evidence and a one-line reproduce are in [the named-benchmark snapshot](crates/llmtrim-cli/bench/snapshots/named-benchmarks/README.md):
+
+```bash
+python3 crates/llmtrim-cli/bench/scripts/download.py 40 truthfulqa,squad2,bfcl
+(cd crates/llmtrim-cli && cargo run -q --features live -- bench quality \
+   --corpus bench/data/squad2.jsonl --preset rag \
+   --model qwen/qwen3-next-80b-a3b-instruct --route "" --n 20)
+```
+
 Full methodology, per-corpus frontier, and confidence intervals are in [crates/llmtrim-cli/bench/README.md](crates/llmtrim-cli/bench/README.md). Reproduce it:
 
 ```bash

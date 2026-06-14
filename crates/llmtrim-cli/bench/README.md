@@ -39,6 +39,19 @@ Across **112 A/B cases** on this real-usage mix (generation, chat, reasoning, co
 | `tl_ours` | Tool output (logs) | 5 | 88% | 93% | 89% | 0% | 100%→100% | +0pp |
 | `tl_rtk` | Tool output (grep) | 5 | -29% | 87% | 66% | 0% | 100%→100% | +0pp |
 
+## Named academic benchmarks
+
+The same A/B on the standard suites, at a conservative shape-matched preset (`qwen3-next-80b`, n=20 each, paired 95% CI). GSM8K is in the frontier above; the other three are the named benchmarks readers compare against.
+
+| benchmark | task | scorer | preset | input saved | quality (orig→comp) | retention |
+|---|---|---|---|--:|:--:|--:|
+| GSM8K | grade-school math | numeric-exact | reasoning | -47% | 100%→92% | -8pp |
+| TruthfulQA (MC1) | factual truthfulness | choice-exact | safe | 0% | 75%→75% | +0.0±0.0pp |
+| SQuAD v2 | extractive QA | token-F1 / EM | rag | 11% | 84%→84% | -0.0±15.2pp |
+| BFCL (live_multiple) | function calling | tool-call match | agent | 33% | 95%→95% | +0.0±15.2pp |
+
+BFCL and SQuAD v2 are the compression wins at no quality cost: BFCL drops the tool schemas the query doesn't need (a 2-to-37 tool menu) for 33% input saved, SQuAD v2 cuts 11% while handling its unanswerable questions correctly (a right "no answer" scores as a hit). TruthfulQA MC1 is the quality-preservation row: a ~75-token prompt that is almost all answer text, so the safe preset finds nothing to cut and factual accuracy holds exactly. GSM8K is the one measured dip (-8pp at the reasoning preset). Evidence + reproduce: [snapshots/named-benchmarks/README.md](snapshots/named-benchmarks/README.md).
+
 ## Key findings
 
 **Where compression wins big** (cost cut, quality held or up):

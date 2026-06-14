@@ -841,6 +841,11 @@ const SUITE_MATRIX: &[(&str, &str, usize)] = &[
     ("chat", "aggressive", 12),  // multi-turn → output-control + dedup (judge)
     ("cnn", "aggressive", 8),    // long doc   → output budget
     ("cache", "cache", 12),      // shared prefix → cache-first (Stage A)
+    // Named academic benchmarks, run at a conservative shape-matched preset (the honest
+    // headline for an accuracy-preservation claim).
+    ("truthfulqa", "safe", 20), // factual MC1 → safe (no lossy output cuts)
+    ("squad2", "rag", 20),      // extractive QA → retrieve (long ctx)
+    ("bfcl", "agent", 20),      // function call (multi-tool) → tool select/trim
 ];
 
 fn run_bench_suite(args: SuiteArgs) -> Result<()> {
@@ -1976,7 +1981,11 @@ mod tests {
 
     #[test]
     fn suite_matrix_covers_the_documented_corpora() {
-        assert_eq!(SUITE_MATRIX.len(), 8, "the eight-corpus matrix");
+        assert_eq!(
+            SUITE_MATRIX.len(),
+            11,
+            "eight workload corpora + three named benchmarks"
+        );
         let cnn = SUITE_MATRIX.iter().find(|(c, _, _)| *c == "cnn").unwrap();
         assert_eq!(cnn.2, 8, "cnn runs fewer cases (long docs)");
         // Every preset name must resolve, or a live suite run dies mid-matrix.

@@ -45,6 +45,10 @@ pub enum Scorer {
     TokenF1,
     /// Gold phrase appears verbatim in the answer (loose containment).
     ContainsMatch,
+    /// Multiple-choice exact match: the *selected* option letter (A–Z) equals the gold
+    /// letter (TruthfulQA MC1). Unlike [`Self::ContainsMatch`], it grades the model's
+    /// chosen answer, not a letter mentioned in passing.
+    ChoiceExact,
     /// Run the model's code against provided unit tests (HumanEval/MBPP). Gold is
     /// JSON `{"test":…, "entry_point":…}`; scored in [`exec`] (needs a subprocess).
     PassAtOne,
@@ -62,6 +66,7 @@ impl Scorer {
             "span" | "span_em" | "em" => Scorer::SpanEm,
             "f1" | "token_f1" => Scorer::TokenF1,
             "contains" | "contains_match" => Scorer::ContainsMatch,
+            "choice" | "choice_exact" | "mc1" => Scorer::ChoiceExact,
             "pass@1" | "pass_at_one" | "passatone" => Scorer::PassAtOne,
             "tool" | "tool_call" | "tool_call_match" => Scorer::ToolCallMatch,
             "judge" | "llm_judge" => Scorer::LlmJudge,
@@ -96,6 +101,7 @@ pub fn score_text(scorer: Scorer, answer: &str, gold: &str) -> Option<f64> {
         Scorer::SpanEm => span_em(answer, gold),
         Scorer::TokenF1 => token_f1(answer, gold),
         Scorer::ContainsMatch => contains_match(answer, gold),
+        Scorer::ChoiceExact => choice_exact(answer, gold),
         _ => return None,
     })
 }
@@ -188,6 +194,48 @@ fn contains_match(answer: &str, gold: &str) -> f64 {
         1.0
     } else {
         0.0
+    }
+}
+
+/// Explicit verdict like "answer: B" / "the answer is (C)" — the selection the model
+/// commits to, captured ahead of any letter it merely discusses.
+static CHOICE_VERDICT: Lazy<Regex> = Lazy::new(|| {
+    Regex::new(r"(?i)\banswers?\b[^a-z0-9]*(?:is|:|=)?[^a-z0-9]*\(?([a-z])\)?").unwrap()
+});
+/// A standalone option letter as the model usually emits it: start of reply or after a
+/// newline, optionally wrapped `(A)`/`A.`/`A)`, not glued to a longer word. The trailing
+/// `[^a-z]|$` requires a non-letter (or end) after the marker, so mid-token letters like
+/// the `e` in `(e.g.` or `i` in `(i.e.` aren't mistaken for an option (the Rust `regex`
+/// crate has no lookahead, so this consumes one trailing char instead of asserting it).
+static CHOICE_STANDALONE: Lazy<Regex> =
+    Lazy::new(|| Regex::new(r"(?im)(?:^|[\s(])\(?([a-z])[).:](?:[^a-z]|$)").unwrap());
+
+/// Extract the single option letter the model **selected**, lowercased. Prefers an
+/// explicit "answer: X" verdict; otherwise the last standalone option marker (`(B)`,
+/// `C.`, `D)`); a bare single-letter reply (`"B"`) is taken as-is.
+fn selected_choice(answer: &str) -> Option<char> {
+    let pick = |c: &str| c.chars().next().map(|ch| ch.to_ascii_lowercase());
+    if let Some(m) = CHOICE_VERDICT.captures_iter(answer).last() {
+        return pick(&m[1]);
+    }
+    let bare = answer.trim();
+    if bare.len() == 1 && bare.chars().next().is_some_and(|c| c.is_ascii_alphabetic()) {
+        return pick(bare);
+    }
+    CHOICE_STANDALONE
+        .captures_iter(answer)
+        .last()
+        .and_then(|m| pick(&m[1]))
+}
+
+/// Multiple-choice exact match (TruthfulQA MC1): the model's *selected* option letter
+/// equals the gold letter. Grades the committed choice, not any letter mentioned in
+/// passing, so "B is tempting but the answer is A" scores against A.
+fn choice_exact(answer: &str, gold: &str) -> f64 {
+    let want = gold.trim().chars().next().map(|c| c.to_ascii_lowercase());
+    match (selected_choice(answer), want) {
+        (Some(a), Some(g)) if a == g => 1.0,
+        _ => 0.0,
     }
 }
 
@@ -1173,11 +1221,55 @@ mod tests {
     }
 
     #[test]
+    fn choice_exact_grades_the_selected_letter() {
+        // Bare letter, verbose verdict, and wrapped marker all resolve to the choice.
+        assert_eq!(choice_exact("B", "B"), 1.0);
+        assert_eq!(choice_exact("The answer is C.", "C"), 1.0);
+        assert_eq!(choice_exact("(D)", "D"), 1.0);
+        assert_eq!(choice_exact("answer: a", "A"), 1.0); // case-insensitive
+        // Wrong pick scores 0.
+        assert_eq!(choice_exact("The answer is C.", "B"), 0.0);
+    }
+
+    #[test]
+    fn choice_exact_ignores_letters_merely_discussed() {
+        // The classic trap: B is named but A is the committed answer.
+        assert_eq!(
+            choice_exact("B is tempting, but the correct answer is A.", "A"),
+            1.0
+        );
+        assert_eq!(
+            choice_exact("B is tempting, but the correct answer is A.", "B"),
+            0.0
+        );
+    }
+
+    #[test]
+    fn choice_exact_ignores_abbreviations_in_reasoning() {
+        // "(e.g." / "(i.e." must not be read as option markers e / i. The real pick (D) wins.
+        assert_eq!(
+            choice_exact(
+                "Some options are wrong (e.g. salt water), so I pick (D).",
+                "D"
+            ),
+            1.0
+        );
+        assert_eq!(
+            choice_exact(
+                "Some options are wrong (e.g. salt water), so I pick (D).",
+                "E"
+            ),
+            0.0
+        );
+    }
+
+    #[test]
     fn score_text_returns_none_for_resource_scorers() {
         assert!(score_text(Scorer::PassAtOne, "x", "y").is_none());
         assert!(score_text(Scorer::ToolCallMatch, "x", "y").is_none());
         assert!(score_text(Scorer::LlmJudge, "x", "y").is_none());
         assert!(score_text(Scorer::NumericExact, "5", "5").is_some());
+        assert!(score_text(Scorer::ChoiceExact, "B", "B").is_some());
     }
 
     #[test]
@@ -1185,7 +1277,26 @@ mod tests {
         assert_eq!(Scorer::parse("numeric"), Some(Scorer::NumericExact));
         assert_eq!(Scorer::parse("F1"), Some(Scorer::TokenF1));
         assert_eq!(Scorer::parse("pass@1"), Some(Scorer::PassAtOne));
+        assert_eq!(Scorer::parse("mc1"), Some(Scorer::ChoiceExact));
         assert_eq!(Scorer::parse("nonsense"), None);
+    }
+
+    #[test]
+    fn squad_v2_unanswerable_scores_correct_no_answer_as_hit() {
+        // SQuAD v2 unanswerable cases use gold sentinel "unanswerable" and the
+        // `contains` scorer: a model that correctly declines must score 1.0, and one
+        // that hallucinates a span must score 0.0.
+        assert_eq!(contains_match("unanswerable", "unanswerable"), 1.0);
+        assert_eq!(
+            contains_match(
+                "This question is unanswerable from the context.",
+                "unanswerable"
+            ),
+            1.0
+        );
+        assert_eq!(contains_match("The capital is Paris.", "unanswerable"), 0.0);
+        // Answerable cases keep token-F1 against the gold span (exact span = 1.0).
+        assert_eq!(token_f1("Paris", "Paris"), 1.0);
     }
 
     #[test]
@@ -1194,6 +1305,7 @@ mod tests {
         assert!(Scorer::LlmJudge.needs_resource());
         assert!(!Scorer::NumericExact.needs_resource());
         assert!(!Scorer::TokenF1.needs_resource());
+        assert!(!Scorer::ChoiceExact.needs_resource());
     }
 
     struct StubModel(String);
@@ -1494,6 +1606,54 @@ mod tests {
         assert!(cases[1].request.contains("\"content\":\"hi\""));
         assert_eq!(cases[1].gold, "Paris");
         assert_eq!(cases[1].scorer, Scorer::TokenF1);
+    }
+
+    #[test]
+    fn named_benchmark_corpus_loads_and_scores_offline() {
+        // One line per named benchmark, in the shape `download.py` emits: TruthfulQA MC1
+        // (friendly + choice), SQuAD v2 unanswerable (friendly + contains sentinel), and
+        // BFCL (explicit tool request). Loads through `load_bench_corpus` and scores each
+        // with the resource-free path — no model, no network.
+        let jsonl = r#"
+{"name":"truthfulqa-0","question":"Q?\n\nA) wrong\nB) right\n\nAnswer with the single letter.","gold":"B","scorer":"choice"}
+{"name":"squad-0-noans","context":"The sky is blue.","question":"What is the capital?\nIf the context does not contain the answer, reply with exactly: unanswerable.","gold":"unanswerable","scorer":"contains"}
+{"request":"{\"model\":\"x\",\"messages\":[{\"role\":\"user\",\"content\":\"weather?\"}],\"tools\":[{\"type\":\"function\",\"function\":{\"name\":\"get_weather\"}}]}","gold":"{\"name\":\"get_weather\"}","scorer":"tool"}
+"#;
+        let cases = load_bench_corpus(jsonl, ProviderKind::OpenAi, "gpt-4o").unwrap();
+        assert_eq!(cases.len(), 3);
+        assert_eq!(cases[0].scorer, Scorer::ChoiceExact);
+        assert_eq!(cases[1].scorer, Scorer::ContainsMatch);
+        assert_eq!(cases[2].scorer, Scorer::ToolCallMatch);
+        // The friendly MC1 line assembles the lettered choices into the request.
+        assert!(cases[0].request.contains("B) right"));
+
+        let scorer = BenchScorer {
+            exec_timeout: 10,
+            judge: None,
+            judge_model: String::new(),
+        };
+        // TruthfulQA: the committed letter is graded, a distractor mention is not.
+        assert_eq!(
+            scorer.score(cases[0].scorer, "I'll go with B.", &cases[0].gold),
+            1.0
+        );
+        assert_eq!(
+            scorer.score(cases[0].scorer, "Looks like A.", &cases[0].gold),
+            0.0
+        );
+        // SQuAD v2 unanswerable: a correct refusal is a hit; a hallucinated span is not.
+        assert_eq!(
+            scorer.score(cases[1].scorer, "unanswerable", &cases[1].gold),
+            1.0
+        );
+        assert_eq!(scorer.score(cases[1].scorer, "Paris", &cases[1].gold), 0.0);
+        // BFCL: the right function name scores, a different one does not.
+        let call = r#"{"name":"get_weather","arguments":{}}"#;
+        assert_eq!(scorer.score(cases[2].scorer, call, &cases[2].gold), 1.0);
+        assert_eq!(
+            scorer.score(cases[2].scorer, r#"{"name":"get_time"}"#, &cases[2].gold),
+            0.0
+        );
     }
 
     #[test]
