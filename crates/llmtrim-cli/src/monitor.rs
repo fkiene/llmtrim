@@ -6,9 +6,10 @@
 //! styling goes through `crate::ui`; colour is passed in by the caller, which disables
 //! it for non-TTY stdout or when `NO_COLOR` is set.
 
+use anyhow::Result;
 use serde_json::json;
 
-use crate::tracking::{PeriodRow, Summary};
+use crate::tracking::{ModelRow, Period, PeriodRow, Summary, Tracker};
 use crate::ui::{self, Tone};
 
 // ── view models (built by main from the ledger/daemon/pricing) ──────────────────
@@ -693,6 +694,191 @@ pub fn export_csv(periods: &[PeriodRow]) -> String {
     o
 }
 
+// ── ledger → view models + pricing (the single source of truth shared by the `status`
+//    dashboard and the MCP `llmtrim_stats` tool) ─────────────────────────────────────
+
+/// Full machine-readable stats snapshot from the ledger: the same JSON `status --json`
+/// emits. The MCP server returns this verbatim so a tool call and the dashboard never
+/// disagree. `daemon` is `None` for callers that don't inspect the proxy (the MCP tool),
+/// which renders as `"daemon": null`.
+pub fn stats_json(tracker: &Tracker, daemon: Option<&DaemonView>) -> Result<String> {
+    let summary = tracker.summary()?;
+    let models = model_views(tracker)?;
+    let cost = monitor_cost(tracker);
+    let periods = tracker.by_period(Period::Day)?;
+    Ok(export_json(
+        &summary,
+        &models,
+        cost.as_ref(),
+        &periods,
+        daemon,
+    ))
+}
+
+pub fn monitor_cost(tracker: &Tracker) -> Option<Cost> {
+    let models = tracker.by_model().ok()?;
+    cost_estimate(&models)
+}
+
+/// Per-model rows for the breakdown, top 8 by request volume, priced where the registry
+/// knows the model.
+pub fn model_views(tracker: &Tracker) -> Result<Vec<ModelView>> {
+    let mut models: Vec<ModelView> = tracker
+        .by_model()?
+        .into_iter()
+        .filter(|m| m.events > 0)
+        .map(|m| {
+            // Per-model USD figures where the registry prices the model — used to project the
+            // round-trip the same way the hero does.
+            let priced = m.model.as_deref().and_then(llm_prices);
+            // Frozen-zone meter, per model: the saving over the compressible surface
+            // (metered rows only). `None` until traffic recorded the meter.
+            let new_before = m.metered_input_before - m.frozen_input_tokens;
+            let new_pct = (m.frozen_input_tokens > 0 && new_before > 0).then(|| {
+                ui::saved_pct(
+                    new_before as f64,
+                    (m.metered_input_after - m.frozen_input_tokens) as f64,
+                )
+            });
+            let cost_saved = priced
+                .map(|(inp, _)| (m.input_before - m.input_after).max(0) as f64 / 1_000_000.0 * inp);
+            let out_spend = priced.map(|(_, outp)| m.output_after as f64 / 1_000_000.0 * outp);
+            let spend = priced.map(|(inp, outp)| {
+                m.input_after as f64 / 1_000_000.0 * inp
+                    + m.output_after as f64 / 1_000_000.0 * outp
+            });
+            ModelView {
+                name: m
+                    .model
+                    .unwrap_or_else(|| format!("{} · unknown model", m.provider)),
+                events: m.events,
+                saved_pct: ui::saved_pct(m.input_before as f64, m.input_after as f64),
+                cost_saved,
+                spend,
+                out_spend,
+                cached: m.cache_read > 0,
+                new_pct,
+            }
+        })
+        .collect();
+    models.sort_unstable_by_key(|b| std::cmp::Reverse(b.events));
+    models.truncate(8);
+    Ok(models)
+}
+
+/// Today's priced saving (UTC), for the hero's recency anchor. `None` when nothing
+/// priced ran today — the dashboard hides the figure rather than showing $0.00.
+pub fn today_saved_usd(tracker: &Tracker) -> Option<f64> {
+    let models = tracker.by_model_today().ok()?;
+    cost_estimate(&models).map(|c| c.saved)
+}
+
+fn cache_multipliers(provider: &str) -> (f64, f64) {
+    match provider {
+        "anthropic" => (0.10, 1.25),
+        "openai" => (0.50, 0.0),
+        "google" => (0.25, 0.0),
+        _ => (1.0, 0.0),
+    }
+}
+
+/// USD cost figures priced per model via [`llm_prices`], `None` when no recorded model
+/// is priced.
+///
+/// - `saved`/`spend` value tokens at **list input rates** (tokens cut × input price; the
+///   compressed input_after + measured output). Consistent numerator/denominator — the
+///   headline basis.
+/// - `net_saved` re-prices the same measured saving against the **real bill**: the
+///   provider-reported usage split (fresh × 1.0 + cache writes × 1.25 + cache reads ×
+///   0.1, per provider) gives the actual input bill, and the counterfactual bill scales
+///   it by the measured compression ratio (same cache mix, prompt larger by `pct`):
+///   `net_saved = net_bill × pct / (1 − pct)`. On traffic with no cache usage this
+///   degrades exactly to the list-rate figure.
+/// - `out_spend_shaped` is the output spend from requests that actually carried the
+///   output-shaping instruction — the only spend the benchmark factor may be projected on.
+fn cost_estimate(models: &[ModelRow]) -> Option<Cost> {
+    let mut cost = Cost {
+        saved: 0.0,
+        spend: 0.0,
+        out_spend: 0.0,
+        net_saved: 0.0,
+        out_spend_shaped: 0.0,
+        live_saved: 0.0,
+    };
+    let mut matched = false;
+    for m in models {
+        let Some(model_id) = m.model.as_deref() else {
+            continue;
+        };
+        if let Some((input_price, output_price)) = llm_prices(model_id) {
+            let delta = (m.input_before - m.input_after).max(0) as f64;
+            cost.saved += delta / 1_000_000.0 * input_price;
+            let out = m.output_after as f64 / 1_000_000.0 * output_price;
+            cost.spend += m.input_after as f64 / 1_000_000.0 * input_price + out;
+            cost.out_spend += out;
+            cost.out_spend_shaped += m.output_after_shaped as f64 / 1_000_000.0 * output_price;
+
+            let (read_mult, write_mult) = cache_multipliers(&m.provider);
+            let net_bill = (m.fresh_input_est as f64
+                + m.cache_write as f64 * write_mult
+                + m.cache_read as f64 * read_mult)
+                / 1_000_000.0
+                * input_price;
+            let pct = if m.input_before > 0 {
+                (delta / m.input_before as f64).min(0.95)
+            } else {
+                0.0
+            };
+            cost.net_saved += net_bill * pct / (1.0 - pct);
+            // Live-zone attribution: the cut happens in the compressible zone, billed as
+            // fresh (1×) + cache writes (1.25× on Anthropic) — never at the ~10% read rate
+            // the net blend assumes — so price the cut at that mix. No usage split recorded
+            // → rate 1.0, degrading to the list figure.
+            let live_used = m.fresh_input_est + m.cache_write;
+            let live_rate = if live_used > 0 {
+                (m.fresh_input_est as f64 + m.cache_write as f64 * write_mult.max(1.0))
+                    / live_used as f64
+            } else {
+                1.0
+            };
+            cost.live_saved += delta / 1_000_000.0 * input_price * live_rate;
+            matched = true;
+        }
+    }
+    matched.then_some(cost)
+}
+
+/// Per-1M-token `(input, output)` price for a model: the `llm_providers` registry first,
+/// matched across every provider (the ledger records the wire-shape provider, not the
+/// upstream brand), then the embedded models.dev snapshot for models the registry hasn't
+/// shipped yet (e.g. day-one releases like claude-fable-5 on 0.14.3).
+fn llm_prices(model_id: &str) -> Option<(f64, f64)> {
+    #[cfg(feature = "intercept")]
+    for &provider_id in llm_providers::get_providers_data().keys() {
+        if let Some(model) = llm_providers::get_model_ref(provider_id, model_id) {
+            return Some((model.input_price, model.output_price));
+        }
+    }
+    snapshot_prices(model_id)
+}
+
+/// Fallback table: the pinned models.dev snapshot the bench prices from, embedded at
+/// compile time (the package re-includes bench/pricing.json for this). Exact id first,
+/// then with the `provider/` prefix stripped, mirroring [`crate::bench::resolve_pricing`]
+/// — but zero-priced rows (free tiers, parse gaps) return `None` so an unknown model
+/// shows a blank cost cell rather than a misleading $0.00.
+fn snapshot_prices(model_id: &str) -> Option<(f64, f64)> {
+    use crate::bench;
+    static TABLE: once_cell::sync::Lazy<bench::PriceTable> =
+        once_cell::sync::Lazy::new(|| bench::load_pricing(include_str!("../bench/pricing.json")));
+    let p = TABLE.get(model_id).or_else(|| {
+        let (_, bare) = model_id.split_once('/')?;
+        TABLE.get(bare)
+    })?;
+    let (input, output) = (p.input_per_1k * 1000.0, p.output_per_1k * 1000.0);
+    (input > 0.0 || output > 0.0).then_some((input, output))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -915,6 +1101,39 @@ mod tests {
         let v: serde_json::Value = serde_json::from_str(&out).unwrap();
         assert_eq!(v["requests"], 1204);
         assert_eq!(v["cost"], serde_json::Value::Null);
+    }
+
+    // stats_json is the single source the `status --json` dashboard and the MCP llmtrim_stats
+    // tool both read; assert it assembles real ledger rows into the export shape.
+    #[test]
+    fn stats_json_reads_the_ledger() {
+        use crate::tracking::Record;
+        let tracker = Tracker::open_in_memory().unwrap();
+        for _ in 0..2 {
+            tracker
+                .record(&Record {
+                    provider: "openai".into(),
+                    model: Some("gpt-4o".into()),
+                    tokenizer: "tiktoken".into(),
+                    exact: true,
+                    input_before: 1000,
+                    input_after: 600,
+                    output_before: None,
+                    output_after: None,
+                    compress_micros: None,
+                    cache_read_tokens: None,
+                    fresh_input_tokens: None,
+                    cache_write_tokens: None,
+                    output_shaped: Some(false),
+                    frozen_input_tokens: Some(0),
+                })
+                .unwrap();
+        }
+        let out = stats_json(&tracker, None).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(v["requests"], 2);
+        assert_eq!(v["daemon"], serde_json::Value::Null);
+        assert!(v["by_model"].as_array().is_some_and(|m| !m.is_empty()));
     }
 
     #[test]

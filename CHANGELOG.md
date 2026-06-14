@@ -18,6 +18,16 @@ All notable changes to this project are documented here. The format follows
   are handled correctly: a right "no answer" scores as a hit. A new `choice` (MC1) scorer
   grades TruthfulQA by the selected option letter, not by any letter the model mentions in
   passing.
+- **`llmtrim mcp` runs an MCP server over stdio.** Any MCP client (Claude Code, Cursor,
+  custom agents) can spawn `llmtrim mcp` and call the engine as tools: `llmtrim_compress`
+  (compress a full request body and report the token deltas, honoring your `~/.llmtrim`
+  config like the proxy and CLI), `llmtrim_compress_text` (shrink a single text blob with
+  the lossless `safe` preset, independent of config), and `llmtrim_stats` (read the savings
+  ledger, the same data `llmtrim status --json` shows). Every call records to the same
+  ledger, so MCP traffic shows up in `llmtrim status`. Behind the `mcp` feature, which ships
+  in the default build. `llmtrim mcp install` registers the server with Claude Code via its
+  `claude mcp add` CLI (idempotent); `llmtrim mcp install --print` emits the config block to
+  paste into any other client.
 
 ### Changed
 - **The benchmark commands are now one `bench` subcommand group.** `llmtrim bench` and

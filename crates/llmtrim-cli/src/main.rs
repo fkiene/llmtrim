@@ -199,6 +199,17 @@ enum Commands {
         #[arg(long, short, conflicts_with_all = ["watch", "daily", "weekly", "monthly", "json", "csv"])]
         quiet: bool,
     },
+    /// Run an MCP server over stdio (or `mcp install` to register it with a client)
+    ///
+    /// Exposes llmtrim's compression and savings stats as Model Context Protocol
+    /// tools, so any MCP client (Claude Code, Cursor, custom agents) can compress a
+    /// request and read the ledger directly. Speaks JSON-RPC over stdin/stdout — point
+    /// a client at `command: llmtrim, args: ["mcp"]`. Honors your ~/.llmtrim config like
+    /// the proxy and CLI do. Run `llmtrim mcp install` to register it for you.
+    Mcp {
+        #[command(subcommand)]
+        action: Option<McpAction>,
+    },
     /// Check the install end-to-end and explain anything broken
     ///
     /// Read-only diagnosis: binary, daemon, port, env wiring (persisted + this shell),
@@ -278,6 +289,22 @@ enum BenchCmd {
     Latency(LatencyArgs),
     /// Head-to-head vs a third-party compressor (Python comparators).
     Compare(CompareArgs),
+}
+
+#[derive(Subcommand)]
+enum McpAction {
+    /// Register the llmtrim MCP server with your MCP client
+    ///
+    /// Installs it into Claude Code via its `claude mcp add` CLI (idempotent — re-running
+    /// is a no-op). For any other client, `--print` emits the config block to paste.
+    Install {
+        /// Print the client config JSON instead of installing it.
+        #[arg(long)]
+        print: bool,
+        /// Overwrite an existing `llmtrim` server entry that differs.
+        #[arg(long)]
+        force: bool,
+    },
 }
 
 #[derive(clap::Args)]
@@ -588,6 +615,10 @@ fn run() -> Result<()> {
             ),
         },
         Commands::Update => llmtrim::update::run()?,
+        Commands::Mcp { action } => match action {
+            None => llmtrim::mcp::run()?,
+            Some(McpAction::Install { print, force }) => llmtrim::mcp::install(print, force)?,
+        },
         Commands::Monitor {
             watch,
             interval,
@@ -1565,68 +1596,10 @@ fn daemon_view(summary: &llmtrim::tracking::Summary) -> monitor::DaemonView {
     }
 }
 
-fn monitor_cost(tracker: &Tracker) -> Option<monitor::Cost> {
-    let models = tracker.by_model().ok()?;
-    cost_estimate(&models)
-}
-
-/// Per-model rows for the breakdown, top 8 by request volume, priced where the registry
-/// knows the model.
-fn model_views(tracker: &Tracker) -> Result<Vec<monitor::ModelView>> {
-    let mut models: Vec<monitor::ModelView> = tracker
-        .by_model()?
-        .into_iter()
-        .filter(|m| m.events > 0)
-        .map(|m| {
-            // Per-model USD figures where the registry prices the model — used to project the
-            // round-trip the same way the hero does.
-            let priced = m.model.as_deref().and_then(llm_prices);
-            // Frozen-zone meter, per model: the saving over the compressible surface
-            // (metered rows only). `None` until traffic recorded the meter.
-            let new_before = m.metered_input_before - m.frozen_input_tokens;
-            let new_pct = (m.frozen_input_tokens > 0 && new_before > 0).then(|| {
-                ui::saved_pct(
-                    new_before as f64,
-                    (m.metered_input_after - m.frozen_input_tokens) as f64,
-                )
-            });
-            let cost_saved = priced
-                .map(|(inp, _)| (m.input_before - m.input_after).max(0) as f64 / 1_000_000.0 * inp);
-            let out_spend = priced.map(|(_, outp)| m.output_after as f64 / 1_000_000.0 * outp);
-            let spend = priced.map(|(inp, outp)| {
-                m.input_after as f64 / 1_000_000.0 * inp
-                    + m.output_after as f64 / 1_000_000.0 * outp
-            });
-            monitor::ModelView {
-                name: m
-                    .model
-                    .unwrap_or_else(|| format!("{} · unknown model", m.provider)),
-                events: m.events,
-                saved_pct: ui::saved_pct(m.input_before as f64, m.input_after as f64),
-                cost_saved,
-                spend,
-                out_spend,
-                cached: m.cache_read > 0,
-                new_pct,
-            }
-        })
-        .collect();
-    models.sort_unstable_by_key(|b| std::cmp::Reverse(b.events));
-    models.truncate(8);
-    Ok(models)
-}
-
-/// Today's priced saving (UTC), for the hero's recency anchor. `None` when nothing
-/// priced ran today — the dashboard hides the figure rather than showing $0.00.
-fn today_saved_usd(tracker: &Tracker) -> Option<f64> {
-    let models = tracker.by_model_today().ok()?;
-    cost_estimate(&models).map(|c| c.saved)
-}
-
 fn render_snapshot(tracker: &Tracker, color: bool) -> Result<(String, monitor::Health)> {
     let summary = tracker.summary()?;
-    let models = model_views(tracker)?;
-    let cost = monitor_cost(tracker);
+    let models = monitor::model_views(tracker)?;
+    let cost = monitor::monitor_cost(tracker);
     let daemon = daemon_view(&summary);
     let health = monitor::health(&daemon);
     let mut out = monitor::snapshot(
@@ -1635,7 +1608,7 @@ fn render_snapshot(tracker: &Tracker, color: bool) -> Result<(String, monitor::H
         &summary,
         &models,
         cost.as_ref(),
-        today_saved_usd(tracker),
+        monitor::today_saved_usd(tracker),
     );
     // Passive, cached (≤24h), opt-out update notice (LLMTRIM_NO_UPDATE_CHECK to disable).
     if let Some(v) = llmtrim::update::check(false) {
@@ -1756,14 +1729,14 @@ fn run_monitor(
             print!("{}", monitor::export_csv(&rows));
         } else if json {
             let s = tracker.summary()?;
-            let models = model_views(&tracker)?;
+            let models = monitor::model_views(&tracker)?;
             let daemon = daemon_view(&s);
             println!(
                 "{}",
                 monitor::export_json(
                     &s,
                     &models,
-                    monitor_cost(&tracker).as_ref(),
+                    monitor::monitor_cost(&tracker).as_ref(),
                     &rows,
                     Some(&daemon)
                 )
@@ -1779,23 +1752,12 @@ fn run_monitor(
 
     // Whole-snapshot export (no period selected).
     if json || csv {
-        let rows = tracker.by_period(Period::Day)?;
         if csv {
+            let rows = tracker.by_period(Period::Day)?;
             print!("{}", monitor::export_csv(&rows));
         } else {
-            let s = tracker.summary()?;
-            let models = model_views(&tracker)?;
-            let daemon = daemon_view(&s);
-            println!(
-                "{}",
-                monitor::export_json(
-                    &s,
-                    &models,
-                    monitor_cost(&tracker).as_ref(),
-                    &rows,
-                    Some(&daemon)
-                )
-            );
+            let daemon = daemon_view(&tracker.summary()?);
+            println!("{}", monitor::stats_json(&tracker, Some(&daemon))?);
         }
         return Ok(());
     }
@@ -1821,111 +1783,6 @@ fn run_monitor(
 /// prompt tokens at 50% (no write surcharge); Gemini implicit caching discounts cached
 /// tokens 75%. Unknown providers assume no discount, which collapses the net figure to
 /// the list-rate one instead of inventing a discount.
-fn cache_multipliers(provider: &str) -> (f64, f64) {
-    match provider {
-        "anthropic" => (0.10, 1.25),
-        "openai" => (0.50, 0.0),
-        "google" => (0.25, 0.0),
-        _ => (1.0, 0.0),
-    }
-}
-
-/// USD cost figures priced per model via [`llm_prices`], `None` when no recorded model
-/// is priced.
-///
-/// - `saved`/`spend` value tokens at **list input rates** (tokens cut × input price; the
-///   compressed input_after + measured output). Consistent numerator/denominator — the
-///   headline basis.
-/// - `net_saved` re-prices the same measured saving against the **real bill**: the
-///   provider-reported usage split (fresh × 1.0 + cache writes × 1.25 + cache reads ×
-///   0.1, per provider) gives the actual input bill, and the counterfactual bill scales
-///   it by the measured compression ratio (same cache mix, prompt larger by `pct`):
-///   `net_saved = net_bill × pct / (1 − pct)`. On traffic with no cache usage this
-///   degrades exactly to the list-rate figure.
-/// - `out_spend_shaped` is the output spend from requests that actually carried the
-///   output-shaping instruction — the only spend the benchmark factor may be projected on.
-fn cost_estimate(models: &[llmtrim::tracking::ModelRow]) -> Option<monitor::Cost> {
-    let mut cost = monitor::Cost {
-        saved: 0.0,
-        spend: 0.0,
-        out_spend: 0.0,
-        net_saved: 0.0,
-        out_spend_shaped: 0.0,
-        live_saved: 0.0,
-    };
-    let mut matched = false;
-    for m in models {
-        let Some(model_id) = m.model.as_deref() else {
-            continue;
-        };
-        if let Some((input_price, output_price)) = llm_prices(model_id) {
-            let delta = (m.input_before - m.input_after).max(0) as f64;
-            cost.saved += delta / 1_000_000.0 * input_price;
-            let out = m.output_after as f64 / 1_000_000.0 * output_price;
-            cost.spend += m.input_after as f64 / 1_000_000.0 * input_price + out;
-            cost.out_spend += out;
-            cost.out_spend_shaped += m.output_after_shaped as f64 / 1_000_000.0 * output_price;
-
-            let (read_mult, write_mult) = cache_multipliers(&m.provider);
-            let net_bill = (m.fresh_input_est as f64
-                + m.cache_write as f64 * write_mult
-                + m.cache_read as f64 * read_mult)
-                / 1_000_000.0
-                * input_price;
-            let pct = if m.input_before > 0 {
-                (delta / m.input_before as f64).min(0.95)
-            } else {
-                0.0
-            };
-            cost.net_saved += net_bill * pct / (1.0 - pct);
-            // Live-zone attribution: the cut happens in the compressible zone, billed as
-            // fresh (1×) + cache writes (1.25× on Anthropic) — never at the ~10% read rate
-            // the net blend assumes — so price the cut at that mix. No usage split recorded
-            // → rate 1.0, degrading to the list figure.
-            let live_used = m.fresh_input_est + m.cache_write;
-            let live_rate = if live_used > 0 {
-                (m.fresh_input_est as f64 + m.cache_write as f64 * write_mult.max(1.0))
-                    / live_used as f64
-            } else {
-                1.0
-            };
-            cost.live_saved += delta / 1_000_000.0 * input_price * live_rate;
-            matched = true;
-        }
-    }
-    matched.then_some(cost)
-}
-
-/// Per-1M-token `(input, output)` price for a model: the `llm_providers` registry first,
-/// matched across every provider (the ledger records the wire-shape provider, not the
-/// upstream brand), then the embedded models.dev snapshot for models the registry hasn't
-/// shipped yet (e.g. day-one releases like claude-fable-5 on 0.14.3).
-fn llm_prices(model_id: &str) -> Option<(f64, f64)> {
-    #[cfg(feature = "intercept")]
-    for &provider_id in llm_providers::get_providers_data().keys() {
-        if let Some(model) = llm_providers::get_model_ref(provider_id, model_id) {
-            return Some((model.input_price, model.output_price));
-        }
-    }
-    snapshot_prices(model_id)
-}
-
-/// Fallback table: the pinned models.dev snapshot the bench prices from, embedded at
-/// compile time (the package re-includes bench/pricing.json for this). Exact id first,
-/// then with the `provider/` prefix stripped, mirroring [`bench::resolve_pricing`] — but
-/// zero-priced rows (free tiers, parse gaps) return `None` so an unknown model shows a
-/// blank cost cell rather than a misleading $0.00.
-fn snapshot_prices(model_id: &str) -> Option<(f64, f64)> {
-    static TABLE: once_cell::sync::Lazy<bench::PriceTable> =
-        once_cell::sync::Lazy::new(|| bench::load_pricing(include_str!("../bench/pricing.json")));
-    let p = TABLE.get(model_id).or_else(|| {
-        let (_, bare) = model_id.split_once('/')?;
-        TABLE.get(bare)
-    })?;
-    let (input, output) = (p.input_per_1k * 1000.0, p.output_per_1k * 1000.0);
-    (input > 0.0 || output > 0.0).then_some((input, output))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

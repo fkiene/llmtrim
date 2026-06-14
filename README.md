@@ -14,6 +14,10 @@
 </p>
 
 <p align="center">
+  <sub>Use it as a <b>proxy</b>, a <b>CLI</b>, an <b>MCP server</b>, or a <b>library</b> (Python · Ruby · Swift · Kotlin).</sub>
+</p>
+
+<p align="center">
   <a href="https://github.com/fkiene/llmtrim/actions/workflows/ci.yml"><img src="https://github.com/fkiene/llmtrim/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-AGPL--3.0-blue" alt="License: AGPL v3"></a>
   <a href="https://crates.io/crates/llmtrim"><img src="https://img.shields.io/crates/v/llmtrim" alt="crates.io"></a>
@@ -243,6 +247,23 @@ print(out.input_tokens_before, "->", out.input_tokens_after)
 
 > [!NOTE]
 > Every binding returns the compressed `request_json` plus the before/after token counts, and maps errors to native exceptions. Per-language install and usage live in [`crates/llmtrim-uniffi`](crates/llmtrim-uniffi).
+
+**MCP server.** `llmtrim mcp` speaks the [Model Context Protocol](https://modelcontextprotocol.io) over stdin/stdout, so any MCP client can compress payloads and read your savings without the proxy. It exposes three tools: `llmtrim_compress` (compress a full request body, honoring your `~/.llmtrim` config like the proxy), `llmtrim_compress_text` (shrink one text blob, lossless), and `llmtrim_stats` (your savings ledger). Every call records to the same ledger, so MCP traffic shows up in `llmtrim status`.
+
+```bash
+llmtrim mcp install          # register with Claude Code (one command)
+llmtrim mcp install --print  # or print the config to paste into any other client
+```
+
+The printed block is the standard MCP config; for a client you edit by hand it looks like:
+
+```json
+{
+  "mcpServers": {
+    "llmtrim": { "command": "llmtrim", "args": ["mcp"] }
+  }
+}
+```
 
 ## Works with
 

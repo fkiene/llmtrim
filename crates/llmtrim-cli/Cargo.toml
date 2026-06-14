@@ -72,6 +72,16 @@ llm_providers = { version = "0.14", optional = true }
 # whose new blanket impl collides with rcgen 0.14's `impl<T: Into<String>> From<T>`
 # (E0119), breaking un-`--locked` `cargo install`. Drop when rcgen ships a fix.
 time = { version = ">=0.3.36, <0.3.48", default-features = false, optional = true }
+# MCP server over stdio (`mcp`). rmcp is the official Model Context Protocol Rust SDK;
+# `transport-io` is the stdio transport, `macros` derives each tool's JSON Schema.
+rmcp = { version = "1.7", default-features = false, features = ["server", "macros", "transport-io"], optional = true }
+schemars = { version = "1", optional = true }
+
+# The protocol-level MCP test (`tests/mcp_protocol.rs`, gated on the `mcp` feature) drives
+# the server through an in-memory client, which needs rmcp's `client` side. Dev-only —
+# the shipped binary keeps just the server features above.
+[dev-dependencies]
+rmcp = { version = "1.7", default-features = false, features = ["client", "transport-io"] }
 
 [target.'cfg(not(windows))'.dependencies]
 auto-launch = "0.6.0"
@@ -80,9 +90,14 @@ auto-launch = "0.6.0"
 winreg = "0.56"
 
 [features]
-default = ["intercept"]
+# `mcp` is in `default` (like `intercept`) because the release binaries are built with
+# default features only; the whole point of `llmtrim mcp` is that MCP clients can spawn the
+# shipped binary, so it must carry the command. Cost is rmcp + schemars (modest next to the
+# hudsucker/tokio stack intercept already pulls).
+default = ["intercept", "mcp"]
 live = ["dep:async-openai", "dep:reqwest", "dep:tokio"]
 intercept = ["dep:hudsucker", "dep:tokio", "dep:async-trait", "dep:http-body-util", "dep:bytes", "dep:llm_providers", "dep:time"]
+mcp = ["dep:rmcp", "dep:schemars", "dep:tokio"]
 
 [lints]
 workspace = true

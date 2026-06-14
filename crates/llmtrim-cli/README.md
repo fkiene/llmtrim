@@ -44,6 +44,8 @@ echo '{"model":"gpt-4o","messages":[...]}' | llmtrim send     --provider openai 
 
 **Zero config needed.** The default `auto` mode inspects each request and picks the right compressors for its shape (tool-heavy → `agent`, code → `code`, long context → `rag`, else `aggressive`). Force one with `LLMTRIM_PRESET=<name>`.
 
+Or expose the engine to an MCP client. `llmtrim mcp` runs a [Model Context Protocol](https://modelcontextprotocol.io) server over stdin/stdout with three tools, `llmtrim_compress`, `llmtrim_compress_text`, and `llmtrim_stats`, recording to the same savings ledger as the proxy. Run `llmtrim mcp install` to register it with Claude Code, or `llmtrim mcp install --print` to get the config for any other client.
+
 ## As a library
 
 The compression engine is the [`llmtrim-core`](https://crates.io/crates/llmtrim-core) crate (no network, no async), with native bindings for **Python, Ruby, Swift and Kotlin** (see the [project README](https://github.com/fkiene/llmtrim)).
