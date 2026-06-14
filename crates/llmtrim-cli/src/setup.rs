@@ -440,20 +440,25 @@ pub fn run(requested: Option<u16>) -> Result<()> {
         )
     );
 
-    // caveman (the output-compression skill) shapes replies the same way Stage F does;
-    // stacked, the two inject competing style instructions into the same prompt, and our
-    // A/B measured telegraphic output hurting quality. Warn and print caveman's *own*
-    // uninstall commands — never run them ourselves: removing another tool is the
-    // user's call, not setup's.
+    // caveman (the output-compression skill) shapes model output on every request. llmtrim's
+    // `auto` already shapes output where it pays (code / long context / plain prose), and
+    // deliberately skips it on agent traffic — tool-call replies are already short,
+    // so terse shaping there saves no tokens (bench/README glaive: cost ~-5%, quality +0pp).
+    // So caveman is redundant where output shaping helps and a no-op win where it doesn't.
+    // Warn and print caveman's *own* uninstall commands — never run them ourselves: removing
+    // another tool is the user's call, not setup's.
     if caveman_installed() {
         println!();
         println!(
             "{}",
             ui::warn(
                 color,
-                "caveman detected — it compresses model output, which llmtrim already does \
-                 (Stage F). Stacked, the two inject competing style instructions; our A/B \
-                 measured telegraphic output hurting answer quality. Consider removing it:"
+                "caveman detected. It shapes model output on every request. llmtrim's auto \
+                 mode already shapes output where it pays (code, long context, plain prose) \
+                 and skips it on tool-calling agent traffic on purpose: tool-call replies are \
+                 already short, so terse shaping there saves no tokens (our bench measured \
+                 quality neutral). So caveman adds nothing llmtrim does not already do where \
+                 it helps. To remove it:"
             )
         );
         #[cfg(not(windows))]
