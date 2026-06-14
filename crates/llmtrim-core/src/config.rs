@@ -364,8 +364,9 @@ impl DenseConfig {
                 c.serialize_flatten = true; // dot-flatten nested tool-result JSON
                 c.serialize_buckets = true; // bucket heterogeneous record arrays
                 c.json_crush = true; // sample huge record arrays to representatives
-                // No terse output here: on tool-calling traffic it gave ~no cost benefit
-                // (glaive cost 7%) and a quality dip (100→92 at n=12) — see bench/README.
+                // No terse output here: short tool-call replies leave nothing to trim, so it
+                // gave ~no cost benefit (glaive cost 5%) at neutral quality (n=39 +0.0pp,
+                // CI ±5.2 — the n=12 -8pp was noise; see bench/README).
                 c.multimodal = true; // downscale images to the provider cap (see `rag` note)
                 c.strip_base64 = true; // elide base64 blobs (measured +0.0pp, see `rag` note)
                 // ngram dropped: ~10–106 tok on agent traffic (bench) for an injected

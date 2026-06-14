@@ -6,6 +6,15 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Fixed
+- **`setup`'s caveman warning no longer claims llmtrim shapes output the same way caveman
+  does.** caveman users run coding agents, which route to the `agent` preset where `auto`
+  deliberately leaves output unshaped, so the old "llmtrim already does this (Stage F)" reason
+  was wrong for exactly the people who saw it. The warning now explains that `auto` already
+  shapes output where it pays (code, long context, plain prose) and skips tool-call traffic
+  because terse shaping saves no tokens on short replies (bench: quality neutral), so caveman
+  is redundant either way.
+
 ## [0.1.10] - 2026-06-14
 
 ### Added
