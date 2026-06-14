@@ -6,6 +6,12 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+- **Language bindings now expose the per-stage compression breakdown.** `CompressOutput`
+  carries a `stages` list (one `StageReport` per pipeline stage: `name`, `applied`,
+  `tokens_before`, `tokens_after`, `note`), so embedders in Python, Ruby, Swift and Kotlin
+  can attribute the input-token reduction to each stage instead of only seeing the total.
+
 ### Fixed
 - **Windows autostart no longer leaves a console window open.** The login Run-key entry
   launched `serve --supervised` as a foreground console app, so Explorer opened a terminal

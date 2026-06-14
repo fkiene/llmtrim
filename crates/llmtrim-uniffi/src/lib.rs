@@ -29,6 +29,25 @@ impl From<Provider> for ProviderKind {
     }
 }
 
+/// What one pipeline stage did to the request, projected from
+/// [`llmtrim_core::pipeline::StageReport`]. The token counts are over the content the
+/// stage saw, so `tokens_before - tokens_after` is that stage's own contribution to the
+/// total input reduction (mirrors the per-strategy breakdown other compressors report).
+#[derive(uniffi::Record, Debug)]
+pub struct StageReport {
+    /// Stage identifier, e.g. `toolout`, `retrieve`, `dedup`, `output`.
+    pub name: String,
+    /// Whether the stage actually changed the request (a stage can run yet be a no-op, or
+    /// be reverted by the token gate when it would not have saved tokens).
+    pub applied: bool,
+    /// Content tokens the stage saw before running.
+    pub tokens_before: u64,
+    /// Content tokens after the stage ran.
+    pub tokens_after: u64,
+    /// Optional human-readable note (e.g. why a stage was skipped or gated).
+    pub note: Option<String>,
+}
+
 /// The result of compressing one request body.
 #[derive(uniffi::Record, Debug)]
 pub struct CompressOutput {
@@ -51,6 +70,9 @@ pub struct CompressOutput {
     pub frozen_input_tokens: u64,
     /// Whether output-shaping (Stage F) ran on this request.
     pub output_shaped: bool,
+    /// Per-stage breakdown, in pipeline order. Each entry is one stage's own token
+    /// contribution; sum the deltas of applied stages to attribute the total reduction.
+    pub stages: Vec<StageReport>,
 }
 
 /// Errors surfaced to the bound language.
@@ -87,6 +109,17 @@ fn project(r: llmtrim_core::CompressResult) -> CompressOutput {
         input_tokens_after: r.input_tokens_after.0 as u64,
         frozen_input_tokens: r.frozen_input_tokens.0 as u64,
         output_shaped: r.output_shaped,
+        stages: r
+            .stages
+            .into_iter()
+            .map(|s| StageReport {
+                name: s.name,
+                applied: s.applied,
+                tokens_before: s.tokens_before.0 as u64,
+                tokens_after: s.tokens_after.0 as u64,
+                note: s.note,
+            })
+            .collect(),
     }
 }
 
@@ -148,6 +181,14 @@ mod tests {
         assert_eq!(out.provider, "anthropic");
         assert!(out.input_tokens_after <= out.input_tokens_before);
         assert!(!out.request_json.is_empty());
+        // The per-stage breakdown projects through: a tool-output-heavy request under the
+        // `agent` preset runs at least one stage, and at least one of them applies and saves.
+        assert!(!out.stages.is_empty());
+        assert!(
+            out.stages
+                .iter()
+                .any(|s| s.applied && s.tokens_after < s.tokens_before)
+        );
     }
 
     #[test]
