@@ -19,6 +19,10 @@ All notable changes to this project are documented here. The format follows
   suite, agent) wraps its body in `{ schema, produced_at, commit, llmtrim_version, meta,
   result }`, so any consumer can identify the schema and the code that produced it. The
   README/chart synthesizers unwrap it transparently and still read pre-envelope files.
+- **`bench quality --offline --json-out` now writes its results.** Previously `--json-out`
+  was honored only on live runs, so the free offline savings pass produced nothing on disk.
+  It now writes a `quality-offline-v1` envelope (per-case input-token before/after plus the
+  totals), which makes `bench suite --offline` reproducible without an API key.
 
 ### Fixed
 - **`setup`'s caveman warning no longer claims llmtrim shapes output the same way caveman
