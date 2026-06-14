@@ -237,6 +237,21 @@ def main():
         "`llmtrim bench --corpus bench/data/<c>.jsonl --preset aggressive --ablate`.\n"
     )
 
+    lines.append("\n## Head-to-head: Headroom\n")
+    lines.append(
+        "Both libraries run through their Python APIs on the same inputs and the same "
+        "`o200k_base` denominator. Full tables (input saved, per-stage attribution, latency, "
+        "and the live gpt-oss-20b output A/B) are in "
+        "[results-vs-headroom/README.md](results-vs-headroom/README.md).\n"
+    )
+    lines.append("```bash")
+    lines.append("crates/llmtrim-uniffi/scripts/build-wheel.sh --release   # build the llmtrim wheel")
+    lines.append("pip install --user target/wheels/llmtrim-*.whl")
+    lines.append("pip install --user -r bench/scripts/requirements-vs-headroom.txt")
+    lines.append("python3 bench/scripts/vs_headroom.py                     # deterministic axes (offline)")
+    lines.append("python3 bench/scripts/vs_headroom.py --live --live-n 12  # output A/B (needs OPENROUTER_API_KEY)")
+    lines.append("```")
+
     readme = os.path.join(HERE, "README.md")
     open(readme, "w").write("\n".join(lines) + "\n")
     print(f"wrote {readme} ({len(results)} corpora)")

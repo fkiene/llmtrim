@@ -1,0 +1,7 @@
+# Dependencies for bench/scripts/vs_headroom.py (the llmtrim-vs-Headroom head-to-head).
+# The llmtrim wheel itself is built locally and installed separately:
+#   crates/llmtrim-uniffi/scripts/build-wheel.sh
+#   pip install --user target/wheels/llmtrim-*.whl
+tiktoken==0.8.0      # the shared o200k_base encoder (fair denominator for both tools)
+headroom-ai==0.25.0  # Headroom's Python library (pulls litellm + a ModernBERT model)
+openai==2.41.1       # only used by --live (OpenRouter is OpenAI-compatible)

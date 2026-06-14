@@ -202,20 +202,7 @@ llmtrim uninstall   # exact inverse of setup: removes all three changes
 
 ## Use it as a CLI or library
 
-The same compression runs with no proxy and no setup. No extra model calls, no network: the deterministic engine runs in your process, either as a one-shot CLI or as an embedded library.
-
-### As a CLI
-
-Pipe a request in, get a compressed one out:
-
-```bash
-echo '{"model":"gpt-4o","messages":[...]}' | llmtrim compress --provider openai > out.json
-echo '{"model":"gpt-4o","messages":[...]}' | llmtrim send     --provider openai   # compress, call, print
-```
-
-### As a library
-
-An embeddable Rust crate, or native bindings for **Python, Ruby, Swift and Kotlin**:
+The same compression runs with no proxy and no setup, as a one-shot CLI, an embeddable Rust crate, or native bindings for **Python, Ruby, Swift and Kotlin**. No extra model calls, no network: the deterministic engine runs in your process.
 
 | Language | Install |
 |---|---|
@@ -224,6 +211,13 @@ An embeddable Rust crate, or native bindings for **Python, Ruby, Swift and Kotli
 | Ruby | `gem install llmtrim` |
 | Kotlin | `implementation("io.github.fkiene:llmtrim:0.1.9")` (Maven Central) |
 | Swift | `.package(url: "https://github.com/fkiene/llmtrim-swift", from: "0.1.8")` (SwiftPM) |
+
+**CLI.** Pipe a request in, get a compressed one out:
+
+```bash
+echo '{"model":"gpt-4o","messages":[...]}' | llmtrim compress --provider openai > out.json
+echo '{"model":"gpt-4o","messages":[...]}' | llmtrim send     --provider openai   # compress, call, print
+```
 
 **Rust.** The engine is the [`llmtrim-core`](https://crates.io/crates/llmtrim-core) crate (no `tokio`, no network in its dependency tree):
 
@@ -341,6 +335,16 @@ Three neighbors each compress one layer of the problem; llmtrim does the whole r
 | Install: one static binary | ✅ | Python + GB models | ✅ | ✅ |
 | Overhead added / request | **<10 ms** | 52 ms median | <10 ms | n/a |
 | Prompt overhead injected | **19 tokens** | n/a | n/a | 949 tokens |
+
+Headroom is the closest comparison, so we measured it directly: both libraries run through their Python APIs on the same inputs and the same `o200k_base` tokenizer.
+
+| on tool output | llmtrim | Headroom |
+|---|:--:|:--:|
+| input tokens removed | **84%** | 36% |
+| compress latency (warm median) | **~4 ms** | ~14 ms |
+| per-stage breakdown of where tokens went | yes | no |
+
+llmtrim removes more, compresses faster (pure algorithm, no model to load), and reports which stage removed what. Latency jitters run to run; the [artifact](crates/llmtrim-cli/bench/results-vs-headroom/README.md#head-to-head-headroom) holds the committed warm medians. The gap is wider on everyday traffic: Headroom only rewrites tool results, and runs a local ModernBERT model to do it, so on plain chat, RAG, and code requests it mostly passes through while llmtrim still compresses. Method notes and full tables are in [bench/README.md](crates/llmtrim-cli/bench/README.md#head-to-head-headroom); reproduce with `bench/scripts/vs_headroom.py`.
 
 They also **stack**: llmtrim removes another ~35% from Claude Code's resent tool schemas on top of RTK. Detailed head-to-heads with [RTK](https://github.com/rtk-ai/rtk), [Headroom](https://github.com/chopratejas/headroom), and [caveman](https://github.com/JuliusBrussee/caveman) are in [crates/llmtrim-cli/bench/README.md](crates/llmtrim-cli/bench/README.md).
 

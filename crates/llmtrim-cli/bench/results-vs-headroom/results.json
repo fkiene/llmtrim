@@ -1,0 +1,5252 @@
+{
+  "meta": {
+    "model": "openai/gpt-oss-20b",
+    "preset": "agent",
+    "repeats": 9,
+    "encoder": "o200k_base",
+    "headroom": true
+  },
+  "cases": [
+    {
+      "group": "tool-output",
+      "name": "json_100",
+      "llmtrim": {
+        "before": 5436,
+        "after": 2187,
+        "ms": 7.151404395699501,
+        "stages": [
+          {
+            "name": "toolout",
+            "applied": false,
+            "tokens_before": 5437,
+            "tokens_after": 5437,
+            "note": "no token reduction"
+          },
+          {
+            "name": "image",
+            "applied": true,
+            "tokens_before": 5437,
+            "tokens_after": 5437,
+            "note": null
+          },
+          {
+            "name": "hygiene",
+            "applied": true,
+            "tokens_before": 5437,
+            "tokens_after": 4234,
+            "note": null
+          },
+          {
+            "name": "json-crush",
+            "applied": true,
+            "tokens_before": 4234,
+            "tokens_after": 2188,
+            "note": null
+          },
+          {
+            "name": "serialize-toon",
+            "applied": false,
+            "tokens_before": 2188,
+            "tokens_after": 2188,
+            "note": "no token reduction"
+          },
+          {
+            "name": "dedup",
+            "applied": false,
+            "tokens_before": 2188,
+            "tokens_after": 2188,
+            "note": "no token reduction"
+          },
+          {
+            "name": "tools",
+            "applied": false,
+            "tokens_before": 2188,
+            "tokens_after": 2188,
+            "note": "no token reduction"
+          },
+          {
+            "name": "cache",
+            "applied": true,
+            "tokens_before": 2188,
+            "tokens_after": 2188,
+            "note": null
+          }
+        ]
+      },
+      "headroom": {
+        "before": 5436,
+        "after": 3254,
+        "ms": 16.872232779860497,
+        "transforms": [
+          "router:protected:user_message",
+          "router:smart_crusher:0.20",
+          "router:protected:user_message"
+        ]
+      }
+    },
+    {
+      "group": "tool-output",
+      "name": "json_500",
+      "llmtrim": {
+        "before": 27036,
+        "after": 2187,
+        "ms": 30.823973938822746,
+        "stages": [
+          {
+            "name": "toolout",
+            "applied": false,
+            "tokens_before": 27037,
+            "tokens_after": 27037,
+            "note": "no token reduction"
+          },
+          {
+            "name": "image",
+            "applied": true,
+            "tokens_before": 27037,
+            "tokens_after": 27037,
+            "note": null
+          },
+          {
+            "name": "hygiene",
+            "applied": true,
+            "tokens_before": 27037,
+            "tokens_after": 21034,
+            "note": null
+          },
+          {
+            "name": "json-crush",
+            "applied": true,
+            "tokens_before": 21034,
+            "tokens_after": 2188,
+            "note": null
+          },
+          {
+            "name": "serialize-toon",
+            "applied": false,
+            "tokens_before": 2188,
+            "tokens_after": 2188,
+            "note": "no token reduction"
+          },
+          {
+            "name": "dedup",
+            "applied": false,
+            "tokens_before": 2188,
+            "tokens_after": 2188,
+            "note": "no token reduction"
+          },
+          {
+            "name": "tools",
+            "applied": false,
+            "tokens_before": 2188,
+            "tokens_after": 2188,
+            "note": "no token reduction"
+          },
+          {
+            "name": "cache",
+            "applied": true,
+            "tokens_before": 2188,
+            "tokens_after": 2188,
+            "note": null
+          }
+        ]
+      },
+      "headroom": {
+        "before": 27036,
+        "after": 16054,
+        "ms": 48.12321998178959,
+        "transforms": [
+          "router:protected:user_message",
+          "router:smart_crusher:0.20",
+          "router:protected:user_message"
+        ]
+      }
+    },
+    {
+      "group": "tool-output",
+      "name": "shell_200",
+      "llmtrim": {
+        "before": 4417,
+        "after": 457,
+        "ms": 4.005918279290199,
+        "stages": [
+          {
+            "name": "toolout",
+            "applied": true,
+            "tokens_before": 4417,
+            "tokens_after": 458,
+            "note": null
+          },
+          {
+            "name": "image",
+            "applied": true,
+            "tokens_before": 458,
+            "tokens_after": 458,
+            "note": null
+          },
+          {
+            "name": "hygiene",
+            "applied": false,
+            "tokens_before": 458,
+            "tokens_after": 458,
+            "note": "no token reduction"
+          },
+          {
+            "name": "json-crush",
+            "applied": false,
+            "tokens_before": 458,
+            "tokens_after": 458,
+            "note": "no token reduction"
+          },
+          {
+            "name": "serialize-toon",
+            "applied": false,
+            "tokens_before": 458,
+            "tokens_after": 458,
+            "note": "no token reduction"
+          },
+          {
+            "name": "dedup",
+            "applied": false,
+            "tokens_before": 458,
+            "tokens_after": 458,
+            "note": "no token reduction"
+          },
+          {
+            "name": "tools",
+            "applied": false,
+            "tokens_before": 458,
+            "tokens_after": 458,
+            "note": "no token reduction"
+          },
+          {
+            "name": "cache",
+            "applied": true,
+            "tokens_before": 458,
+            "tokens_after": 458,
+            "note": null
+          }
+        ]
+      },
+      "headroom": {
+        "before": 4417,
+        "after": 2568,
+        "ms": 13.83836381137371,
+        "transforms": [
+          "router:protected:user_message",
+          "router:text:0.63",
+          "router:protected:user_message"
+        ]
+      }
+    },
+    {
+      "group": "tool-output",
+      "name": "buildlog_200",
+      "llmtrim": {
+        "before": 2207,
+        "after": 79,
+        "ms": 2.7093831449747086,
+        "stages": [
+          {
+            "name": "toolout",
+            "applied": true,
+            "tokens_before": 2207,
+            "tokens_after": 79,
+            "note": null
+          },
+          {
+            "name": "image",
+            "applied": true,
+            "tokens_before": 79,
+            "tokens_after": 79,
+            "note": null
+          },
+          {
+            "name": "hygiene",
+            "applied": false,
+            "tokens_before": 79,
+            "tokens_after": 79,
+            "note": "no token reduction"
+          },
+          {
+            "name": "json-crush",
+            "applied": false,
+            "tokens_before": 79,
+            "tokens_after": 79,
+            "note": "no token reduction"
+          },
+          {
+            "name": "serialize-toon",
+            "applied": false,
+            "tokens_before": 79,
+            "tokens_after": 79,
+            "note": "no token reduction"
+          },
+          {
+            "name": "dedup",
+            "applied": false,
+            "tokens_before": 79,
+            "tokens_after": 79,
+            "note": "no token reduction"
+          },
+          {
+            "name": "tools",
+            "applied": false,
+            "tokens_before": 79,
+            "tokens_after": 79,
+            "note": "no token reduction"
+          },
+          {
+            "name": "cache",
+            "applied": true,
+            "tokens_before": 79,
+            "tokens_after": 79,
+            "note": null
+          }
+        ]
+      },
+      "headroom": {
+        "before": 2207,
+        "after": 2207,
+        "ms": 2.4783387780189514,
+        "transforms": [
+          "router:protected:user_message",
+          "router:protected:error_output",
+          "router:protected:user_message"
+        ]
+      }
+    },
+    {
+      "group": "tool-output",
+      "name": "grep_150",
+      "llmtrim": {
+        "before": 2118,
+        "after": 1836,
+        "ms": 3.3102165907621384,
+        "stages": [
+          {
+            "name": "toolout",
+            "applied": true,
+            "tokens_before": 2119,
+            "tokens_after": 1837,
+            "note": null
+          },
+          {
+            "name": "image",
+            "applied": true,
+            "tokens_before": 1837,
+            "tokens_after": 1837,
+            "note": null
+          },
+          {
+            "name": "hygiene",
+            "applied": false,
+            "tokens_before": 1837,
+            "tokens_after": 1837,
+            "note": "no token reduction"
+          },
+          {
+            "name": "json-crush",
+            "applied": false,
+            "tokens_before": 1837,
+            "tokens_after": 1837,
+            "note": "no token reduction"
+          },
+          {
+            "name": "serialize-toon",
+            "applied": false,
+            "tokens_before": 1837,
+            "tokens_after": 1837,
+            "note": "no token reduction"
+          },
+          {
+            "name": "dedup",
+            "applied": false,
+            "tokens_before": 1837,
+            "tokens_after": 1837,
+            "note": "no token reduction"
+          },
+          {
+            "name": "tools",
+            "applied": false,
+            "tokens_before": 1837,
+            "tokens_after": 1837,
+            "note": "no token reduction"
+          },
+          {
+            "name": "cache",
+            "applied": true,
+            "tokens_before": 1837,
+            "tokens_after": 1837,
+            "note": null
+          }
+        ]
+      },
+      "headroom": {
+        "before": 2118,
+        "after": 2118,
+        "ms": 8.615454658865929,
+        "transforms": [
+          "router:protected:user_message",
+          "router:protected:recent_code",
+          "router:protected:user_message"
+        ]
+      }
+    },
+    {
+      "group": "general",
+      "name": "gsm8k-0",
+      "llmtrim": {
+        "before": 74,
+        "after": 74,
+        "ms": 0.2857279032468796,
+        "stages": [
+          {
+            "name": "toolout",
+            "applied": false,
+            "tokens_before": 74,
+            "tokens_after": 74,
+            "note": "no token reduction"
+          },
+          {
+            "name": "image",
+            "applied": true,
+            "tokens_before": 74,
+            "tokens_after": 74,
+            "note": null
+          },
+          {
+            "name": "hygiene",
+            "applied": false,
+            "tokens_before": 74,
+            "tokens_after": 74,
+            "note": "no token reduction"
+          },
+          {
+            "name": "json-crush",
+            "applied": false,
+            "tokens_before": 74,
+            "tokens_after": 74,
+            "note": "no token reduction"
+          },
+          {
+            "name": "serialize-toon",
+            "applied": false,
+            "tokens_before": 74,
+            "tokens_after": 74,
+            "note": "no token reduction"
+          },
+          {
+            "name": "dedup",
+            "applied": false,
+            "tokens_before": 74,
+            "tokens_after": 74,
+            "note": "no token reduction"
+          },
+          {
+            "name": "tools",
+            "applied": false,
+            "tokens_before": 74,
+            "tokens_after": 74,
+            "note": "no token reduction"
+          },
+          {
+            "name": "cache",
+            "applied": true,
+            "tokens_before": 74,
+            "tokens_after": 74,
+            "note": null
+          }
+        ]
+      },
+      "headroom": {
+        "before": 74,
+        "after": 74,
+        "ms": 0.1991111785173416,
+        "transforms": [
+          "router:protected:user_message"
+        ]
+      }
+    },
+    {
+      "group": "general",
+      "name": "gsm8k-1",
+      "llmtrim": {
+        "before": 37,
+        "after": 37,
+        "ms": 0.19008107483386993,
+        "stages": [
+          {
+            "name": "toolout",
+            "applied": false,
+            "tokens_before": 37,
+            "tokens_after": 37,
+            "note": "no token reduction"
+          },
+          {
+            "name": "image",
+            "applied": true,
+            "tokens_before": 37,
+            "tokens_after": 37,
+            "note": null
+          },
+          {
+            "name": "hygiene",
+            "applied": false,
+            "tokens_before": 37,
+            "tokens_after": 37,
+            "note": "no token reduction"
+          },
+          {
+            "name": "json-crush",
+            "applied": false,
+            "tokens_before": 37,
+            "tokens_after": 37,
+            "note": "no token reduction"
+          },
+          {
+            "name": "serialize-toon",
+            "applied": false,
+            "tokens_before": 37,
+            "tokens_after": 37,
+            "note": "no token reduction"
+          },
+          {
+            "name": "dedup",
+            "applied": false,
+            "tokens_before": 37,
+            "tokens_after": 37,
+            "note": "no token reduction"
+          },
+          {
+            "name": "tools",
+            "applied": false,
+            "tokens_before": 37,
+            "tokens_after": 37,
+            "note": "no token reduction"
+          },
+          {
+            "name": "cache",
+            "applied": true,
+            "tokens_before": 37,
+            "tokens_after": 37,
+            "note": null
+          }
+        ]
+      },
+      "headroom": {
+        "before": 37,
+        "after": 37,
+        "ms": 0.15271082520484924,
+        "transforms": [
+          "router:protected:user_message"
+        ]
+      }
+    },
+    {
+      "group": "general",
+      "name": "gsm8k-2",
+      "llmtrim": {
+        "before": 60,
+        "after": 60,
+        "ms": 0.22450461983680725,
+        "stages": [
+          {
+            "name": "toolout",
+            "applied": false,
+            "tokens_before": 60,
+            "tokens_after": 60,
+            "note": "no token reduction"
+          },
+          {
+            "name": "image",
+            "applied": true,
+            "tokens_before": 60,
+            "tokens_after": 60,
+            "note": null
+          },
+          {
+            "name": "hygiene",
+            "applied": false,
+            "tokens_before": 60,
+            "tokens_after": 60,
+            "note": "no token reduction"
+          },
+          {
+            "name": "json-crush",
+            "applied": false,
+            "tokens_before": 60,
+            "tokens_after": 60,
+            "note": "no token reduction"
+          },
+          {
+            "name": "serialize-toon",
+            "applied": false,
+            "tokens_before": 60,
+            "tokens_after": 60,
+            "note": "no token reduction"
+          },
+          {
+            "name": "dedup",
+            "applied": false,
+            "tokens_before": 60,
+            "tokens_after": 60,
+            "note": "no token reduction"
+          },
+          {
+            "name": "tools",
+            "applied": false,
+            "tokens_before": 60,
+            "tokens_after": 60,
+            "note": "no token reduction"
+          },
+          {
+            "name": "cache",
+            "applied": true,
+            "tokens_before": 60,
+            "tokens_after": 60,
+            "note": null
+          }
+        ]
+      },
+      "headroom": {
+        "before": 60,
+        "after": 60,
+        "ms": 0.17679482698440552,
+        "transforms": [
+          "router:protected:user_message"
+        ]
+      }
+    },
+    {
+      "group": "general",
+      "name": "gsm8k-3",
+      "llmtrim": {
+        "before": 45,
+        "after": 45,
+        "ms": 0.19552558660507202,
+        "stages": [
+          {
+            "name": "toolout",
+            "applied": false,
+            "tokens_before": 45,
+            "tokens_after": 45,
+            "note": "no token reduction"
+          },
+          {
+            "name": "image",
+            "applied": true,
+            "tokens_before": 45,
+            "tokens_after": 45,
+            "note": null
+          },
+          {
+            "name": "hygiene",
+            "applied": false,
+            "tokens_before": 45,
+            "tokens_after": 45,
+            "note": "no token reduction"
+          },
+          {
+            "name": "json-crush",
+            "applied": false,
+            "tokens_before": 45,
+            "tokens_after": 45,
+            "note": "no token reduction"
+          },
+          {
+            "name": "serialize-toon",
+            "applied": false,
+            "tokens_before": 45,
+            "tokens_after": 45,
+            "note": "no token reduction"
+          },
+          {
+            "name": "dedup",
+            "applied": false,
+            "tokens_before": 45,
+            "tokens_after": 45,
+            "note": "no token reduction"
+          },
+          {
+            "name": "tools",
+            "applied": false,
+            "tokens_before": 45,
+            "tokens_after": 45,
+            "note": "no token reduction"
+          },
+          {
+            "name": "cache",
+            "applied": true,
+            "tokens_before": 45,
+            "tokens_after": 45,
+            "note": null
+          }
+        ]
+      },
+      "headroom": {
+        "before": 45,
+        "after": 45,
+        "ms": 0.16536936163902283,
+        "transforms": [
+          "router:protected:user_message"
+        ]
+      }
+    },
+    {
+      "group": "general",
+      "name": "gsm8k-4",
+      "llmtrim": {
+        "before": 118,
+        "after": 118,
+        "ms": 0.322951003909111,
+        "stages": [
+          {
+            "name": "toolout",
+            "applied": false,
+            "tokens_before": 118,
+            "tokens_after": 118,
+            "note": "no token reduction"
+          },
+          {
+            "name": "image",
+            "applied": true,
+            "tokens_before": 118,
+            "tokens_after": 118,
+            "note": null
+          },
+          {
+            "name": "hygiene",
+            "applied": false,
+            "tokens_before": 118,
+            "tokens_after": 118,
+            "note": "no token reduction"
+          },
+          {
+            "name": "json-crush",
+            "applied": false,
+            "tokens_before": 118,
+            "tokens_after": 118,
+            "note": "no token reduction"
+          },
+          {
+            "name": "serialize-toon",
+            "applied": false,
+            "tokens_before": 118,
+            "tokens_after": 118,
+            "note": "no token reduction"
+          },
+          {
+            "name": "dedup",
+            "applied": false,
+            "tokens_before": 118,
+            "tokens_after": 118,
+            "note": "no token reduction"
+          },
+          {
+            "name": "tools",
+            "applied": false,
+            "tokens_before": 118,
+            "tokens_after": 118,
+            "note": "no token reduction"
+          },
+          {
+            "name": "cache",
+            "applied": true,
+            "tokens_before": 118,
+            "tokens_after": 118,
+            "note": null
+          }
+        ]
+      },
+      "headroom": {
+        "before": 118,
+        "after": 118,
+        "ms": 0.3167111426591873,
+        "transforms": [
+          "router:protected:user_message"
+        ]
+      }
+    },
+    {
+      "group": "general",
+      "name": "gsm8k-5",
+      "llmtrim": {
+        "before": 63,
+        "after": 63,
+        "ms": 0.22690743207931519,
+        "stages": [
+          {
+            "name": "toolout",
+            "applied": false,
+            "tokens_before": 63,
+            "tokens_after": 63,
+            "note": "no token reduction"
+          },
+          {
+            "name": "image",
+            "applied": true,
+            "tokens_before": 63,
+            "tokens_after": 63,
+            "note": null
+          },
+          {
+            "name": "hygiene",
+            "applied": false,
+            "tokens_before": 63,
+            "tokens_after": 63,
+            "note": "no token reduction"
+          },
+          {
+            "name": "json-crush",
+            "applied": false,
+            "tokens_before": 63,
+            "tokens_after": 63,
+            "note": "no token reduction"
+          },
+          {
+            "name": "serialize-toon",
+            "applied": false,
+            "tokens_before": 63,
+            "tokens_after": 63,
+            "note": "no token reduction"
+          },
+          {
+            "name": "dedup",
+            "applied": false,
+            "tokens_before": 63,
+            "tokens_after": 63,
+            "note": "no token reduction"
+          },
+          {
+            "name": "tools",
+            "applied": false,
+            "tokens_before": 63,
+            "tokens_after": 63,
+            "note": "no token reduction"
+          },
+          {
+            "name": "cache",
+            "applied": true,
+            "tokens_before": 63,
+            "tokens_after": 63,
+            "note": null
+          }
+        ]
+      },
+      "headroom": {
+        "before": 63,
+        "after": 63,
+        "ms": 0.178581103682518,
+        "transforms": [
+          "router:protected:user_message"
+        ]
+      }
+    },
+    {
+      "group": "general",
+      "name": "gsm8k-6",
+      "llmtrim": {
+        "before": 52,
+        "after": 52,
+        "ms": 0.22145546972751617,
+        "stages": [
+          {
+            "name": "toolout",
+            "applied": false,
+            "tokens_before": 52,
+            "tokens_after": 52,
+            "note": "no token reduction"
+          },
+          {
+            "name": "image",
+            "applied": true,
+            "tokens_before": 52,
+            "tokens_after": 52,
+            "note": null
+          },
+          {
+            "name": "hygiene",
+            "applied": false,
+            "tokens_before": 52,
+            "tokens_after": 52,
+            "note": "no token reduction"
+          },
+          {
+            "name": "json-crush",
+            "applied": false,
+            "tokens_before": 52,
+            "tokens_after": 52,
+            "note": "no token reduction"
+          },
+          {
+            "name": "serialize-toon",
+            "applied": false,
+            "tokens_before": 52,
+            "tokens_after": 52,
+            "note": "no token reduction"
+          },
+          {
+            "name": "dedup",
+            "applied": false,
+            "tokens_before": 52,
+            "tokens_after": 52,
+            "note": "no token reduction"
+          },
+          {
+            "name": "tools",
+            "applied": false,
+            "tokens_before": 52,
+            "tokens_after": 52,
+            "note": "no token reduction"
+          },
+          {
+            "name": "cache",
+            "applied": true,
+            "tokens_before": 52,
+            "tokens_after": 52,
+            "note": null
+          }
+        ]
+      },
+      "headroom": {
+        "before": 52,
+        "after": 52,
+        "ms": 0.16694329679012299,
+        "transforms": [
+          "router:protected:user_message"
+        ]
+      }
+    },
+    {
+      "group": "general",
+      "name": "gsm8k-7",
+      "llmtrim": {
+        "before": 77,
+        "after": 77,
+        "ms": 0.2559628337621689,
+        "stages": [
+          {
+            "name": "toolout",
+            "applied": false,
+            "tokens_before": 77,
+            "tokens_after": 77,
+            "note": "no token reduction"
+          },
+          {
+            "name": "image",
+            "applied": true,
+            "tokens_before": 77,
+            "tokens_after": 77,
+            "note": null
+          },
+          {
+            "name": "hygiene",
+            "applied": false,
+            "tokens_before": 77,
+            "tokens_after": 77,
+            "note": "no token reduction"
+          },
+          {
+            "name": "json-crush",
+            "applied": false,
+            "tokens_before": 77,
+            "tokens_after": 77,
+            "note": "no token reduction"
+          },
+          {
+            "name": "serialize-toon",
+            "applied": false,
+            "tokens_before": 77,
+            "tokens_after": 77,
+            "note": "no token reduction"
+          },
+          {
+            "name": "dedup",
+            "applied": false,
+            "tokens_before": 77,
+            "tokens_after": 77,
+            "note": "no token reduction"
+          },
+          {
+            "name": "tools",
+            "applied": false,
+            "tokens_before": 77,
+            "tokens_after": 77,
+            "note": "no token reduction"
+          },
+          {
+            "name": "cache",
+            "applied": true,
+            "tokens_before": 77,
+            "tokens_after": 77,
+            "note": null
+          }
+        ]
+      },
+      "headroom": {
+        "before": 77,
+        "after": 77,
+        "ms": 0.19640102982521057,
+        "transforms": [
+          "router:protected:user_message"
+        ]
+      }
+    },
+    {
+      "group": "general",
+      "name": "humaneval-0",
+      "llmtrim": {
+        "before": 140,
+        "after": 133,
+        "ms": 0.375283882021904,
+        "stages": [
+          {
+            "name": "toolout",
+            "applied": false,
+            "tokens_before": 140,
+            "tokens_after": 140,
+            "note": "no token reduction"
+          },
+          {
+            "name": "image",
+            "applied": true,
+            "tokens_before": 140,
+            "tokens_after": 140,
+            "note": null
+          },
+          {
+            "name": "hygiene",
+            "applied": true,
+            "tokens_before": 140,
+            "tokens_after": 133,
+            "note": null
+          },
+          {
+            "name": "json-crush",
+            "applied": false,
+            "tokens_before": 133,
+            "tokens_after": 133,
+            "note": "no token reduction"
+          },
+          {
+            "name": "serialize-toon",
+            "applied": false,
+            "tokens_before": 133,
+            "tokens_after": 133,
+            "note": "no token reduction"
+          },
+          {
+            "name": "dedup",
+            "applied": false,
+            "tokens_before": 133,
+            "tokens_after": 133,
+            "note": "no token reduction"
+          },
+          {
+            "name": "tools",
+            "applied": false,
+            "tokens_before": 133,
+            "tokens_after": 133,
+            "note": "no token reduction"
+          },
+          {
+            "name": "cache",
+            "applied": true,
+            "tokens_before": 133,
+            "tokens_after": 133,
+            "note": null
+          }
+        ]
+      },
+      "headroom": {
+        "before": 140,
+        "after": 140,
+        "ms": 0.29934756457805634,
+        "transforms": [
+          "router:protected:user_message"
+        ]
+      }
+    },
+    {
+      "group": "general",
+      "name": "humaneval-1",
+      "llmtrim": {
+        "before": 130,
+        "after": 130,
+        "ms": 0.382792204618454,
+        "stages": [
+          {
+            "name": "toolout",
+            "applied": false,
+            "tokens_before": 130,
+            "tokens_after": 130,
+            "note": "no token reduction"
+          },
+          {
+            "name": "image",
+            "applied": true,
+            "tokens_before": 130,
+            "tokens_after": 130,
+            "note": null
+          },
+          {
+            "name": "hygiene",
+            "applied": false,
+            "tokens_before": 130,
+            "tokens_after": 130,
+            "note": "no token reduction"
+          },
+          {
+            "name": "json-crush",
+            "applied": false,
+            "tokens_before": 130,
+            "tokens_after": 130,
+            "note": "no token reduction"
+          },
+          {
+            "name": "serialize-toon",
+            "applied": false,
+            "tokens_before": 130,
+            "tokens_after": 130,
+            "note": "no token reduction"
+          },
+          {
+            "name": "dedup",
+            "applied": false,
+            "tokens_before": 130,
+            "tokens_after": 130,
+            "note": "no token reduction"
+          },
+          {
+            "name": "tools",
+            "applied": false,
+            "tokens_before": 130,
+            "tokens_after": 130,
+            "note": "no token reduction"
+          },
+          {
+            "name": "cache",
+            "applied": true,
+            "tokens_before": 130,
+            "tokens_after": 130,
+            "note": null
+          }
+        ]
+      },
+      "headroom": {
+        "before": 130,
+        "after": 130,
+        "ms": 0.28999336063861847,
+        "transforms": [
+          "router:protected:user_message"
+        ]
+      }
+    },
+    {
+      "group": "general",
+      "name": "humaneval-2",
+      "llmtrim": {
+        "before": 99,
+        "after": 99,
+        "ms": 0.3270171582698822,
+        "stages": [
+          {
+            "name": "toolout",
+            "applied": false,
+            "tokens_before": 100,
+            "tokens_after": 100,
+            "note": "no token reduction"
+          },
+          {
+            "name": "image",
+            "applied": true,
+            "tokens_before": 100,
+            "tokens_after": 100,
+            "note": null
+          },
+          {
+            "name": "hygiene",
+            "applied": false,
+            "tokens_before": 100,
+            "tokens_after": 100,
+            "note": "no token reduction"
+          },
+          {
+            "name": "json-crush",
+            "applied": false,
+            "tokens_before": 100,
+            "tokens_after": 100,
+            "note": "no token reduction"
+          },
+          {
+            "name": "serialize-toon",
+            "applied": false,
+            "tokens_before": 100,
+            "tokens_after": 100,
+            "note": "no token reduction"
+          },
+          {
+            "name": "dedup",
+            "applied": false,
+            "tokens_before": 100,
+            "tokens_after": 100,
+            "note": "no token reduction"
+          },
+          {
+            "name": "tools",
+            "applied": false,
+            "tokens_before": 100,
+            "tokens_after": 100,
+            "note": "no token reduction"
+          },
+          {
+            "name": "cache",
+            "applied": true,
+            "tokens_before": 100,
+            "tokens_after": 100,
+            "note": null
+          }
+        ]
+      },
+      "headroom": {
+        "before": 99,
+        "after": 99,
+        "ms": 0.25842897593975067,
+        "transforms": [
+          "router:protected:user_message"
+        ]
+      }
+    },
+    {
+      "group": "general",
+      "name": "humaneval-3",
+      "llmtrim": {
+        "before": 133,
+        "after": 128,
+        "ms": 0.40971487760543823,
+        "stages": [
+          {
+            "name": "toolout",
+            "applied": false,
+            "tokens_before": 133,
+            "tokens_after": 133,
+            "note": "no token reduction"
+          },
+          {
+            "name": "image",
+            "applied": true,
+            "tokens_before": 133,
+            "tokens_after": 133,
+            "note": null
+          },
+          {
+            "name": "hygiene",
+            "applied": true,
+            "tokens_before": 133,
+            "tokens_after": 128,
+            "note": null
+          },
+          {
+            "name": "json-crush",
+            "applied": false,
+            "tokens_before": 128,
+            "tokens_after": 128,
+            "note": "no token reduction"
+          },
+          {
+            "name": "serialize-toon",
+            "applied": false,
+            "tokens_before": 128,
+            "tokens_after": 128,
+            "note": "no token reduction"
+          },
+          {
+            "name": "dedup",
+            "applied": false,
+            "tokens_before": 128,
+            "tokens_after": 128,
+            "note": "no token reduction"
+          },
+          {
+            "name": "tools",
+            "applied": false,
+            "tokens_before": 128,
+            "tokens_after": 128,
+            "note": "no token reduction"
+          },
+          {
+            "name": "cache",
+            "applied": true,
+            "tokens_before": 128,
+            "tokens_after": 128,
+            "note": null
+          }
+        ]
+      },
+      "headroom": {
+        "before": 133,
+        "after": 133,
+        "ms": 0.2944525331258774,
+        "transforms": [
+          "router:protected:user_message"
+        ]
+      }
+    },
+    {
+      "group": "general",
+      "name": "humaneval-4",
+      "llmtrim": {
+        "before": 133,
+        "after": 130,
+        "ms": 0.40260888636112213,
+        "stages": [
+          {
+            "name": "toolout",
+            "applied": false,
+            "tokens_before": 133,
+            "tokens_after": 133,
+            "note": "no token reduction"
+          },
+          {
+            "name": "image",
+            "applied": true,
+            "tokens_before": 133,
+            "tokens_after": 133,
+            "note": null
+          },
+          {
+            "name": "hygiene",
+            "applied": true,
+            "tokens_before": 133,
+            "tokens_after": 130,
+            "note": null
+          },
+          {
+            "name": "json-crush",
+            "applied": false,
+            "tokens_before": 130,
+            "tokens_after": 130,
+            "note": "no token reduction"
+          },
+          {
+            "name": "serialize-toon",
+            "applied": false,
+            "tokens_before": 130,
+            "tokens_after": 130,
+            "note": "no token reduction"
+          },
+          {
+            "name": "dedup",
+            "applied": false,
+            "tokens_before": 130,
+            "tokens_after": 130,
+            "note": "no token reduction"
+          },
+          {
+            "name": "tools",
+            "applied": false,
+            "tokens_before": 130,
+            "tokens_after": 130,
+            "note": "no token reduction"
+          },
+          {
+            "name": "cache",
+            "applied": true,
+            "tokens_before": 130,
+            "tokens_after": 130,
+            "note": null
+          }
+        ]
+      },
+      "headroom": {
+        "before": 133,
+        "after": 133,
+        "ms": 0.30077993869781494,
+        "transforms": [
+          "router:protected:user_message"
+        ]
+      }
+    },
+    {
+      "group": "general",
+      "name": "humaneval-5",
+      "llmtrim": {
+        "before": 113,
+        "after": 107,
+        "ms": 0.34347549080848694,
+        "stages": [
+          {
+            "name": "toolout",
+            "applied": false,
+            "tokens_before": 113,
+            "tokens_after": 113,
+            "note": "no token reduction"
+          },
+          {
+            "name": "image",
+            "applied": true,
+            "tokens_before": 113,
+            "tokens_after": 113,
+            "note": null
+          },
+          {
+            "name": "hygiene",
+            "applied": true,
+            "tokens_before": 113,
+            "tokens_after": 107,
+            "note": null
+          },
+          {
+            "name": "json-crush",
+            "applied": false,
+            "tokens_before": 107,
+            "tokens_after": 107,
+            "note": "no token reduction"
+          },
+          {
+            "name": "serialize-toon",
+            "applied": false,
+            "tokens_before": 107,
+            "tokens_after": 107,
+            "note": "no token reduction"
+          },
+          {
+            "name": "dedup",
+            "applied": false,
+            "tokens_before": 107,
+            "tokens_after": 107,
+            "note": "no token reduction"
+          },
+          {
+            "name": "tools",
+            "applied": false,
+            "tokens_before": 107,
+            "tokens_after": 107,
+            "note": "no token reduction"
+          },
+          {
+            "name": "cache",
+            "applied": true,
+            "tokens_before": 107,
+            "tokens_after": 107,
+            "note": null
+          }
+        ]
+      },
+      "headroom": {
+        "before": 113,
+        "after": 113,
+        "ms": 0.27495063841342926,
+        "transforms": [
+          "router:protected:user_message"
+        ]
+      }
+    },
+    {
+      "group": "general",
+      "name": "humaneval-6",
+      "llmtrim": {
+        "before": 125,
+        "after": 122,
+        "ms": 0.3887545317411423,
+        "stages": [
+          {
+            "name": "toolout",
+            "applied": false,
+            "tokens_before": 125,
+            "tokens_after": 125,
+            "note": "no token reduction"
+          },
+          {
+            "name": "image",
+            "applied": true,
+            "tokens_before": 125,
+            "tokens_after": 125,
+            "note": null
+          },
+          {
+            "name": "hygiene",
+            "applied": true,
+            "tokens_before": 125,
+            "tokens_after": 122,
+            "note": null
+          },
+          {
+            "name": "json-crush",
+            "applied": false,
+            "tokens_before": 122,
+            "tokens_after": 122,
+            "note": "no token reduction"
+          },
+          {
+            "name": "serialize-toon",
+            "applied": false,
+            "tokens_before": 122,
+            "tokens_after": 122,
+            "note": "no token reduction"
+          },
+          {
+            "name": "dedup",
+            "applied": false,
+            "tokens_before": 122,
+            "tokens_after": 122,
+            "note": "no token reduction"
+          },
+          {
+            "name": "tools",
+            "applied": false,
+            "tokens_before": 122,
+            "tokens_after": 122,
+            "note": "no token reduction"
+          },
+          {
+            "name": "cache",
+            "applied": true,
+            "tokens_before": 122,
+            "tokens_after": 122,
+            "note": null
+          }
+        ]
+      },
+      "headroom": {
+        "before": 125,
+        "after": 125,
+        "ms": 0.2827811986207962,
+        "transforms": [
+          "router:protected:user_message"
+        ]
+      }
+    },
+    {
+      "group": "general",
+      "name": "humaneval-7",
+      "llmtrim": {
+        "before": 108,
+        "after": 108,
+        "ms": 0.308280810713768,
+        "stages": [
+          {
+            "name": "toolout",
+            "applied": false,
+            "tokens_before": 108,
+            "tokens_after": 108,
+            "note": "no token reduction"
+          },
+          {
+            "name": "image",
+            "applied": true,
+            "tokens_before": 108,
+            "tokens_after": 108,
+            "note": null
+          },
+          {
+            "name": "hygiene",
+            "applied": false,
+            "tokens_before": 108,
+            "tokens_after": 108,
+            "note": "no token reduction"
+          },
+          {
+            "name": "json-crush",
+            "applied": false,
+            "tokens_before": 108,
+            "tokens_after": 108,
+            "note": "no token reduction"
+          },
+          {
+            "name": "serialize-toon",
+            "applied": false,
+            "tokens_before": 108,
+            "tokens_after": 108,
+            "note": "no token reduction"
+          },
+          {
+            "name": "dedup",
+            "applied": false,
+            "tokens_before": 108,
+            "tokens_after": 108,
+            "note": "no token reduction"
+          },
+          {
+            "name": "tools",
+            "applied": false,
+            "tokens_before": 108,
+            "tokens_after": 108,
+            "note": "no token reduction"
+          },
+          {
+            "name": "cache",
+            "applied": true,
+            "tokens_before": 108,
+            "tokens_after": 108,
+            "note": null
+          }
+        ]
+      },
+      "headroom": {
+        "before": 108,
+        "after": 108,
+        "ms": 0.26270560920238495,
+        "transforms": [
+          "router:protected:user_message"
+        ]
+      }
+    },
+    {
+      "group": "general",
+      "name": "dolly-0",
+      "llmtrim": {
+        "before": 213,
+        "after": 213,
+        "ms": 0.500064343214035,
+        "stages": [
+          {
+            "name": "toolout",
+            "applied": false,
+            "tokens_before": 213,
+            "tokens_after": 213,
+            "note": "no token reduction"
+          },
+          {
+            "name": "image",
+            "applied": true,
+            "tokens_before": 213,
+            "tokens_after": 213,
+            "note": null
+          },
+          {
+            "name": "hygiene",
+            "applied": false,
+            "tokens_before": 213,
+            "tokens_after": 213,
+            "note": "no token reduction"
+          },
+          {
+            "name": "json-crush",
+            "applied": false,
+            "tokens_before": 213,
+            "tokens_after": 213,
+            "note": "no token reduction"
+          },
+          {
+            "name": "serialize-toon",
+            "applied": false,
+            "tokens_before": 213,
+            "tokens_after": 213,
+            "note": "no token reduction"
+          },
+          {
+            "name": "dedup",
+            "applied": false,
+            "tokens_before": 213,
+            "tokens_after": 213,
+            "note": "no token reduction"
+          },
+          {
+            "name": "tools",
+            "applied": false,
+            "tokens_before": 213,
+            "tokens_after": 213,
+            "note": "no token reduction"
+          },
+          {
+            "name": "cache",
+            "applied": true,
+            "tokens_before": 213,
+            "tokens_after": 213,
+            "note": null
+          }
+        ]
+      },
+      "headroom": {
+        "before": 213,
+        "after": 213,
+        "ms": 0.32605230808258057,
+        "transforms": [
+          "router:protected:user_message",
+          "router:protected:user_message"
+        ]
+      }
+    },
+    {
+      "group": "general",
+      "name": "dolly-1",
+      "llmtrim": {
+        "before": 406,
+        "after": 406,
+        "ms": 0.973796471953392,
+        "stages": [
+          {
+            "name": "toolout",
+            "applied": false,
+            "tokens_before": 406,
+            "tokens_after": 406,
+            "note": "no token reduction"
+          },
+          {
+            "name": "image",
+            "applied": true,
+            "tokens_before": 406,
+            "tokens_after": 406,
+            "note": null
+          },
+          {
+            "name": "hygiene",
+            "applied": false,
+            "tokens_before": 406,
+            "tokens_after": 406,
+            "note": "no token reduction"
+          },
+          {
+            "name": "json-crush",
+            "applied": false,
+            "tokens_before": 406,
+            "tokens_after": 406,
+            "note": "no token reduction"
+          },
+          {
+            "name": "serialize-toon",
+            "applied": false,
+            "tokens_before": 406,
+            "tokens_after": 406,
+            "note": "no token reduction"
+          },
+          {
+            "name": "dedup",
+            "applied": false,
+            "tokens_before": 406,
+            "tokens_after": 406,
+            "note": "no token reduction"
+          },
+          {
+            "name": "tools",
+            "applied": false,
+            "tokens_before": 406,
+            "tokens_after": 406,
+            "note": "no token reduction"
+          },
+          {
+            "name": "cache",
+            "applied": true,
+            "tokens_before": 406,
+            "tokens_after": 406,
+            "note": null
+          }
+        ]
+      },
+      "headroom": {
+        "before": 406,
+        "after": 406,
+        "ms": 0.5147494375705719,
+        "transforms": [
+          "router:protected:user_message",
+          "router:protected:user_message"
+        ]
+      }
+    },
+    {
+      "group": "general",
+      "name": "dolly-2",
+      "llmtrim": {
+        "before": 129,
+        "after": 129,
+        "ms": 0.39365142583847046,
+        "stages": [
+          {
+            "name": "toolout",
+            "applied": false,
+            "tokens_before": 129,
+            "tokens_after": 129,
+            "note": "no token reduction"
+          },
+          {
+            "name": "image",
+            "applied": true,
+            "tokens_before": 129,
+            "tokens_after": 129,
+            "note": null
+          },
+          {
+            "name": "hygiene",
+            "applied": false,
+            "tokens_before": 129,
+            "tokens_after": 129,
+            "note": "no token reduction"
+          },
+          {
+            "name": "json-crush",
+            "applied": false,
+            "tokens_before": 129,
+            "tokens_after": 129,
+            "note": "no token reduction"
+          },
+          {
+            "name": "serialize-toon",
+            "applied": false,
+            "tokens_before": 129,
+            "tokens_after": 129,
+            "note": "no token reduction"
+          },
+          {
+            "name": "dedup",
+            "applied": false,
+            "tokens_before": 129,
+            "tokens_after": 129,
+            "note": "no token reduction"
+          },
+          {
+            "name": "tools",
+            "applied": false,
+            "tokens_before": 129,
+            "tokens_after": 129,
+            "note": "no token reduction"
+          },
+          {
+            "name": "cache",
+            "applied": true,
+            "tokens_before": 129,
+            "tokens_after": 129,
+            "note": null
+          }
+        ]
+      },
+      "headroom": {
+        "before": 129,
+        "after": 129,
+        "ms": 0.26517920196056366,
+        "transforms": [
+          "router:protected:user_message",
+          "router:protected:user_message"
+        ]
+      }
+    },
+    {
+      "group": "general",
+      "name": "dolly-3",
+      "llmtrim": {
+        "before": 5,
+        "after": 5,
+        "ms": 0.13107620179653168,
+        "stages": [
+          {
+            "name": "toolout",
+            "applied": false,
+            "tokens_before": 5,
+            "tokens_after": 5,
+            "note": "no token reduction"
+          },
+          {
+            "name": "image",
+            "applied": true,
+            "tokens_before": 5,
+            "tokens_after": 5,
+            "note": null
+          },
+          {
+            "name": "hygiene",
+            "applied": false,
+            "tokens_before": 5,
+            "tokens_after": 5,
+            "note": "no token reduction"
+          },
+          {
+            "name": "json-crush",
+            "applied": false,
+            "tokens_before": 5,
+            "tokens_after": 5,
+            "note": "no token reduction"
+          },
+          {
+            "name": "serialize-toon",
+            "applied": false,
+            "tokens_before": 5,
+            "tokens_after": 5,
+            "note": "no token reduction"
+          },
+          {
+            "name": "dedup",
+            "applied": false,
+            "tokens_before": 5,
+            "tokens_after": 5,
+            "note": "no token reduction"
+          },
+          {
+            "name": "tools",
+            "applied": false,
+            "tokens_before": 5,
+            "tokens_after": 5,
+            "note": "no token reduction"
+          },
+          {
+            "name": "cache",
+            "applied": true,
+            "tokens_before": 5,
+            "tokens_after": 5,
+            "note": null
+          }
+        ]
+      },
+      "headroom": {
+        "before": 5,
+        "after": 5,
+        "ms": 0.11326372623443604,
+        "transforms": [
+          "router:protected:user_message"
+        ]
+      }
+    },
+    {
+      "group": "general",
+      "name": "dolly-4",
+      "llmtrim": {
+        "before": 6,
+        "after": 6,
+        "ms": 0.13311393558979034,
+        "stages": [
+          {
+            "name": "toolout",
+            "applied": false,
+            "tokens_before": 6,
+            "tokens_after": 6,
+            "note": "no token reduction"
+          },
+          {
+            "name": "image",
+            "applied": true,
+            "tokens_before": 6,
+            "tokens_after": 6,
+            "note": null
+          },
+          {
+            "name": "hygiene",
+            "applied": false,
+            "tokens_before": 6,
+            "tokens_after": 6,
+            "note": "no token reduction"
+          },
+          {
+            "name": "json-crush",
+            "applied": false,
+            "tokens_before": 6,
+            "tokens_after": 6,
+            "note": "no token reduction"
+          },
+          {
+            "name": "serialize-toon",
+            "applied": false,
+            "tokens_before": 6,
+            "tokens_after": 6,
+            "note": "no token reduction"
+          },
+          {
+            "name": "dedup",
+            "applied": false,
+            "tokens_before": 6,
+            "tokens_after": 6,
+            "note": "no token reduction"
+          },
+          {
+            "name": "tools",
+            "applied": false,
+            "tokens_before": 6,
+            "tokens_after": 6,
+            "note": "no token reduction"
+          },
+          {
+            "name": "cache",
+            "applied": true,
+            "tokens_before": 6,
+            "tokens_after": 6,
+            "note": null
+          }
+        ]
+      },
+      "headroom": {
+        "before": 6,
+        "after": 6,
+        "ms": 0.1127738505601883,
+        "transforms": [
+          "router:protected:user_message"
+        ]
+      }
+    },
+    {
+      "group": "general",
+      "name": "dolly-5",
+      "llmtrim": {
+        "before": 13,
+        "after": 13,
+        "ms": 0.1434851437807083,
+        "stages": [
+          {
+            "name": "toolout",
+            "applied": false,
+            "tokens_before": 13,
+            "tokens_after": 13,
+            "note": "no token reduction"
+          },
+          {
+            "name": "image",
+            "applied": true,
+            "tokens_before": 13,
+            "tokens_after": 13,
+            "note": null
+          },
+          {
+            "name": "hygiene",
+            "applied": false,
+            "tokens_before": 13,
+            "tokens_after": 13,
+            "note": "no token reduction"
+          },
+          {
+            "name": "json-crush",
+            "applied": false,
+            "tokens_before": 13,
+            "tokens_after": 13,
+            "note": "no token reduction"
+          },
+          {
+            "name": "serialize-toon",
+            "applied": false,
+            "tokens_before": 13,
+            "tokens_after": 13,
+            "note": "no token reduction"
+          },
+          {
+            "name": "dedup",
+            "applied": false,
+            "tokens_before": 13,
+            "tokens_after": 13,
+            "note": "no token reduction"
+          },
+          {
+            "name": "tools",
+            "applied": false,
+            "tokens_before": 13,
+            "tokens_after": 13,
+            "note": "no token reduction"
+          },
+          {
+            "name": "cache",
+            "applied": true,
+            "tokens_before": 13,
+            "tokens_after": 13,
+            "note": null
+          }
+        ]
+      },
+      "headroom": {
+        "before": 13,
+        "after": 13,
+        "ms": 0.1218300312757492,
+        "transforms": [
+          "router:protected:user_message"
+        ]
+      }
+    },
+    {
+      "group": "general",
+      "name": "dolly-6",
+      "llmtrim": {
+        "before": 125,
+        "after": 125,
+        "ms": 0.33448077738285065,
+        "stages": [
+          {
+            "name": "toolout",
+            "applied": false,
+            "tokens_before": 125,
+            "tokens_after": 125,
+            "note": "no token reduction"
+          },
+          {
+            "name": "image",
+            "applied": true,
+            "tokens_before": 125,
+            "tokens_after": 125,
+            "note": null
+          },
+          {
+            "name": "hygiene",
+            "applied": false,
+            "tokens_before": 125,
+            "tokens_after": 125,
+            "note": "no token reduction"
+          },
+          {
+            "name": "json-crush",
+            "applied": false,
+            "tokens_before": 125,
+            "tokens_after": 125,
+            "note": "no token reduction"
+          },
+          {
+            "name": "serialize-toon",
+            "applied": false,
+            "tokens_before": 125,
+            "tokens_after": 125,
+            "note": "no token reduction"
+          },
+          {
+            "name": "dedup",
+            "applied": false,
+            "tokens_before": 125,
+            "tokens_after": 125,
+            "note": "no token reduction"
+          },
+          {
+            "name": "tools",
+            "applied": false,
+            "tokens_before": 125,
+            "tokens_after": 125,
+            "note": "no token reduction"
+          },
+          {
+            "name": "cache",
+            "applied": true,
+            "tokens_before": 125,
+            "tokens_after": 125,
+            "note": null
+          }
+        ]
+      },
+      "headroom": {
+        "before": 125,
+        "after": 125,
+        "ms": 0.2514868974685669,
+        "transforms": [
+          "router:protected:user_message",
+          "router:protected:user_message"
+        ]
+      }
+    },
+    {
+      "group": "general",
+      "name": "dolly-7",
+      "llmtrim": {
+        "before": 5,
+        "after": 5,
+        "ms": 0.13052485883235931,
+        "stages": [
+          {
+            "name": "toolout",
+            "applied": false,
+            "tokens_before": 5,
+            "tokens_after": 5,
+            "note": "no token reduction"
+          },
+          {
+            "name": "image",
+            "applied": true,
+            "tokens_before": 5,
+            "tokens_after": 5,
+            "note": null
+          },
+          {
+            "name": "hygiene",
+            "applied": false,
+            "tokens_before": 5,
+            "tokens_after": 5,
+            "note": "no token reduction"
+          },
+          {
+            "name": "json-crush",
+            "applied": false,
+            "tokens_before": 5,
+            "tokens_after": 5,
+            "note": "no token reduction"
+          },
+          {
+            "name": "serialize-toon",
+            "applied": false,
+            "tokens_before": 5,
+            "tokens_after": 5,
+            "note": "no token reduction"
+          },
+          {
+            "name": "dedup",
+            "applied": false,
+            "tokens_before": 5,
+            "tokens_after": 5,
+            "note": "no token reduction"
+          },
+          {
+            "name": "tools",
+            "applied": false,
+            "tokens_before": 5,
+            "tokens_after": 5,
+            "note": "no token reduction"
+          },
+          {
+            "name": "cache",
+            "applied": true,
+            "tokens_before": 5,
+            "tokens_after": 5,
+            "note": null
+          }
+        ]
+      },
+      "headroom": {
+        "before": 5,
+        "after": 5,
+        "ms": 0.11343695223331451,
+        "transforms": [
+          "router:protected:user_message"
+        ]
+      }
+    },
+    {
+      "group": "general",
+      "name": "hotpotqa-0",
+      "llmtrim": {
+        "before": 1126,
+        "after": 1126,
+        "ms": 1.8477234989404678,
+        "stages": [
+          {
+            "name": "toolout",
+            "applied": false,
+            "tokens_before": 1126,
+            "tokens_after": 1126,
+            "note": "no token reduction"
+          },
+          {
+            "name": "image",
+            "applied": true,
+            "tokens_before": 1126,
+            "tokens_after": 1126,
+            "note": null
+          },
+          {
+            "name": "hygiene",
+            "applied": false,
+            "tokens_before": 1126,
+            "tokens_after": 1126,
+            "note": "no token reduction"
+          },
+          {
+            "name": "json-crush",
+            "applied": false,
+            "tokens_before": 1126,
+            "tokens_after": 1126,
+            "note": "no token reduction"
+          },
+          {
+            "name": "serialize-toon",
+            "applied": false,
+            "tokens_before": 1126,
+            "tokens_after": 1126,
+            "note": "no token reduction"
+          },
+          {
+            "name": "dedup",
+            "applied": false,
+            "tokens_before": 1126,
+            "tokens_after": 1126,
+            "note": "no token reduction"
+          },
+          {
+            "name": "tools",
+            "applied": false,
+            "tokens_before": 1126,
+            "tokens_after": 1126,
+            "note": "no token reduction"
+          },
+          {
+            "name": "cache",
+            "applied": true,
+            "tokens_before": 1126,
+            "tokens_after": 1126,
+            "note": null
+          }
+        ]
+      },
+      "headroom": {
+        "before": 1126,
+        "after": 1126,
+        "ms": 1.2273956090211868,
+        "transforms": [
+          "router:protected:user_message",
+          "router:protected:user_message"
+        ]
+      }
+    },
+    {
+      "group": "general",
+      "name": "hotpotqa-1",
+      "llmtrim": {
+        "before": 1233,
+        "after": 1233,
+        "ms": 2.1106842905282974,
+        "stages": [
+          {
+            "name": "toolout",
+            "applied": false,
+            "tokens_before": 1233,
+            "tokens_after": 1233,
+            "note": "no token reduction"
+          },
+          {
+            "name": "image",
+            "applied": true,
+            "tokens_before": 1233,
+            "tokens_after": 1233,
+            "note": null
+          },
+          {
+            "name": "hygiene",
+            "applied": false,
+            "tokens_before": 1233,
+            "tokens_after": 1233,
+            "note": "no token reduction"
+          },
+          {
+            "name": "json-crush",
+            "applied": false,
+            "tokens_before": 1233,
+            "tokens_after": 1233,
+            "note": "no token reduction"
+          },
+          {
+            "name": "serialize-toon",
+            "applied": false,
+            "tokens_before": 1233,
+            "tokens_after": 1233,
+            "note": "no token reduction"
+          },
+          {
+            "name": "dedup",
+            "applied": false,
+            "tokens_before": 1233,
+            "tokens_after": 1233,
+            "note": "no token reduction"
+          },
+          {
+            "name": "tools",
+            "applied": false,
+            "tokens_before": 1233,
+            "tokens_after": 1233,
+            "note": "no token reduction"
+          },
+          {
+            "name": "cache",
+            "applied": true,
+            "tokens_before": 1233,
+            "tokens_after": 1233,
+            "note": null
+          }
+        ]
+      },
+      "headroom": {
+        "before": 1233,
+        "after": 1233,
+        "ms": 1.2714341282844543,
+        "transforms": [
+          "router:protected:user_message",
+          "router:protected:user_message"
+        ]
+      }
+    },
+    {
+      "group": "general",
+      "name": "hotpotqa-2",
+      "llmtrim": {
+        "before": 1484,
+        "after": 1484,
+        "ms": 2.648239955306053,
+        "stages": [
+          {
+            "name": "toolout",
+            "applied": false,
+            "tokens_before": 1484,
+            "tokens_after": 1484,
+            "note": "no token reduction"
+          },
+          {
+            "name": "image",
+            "applied": true,
+            "tokens_before": 1484,
+            "tokens_after": 1484,
+            "note": null
+          },
+          {
+            "name": "hygiene",
+            "applied": false,
+            "tokens_before": 1484,
+            "tokens_after": 1484,
+            "note": "no token reduction"
+          },
+          {
+            "name": "json-crush",
+            "applied": false,
+            "tokens_before": 1484,
+            "tokens_after": 1484,
+            "note": "no token reduction"
+          },
+          {
+            "name": "serialize-toon",
+            "applied": false,
+            "tokens_before": 1484,
+            "tokens_after": 1484,
+            "note": "no token reduction"
+          },
+          {
+            "name": "dedup",
+            "applied": false,
+            "tokens_before": 1484,
+            "tokens_after": 1484,
+            "note": "no token reduction"
+          },
+          {
+            "name": "tools",
+            "applied": false,
+            "tokens_before": 1484,
+            "tokens_after": 1484,
+            "note": "no token reduction"
+          },
+          {
+            "name": "cache",
+            "applied": true,
+            "tokens_before": 1484,
+            "tokens_after": 1484,
+            "note": null
+          }
+        ]
+      },
+      "headroom": {
+        "before": 1484,
+        "after": 1484,
+        "ms": 1.474311575293541,
+        "transforms": [
+          "router:protected:user_message",
+          "router:protected:user_message"
+        ]
+      }
+    },
+    {
+      "group": "general",
+      "name": "hotpotqa-3",
+      "llmtrim": {
+        "before": 962,
+        "after": 962,
+        "ms": 2.041921019554138,
+        "stages": [
+          {
+            "name": "toolout",
+            "applied": false,
+            "tokens_before": 962,
+            "tokens_after": 962,
+            "note": "no token reduction"
+          },
+          {
+            "name": "image",
+            "applied": true,
+            "tokens_before": 962,
+            "tokens_after": 962,
+            "note": null
+          },
+          {
+            "name": "hygiene",
+            "applied": false,
+            "tokens_before": 962,
+            "tokens_after": 962,
+            "note": "no token reduction"
+          },
+          {
+            "name": "json-crush",
+            "applied": false,
+            "tokens_before": 962,
+            "tokens_after": 962,
+            "note": "no token reduction"
+          },
+          {
+            "name": "serialize-toon",
+            "applied": false,
+            "tokens_before": 962,
+            "tokens_after": 962,
+            "note": "no token reduction"
+          },
+          {
+            "name": "dedup",
+            "applied": false,
+            "tokens_before": 962,
+            "tokens_after": 962,
+            "note": "no token reduction"
+          },
+          {
+            "name": "tools",
+            "applied": false,
+            "tokens_before": 962,
+            "tokens_after": 962,
+            "note": "no token reduction"
+          },
+          {
+            "name": "cache",
+            "applied": true,
+            "tokens_before": 962,
+            "tokens_after": 962,
+            "note": null
+          }
+        ]
+      },
+      "headroom": {
+        "before": 962,
+        "after": 962,
+        "ms": 1.0705497115850449,
+        "transforms": [
+          "router:protected:user_message",
+          "router:protected:user_message"
+        ]
+      }
+    },
+    {
+      "group": "general",
+      "name": "hotpotqa-4",
+      "llmtrim": {
+        "before": 1266,
+        "after": 1266,
+        "ms": 2.082688733935356,
+        "stages": [
+          {
+            "name": "toolout",
+            "applied": false,
+            "tokens_before": 1266,
+            "tokens_after": 1266,
+            "note": "no token reduction"
+          },
+          {
+            "name": "image",
+            "applied": true,
+            "tokens_before": 1266,
+            "tokens_after": 1266,
+            "note": null
+          },
+          {
+            "name": "hygiene",
+            "applied": false,
+            "tokens_before": 1266,
+            "tokens_after": 1266,
+            "note": "no token reduction"
+          },
+          {
+            "name": "json-crush",
+            "applied": false,
+            "tokens_before": 1266,
+            "tokens_after": 1266,
+            "note": "no token reduction"
+          },
+          {
+            "name": "serialize-toon",
+            "applied": false,
+            "tokens_before": 1266,
+            "tokens_after": 1266,
+            "note": "no token reduction"
+          },
+          {
+            "name": "dedup",
+            "applied": false,
+            "tokens_before": 1266,
+            "tokens_after": 1266,
+            "note": "no token reduction"
+          },
+          {
+            "name": "tools",
+            "applied": false,
+            "tokens_before": 1266,
+            "tokens_after": 1266,
+            "note": "no token reduction"
+          },
+          {
+            "name": "cache",
+            "applied": true,
+            "tokens_before": 1266,
+            "tokens_after": 1266,
+            "note": null
+          }
+        ]
+      },
+      "headroom": {
+        "before": 1266,
+        "after": 1266,
+        "ms": 1.2724213302135468,
+        "transforms": [
+          "router:protected:user_message",
+          "router:protected:user_message"
+        ]
+      }
+    },
+    {
+      "group": "general",
+      "name": "hotpotqa-5",
+      "llmtrim": {
+        "before": 1280,
+        "after": 1280,
+        "ms": 2.1140091121196747,
+        "stages": [
+          {
+            "name": "toolout",
+            "applied": false,
+            "tokens_before": 1280,
+            "tokens_after": 1280,
+            "note": "no token reduction"
+          },
+          {
+            "name": "image",
+            "applied": true,
+            "tokens_before": 1280,
+            "tokens_after": 1280,
+            "note": null
+          },
+          {
+            "name": "hygiene",
+            "applied": false,
+            "tokens_before": 1280,
+            "tokens_after": 1280,
+            "note": "no token reduction"
+          },
+          {
+            "name": "json-crush",
+            "applied": false,
+            "tokens_before": 1280,
+            "tokens_after": 1280,
+            "note": "no token reduction"
+          },
+          {
+            "name": "serialize-toon",
+            "applied": false,
+            "tokens_before": 1280,
+            "tokens_after": 1280,
+            "note": "no token reduction"
+          },
+          {
+            "name": "dedup",
+            "applied": false,
+            "tokens_before": 1280,
+            "tokens_after": 1280,
+            "note": "no token reduction"
+          },
+          {
+            "name": "tools",
+            "applied": false,
+            "tokens_before": 1280,
+            "tokens_after": 1280,
+            "note": "no token reduction"
+          },
+          {
+            "name": "cache",
+            "applied": true,
+            "tokens_before": 1280,
+            "tokens_after": 1280,
+            "note": null
+          }
+        ]
+      },
+      "headroom": {
+        "before": 1280,
+        "after": 1280,
+        "ms": 1.3299398124217987,
+        "transforms": [
+          "router:protected:user_message",
+          "router:protected:user_message"
+        ]
+      }
+    },
+    {
+      "group": "general",
+      "name": "hotpotqa-6",
+      "llmtrim": {
+        "before": 1759,
+        "after": 1759,
+        "ms": 3.1129885464906693,
+        "stages": [
+          {
+            "name": "toolout",
+            "applied": false,
+            "tokens_before": 1759,
+            "tokens_after": 1759,
+            "note": "no token reduction"
+          },
+          {
+            "name": "image",
+            "applied": true,
+            "tokens_before": 1759,
+            "tokens_after": 1759,
+            "note": null
+          },
+          {
+            "name": "hygiene",
+            "applied": false,
+            "tokens_before": 1759,
+            "tokens_after": 1759,
+            "note": "no token reduction"
+          },
+          {
+            "name": "json-crush",
+            "applied": false,
+            "tokens_before": 1759,
+            "tokens_after": 1759,
+            "note": "no token reduction"
+          },
+          {
+            "name": "serialize-toon",
+            "applied": false,
+            "tokens_before": 1759,
+            "tokens_after": 1759,
+            "note": "no token reduction"
+          },
+          {
+            "name": "dedup",
+            "applied": false,
+            "tokens_before": 1759,
+            "tokens_after": 1759,
+            "note": "no token reduction"
+          },
+          {
+            "name": "tools",
+            "applied": false,
+            "tokens_before": 1759,
+            "tokens_after": 1759,
+            "note": "no token reduction"
+          },
+          {
+            "name": "cache",
+            "applied": true,
+            "tokens_before": 1759,
+            "tokens_after": 1759,
+            "note": null
+          }
+        ]
+      },
+      "headroom": {
+        "before": 1759,
+        "after": 1759,
+        "ms": 1.7538666725158691,
+        "transforms": [
+          "router:protected:user_message",
+          "router:protected:user_message"
+        ]
+      }
+    },
+    {
+      "group": "general",
+      "name": "hotpotqa-7",
+      "llmtrim": {
+        "before": 2829,
+        "after": 2829,
+        "ms": 5.040302872657776,
+        "stages": [
+          {
+            "name": "toolout",
+            "applied": false,
+            "tokens_before": 2829,
+            "tokens_after": 2829,
+            "note": "no token reduction"
+          },
+          {
+            "name": "image",
+            "applied": true,
+            "tokens_before": 2829,
+            "tokens_after": 2829,
+            "note": null
+          },
+          {
+            "name": "hygiene",
+            "applied": false,
+            "tokens_before": 2829,
+            "tokens_after": 2829,
+            "note": "no token reduction"
+          },
+          {
+            "name": "json-crush",
+            "applied": false,
+            "tokens_before": 2829,
+            "tokens_after": 2829,
+            "note": "no token reduction"
+          },
+          {
+            "name": "serialize-toon",
+            "applied": false,
+            "tokens_before": 2829,
+            "tokens_after": 2829,
+            "note": "no token reduction"
+          },
+          {
+            "name": "dedup",
+            "applied": false,
+            "tokens_before": 2829,
+            "tokens_after": 2829,
+            "note": "no token reduction"
+          },
+          {
+            "name": "tools",
+            "applied": false,
+            "tokens_before": 2829,
+            "tokens_after": 2829,
+            "note": "no token reduction"
+          },
+          {
+            "name": "cache",
+            "applied": true,
+            "tokens_before": 2829,
+            "tokens_after": 2829,
+            "note": null
+          }
+        ]
+      },
+      "headroom": {
+        "before": 2829,
+        "after": 2829,
+        "ms": 2.6771556586027145,
+        "transforms": [
+          "router:protected:user_message",
+          "router:protected:user_message"
+        ]
+      }
+    },
+    {
+      "group": "general",
+      "name": "glaive-0",
+      "llmtrim": {
+        "before": 13,
+        "after": 13,
+        "ms": 0.14318525791168213,
+        "stages": [
+          {
+            "name": "toolout",
+            "applied": false,
+            "tokens_before": 13,
+            "tokens_after": 13,
+            "note": "no token reduction"
+          },
+          {
+            "name": "image",
+            "applied": true,
+            "tokens_before": 13,
+            "tokens_after": 13,
+            "note": null
+          },
+          {
+            "name": "hygiene",
+            "applied": false,
+            "tokens_before": 13,
+            "tokens_after": 13,
+            "note": "no token reduction"
+          },
+          {
+            "name": "json-crush",
+            "applied": false,
+            "tokens_before": 13,
+            "tokens_after": 13,
+            "note": "no token reduction"
+          },
+          {
+            "name": "serialize-toon",
+            "applied": false,
+            "tokens_before": 13,
+            "tokens_after": 13,
+            "note": "no token reduction"
+          },
+          {
+            "name": "dedup",
+            "applied": false,
+            "tokens_before": 13,
+            "tokens_after": 13,
+            "note": "no token reduction"
+          },
+          {
+            "name": "tools",
+            "applied": false,
+            "tokens_before": 13,
+            "tokens_after": 13,
+            "note": "no token reduction"
+          },
+          {
+            "name": "cache",
+            "applied": true,
+            "tokens_before": 13,
+            "tokens_after": 13,
+            "note": null
+          }
+        ]
+      },
+      "headroom": {
+        "before": 13,
+        "after": 13,
+        "ms": 0.12295879423618317,
+        "transforms": [
+          "router:protected:user_message"
+        ]
+      }
+    },
+    {
+      "group": "general",
+      "name": "glaive-1",
+      "llmtrim": {
+        "before": 52,
+        "after": 52,
+        "ms": 0.24118460714817047,
+        "stages": [
+          {
+            "name": "toolout",
+            "applied": false,
+            "tokens_before": 52,
+            "tokens_after": 52,
+            "note": "no token reduction"
+          },
+          {
+            "name": "image",
+            "applied": true,
+            "tokens_before": 52,
+            "tokens_after": 52,
+            "note": null
+          },
+          {
+            "name": "hygiene",
+            "applied": false,
+            "tokens_before": 52,
+            "tokens_after": 52,
+            "note": "no token reduction"
+          },
+          {
+            "name": "json-crush",
+            "applied": false,
+            "tokens_before": 52,
+            "tokens_after": 52,
+            "note": "no token reduction"
+          },
+          {
+            "name": "serialize-toon",
+            "applied": false,
+            "tokens_before": 52,
+            "tokens_after": 52,
+            "note": "no token reduction"
+          },
+          {
+            "name": "dedup",
+            "applied": false,
+            "tokens_before": 52,
+            "tokens_after": 52,
+            "note": "no token reduction"
+          },
+          {
+            "name": "tools",
+            "applied": false,
+            "tokens_before": 52,
+            "tokens_after": 52,
+            "note": "no token reduction"
+          },
+          {
+            "name": "cache",
+            "applied": true,
+            "tokens_before": 52,
+            "tokens_after": 52,
+            "note": null
+          }
+        ]
+      },
+      "headroom": {
+        "before": 52,
+        "after": 52,
+        "ms": 0.20014867186546326,
+        "transforms": [
+          "router:protected:user_message",
+          "router:protected:user_message"
+        ]
+      }
+    },
+    {
+      "group": "general",
+      "name": "glaive-2",
+      "llmtrim": {
+        "before": 59,
+        "after": 59,
+        "ms": 0.2650488168001175,
+        "stages": [
+          {
+            "name": "toolout",
+            "applied": false,
+            "tokens_before": 59,
+            "tokens_after": 59,
+            "note": "no token reduction"
+          },
+          {
+            "name": "image",
+            "applied": true,
+            "tokens_before": 59,
+            "tokens_after": 59,
+            "note": null
+          },
+          {
+            "name": "hygiene",
+            "applied": false,
+            "tokens_before": 59,
+            "tokens_after": 59,
+            "note": "no token reduction"
+          },
+          {
+            "name": "json-crush",
+            "applied": false,
+            "tokens_before": 59,
+            "tokens_after": 59,
+            "note": "no token reduction"
+          },
+          {
+            "name": "serialize-toon",
+            "applied": false,
+            "tokens_before": 59,
+            "tokens_after": 59,
+            "note": "no token reduction"
+          },
+          {
+            "name": "dedup",
+            "applied": false,
+            "tokens_before": 59,
+            "tokens_after": 59,
+            "note": "no token reduction"
+          },
+          {
+            "name": "tools",
+            "applied": false,
+            "tokens_before": 59,
+            "tokens_after": 59,
+            "note": "no token reduction"
+          },
+          {
+            "name": "cache",
+            "applied": true,
+            "tokens_before": 59,
+            "tokens_after": 59,
+            "note": null
+          }
+        ]
+      },
+      "headroom": {
+        "before": 59,
+        "after": 59,
+        "ms": 0.3907550126314163,
+        "transforms": [
+          "router:protected:user_message",
+          "router:protected:user_message"
+        ]
+      }
+    },
+    {
+      "group": "general",
+      "name": "glaive-3",
+      "llmtrim": {
+        "before": 72,
+        "after": 72,
+        "ms": 0.2532918006181717,
+        "stages": [
+          {
+            "name": "toolout",
+            "applied": false,
+            "tokens_before": 72,
+            "tokens_after": 72,
+            "note": "no token reduction"
+          },
+          {
+            "name": "image",
+            "applied": true,
+            "tokens_before": 72,
+            "tokens_after": 72,
+            "note": null
+          },
+          {
+            "name": "hygiene",
+            "applied": false,
+            "tokens_before": 72,
+            "tokens_after": 72,
+            "note": "no token reduction"
+          },
+          {
+            "name": "json-crush",
+            "applied": false,
+            "tokens_before": 72,
+            "tokens_after": 72,
+            "note": "no token reduction"
+          },
+          {
+            "name": "serialize-toon",
+            "applied": false,
+            "tokens_before": 72,
+            "tokens_after": 72,
+            "note": "no token reduction"
+          },
+          {
+            "name": "dedup",
+            "applied": false,
+            "tokens_before": 72,
+            "tokens_after": 72,
+            "note": "no token reduction"
+          },
+          {
+            "name": "tools",
+            "applied": false,
+            "tokens_before": 72,
+            "tokens_after": 72,
+            "note": "no token reduction"
+          },
+          {
+            "name": "cache",
+            "applied": true,
+            "tokens_before": 72,
+            "tokens_after": 72,
+            "note": null
+          }
+        ]
+      },
+      "headroom": {
+        "before": 72,
+        "after": 72,
+        "ms": 0.22400729358196259,
+        "transforms": [
+          "router:protected:user_message",
+          "router:protected:user_message"
+        ]
+      }
+    },
+    {
+      "group": "general",
+      "name": "glaive-4",
+      "llmtrim": {
+        "before": 61,
+        "after": 61,
+        "ms": 0.22631138563156128,
+        "stages": [
+          {
+            "name": "toolout",
+            "applied": false,
+            "tokens_before": 61,
+            "tokens_after": 61,
+            "note": "no token reduction"
+          },
+          {
+            "name": "image",
+            "applied": true,
+            "tokens_before": 61,
+            "tokens_after": 61,
+            "note": null
+          },
+          {
+            "name": "hygiene",
+            "applied": false,
+            "tokens_before": 61,
+            "tokens_after": 61,
+            "note": "no token reduction"
+          },
+          {
+            "name": "json-crush",
+            "applied": false,
+            "tokens_before": 61,
+            "tokens_after": 61,
+            "note": "no token reduction"
+          },
+          {
+            "name": "serialize-toon",
+            "applied": false,
+            "tokens_before": 61,
+            "tokens_after": 61,
+            "note": "no token reduction"
+          },
+          {
+            "name": "dedup",
+            "applied": false,
+            "tokens_before": 61,
+            "tokens_after": 61,
+            "note": "no token reduction"
+          },
+          {
+            "name": "tools",
+            "applied": false,
+            "tokens_before": 61,
+            "tokens_after": 61,
+            "note": "no token reduction"
+          },
+          {
+            "name": "cache",
+            "applied": true,
+            "tokens_before": 61,
+            "tokens_after": 61,
+            "note": null
+          }
+        ]
+      },
+      "headroom": {
+        "before": 61,
+        "after": 61,
+        "ms": 0.1928228884935379,
+        "transforms": [
+          "router:protected:user_message"
+        ]
+      }
+    },
+    {
+      "group": "general",
+      "name": "glaive-5",
+      "llmtrim": {
+        "before": 21,
+        "after": 21,
+        "ms": 0.1571308821439743,
+        "stages": [
+          {
+            "name": "toolout",
+            "applied": false,
+            "tokens_before": 21,
+            "tokens_after": 21,
+            "note": "no token reduction"
+          },
+          {
+            "name": "image",
+            "applied": true,
+            "tokens_before": 21,
+            "tokens_after": 21,
+            "note": null
+          },
+          {
+            "name": "hygiene",
+            "applied": false,
+            "tokens_before": 21,
+            "tokens_after": 21,
+            "note": "no token reduction"
+          },
+          {
+            "name": "json-crush",
+            "applied": false,
+            "tokens_before": 21,
+            "tokens_after": 21,
+            "note": "no token reduction"
+          },
+          {
+            "name": "serialize-toon",
+            "applied": false,
+            "tokens_before": 21,
+            "tokens_after": 21,
+            "note": "no token reduction"
+          },
+          {
+            "name": "dedup",
+            "applied": false,
+            "tokens_before": 21,
+            "tokens_after": 21,
+            "note": "no token reduction"
+          },
+          {
+            "name": "tools",
+            "applied": false,
+            "tokens_before": 21,
+            "tokens_after": 21,
+            "note": "no token reduction"
+          },
+          {
+            "name": "cache",
+            "applied": true,
+            "tokens_before": 21,
+            "tokens_after": 21,
+            "note": null
+          }
+        ]
+      },
+      "headroom": {
+        "before": 21,
+        "after": 21,
+        "ms": 0.14005228877067566,
+        "transforms": [
+          "router:protected:user_message"
+        ]
+      }
+    },
+    {
+      "group": "general",
+      "name": "glaive-6",
+      "llmtrim": {
+        "before": 35,
+        "after": 35,
+        "ms": 0.18684379756450653,
+        "stages": [
+          {
+            "name": "toolout",
+            "applied": false,
+            "tokens_before": 35,
+            "tokens_after": 35,
+            "note": "no token reduction"
+          },
+          {
+            "name": "image",
+            "applied": true,
+            "tokens_before": 35,
+            "tokens_after": 35,
+            "note": null
+          },
+          {
+            "name": "hygiene",
+            "applied": false,
+            "tokens_before": 35,
+            "tokens_after": 35,
+            "note": "no token reduction"
+          },
+          {
+            "name": "json-crush",
+            "applied": false,
+            "tokens_before": 35,
+            "tokens_after": 35,
+            "note": "no token reduction"
+          },
+          {
+            "name": "serialize-toon",
+            "applied": false,
+            "tokens_before": 35,
+            "tokens_after": 35,
+            "note": "no token reduction"
+          },
+          {
+            "name": "dedup",
+            "applied": false,
+            "tokens_before": 35,
+            "tokens_after": 35,
+            "note": "no token reduction"
+          },
+          {
+            "name": "tools",
+            "applied": false,
+            "tokens_before": 35,
+            "tokens_after": 35,
+            "note": "no token reduction"
+          },
+          {
+            "name": "cache",
+            "applied": true,
+            "tokens_before": 35,
+            "tokens_after": 35,
+            "note": null
+          }
+        ]
+      },
+      "headroom": {
+        "before": 35,
+        "after": 35,
+        "ms": 0.16957148909568787,
+        "transforms": [
+          "router:protected:user_message"
+        ]
+      }
+    },
+    {
+      "group": "general",
+      "name": "glaive-7",
+      "llmtrim": {
+        "before": 22,
+        "after": 22,
+        "ms": 0.15278533101081848,
+        "stages": [
+          {
+            "name": "toolout",
+            "applied": false,
+            "tokens_before": 22,
+            "tokens_after": 22,
+            "note": "no token reduction"
+          },
+          {
+            "name": "image",
+            "applied": true,
+            "tokens_before": 22,
+            "tokens_after": 22,
+            "note": null
+          },
+          {
+            "name": "hygiene",
+            "applied": false,
+            "tokens_before": 22,
+            "tokens_after": 22,
+            "note": "no token reduction"
+          },
+          {
+            "name": "json-crush",
+            "applied": false,
+            "tokens_before": 22,
+            "tokens_after": 22,
+            "note": "no token reduction"
+          },
+          {
+            "name": "serialize-toon",
+            "applied": false,
+            "tokens_before": 22,
+            "tokens_after": 22,
+            "note": "no token reduction"
+          },
+          {
+            "name": "dedup",
+            "applied": false,
+            "tokens_before": 22,
+            "tokens_after": 22,
+            "note": "no token reduction"
+          },
+          {
+            "name": "tools",
+            "applied": false,
+            "tokens_before": 22,
+            "tokens_after": 22,
+            "note": "no token reduction"
+          },
+          {
+            "name": "cache",
+            "applied": true,
+            "tokens_before": 22,
+            "tokens_after": 22,
+            "note": null
+          }
+        ]
+      },
+      "headroom": {
+        "before": 22,
+        "after": 22,
+        "ms": 0.13195723295211792,
+        "transforms": [
+          "router:protected:user_message"
+        ]
+      }
+    },
+    {
+      "group": "general",
+      "name": "chat-0",
+      "llmtrim": {
+        "before": 460,
+        "after": 460,
+        "ms": 0.982426106929779,
+        "stages": [
+          {
+            "name": "toolout",
+            "applied": false,
+            "tokens_before": 460,
+            "tokens_after": 460,
+            "note": "no token reduction"
+          },
+          {
+            "name": "image",
+            "applied": true,
+            "tokens_before": 460,
+            "tokens_after": 460,
+            "note": null
+          },
+          {
+            "name": "hygiene",
+            "applied": false,
+            "tokens_before": 460,
+            "tokens_after": 460,
+            "note": "no token reduction"
+          },
+          {
+            "name": "json-crush",
+            "applied": false,
+            "tokens_before": 460,
+            "tokens_after": 460,
+            "note": "no token reduction"
+          },
+          {
+            "name": "serialize-toon",
+            "applied": false,
+            "tokens_before": 460,
+            "tokens_after": 460,
+            "note": "no token reduction"
+          },
+          {
+            "name": "dedup",
+            "applied": false,
+            "tokens_before": 460,
+            "tokens_after": 460,
+            "note": "no token reduction"
+          },
+          {
+            "name": "tools",
+            "applied": false,
+            "tokens_before": 460,
+            "tokens_after": 460,
+            "note": "no token reduction"
+          },
+          {
+            "name": "cache",
+            "applied": true,
+            "tokens_before": 460,
+            "tokens_after": 460,
+            "note": null
+          }
+        ]
+      },
+      "headroom": {
+        "before": 460,
+        "after": 460,
+        "ms": 0.6971303373575211,
+        "transforms": [
+          "router:protected:user_message",
+          "router:protected:user_message",
+          "router:protected:user_message",
+          "router:protected:user_message"
+        ]
+      }
+    },
+    {
+      "group": "general",
+      "name": "chat-1",
+      "llmtrim": {
+        "before": 1273,
+        "after": 1273,
+        "ms": 2.350602298974991,
+        "stages": [
+          {
+            "name": "toolout",
+            "applied": false,
+            "tokens_before": 1273,
+            "tokens_after": 1273,
+            "note": "no token reduction"
+          },
+          {
+            "name": "image",
+            "applied": true,
+            "tokens_before": 1273,
+            "tokens_after": 1273,
+            "note": null
+          },
+          {
+            "name": "hygiene",
+            "applied": false,
+            "tokens_before": 1273,
+            "tokens_after": 1273,
+            "note": "no token reduction"
+          },
+          {
+            "name": "json-crush",
+            "applied": false,
+            "tokens_before": 1273,
+            "tokens_after": 1273,
+            "note": "no token reduction"
+          },
+          {
+            "name": "serialize-toon",
+            "applied": false,
+            "tokens_before": 1273,
+            "tokens_after": 1273,
+            "note": "no token reduction"
+          },
+          {
+            "name": "dedup",
+            "applied": false,
+            "tokens_before": 1273,
+            "tokens_after": 1273,
+            "note": "no token reduction"
+          },
+          {
+            "name": "tools",
+            "applied": false,
+            "tokens_before": 1273,
+            "tokens_after": 1273,
+            "note": "no token reduction"
+          },
+          {
+            "name": "cache",
+            "applied": true,
+            "tokens_before": 1273,
+            "tokens_after": 1273,
+            "note": null
+          }
+        ]
+      },
+      "headroom": {
+        "before": 1273,
+        "after": 1233,
+        "ms": 11.809077113866806,
+        "transforms": [
+          "router:protected:user_message",
+          "router:protected:user_message",
+          "router:text:0.82",
+          "router:protected:user_message",
+          "router:protected:user_message",
+          "router:protected:user_message",
+          "router:protected:user_message"
+        ]
+      }
+    },
+    {
+      "group": "general",
+      "name": "chat-2",
+      "llmtrim": {
+        "before": 2322,
+        "after": 2322,
+        "ms": 4.603710025548935,
+        "stages": [
+          {
+            "name": "toolout",
+            "applied": false,
+            "tokens_before": 2321,
+            "tokens_after": 2321,
+            "note": "no token reduction"
+          },
+          {
+            "name": "image",
+            "applied": true,
+            "tokens_before": 2321,
+            "tokens_after": 2321,
+            "note": null
+          },
+          {
+            "name": "hygiene",
+            "applied": false,
+            "tokens_before": 2321,
+            "tokens_after": 2321,
+            "note": "no token reduction"
+          },
+          {
+            "name": "json-crush",
+            "applied": false,
+            "tokens_before": 2321,
+            "tokens_after": 2321,
+            "note": "no token reduction"
+          },
+          {
+            "name": "serialize-toon",
+            "applied": false,
+            "tokens_before": 2321,
+            "tokens_after": 2321,
+            "note": "no token reduction"
+          },
+          {
+            "name": "dedup",
+            "applied": false,
+            "tokens_before": 2321,
+            "tokens_after": 2321,
+            "note": "no token reduction"
+          },
+          {
+            "name": "tools",
+            "applied": false,
+            "tokens_before": 2321,
+            "tokens_after": 2321,
+            "note": "no token reduction"
+          },
+          {
+            "name": "cache",
+            "applied": true,
+            "tokens_before": 2321,
+            "tokens_after": 2321,
+            "note": null
+          }
+        ]
+      },
+      "headroom": {
+        "before": 2322,
+        "after": 2322,
+        "ms": 18.347544595599174,
+        "transforms": [
+          "router:protected:user_message",
+          "router:protected:user_message",
+          "router:protected:user_message",
+          "router:protected:user_message"
+        ]
+      }
+    },
+    {
+      "group": "general",
+      "name": "chat-3",
+      "llmtrim": {
+        "before": 196,
+        "after": 196,
+        "ms": 0.5642957985401154,
+        "stages": [
+          {
+            "name": "toolout",
+            "applied": false,
+            "tokens_before": 196,
+            "tokens_after": 196,
+            "note": "no token reduction"
+          },
+          {
+            "name": "image",
+            "applied": true,
+            "tokens_before": 196,
+            "tokens_after": 196,
+            "note": null
+          },
+          {
+            "name": "hygiene",
+            "applied": false,
+            "tokens_before": 196,
+            "tokens_after": 196,
+            "note": "no token reduction"
+          },
+          {
+            "name": "json-crush",
+            "applied": false,
+            "tokens_before": 196,
+            "tokens_after": 196,
+            "note": "no token reduction"
+          },
+          {
+            "name": "serialize-toon",
+            "applied": false,
+            "tokens_before": 196,
+            "tokens_after": 196,
+            "note": "no token reduction"
+          },
+          {
+            "name": "dedup",
+            "applied": false,
+            "tokens_before": 196,
+            "tokens_after": 196,
+            "note": "no token reduction"
+          },
+          {
+            "name": "tools",
+            "applied": false,
+            "tokens_before": 196,
+            "tokens_after": 196,
+            "note": "no token reduction"
+          },
+          {
+            "name": "cache",
+            "applied": true,
+            "tokens_before": 196,
+            "tokens_after": 196,
+            "note": null
+          }
+        ]
+      },
+      "headroom": {
+        "before": 196,
+        "after": 196,
+        "ms": 0.3496278077363968,
+        "transforms": [
+          "router:protected:user_message",
+          "router:protected:user_message"
+        ]
+      }
+    },
+    {
+      "group": "general",
+      "name": "chat-4",
+      "llmtrim": {
+        "before": 1762,
+        "after": 1762,
+        "ms": 3.401864320039749,
+        "stages": [
+          {
+            "name": "toolout",
+            "applied": false,
+            "tokens_before": 1762,
+            "tokens_after": 1762,
+            "note": "no token reduction"
+          },
+          {
+            "name": "image",
+            "applied": true,
+            "tokens_before": 1762,
+            "tokens_after": 1762,
+            "note": null
+          },
+          {
+            "name": "hygiene",
+            "applied": false,
+            "tokens_before": 1762,
+            "tokens_after": 1762,
+            "note": "no token reduction"
+          },
+          {
+            "name": "json-crush",
+            "applied": false,
+            "tokens_before": 1762,
+            "tokens_after": 1762,
+            "note": "no token reduction"
+          },
+          {
+            "name": "serialize-toon",
+            "applied": false,
+            "tokens_before": 1762,
+            "tokens_after": 1762,
+            "note": "no token reduction"
+          },
+          {
+            "name": "dedup",
+            "applied": false,
+            "tokens_before": 1762,
+            "tokens_after": 1762,
+            "note": "no token reduction"
+          },
+          {
+            "name": "tools",
+            "applied": false,
+            "tokens_before": 1762,
+            "tokens_after": 1762,
+            "note": "no token reduction"
+          },
+          {
+            "name": "cache",
+            "applied": true,
+            "tokens_before": 1762,
+            "tokens_after": 1762,
+            "note": null
+          }
+        ]
+      },
+      "headroom": {
+        "before": 1762,
+        "after": 1762,
+        "ms": 15.916861593723297,
+        "transforms": [
+          "router:protected:user_message",
+          "router:protected:user_message",
+          "router:protected:user_message",
+          "router:protected:user_message"
+        ]
+      }
+    },
+    {
+      "group": "general",
+      "name": "chat-5",
+      "llmtrim": {
+        "before": 878,
+        "after": 878,
+        "ms": 2.0597074180841446,
+        "stages": [
+          {
+            "name": "toolout",
+            "applied": false,
+            "tokens_before": 877,
+            "tokens_after": 877,
+            "note": "no token reduction"
+          },
+          {
+            "name": "image",
+            "applied": true,
+            "tokens_before": 877,
+            "tokens_after": 877,
+            "note": null
+          },
+          {
+            "name": "hygiene",
+            "applied": false,
+            "tokens_before": 877,
+            "tokens_after": 877,
+            "note": "no token reduction"
+          },
+          {
+            "name": "json-crush",
+            "applied": false,
+            "tokens_before": 877,
+            "tokens_after": 877,
+            "note": "no token reduction"
+          },
+          {
+            "name": "serialize-toon",
+            "applied": false,
+            "tokens_before": 877,
+            "tokens_after": 877,
+            "note": "no token reduction"
+          },
+          {
+            "name": "dedup",
+            "applied": false,
+            "tokens_before": 877,
+            "tokens_after": 877,
+            "note": "no token reduction"
+          },
+          {
+            "name": "tools",
+            "applied": false,
+            "tokens_before": 877,
+            "tokens_after": 877,
+            "note": "no token reduction"
+          },
+          {
+            "name": "cache",
+            "applied": true,
+            "tokens_before": 877,
+            "tokens_after": 877,
+            "note": null
+          }
+        ]
+      },
+      "headroom": {
+        "before": 878,
+        "after": 878,
+        "ms": 0.9509772062301636,
+        "transforms": [
+          "router:protected:user_message",
+          "router:protected:user_message"
+        ]
+      }
+    },
+    {
+      "group": "general",
+      "name": "chat-6",
+      "llmtrim": {
+        "before": 985,
+        "after": 653,
+        "ms": 2.759929746389389,
+        "stages": [
+          {
+            "name": "toolout",
+            "applied": true,
+            "tokens_before": 985,
+            "tokens_after": 653,
+            "note": null
+          },
+          {
+            "name": "image",
+            "applied": true,
+            "tokens_before": 653,
+            "tokens_after": 653,
+            "note": null
+          },
+          {
+            "name": "hygiene",
+            "applied": false,
+            "tokens_before": 653,
+            "tokens_after": 653,
+            "note": "no token reduction"
+          },
+          {
+            "name": "json-crush",
+            "applied": false,
+            "tokens_before": 653,
+            "tokens_after": 653,
+            "note": "no token reduction"
+          },
+          {
+            "name": "serialize-toon",
+            "applied": false,
+            "tokens_before": 653,
+            "tokens_after": 653,
+            "note": "no token reduction"
+          },
+          {
+            "name": "dedup",
+            "applied": false,
+            "tokens_before": 653,
+            "tokens_after": 653,
+            "note": "no token reduction"
+          },
+          {
+            "name": "tools",
+            "applied": false,
+            "tokens_before": 653,
+            "tokens_after": 653,
+            "note": "no token reduction"
+          },
+          {
+            "name": "cache",
+            "applied": true,
+            "tokens_before": 653,
+            "tokens_after": 653,
+            "note": null
+          }
+        ]
+      },
+      "headroom": {
+        "before": 985,
+        "after": 985,
+        "ms": 9.118204936385155,
+        "transforms": [
+          "router:protected:user_message",
+          "router:protected:recent_code",
+          "router:protected:user_message",
+          "router:protected:recent_code",
+          "router:protected:user_message"
+        ]
+      }
+    },
+    {
+      "group": "general",
+      "name": "chat-7",
+      "llmtrim": {
+        "before": 742,
+        "after": 742,
+        "ms": 1.6531869769096375,
+        "stages": [
+          {
+            "name": "toolout",
+            "applied": false,
+            "tokens_before": 742,
+            "tokens_after": 742,
+            "note": "no token reduction"
+          },
+          {
+            "name": "image",
+            "applied": true,
+            "tokens_before": 742,
+            "tokens_after": 742,
+            "note": null
+          },
+          {
+            "name": "hygiene",
+            "applied": false,
+            "tokens_before": 742,
+            "tokens_after": 742,
+            "note": "no token reduction"
+          },
+          {
+            "name": "json-crush",
+            "applied": false,
+            "tokens_before": 742,
+            "tokens_after": 742,
+            "note": "no token reduction"
+          },
+          {
+            "name": "serialize-toon",
+            "applied": false,
+            "tokens_before": 742,
+            "tokens_after": 742,
+            "note": "no token reduction"
+          },
+          {
+            "name": "dedup",
+            "applied": false,
+            "tokens_before": 742,
+            "tokens_after": 742,
+            "note": "no token reduction"
+          },
+          {
+            "name": "tools",
+            "applied": false,
+            "tokens_before": 742,
+            "tokens_after": 742,
+            "note": "no token reduction"
+          },
+          {
+            "name": "cache",
+            "applied": true,
+            "tokens_before": 742,
+            "tokens_after": 742,
+            "note": null
+          }
+        ]
+      },
+      "headroom": {
+        "before": 742,
+        "after": 706,
+        "ms": 6.1865150928497314,
+        "transforms": [
+          "router:protected:user_message",
+          "router:text:0.80",
+          "router:protected:user_message",
+          "router:protected:user_message"
+        ]
+      }
+    },
+    {
+      "group": "general",
+      "name": "cnn-0",
+      "llmtrim": {
+        "before": 921,
+        "after": 921,
+        "ms": 1.4175642281770706,
+        "stages": [
+          {
+            "name": "toolout",
+            "applied": false,
+            "tokens_before": 921,
+            "tokens_after": 921,
+            "note": "no token reduction"
+          },
+          {
+            "name": "image",
+            "applied": true,
+            "tokens_before": 921,
+            "tokens_after": 921,
+            "note": null
+          },
+          {
+            "name": "hygiene",
+            "applied": false,
+            "tokens_before": 921,
+            "tokens_after": 921,
+            "note": "no token reduction"
+          },
+          {
+            "name": "json-crush",
+            "applied": false,
+            "tokens_before": 921,
+            "tokens_after": 921,
+            "note": "no token reduction"
+          },
+          {
+            "name": "serialize-toon",
+            "applied": false,
+            "tokens_before": 921,
+            "tokens_after": 921,
+            "note": "no token reduction"
+          },
+          {
+            "name": "dedup",
+            "applied": false,
+            "tokens_before": 921,
+            "tokens_after": 921,
+            "note": "no token reduction"
+          },
+          {
+            "name": "tools",
+            "applied": false,
+            "tokens_before": 921,
+            "tokens_after": 921,
+            "note": "no token reduction"
+          },
+          {
+            "name": "cache",
+            "applied": true,
+            "tokens_before": 921,
+            "tokens_after": 921,
+            "note": null
+          }
+        ]
+      },
+      "headroom": {
+        "before": 921,
+        "after": 921,
+        "ms": 0.9293891489505768,
+        "transforms": [
+          "router:protected:user_message",
+          "router:protected:user_message"
+        ]
+      }
+    },
+    {
+      "group": "general",
+      "name": "cnn-1",
+      "llmtrim": {
+        "before": 1604,
+        "after": 1604,
+        "ms": 2.2433586418628693,
+        "stages": [
+          {
+            "name": "toolout",
+            "applied": false,
+            "tokens_before": 1604,
+            "tokens_after": 1604,
+            "note": "no token reduction"
+          },
+          {
+            "name": "image",
+            "applied": true,
+            "tokens_before": 1604,
+            "tokens_after": 1604,
+            "note": null
+          },
+          {
+            "name": "hygiene",
+            "applied": false,
+            "tokens_before": 1604,
+            "tokens_after": 1604,
+            "note": "no token reduction"
+          },
+          {
+            "name": "json-crush",
+            "applied": false,
+            "tokens_before": 1604,
+            "tokens_after": 1604,
+            "note": "no token reduction"
+          },
+          {
+            "name": "serialize-toon",
+            "applied": false,
+            "tokens_before": 1604,
+            "tokens_after": 1604,
+            "note": "no token reduction"
+          },
+          {
+            "name": "dedup",
+            "applied": false,
+            "tokens_before": 1604,
+            "tokens_after": 1604,
+            "note": "no token reduction"
+          },
+          {
+            "name": "tools",
+            "applied": false,
+            "tokens_before": 1604,
+            "tokens_after": 1604,
+            "note": "no token reduction"
+          },
+          {
+            "name": "cache",
+            "applied": true,
+            "tokens_before": 1604,
+            "tokens_after": 1604,
+            "note": null
+          }
+        ]
+      },
+      "headroom": {
+        "before": 1604,
+        "after": 1604,
+        "ms": 1.6840491443872452,
+        "transforms": [
+          "router:protected:user_message",
+          "router:protected:user_message"
+        ]
+      }
+    },
+    {
+      "group": "general",
+      "name": "cnn-2",
+      "llmtrim": {
+        "before": 541,
+        "after": 541,
+        "ms": 0.9035971015691757,
+        "stages": [
+          {
+            "name": "toolout",
+            "applied": false,
+            "tokens_before": 541,
+            "tokens_after": 541,
+            "note": "no token reduction"
+          },
+          {
+            "name": "image",
+            "applied": true,
+            "tokens_before": 541,
+            "tokens_after": 541,
+            "note": null
+          },
+          {
+            "name": "hygiene",
+            "applied": false,
+            "tokens_before": 541,
+            "tokens_after": 541,
+            "note": "no token reduction"
+          },
+          {
+            "name": "json-crush",
+            "applied": false,
+            "tokens_before": 541,
+            "tokens_after": 541,
+            "note": "no token reduction"
+          },
+          {
+            "name": "serialize-toon",
+            "applied": false,
+            "tokens_before": 541,
+            "tokens_after": 541,
+            "note": "no token reduction"
+          },
+          {
+            "name": "dedup",
+            "applied": false,
+            "tokens_before": 541,
+            "tokens_after": 541,
+            "note": "no token reduction"
+          },
+          {
+            "name": "tools",
+            "applied": false,
+            "tokens_before": 541,
+            "tokens_after": 541,
+            "note": "no token reduction"
+          },
+          {
+            "name": "cache",
+            "applied": true,
+            "tokens_before": 541,
+            "tokens_after": 541,
+            "note": null
+          }
+        ]
+      },
+      "headroom": {
+        "before": 541,
+        "after": 541,
+        "ms": 0.662878155708313,
+        "transforms": [
+          "router:protected:user_message",
+          "router:protected:user_message"
+        ]
+      }
+    },
+    {
+      "group": "general",
+      "name": "cnn-3",
+      "llmtrim": {
+        "before": 443,
+        "after": 443,
+        "ms": 0.7990039885044098,
+        "stages": [
+          {
+            "name": "toolout",
+            "applied": false,
+            "tokens_before": 443,
+            "tokens_after": 443,
+            "note": "no token reduction"
+          },
+          {
+            "name": "image",
+            "applied": true,
+            "tokens_before": 443,
+            "tokens_after": 443,
+            "note": null
+          },
+          {
+            "name": "hygiene",
+            "applied": false,
+            "tokens_before": 443,
+            "tokens_after": 443,
+            "note": "no token reduction"
+          },
+          {
+            "name": "json-crush",
+            "applied": false,
+            "tokens_before": 443,
+            "tokens_after": 443,
+            "note": "no token reduction"
+          },
+          {
+            "name": "serialize-toon",
+            "applied": false,
+            "tokens_before": 443,
+            "tokens_after": 443,
+            "note": "no token reduction"
+          },
+          {
+            "name": "dedup",
+            "applied": false,
+            "tokens_before": 443,
+            "tokens_after": 443,
+            "note": "no token reduction"
+          },
+          {
+            "name": "tools",
+            "applied": false,
+            "tokens_before": 443,
+            "tokens_after": 443,
+            "note": "no token reduction"
+          },
+          {
+            "name": "cache",
+            "applied": true,
+            "tokens_before": 443,
+            "tokens_after": 443,
+            "note": null
+          }
+        ]
+      },
+      "headroom": {
+        "before": 443,
+        "after": 443,
+        "ms": 0.5677416920661926,
+        "transforms": [
+          "router:protected:user_message",
+          "router:protected:user_message"
+        ]
+      }
+    },
+    {
+      "group": "general",
+      "name": "cnn-4",
+      "llmtrim": {
+        "before": 578,
+        "after": 578,
+        "ms": 0.9552985429763794,
+        "stages": [
+          {
+            "name": "toolout",
+            "applied": false,
+            "tokens_before": 578,
+            "tokens_after": 578,
+            "note": "no token reduction"
+          },
+          {
+            "name": "image",
+            "applied": true,
+            "tokens_before": 578,
+            "tokens_after": 578,
+            "note": null
+          },
+          {
+            "name": "hygiene",
+            "applied": false,
+            "tokens_before": 578,
+            "tokens_after": 578,
+            "note": "no token reduction"
+          },
+          {
+            "name": "json-crush",
+            "applied": false,
+            "tokens_before": 578,
+            "tokens_after": 578,
+            "note": "no token reduction"
+          },
+          {
+            "name": "serialize-toon",
+            "applied": false,
+            "tokens_before": 578,
+            "tokens_after": 578,
+            "note": "no token reduction"
+          },
+          {
+            "name": "dedup",
+            "applied": false,
+            "tokens_before": 578,
+            "tokens_after": 578,
+            "note": "no token reduction"
+          },
+          {
+            "name": "tools",
+            "applied": false,
+            "tokens_before": 578,
+            "tokens_after": 578,
+            "note": "no token reduction"
+          },
+          {
+            "name": "cache",
+            "applied": true,
+            "tokens_before": 578,
+            "tokens_after": 578,
+            "note": null
+          }
+        ]
+      },
+      "headroom": {
+        "before": 578,
+        "after": 578,
+        "ms": 0.6340015679597855,
+        "transforms": [
+          "router:protected:user_message",
+          "router:protected:user_message"
+        ]
+      }
+    },
+    {
+      "group": "general",
+      "name": "cnn-5",
+      "llmtrim": {
+        "before": 974,
+        "after": 974,
+        "ms": 2.091864123940468,
+        "stages": [
+          {
+            "name": "toolout",
+            "applied": false,
+            "tokens_before": 974,
+            "tokens_after": 974,
+            "note": "no token reduction"
+          },
+          {
+            "name": "image",
+            "applied": true,
+            "tokens_before": 974,
+            "tokens_after": 974,
+            "note": null
+          },
+          {
+            "name": "hygiene",
+            "applied": false,
+            "tokens_before": 974,
+            "tokens_after": 974,
+            "note": "no token reduction"
+          },
+          {
+            "name": "json-crush",
+            "applied": false,
+            "tokens_before": 974,
+            "tokens_after": 974,
+            "note": "no token reduction"
+          },
+          {
+            "name": "serialize-toon",
+            "applied": false,
+            "tokens_before": 974,
+            "tokens_after": 974,
+            "note": "no token reduction"
+          },
+          {
+            "name": "dedup",
+            "applied": false,
+            "tokens_before": 974,
+            "tokens_after": 974,
+            "note": "no token reduction"
+          },
+          {
+            "name": "tools",
+            "applied": false,
+            "tokens_before": 974,
+            "tokens_after": 974,
+            "note": "no token reduction"
+          },
+          {
+            "name": "cache",
+            "applied": true,
+            "tokens_before": 974,
+            "tokens_after": 974,
+            "note": null
+          }
+        ]
+      },
+      "headroom": {
+        "before": 974,
+        "after": 974,
+        "ms": 1.0062027722597122,
+        "transforms": [
+          "router:protected:user_message",
+          "router:protected:user_message"
+        ]
+      }
+    },
+    {
+      "group": "general",
+      "name": "cnn-6",
+      "llmtrim": {
+        "before": 649,
+        "after": 649,
+        "ms": 1.0467134416103363,
+        "stages": [
+          {
+            "name": "toolout",
+            "applied": false,
+            "tokens_before": 649,
+            "tokens_after": 649,
+            "note": "no token reduction"
+          },
+          {
+            "name": "image",
+            "applied": true,
+            "tokens_before": 649,
+            "tokens_after": 649,
+            "note": null
+          },
+          {
+            "name": "hygiene",
+            "applied": false,
+            "tokens_before": 649,
+            "tokens_after": 649,
+            "note": "no token reduction"
+          },
+          {
+            "name": "json-crush",
+            "applied": false,
+            "tokens_before": 649,
+            "tokens_after": 649,
+            "note": "no token reduction"
+          },
+          {
+            "name": "serialize-toon",
+            "applied": false,
+            "tokens_before": 649,
+            "tokens_after": 649,
+            "note": "no token reduction"
+          },
+          {
+            "name": "dedup",
+            "applied": false,
+            "tokens_before": 649,
+            "tokens_after": 649,
+            "note": "no token reduction"
+          },
+          {
+            "name": "tools",
+            "applied": false,
+            "tokens_before": 649,
+            "tokens_after": 649,
+            "note": "no token reduction"
+          },
+          {
+            "name": "cache",
+            "applied": true,
+            "tokens_before": 649,
+            "tokens_after": 649,
+            "note": null
+          }
+        ]
+      },
+      "headroom": {
+        "before": 649,
+        "after": 649,
+        "ms": 0.7385797798633575,
+        "transforms": [
+          "router:protected:user_message",
+          "router:protected:user_message"
+        ]
+      }
+    },
+    {
+      "group": "general",
+      "name": "cnn-7",
+      "llmtrim": {
+        "before": 179,
+        "after": 179,
+        "ms": 0.4462003707885742,
+        "stages": [
+          {
+            "name": "toolout",
+            "applied": false,
+            "tokens_before": 179,
+            "tokens_after": 179,
+            "note": "no token reduction"
+          },
+          {
+            "name": "image",
+            "applied": true,
+            "tokens_before": 179,
+            "tokens_after": 179,
+            "note": null
+          },
+          {
+            "name": "hygiene",
+            "applied": false,
+            "tokens_before": 179,
+            "tokens_after": 179,
+            "note": "no token reduction"
+          },
+          {
+            "name": "json-crush",
+            "applied": false,
+            "tokens_before": 179,
+            "tokens_after": 179,
+            "note": "no token reduction"
+          },
+          {
+            "name": "serialize-toon",
+            "applied": false,
+            "tokens_before": 179,
+            "tokens_after": 179,
+            "note": "no token reduction"
+          },
+          {
+            "name": "dedup",
+            "applied": false,
+            "tokens_before": 179,
+            "tokens_after": 179,
+            "note": "no token reduction"
+          },
+          {
+            "name": "tools",
+            "applied": false,
+            "tokens_before": 179,
+            "tokens_after": 179,
+            "note": "no token reduction"
+          },
+          {
+            "name": "cache",
+            "applied": true,
+            "tokens_before": 179,
+            "tokens_after": 179,
+            "note": null
+          }
+        ]
+      },
+      "headroom": {
+        "before": 179,
+        "after": 179,
+        "ms": 0.30792877078056335,
+        "transforms": [
+          "router:protected:user_message",
+          "router:protected:user_message"
+        ]
+      }
+    },
+    {
+      "group": "general",
+      "name": "toolout-0",
+      "llmtrim": {
+        "before": 860,
+        "after": 83,
+        "ms": 1.251140609383583,
+        "stages": [
+          {
+            "name": "toolout",
+            "applied": true,
+            "tokens_before": 859,
+            "tokens_after": 82,
+            "note": null
+          },
+          {
+            "name": "image",
+            "applied": true,
+            "tokens_before": 82,
+            "tokens_after": 82,
+            "note": null
+          },
+          {
+            "name": "hygiene",
+            "applied": false,
+            "tokens_before": 82,
+            "tokens_after": 82,
+            "note": "no token reduction"
+          },
+          {
+            "name": "json-crush",
+            "applied": false,
+            "tokens_before": 82,
+            "tokens_after": 82,
+            "note": "no token reduction"
+          },
+          {
+            "name": "serialize-toon",
+            "applied": false,
+            "tokens_before": 82,
+            "tokens_after": 82,
+            "note": "no token reduction"
+          },
+          {
+            "name": "dedup",
+            "applied": false,
+            "tokens_before": 82,
+            "tokens_after": 82,
+            "note": "no token reduction"
+          },
+          {
+            "name": "tools",
+            "applied": false,
+            "tokens_before": 82,
+            "tokens_after": 82,
+            "note": "no token reduction"
+          },
+          {
+            "name": "cache",
+            "applied": true,
+            "tokens_before": 82,
+            "tokens_after": 82,
+            "note": null
+          }
+        ]
+      },
+      "headroom": {
+        "before": 860,
+        "after": 860,
+        "ms": 0.9524747729301453,
+        "transforms": [
+          "router:protected:user_message",
+          "router:protected:user_message"
+        ]
+      }
+    },
+    {
+      "group": "general",
+      "name": "toolout-1",
+      "llmtrim": {
+        "before": 1224,
+        "after": 1163,
+        "ms": 1.9786246120929718,
+        "stages": [
+          {
+            "name": "toolout",
+            "applied": true,
+            "tokens_before": 1223,
+            "tokens_after": 1162,
+            "note": null
+          },
+          {
+            "name": "image",
+            "applied": true,
+            "tokens_before": 1162,
+            "tokens_after": 1162,
+            "note": null
+          },
+          {
+            "name": "hygiene",
+            "applied": false,
+            "tokens_before": 1162,
+            "tokens_after": 1162,
+            "note": "no token reduction"
+          },
+          {
+            "name": "json-crush",
+            "applied": false,
+            "tokens_before": 1162,
+            "tokens_after": 1162,
+            "note": "no token reduction"
+          },
+          {
+            "name": "serialize-toon",
+            "applied": false,
+            "tokens_before": 1162,
+            "tokens_after": 1162,
+            "note": "no token reduction"
+          },
+          {
+            "name": "dedup",
+            "applied": false,
+            "tokens_before": 1162,
+            "tokens_after": 1162,
+            "note": "no token reduction"
+          },
+          {
+            "name": "tools",
+            "applied": false,
+            "tokens_before": 1162,
+            "tokens_after": 1162,
+            "note": "no token reduction"
+          },
+          {
+            "name": "cache",
+            "applied": true,
+            "tokens_before": 1162,
+            "tokens_after": 1162,
+            "note": null
+          }
+        ]
+      },
+      "headroom": {
+        "before": 1224,
+        "after": 1224,
+        "ms": 1.1731311678886414,
+        "transforms": [
+          "router:protected:user_message",
+          "router:protected:user_message"
+        ]
+      }
+    },
+    {
+      "group": "general",
+      "name": "toolout-2",
+      "llmtrim": {
+        "before": 609,
+        "after": 78,
+        "ms": 0.929100438952446,
+        "stages": [
+          {
+            "name": "toolout",
+            "applied": true,
+            "tokens_before": 608,
+            "tokens_after": 78,
+            "note": null
+          },
+          {
+            "name": "image",
+            "applied": true,
+            "tokens_before": 78,
+            "tokens_after": 78,
+            "note": null
+          },
+          {
+            "name": "hygiene",
+            "applied": false,
+            "tokens_before": 78,
+            "tokens_after": 78,
+            "note": "no token reduction"
+          },
+          {
+            "name": "json-crush",
+            "applied": false,
+            "tokens_before": 78,
+            "tokens_after": 78,
+            "note": "no token reduction"
+          },
+          {
+            "name": "serialize-toon",
+            "applied": false,
+            "tokens_before": 78,
+            "tokens_after": 78,
+            "note": "no token reduction"
+          },
+          {
+            "name": "dedup",
+            "applied": false,
+            "tokens_before": 78,
+            "tokens_after": 78,
+            "note": "no token reduction"
+          },
+          {
+            "name": "tools",
+            "applied": false,
+            "tokens_before": 78,
+            "tokens_after": 78,
+            "note": "no token reduction"
+          },
+          {
+            "name": "cache",
+            "applied": true,
+            "tokens_before": 78,
+            "tokens_after": 78,
+            "note": null
+          }
+        ]
+      },
+      "headroom": {
+        "before": 609,
+        "after": 609,
+        "ms": 0.6510112434625626,
+        "transforms": [
+          "router:protected:user_message",
+          "router:protected:user_message"
+        ]
+      }
+    },
+    {
+      "group": "general",
+      "name": "toolout-3",
+      "llmtrim": {
+        "before": 1118,
+        "after": 68,
+        "ms": 1.3155154883861542,
+        "stages": [
+          {
+            "name": "toolout",
+            "applied": true,
+            "tokens_before": 1117,
+            "tokens_after": 67,
+            "note": null
+          },
+          {
+            "name": "image",
+            "applied": true,
+            "tokens_before": 67,
+            "tokens_after": 67,
+            "note": null
+          },
+          {
+            "name": "hygiene",
+            "applied": false,
+            "tokens_before": 67,
+            "tokens_after": 67,
+            "note": "no token reduction"
+          },
+          {
+            "name": "json-crush",
+            "applied": false,
+            "tokens_before": 67,
+            "tokens_after": 67,
+            "note": "no token reduction"
+          },
+          {
+            "name": "serialize-toon",
+            "applied": false,
+            "tokens_before": 67,
+            "tokens_after": 67,
+            "note": "no token reduction"
+          },
+          {
+            "name": "dedup",
+            "applied": false,
+            "tokens_before": 67,
+            "tokens_after": 67,
+            "note": "no token reduction"
+          },
+          {
+            "name": "tools",
+            "applied": false,
+            "tokens_before": 67,
+            "tokens_after": 67,
+            "note": "no token reduction"
+          },
+          {
+            "name": "cache",
+            "applied": true,
+            "tokens_before": 67,
+            "tokens_after": 67,
+            "note": null
+          }
+        ]
+      },
+      "headroom": {
+        "before": 1118,
+        "after": 1118,
+        "ms": 1.184515655040741,
+        "transforms": [
+          "router:protected:user_message",
+          "router:protected:user_message"
+        ]
+      }
+    },
+    {
+      "group": "general",
+      "name": "toolout-4",
+      "llmtrim": {
+        "before": 460,
+        "after": 446,
+        "ms": 1.120658591389656,
+        "stages": [
+          {
+            "name": "toolout",
+            "applied": true,
+            "tokens_before": 459,
+            "tokens_after": 445,
+            "note": null
+          },
+          {
+            "name": "image",
+            "applied": true,
+            "tokens_before": 445,
+            "tokens_after": 445,
+            "note": null
+          },
+          {
+            "name": "hygiene",
+            "applied": false,
+            "tokens_before": 445,
+            "tokens_after": 445,
+            "note": "no token reduction"
+          },
+          {
+            "name": "json-crush",
+            "applied": false,
+            "tokens_before": 445,
+            "tokens_after": 445,
+            "note": "no token reduction"
+          },
+          {
+            "name": "serialize-toon",
+            "applied": false,
+            "tokens_before": 445,
+            "tokens_after": 445,
+            "note": "no token reduction"
+          },
+          {
+            "name": "dedup",
+            "applied": false,
+            "tokens_before": 445,
+            "tokens_after": 445,
+            "note": "no token reduction"
+          },
+          {
+            "name": "tools",
+            "applied": false,
+            "tokens_before": 445,
+            "tokens_after": 445,
+            "note": "no token reduction"
+          },
+          {
+            "name": "cache",
+            "applied": true,
+            "tokens_before": 445,
+            "tokens_after": 445,
+            "note": null
+          }
+        ]
+      },
+      "headroom": {
+        "before": 460,
+        "after": 460,
+        "ms": 0.5918480455875397,
+        "transforms": [
+          "router:protected:user_message",
+          "router:protected:user_message"
+        ]
+      }
+    },
+    {
+      "group": "general",
+      "name": "toolout-5",
+      "llmtrim": {
+        "before": 187,
+        "after": 148,
+        "ms": 0.5030296742916107,
+        "stages": [
+          {
+            "name": "toolout",
+            "applied": true,
+            "tokens_before": 186,
+            "tokens_after": 148,
+            "note": null
+          },
+          {
+            "name": "image",
+            "applied": true,
+            "tokens_before": 148,
+            "tokens_after": 148,
+            "note": null
+          },
+          {
+            "name": "hygiene",
+            "applied": false,
+            "tokens_before": 148,
+            "tokens_after": 148,
+            "note": "no token reduction"
+          },
+          {
+            "name": "json-crush",
+            "applied": false,
+            "tokens_before": 148,
+            "tokens_after": 148,
+            "note": "no token reduction"
+          },
+          {
+            "name": "serialize-toon",
+            "applied": false,
+            "tokens_before": 148,
+            "tokens_after": 148,
+            "note": "no token reduction"
+          },
+          {
+            "name": "dedup",
+            "applied": false,
+            "tokens_before": 148,
+            "tokens_after": 148,
+            "note": "no token reduction"
+          },
+          {
+            "name": "tools",
+            "applied": false,
+            "tokens_before": 148,
+            "tokens_after": 148,
+            "note": "no token reduction"
+          },
+          {
+            "name": "cache",
+            "applied": true,
+            "tokens_before": 148,
+            "tokens_after": 148,
+            "note": null
+          }
+        ]
+      },
+      "headroom": {
+        "before": 187,
+        "after": 187,
+        "ms": 0.3043320029973984,
+        "transforms": [
+          "router:protected:user_message",
+          "router:protected:user_message"
+        ]
+      }
+    },
+    {
+      "group": "general",
+      "name": "toolout-6",
+      "llmtrim": {
+        "before": 180,
+        "after": 141,
+        "ms": 0.49851834774017334,
+        "stages": [
+          {
+            "name": "toolout",
+            "applied": true,
+            "tokens_before": 179,
+            "tokens_after": 141,
+            "note": null
+          },
+          {
+            "name": "image",
+            "applied": true,
+            "tokens_before": 141,
+            "tokens_after": 141,
+            "note": null
+          },
+          {
+            "name": "hygiene",
+            "applied": false,
+            "tokens_before": 141,
+            "tokens_after": 141,
+            "note": "no token reduction"
+          },
+          {
+            "name": "json-crush",
+            "applied": false,
+            "tokens_before": 141,
+            "tokens_after": 141,
+            "note": "no token reduction"
+          },
+          {
+            "name": "serialize-toon",
+            "applied": false,
+            "tokens_before": 141,
+            "tokens_after": 141,
+            "note": "no token reduction"
+          },
+          {
+            "name": "dedup",
+            "applied": false,
+            "tokens_before": 141,
+            "tokens_after": 141,
+            "note": "no token reduction"
+          },
+          {
+            "name": "tools",
+            "applied": false,
+            "tokens_before": 141,
+            "tokens_after": 141,
+            "note": "no token reduction"
+          },
+          {
+            "name": "cache",
+            "applied": true,
+            "tokens_before": 141,
+            "tokens_after": 141,
+            "note": null
+          }
+        ]
+      },
+      "headroom": {
+        "before": 180,
+        "after": 180,
+        "ms": 0.29694661498069763,
+        "transforms": [
+          "router:protected:user_message",
+          "router:protected:user_message"
+        ]
+      }
+    },
+    {
+      "group": "general",
+      "name": "toolout-7",
+      "llmtrim": {
+        "before": 907,
+        "after": 668,
+        "ms": 1.4547165483236313,
+        "stages": [
+          {
+            "name": "toolout",
+            "applied": true,
+            "tokens_before": 906,
+            "tokens_after": 668,
+            "note": null
+          },
+          {
+            "name": "image",
+            "applied": true,
+            "tokens_before": 668,
+            "tokens_after": 668,
+            "note": null
+          },
+          {
+            "name": "hygiene",
+            "applied": false,
+            "tokens_before": 668,
+            "tokens_after": 668,
+            "note": "no token reduction"
+          },
+          {
+            "name": "json-crush",
+            "applied": false,
+            "tokens_before": 668,
+            "tokens_after": 668,
+            "note": "no token reduction"
+          },
+          {
+            "name": "serialize-toon",
+            "applied": false,
+            "tokens_before": 668,
+            "tokens_after": 668,
+            "note": "no token reduction"
+          },
+          {
+            "name": "dedup",
+            "applied": false,
+            "tokens_before": 668,
+            "tokens_after": 668,
+            "note": "no token reduction"
+          },
+          {
+            "name": "tools",
+            "applied": false,
+            "tokens_before": 668,
+            "tokens_after": 668,
+            "note": "no token reduction"
+          },
+          {
+            "name": "cache",
+            "applied": true,
+            "tokens_before": 668,
+            "tokens_after": 668,
+            "note": null
+          }
+        ]
+      },
+      "headroom": {
+        "before": 907,
+        "after": 907,
+        "ms": 0.8982978761196136,
+        "transforms": [
+          "router:protected:user_message",
+          "router:protected:user_message"
+        ]
+      }
+    }
+  ],
+  "live": null
+}

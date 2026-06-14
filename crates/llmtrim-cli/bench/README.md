@@ -92,3 +92,16 @@ python3 bench/scripts/synth_readme.py      # regenerate this file
 
 Per-stage ablation (offline, free): `llmtrim bench --corpus bench/data/<c>.jsonl --preset aggressive --ablate`.
 
+
+## Head-to-head: Headroom
+
+Both libraries run through their Python APIs on the same inputs and the same `o200k_base` denominator. Full tables (input saved, per-stage attribution, latency, and the live gpt-oss-20b output A/B) are in [results-vs-headroom/README.md](results-vs-headroom/README.md).
+
+```bash
+crates/llmtrim-uniffi/scripts/build-wheel.sh --release   # build the llmtrim wheel
+pip install --user target/wheels/llmtrim-*.whl
+pip install --user -r bench/scripts/requirements-vs-headroom.txt
+python3 bench/scripts/vs_headroom.py                     # deterministic axes (offline)
+python3 bench/scripts/vs_headroom.py --live --live-n 12  # output A/B (needs OPENROUTER_API_KEY)
+```
+
