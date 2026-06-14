@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Synthesize bench/README.md from bench/results/*.json + data/manifest.json.
 
-Run after bench/scripts/run_all.sh completes. Renders the two-axis frontier table
+Run after `llmtrim bench suite` completes. Renders the two-axis frontier table
 (tokens saved vs quality retained) plus methodology and honest caveats.
 """
 import glob
@@ -24,17 +24,25 @@ META = {
 ORDER = list(META.keys())
 
 
+def unwrap(doc):
+    # Flatten the shared bench envelope ({schema, meta, result, ...}) into the legacy flat
+    # shape this script reads. Pre-envelope (bare) docs pass through unchanged.
+    if isinstance(doc, dict) and "schema" in doc and "result" in doc:
+        return {**doc.get("meta", {}), **doc["result"]}
+    return doc
+
+
 def load_results():
     out = {}
     for path in glob.glob(os.path.join(HERE, "results", "*.json")):
         name = os.path.splitext(os.path.basename(path))[0]
-        # Pool only the shape-matched run (run_all.sh writes results/<corpus>.json). Skip the
-        # run log and the preset-variant files (results/<corpus>__safe|aggressive|tuned.json),
-        # which exist for the chart's safe/aggressive "dial" and would otherwise double-count.
+        # Pool only the shape-matched run (`bench suite` writes results/<corpus>.json). Skip
+        # the preset-variant files (results/<corpus>__safe|aggressive|tuned.json), which exist
+        # for the chart's safe/aggressive "dial" and would otherwise double-count.
         if name == "run" or "__" in name:
             continue
         try:
-            out[name] = json.load(open(path))
+            out[name] = unwrap(json.load(open(path)))
         except Exception:
             pass
     return out
@@ -205,36 +213,15 @@ def main():
         "(no judge noise).\n"
     )
 
-    # Evidence -> action: what these results changed in the algorithm.
-    lines.append("\n## Improvements driven by these results\n")
-    lines.append(
-        "The benchmark is actionable, not just descriptive — each row below is a code change the "
-        "frontier forced:\n"
-    )
-    lines.append(
-        "- **`ngram` → prose-only guard.** `adult` 100%→0% (deterministic) traced to n-gram glossary "
-        "abbreviation of JSON records → the model miscounts. Fix: `ngram` now skips any segment holding a "
-        "JSON array of objects; abbreviates prose only. `adult` recovers to 100%.\n"
-        "- **`code` preset → dropped `output_compact_code`.** Confirmed real at n=37 (pass@1 −21.6pp, "
-        "CI ±14.5, interval clear of zero). Minified-code *output* costs correctness on a small model; the "
-        "−36% lever (arXiv:2508.13666) holds only via fine-tuning. Now opt-in.\n"
-        "- **`glaive` / `agent` preset → no change.** The −8pp at n=12 was **noise**: at n=39, retention is "
-        "**+0.0pp** (CI ±5.2). Verifying before acting avoided a wrong fix.\n"
-        "- **New presets.** `reasoning` (Chain-of-Draft) — GSM8K +17pp, compression *improving* accuracy. "
-        "`cache` (stable prefix + Stage A) — ~92% of input served from cache on fixed-prefix workloads.\n"
-        "- **Meta.** The per-stage **token gate guarantees fewer tokens, not preserved quality** — only this "
-        "A/B quality axis catches `adult`/`humaneval`. Lossy stages are now bundled only where measured safe.\n"
-    )
-
     lines.append("\n## Reproduce\n")
     lines.append("```bash")
     lines.append("python3 bench/scripts/download.py 40       # pull + normalize corpora (pinned in data/manifest.json)")
-    lines.append("bash    bench/scripts/run_all.sh           # live A/B across all corpora (needs OPENROUTER_API_KEY)")
+    lines.append("cargo run -q --features live -- bench suite   # live A/B across all corpora (needs OPENROUTER_API_KEY)")
     lines.append("python3 bench/scripts/synth_readme.py      # regenerate this file")
     lines.append("```")
     lines.append(
         "\nPer-stage ablation (offline, free): "
-        "`llmtrim bench --corpus bench/data/<c>.jsonl --preset aggressive --ablate`.\n"
+        "`llmtrim bench quality --corpus bench/data/<c>.jsonl --preset aggressive --ablate`.\n"
     )
 
     lines.append("\n## Head-to-head: Headroom\n")

@@ -9,6 +9,7 @@ and a silent upstream change is detectable.
 
 Usage:  python3 bench/download.py [N_per_corpus]   (default 40)
 """
+import datetime
 import hashlib
 import json
 import os
@@ -323,7 +324,11 @@ CORPORA = [
 
 
 def main():
-    manifest = {"fetched": "2026-06-05", "n_requested": N, "corpora": {}}
+    manifest = {
+        "fetched": datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%d"),
+        "n_requested": N,
+        "corpora": {},
+    }
     print(f"downloading {len(CORPORA)} corpora, up to {N} cases each:")
     for name, ds, cfg, split, fn in CORPORA:
         try:

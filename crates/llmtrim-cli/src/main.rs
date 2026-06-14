@@ -240,18 +240,44 @@ enum Commands {
         #[arg(long, default_value_t = 0.5)]
         keep_ratio: f64,
     },
-    /// A/B benchmark: tokens saved vs quality retained, on a real model
+    /// Benchmark suite: quality A/B, agent economics, latency, head-to-head comparisons
+    ///
+    /// One dispatcher over every measurement axis. `quality` is the single-corpus A/B;
+    /// `suite` runs the full corpus matrix in-process; `agent` measures per-iteration token
+    /// economics; `latency` times the warm compress path; `compare` drives the Python
+    /// head-to-head comparators (Headroom, caveman).
+    #[command(subcommand)]
+    Bench(BenchCmd),
+}
+
+/// Benchmark suite — a single dispatcher over every measurement axis.
+///
+/// `quality` is the single-corpus A/B primitive; `suite` runs the full corpus matrix
+/// in-process; `agent` measures per-iteration token economics; `latency` times the warm
+/// compress path; `compare` drives the head-to-head Python comparators (Headroom, caveman).
+#[derive(clap::Subcommand)]
+enum BenchCmd {
+    /// A/B on one corpus: tokens saved vs quality retained, on a real model.
     ///
     /// Sends ORIGINAL and COMPRESSED requests, scores both, and prices the
     /// round-trip. Credentials come from the env or a local `.env` (OpenRouter).
     /// `--offline`/`--ablate` measure tokens without any network calls.
-    Bench(Box<BenchArgs>),
+    Quality(Box<BenchArgs>),
+    /// Full corpus matrix in one process — replaces the old run_all.sh.
+    ///
+    /// Runs every (corpus, preset) pair from the built-in table back to back, reusing the
+    /// loaded tokenizer/regexes, and writes one enveloped JSON per corpus into `--out`.
+    Suite(Box<SuiteArgs>),
     /// Agent-loop benchmark (issue #14): per-iteration token economics over a golden task set
     ///
     /// Drives a tool-calling loop with deterministic tool stubs and records input/cached/output
     /// tokens + tool-call count per iteration, per condition (baseline vs presets). Default is a
     /// synthetic `--dry-run` (zero API cost); `--live` calls the model (needs `--features live`).
-    BenchAgent(Box<BenchAgentArgs>),
+    Agent(Box<BenchAgentArgs>),
+    /// Warm compress-path latency + per-stage attribution (offline, no network).
+    Latency(LatencyArgs),
+    /// Head-to-head vs a third-party compressor (Python comparators).
+    Compare(CompareArgs),
 }
 
 #[derive(clap::Args)]
@@ -323,6 +349,59 @@ struct BenchArgs {
     /// Write per-case + frontier results as JSON here.
     #[arg(long)]
     json_out: Option<PathBuf>,
+}
+
+#[derive(clap::Args)]
+struct SuiteArgs {
+    /// Directory of normalized corpus JSONL files (one per corpus in the matrix).
+    #[arg(long, default_value = "bench/data")]
+    data_dir: PathBuf,
+    /// Directory to write one enveloped result JSON per corpus.
+    #[arg(long, default_value = "bench/results")]
+    out: PathBuf,
+    /// Model id to send (OpenRouter style).
+    #[arg(long, default_value = "openai/gpt-oss-20b")]
+    model: String,
+    /// LLM-judge model for open-ended scorers.
+    #[arg(long, default_value = "openai/gpt-4o-mini")]
+    judge_model: String,
+    /// Pin OpenRouter to one upstream (e.g. `groq`). Empty = let OpenRouter choose.
+    #[arg(long, default_value = "groq")]
+    route: String,
+    /// Pinned pricing snapshot (models.dev export).
+    #[arg(long, default_value = "bench/pricing.json")]
+    pricing: PathBuf,
+    /// Override the per-corpus case count for every corpus (smoke runs).
+    #[arg(long)]
+    n: Option<usize>,
+    /// Skip live calls: compress + measure input-token savings only.
+    #[arg(long)]
+    offline: bool,
+}
+
+#[derive(clap::Args)]
+struct LatencyArgs {
+    /// Request JSON to compress. Omit for the built-in representative coding turn.
+    #[arg(long)]
+    request: Option<PathBuf>,
+    /// Request shape: openai|anthropic|google|gemini. Inferred when omitted.
+    #[arg(long)]
+    provider: Option<String>,
+    /// Timed iterations on the warm path.
+    #[arg(long, default_value_t = 100)]
+    iterations: usize,
+}
+
+#[derive(clap::Args)]
+struct CompareArgs {
+    /// Comparator to run: `headroom` or `caveman` (drives the matching Python script).
+    tool: String,
+    /// Call the real model (passed through to the comparator). Off = token-only/dry.
+    #[arg(long)]
+    live: bool,
+    /// Extra arguments forwarded verbatim to the comparator script (after `--`).
+    #[arg(last = true)]
+    extra: Vec<String>,
 }
 
 fn read_stdin() -> Result<String> {
@@ -651,8 +730,13 @@ fn run() -> Result<()> {
                 )
             );
         }
-        Commands::Bench(args) => run_bench(*args)?,
-        Commands::BenchAgent(args) => run_bench_agent(*args)?,
+        Commands::Bench(cmd) => match cmd {
+            BenchCmd::Quality(args) => run_bench(*args)?,
+            BenchCmd::Suite(args) => run_bench_suite(*args)?,
+            BenchCmd::Agent(args) => run_bench_agent(*args)?,
+            BenchCmd::Latency(args) => run_bench_latency(args)?,
+            BenchCmd::Compare(args) => run_bench_compare(args)?,
+        },
     }
     Ok(())
 }
@@ -744,6 +828,184 @@ fn run_bench(args: BenchArgs) -> Result<()> {
     } else {
         run_live(&cases, kind, &config, &args)
     }
+}
+
+/// The corpus matrix: each corpus paired with the shape-matched preset and case count.
+/// Ported from the old run_all.sh so the suite is the single source of truth.
+const SUITE_MATRIX: &[(&str, &str, usize)] = &[
+    ("gsm8k", "reasoning", 12),  // reasoning  → Chain-of-Draft
+    ("humaneval", "code", 12),   // code gen   → skeleton/minify
+    ("dolly", "aggressive", 12), // generation → output-control (judge)
+    ("hotpotqa", "rag", 12),     // multi-hop  → retrieve (long ctx)
+    ("glaive", "agent", 12),     // tool use   → tool select/trim
+    ("chat", "aggressive", 12),  // multi-turn → output-control + dedup (judge)
+    ("cnn", "aggressive", 8),    // long doc   → output budget
+    ("cache", "cache", 12),      // shared prefix → cache-first (Stage A)
+];
+
+fn run_bench_suite(args: SuiteArgs) -> Result<()> {
+    // The A/B compares in-process compression against the true original request. If the
+    // llmtrim proxy is in the environment, both arms get re-compressed in flight and the
+    // baseline is no longer original, contaminating every number. Refuse to run live
+    // through the proxy rather than silently produce bad data.
+    if !args.offline {
+        for k in [
+            "HTTPS_PROXY",
+            "https_proxy",
+            "HTTP_PROXY",
+            "http_proxy",
+            "ALL_PROXY",
+        ] {
+            if std::env::var_os(k).is_some() {
+                anyhow::bail!(
+                    "{k} is set; the llmtrim proxy would re-compress the baseline arm and \
+                     contaminate the A/B. Unset all *_PROXY vars before a live suite run."
+                );
+            }
+        }
+    }
+    std::fs::create_dir_all(&args.out)
+        .with_context(|| format!("failed to create {}", args.out.display()))?;
+
+    for (corpus, preset, default_n) in SUITE_MATRIX {
+        let n = args.n.or(Some(*default_n));
+        eprintln!(
+            "{}",
+            ui::note(
+                ui::color_stderr(),
+                &format!("=== {corpus} ({preset}, n={}) ===", n.unwrap_or(0))
+            )
+        );
+        let corpus_args = BenchArgs {
+            corpus: args.data_dir.join(format!("{corpus}.jsonl")),
+            provider: "openai".to_string(),
+            preset: (*preset).to_string(),
+            model: args.model.clone(),
+            judge_model: args.judge_model.clone(),
+            route: args.route.clone(),
+            n,
+            config: None,
+            pricing: args.pricing.clone(),
+            offline: args.offline,
+            ablate: false,
+            json_out: Some(args.out.join(format!("{corpus}.json"))),
+        };
+        // One failing corpus must not abort the matrix; report and continue.
+        if let Err(e) = run_bench(corpus_args) {
+            eprintln!(
+                "{}",
+                ui::render_error(ui::color_stderr(), &e.context(format!("corpus {corpus}")))
+            );
+        }
+    }
+    eprintln!("{}", ui::note(ui::color_stderr(), "suite complete"));
+    Ok(())
+}
+
+fn run_bench_latency(args: LatencyArgs) -> Result<()> {
+    use std::time::Instant;
+    // Representative coding turn: system + a user message with a fenced code block + prose,
+    // exercising hygiene, skeletonization, and tokenization.
+    const FIXTURE: &str = r#"{"model":"gpt-4o","messages":[
+{"role":"system","content":"You are a meticulous coding assistant. Answer precisely."},
+{"role":"user","content":"Review this function for bugs:\n```rust\nfn process(data: &[i32]) -> i32 {\n    let mut total = 0;\n    for x in data {\n        if *x > 0 {\n            total += x * 2;\n        }\n    }\n    total\n}\n```\nDoes it handle the spec's edge cases?"}
+]}"#;
+    let input = match &args.request {
+        Some(p) => {
+            std::fs::read_to_string(p).with_context(|| format!("failed to read {}", p.display()))?
+        }
+        None => FIXTURE.to_string(),
+    };
+    let kind = args
+        .provider
+        .as_deref()
+        .map(ProviderKind::from_str)
+        .transpose()?;
+    let config = DenseConfig::auto();
+
+    // Warm: tokenizer vocab + lazy regexes (the daemon pays this once at startup, not per
+    // request), so steady-state numbers reflect the warm path.
+    for _ in 0..5 {
+        let _ = llmtrim_core::compress_with_config(&input, kind, &config)?;
+    }
+    let n = args.iterations.max(1);
+    // Run once up front so `r` is unconditionally populated (no Option/expect), then time n.
+    let mut r = llmtrim_core::compress_with_config(&input, kind, &config)?;
+    let t = Instant::now();
+    for _ in 0..n {
+        r = llmtrim_core::compress_with_config(&input, kind, &config)?;
+    }
+    let per_req_ms = t.elapsed().as_secs_f64() * 1000.0 / n as f64;
+
+    let counter = llmtrim_core::tokenizer::counter_for(r.provider, r.model.as_deref())?;
+    let value: serde_json::Value = serde_json::from_str(&input).context("parse request JSON")?;
+    let tools_str = value
+        .get("tools")
+        .map(|t| t.to_string())
+        .unwrap_or_default();
+    let bench = |label: &str, f: &dyn Fn()| {
+        let t = Instant::now();
+        for _ in 0..n {
+            f();
+        }
+        println!(
+            "  {label}: {:.2} ms",
+            t.elapsed().as_secs_f64() * 1000.0 / n as f64
+        );
+    };
+
+    println!("request: {} bytes, provider={:?}", input.len(), r.provider);
+    println!(
+        "input tokens: {} -> {} ({:.1}% saved)",
+        r.input_tokens_before,
+        r.input_tokens_after,
+        100.0 * (1.0 - r.input_tokens_after.0 as f64 / r.input_tokens_before.0.max(1) as f64)
+    );
+    println!("compress latency: {per_req_ms:.2} ms/req (warm, avg of {n})");
+    println!("attribution (1x each):");
+    bench("full tokenize (content+tools)", &|| {
+        let _ = counter.count(&input);
+    });
+    bench("tools tokenize only", &|| {
+        let _ = counter.count(&tools_str);
+    });
+    bench("Value clone (per-stage snapshot)", &|| {
+        let _ = value.clone();
+    });
+    bench("JSON parse", &|| {
+        let _ = serde_json::from_str::<serde_json::Value>(&input);
+    });
+    bench("JSON serialize", &|| {
+        let _ = value.to_string();
+    });
+    Ok(())
+}
+
+fn run_bench_compare(args: CompareArgs) -> Result<()> {
+    let script = match args.tool.as_str() {
+        "headroom" => "bench/scripts/vs_headroom.py",
+        "caveman" => "bench/scripts/caveman_ab.py",
+        other => anyhow::bail!("unknown comparator '{other}' (expected: headroom|caveman)"),
+    };
+    if !std::path::Path::new(script).exists() {
+        anyhow::bail!(
+            "{script} not found — run `llmtrim bench compare` from the repo root (it dispatches \
+             the Python comparator, which needs its own deps; see bench/README.md)"
+        );
+    }
+    let mut cmd = std::process::Command::new("python3");
+    cmd.arg(script);
+    if args.live {
+        cmd.arg("--live");
+    }
+    cmd.args(&args.extra);
+    let status = cmd
+        .status()
+        .with_context(|| format!("failed to run python3 {script}"))?;
+    if !status.success() {
+        std::process::exit(status.code().unwrap_or(1));
+    }
+    Ok(())
 }
 
 fn run_bench_agent(args: BenchAgentArgs) -> Result<()> {
@@ -858,7 +1120,7 @@ fn run_agent_live(
     _table: &bench::PriceTable,
 ) -> Result<()> {
     anyhow::bail!(
-        "--live needs the `live` feature: rebuild with `cargo run --features live -- bench-agent --live …`"
+        "--live needs the `live` feature: rebuild with `cargo run --features live -- bench agent --live …`"
     )
 }
 
@@ -902,7 +1164,12 @@ fn write_agent_json(
     out: &Option<PathBuf>,
 ) -> Result<()> {
     if let Some(path) = out {
-        let json = serde_json::to_string_pretty(results).context("serialize agent results")?;
+        let doc = bench::envelope::wrap(
+            "agent-v1",
+            serde_json::json!({ "runs": results.len() }),
+            serde_json::to_value(results).context("serialize agent results")?,
+        );
+        let json = serde_json::to_string_pretty(&doc).context("serialize agent results")?;
         std::fs::write(path, json).with_context(|| format!("write {}", path.display()))?;
     }
     Ok(())
@@ -1123,10 +1390,10 @@ fn run_live(
                 })
             })
             .collect();
-        let doc = serde_json::json!({
-            // Reproducibility: record the config SOURCE (the path when --config overrode the
-            // preset; else the preset name) AND the actually-resolved settings, so two runs
-            // with the same metadata are genuinely the same run (#15).
+        // Reproducibility: record the config SOURCE (the path when --config overrode the
+        // preset; else the preset name) AND the actually-resolved settings, so two runs
+        // with the same metadata are genuinely the same run (#15).
+        let meta = serde_json::json!({
             "preset": args.preset,
             "config_path": args.config.as_ref().map(|p| p.display().to_string()),
             "config_resolved": config,
@@ -1134,6 +1401,8 @@ fn run_live(
             "judge_model": args.judge_model,
             "route": args.route,
             "corpus": args.corpus.display().to_string(),
+        });
+        let result = serde_json::json!({
             "n": f.n,
             "failed": f.failed,
             "skipped": f.skipped,
@@ -1147,6 +1416,7 @@ fn run_live(
             "retention_ci95_pp": f.retention_ci95_pp,
             "cases": rows,
         });
+        let doc = bench::envelope::wrap("quality-v1", meta, result);
         std::fs::write(path, serde_json::to_string_pretty(&doc)?)
             .with_context(|| format!("failed to write {}", path.display()))?;
         eprintln!(

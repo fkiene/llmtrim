@@ -86,11 +86,19 @@ The benchmark is actionable, not just descriptive; each row below is a code chan
 
 ```bash
 python3 bench/scripts/download.py 40       # pull + normalize corpora (pinned in data/manifest.json)
-bash    bench/scripts/run_all.sh           # live A/B across all corpora (needs OPENROUTER_API_KEY)
+cargo run -q --features live -- bench suite   # live A/B across all corpora (needs OPENROUTER_API_KEY)
 python3 bench/scripts/synth_readme.py      # regenerate this file
 ```
 
-Per-stage ablation (offline, free): `llmtrim bench --corpus bench/data/<c>.jsonl --preset aggressive --ablate`.
+`bench suite` runs the full corpus matrix in one process and writes one enveloped result
+JSON per corpus to `bench/results/`. The other axes share the same dispatcher:
+
+```bash
+llmtrim bench quality --corpus bench/data/<c>.jsonl --preset aggressive --ablate  # per-stage ablation (offline, free)
+llmtrim bench agent                        # per-iteration token economics (dry-run; --live for real)
+llmtrim bench latency                      # warm compress-path latency + attribution (offline)
+llmtrim bench compare headroom             # head-to-head vs Headroom (dispatches the Python comparator)
+```
 
 
 ## Head-to-head: Headroom
@@ -101,7 +109,11 @@ Both libraries run through their Python APIs on the same inputs and the same `o2
 crates/llmtrim-uniffi/scripts/build-wheel.sh --release   # build the llmtrim wheel
 pip install --user target/wheels/llmtrim-*.whl
 pip install --user -r bench/scripts/requirements-vs-headroom.txt
-python3 bench/scripts/vs_headroom.py                     # deterministic axes (offline)
-python3 bench/scripts/vs_headroom.py --live --live-n 12  # output A/B (needs OPENROUTER_API_KEY)
+llmtrim bench compare headroom                           # deterministic axes (offline)
+llmtrim bench compare headroom --live -- --live-n 12     # output A/B (needs OPENROUTER_API_KEY)
 ```
+
+`bench compare` is a thin dispatcher over the Python comparator (`vs_headroom.py` /
+`caveman_ab.py`); it measures the real SDK path, so it still needs the wheel and the deps
+above. Arguments after `--` pass straight through to the script.
 

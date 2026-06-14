@@ -17,6 +17,7 @@
 //! this module remains the single-shot quality/savings harness.
 
 pub mod agent;
+pub mod envelope;
 
 use anyhow::{Context, Result};
 use once_cell::sync::Lazy;

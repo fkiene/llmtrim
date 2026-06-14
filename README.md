@@ -318,7 +318,7 @@ Full methodology, per-corpus frontier, and confidence intervals are in [crates/l
 
 ```bash
 python3 crates/llmtrim-cli/bench/scripts/download.py 40   # pull real corpora (gsm8k, humaneval, dolly, hotpotqa, …)
-bash    crates/llmtrim-cli/bench/scripts/run_all.sh       # live A/B (needs OPENROUTER_API_KEY)
+(cd crates/llmtrim-cli && cargo run -q --features live -- bench suite)  # live A/B across all corpora (needs OPENROUTER_API_KEY)
 python3 crates/llmtrim-cli/bench/scripts/chart.py         # regenerate the chart + table
 ```
 
