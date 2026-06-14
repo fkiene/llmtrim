@@ -65,7 +65,7 @@ LLMTRIM_PRESET_DEFAULT = "agent"  # general agent traffic — the closest analog
 
 # Direct OpenRouter calls for the live A/B bypass any local proxy (otherwise the llmtrim
 # daemon would re-compress the "original" arm and contaminate the baseline) and tolerate a
-# missing CA chain — same posture as bench/scripts/caveman_ab.py and run_all.sh.
+# missing CA chain (same posture as bench/scripts/caveman_ab.py and the `bench suite` proxy guard).
 _SSL_CTX = ssl.create_default_context()
 _SSL_CTX.check_hostname = False
 _SSL_CTX.verify_mode = ssl.CERT_NONE

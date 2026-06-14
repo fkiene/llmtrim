@@ -41,6 +41,14 @@ THEMES = {
 }
 
 
+def unwrap(doc):
+    # Flatten the shared bench envelope into the flat shape this chart reads; bare docs
+    # (pre-envelope) pass through unchanged.
+    if isinstance(doc, dict) and "schema" in doc and "result" in doc:
+        return {**doc.get("meta", {}), **doc["result"]}
+    return doc
+
+
 def pooled():
     """Sum tokens + cost across the shape-matched run (results/<corpus>.json) — the same data
     bench/README pools; variant files (`__safe`/`__aggressive`/`__tuned`) excluded."""
@@ -51,7 +59,7 @@ def pooled():
         name = os.path.splitext(os.path.basename(path))[0]
         if "__" in name or name == "run":
             continue
-        d = json.load(open(path))
+        d = unwrap(json.load(open(path)))
         model = model or d.get("model", "")
         for c in d.get("cases", []):
             tin_b += c["tokens_in_before"]; tin_a += c["tokens_in_after"]

@@ -84,12 +84,5 @@ default = ["intercept"]
 live = ["dep:async-openai", "dep:reqwest", "dep:tokio"]
 intercept = ["dep:hudsucker", "dep:tokio", "dep:async-trait", "dep:http-body-util", "dep:bytes", "dep:llm_providers", "dep:time"]
 
-# Latency micro-benchmark — its own `main` (warm timing + attribution).
-# Run: `cargo bench --bench latency [-- request.json [provider]]`.
-[[bench]]
-name = "latency"
-path = "bench/scripts/latency.rs"
-harness = false
-
 [lints]
 workspace = true

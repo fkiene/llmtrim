@@ -1,0 +1,4 @@
+# Datasets are license-bound and rebuilt on demand via scripts/download.py
+data/
+# Scratch results dir for ad-hoc runs; canonical snapshots are committed explicitly
+results/

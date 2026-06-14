@@ -6,6 +6,20 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Changed
+- **The benchmark commands are now one `bench` subcommand group.** `llmtrim bench` and
+  `llmtrim bench-agent` are replaced by `llmtrim bench quality` and `llmtrim bench agent`,
+  joined by three new axes under the same dispatcher: `bench suite` (the full corpus matrix
+  in one process, replacing the `run_all.sh` shell script and its per-corpus `cargo run`
+  spawns), `bench latency` (the warm compress-path micro-bench, folded in from the loose
+  `latency.rs`), and `bench compare <headroom|caveman>` (a thin dispatcher over the Python
+  head-to-head comparators). `bench suite` refuses to run live while an `*_PROXY` var is set,
+  so the llmtrim proxy can no longer silently contaminate the A/B baseline.
+- **Benchmark result JSON now carries a shared envelope.** Every `--json-out` (quality,
+  suite, agent) wraps its body in `{ schema, produced_at, commit, llmtrim_version, meta,
+  result }`, so any consumer can identify the schema and the code that produced it. The
+  README/chart synthesizers unwrap it transparently and still read pre-envelope files.
+
 ### Fixed
 - **`setup`'s caveman warning no longer claims llmtrim shapes output the same way caveman
   does.** caveman users run coding agents, which route to the `agent` preset where `auto`
