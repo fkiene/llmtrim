@@ -10,11 +10,12 @@ byte-for-byte.
   per-preset comparison runs on `openai/gpt-oss-20b` (tighter CIs; used to confirm
   regressions, see `bench/README.md`). Judge (open-ended shapes only): `gpt-4o-mini`.
   Each file records its own `model` field.
-- **Contents:** one JSON per corpus×preset run. Each file: run config,
-  aggregate savings/quality, and per-case metrics (token counts, costs, quality
-  orig vs compressed). No dataset text: corpora are license-bound and rebuilt
+- **Contents:** one JSON per corpus×preset run, in the shared bench envelope
+  (`schema`/`produced_at`/`commit`/`llmtrim_version`/`meta`/`result`). `meta` holds the
+  run config; `result` holds aggregate savings/quality and per-case metrics (token counts,
+  costs, quality orig vs compressed). No dataset text: corpora are license-bound and rebuilt
   via `bench/scripts/download.py`.
-- **Rerun:** `bench/scripts/run_all.sh` (needs an API key; see `bench/README.md`).
+- **Rerun:** `cargo run -q --features live -- bench suite` (needs an API key; see `bench/README.md`).
 
 `bench/results/` (gitignored) stays the scratch directory for new runs; future
 snapshots get their own dated directory.
