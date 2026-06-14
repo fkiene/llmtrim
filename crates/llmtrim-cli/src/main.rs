@@ -824,7 +824,7 @@ fn run_bench(args: BenchArgs) -> Result<()> {
     if args.ablate {
         run_ablation(&cases, &config, &args.preset)
     } else if args.offline {
-        run_offline(&cases, kind, &config, &args.preset)
+        run_offline(&cases, kind, &config, &args)
     } else {
         run_live(&cases, kind, &config, &args)
     }
@@ -1245,25 +1245,66 @@ fn run_ablation(cases: &[BenchCase], config: &DenseConfig, preset: &str) -> Resu
 }
 
 /// Token-only smoke path: compress + measure input savings, no model calls.
+/// Run metadata shared by the live and offline result envelopes. Records both the config
+/// source (the `--config` path when it overrode the preset, otherwise the preset name) and
+/// the resolved settings, so two runs with the same metadata are genuinely the same run (#15).
+fn quality_meta(args: &BenchArgs, config: &DenseConfig) -> serde_json::Value {
+    serde_json::json!({
+        "preset": args.preset,
+        "config_path": args.config.as_ref().map(|p| p.display().to_string()),
+        "config_resolved": config,
+        "model": args.model,
+        "judge_model": args.judge_model,
+        "route": args.route,
+        "corpus": args.corpus.display().to_string(),
+    })
+}
+
 fn run_offline(
     cases: &[BenchCase],
     kind: ProviderKind,
     config: &DenseConfig,
-    preset: &str,
+    args: &BenchArgs,
 ) -> Result<()> {
     let (mut before, mut after) = (0usize, 0usize);
+    let mut rows = Vec::with_capacity(cases.len());
     for c in cases {
         let r = llmtrim_core::compress_with_config(&c.request, Some(kind), config)?;
         before += r.input_tokens_before.0;
         after += r.input_tokens_after.0;
+        rows.push(serde_json::json!({
+            "name": c.name,
+            "tokens_in_before": r.input_tokens_before.0,
+            "tokens_in_after": r.input_tokens_after.0,
+        }));
     }
     // FROZEN wording: bench/scripts/vs_headroom.py regex-parses this exact line
     // (`input (\d+) -> (\d+) tok \(([\d.]+)% saved\)`). Restyle only in lockstep with it.
     println!(
-        "offline: {} cases  input {before} -> {after} tok ({:.1}% saved)  preset={preset}",
+        "offline: {} cases  input {before} -> {after} tok ({:.1}% saved)  preset={}",
         cases.len(),
         ui::saved_pct(before as f64, after as f64),
+        args.preset,
     );
+    // Unlike the live A/B, offline has no quality/cost axis — only input-token savings. It
+    // gets its own schema so a reader never mistakes it for a full quality run.
+    if let Some(path) = &args.json_out {
+        let result = serde_json::json!({
+            "n": cases.len(),
+            "tokens_in_before": before,
+            "tokens_in_after": after,
+            "tokens_in_saved_pct": ui::saved_pct(before as f64, after as f64),
+            "cases": rows,
+        });
+        let doc = bench::envelope::wrap("quality-offline-v1", quality_meta(args, config), result);
+        let json = serde_json::to_string_pretty(&doc).context("serialize offline results")?;
+        std::fs::write(path, json)
+            .with_context(|| format!("failed to write {}", path.display()))?;
+        eprintln!(
+            "{}",
+            ui::note(ui::color_stderr(), &format!("wrote {}", path.display()))
+        );
+    }
     Ok(())
 }
 
@@ -1416,18 +1457,7 @@ fn run_live(
                 })
             })
             .collect();
-        // Reproducibility: record the config SOURCE (the path when --config overrode the
-        // preset; else the preset name) AND the actually-resolved settings, so two runs
-        // with the same metadata are genuinely the same run (#15).
-        let meta = serde_json::json!({
-            "preset": args.preset,
-            "config_path": args.config.as_ref().map(|p| p.display().to_string()),
-            "config_resolved": config,
-            "model": args.model,
-            "judge_model": args.judge_model,
-            "route": args.route,
-            "corpus": args.corpus.display().to_string(),
-        });
+        let meta = quality_meta(args, config);
         let result = serde_json::json!({
             "n": f.n,
             "failed": f.failed,
@@ -1443,7 +1473,8 @@ fn run_live(
             "cases": rows,
         });
         let doc = bench::envelope::wrap("quality-v1", meta, result);
-        std::fs::write(path, serde_json::to_string_pretty(&doc)?)
+        let json = serde_json::to_string_pretty(&doc).context("serialize quality results")?;
+        std::fs::write(path, json)
             .with_context(|| format!("failed to write {}", path.display()))?;
         eprintln!(
             "{}",
@@ -1956,5 +1987,100 @@ mod tests {
                 "{corpus}: unknown preset '{preset}'"
             );
         }
+    }
+
+    const CORPUS_LINE: &str = r#"{"context":"The cat sat on the red mat.","question":"What color was the mat?","gold":"red","scorer":"token_f1"}"#;
+
+    fn offline_args(corpus: PathBuf, json_out: Option<PathBuf>) -> BenchArgs {
+        BenchArgs {
+            corpus,
+            provider: "openai".to_string(),
+            preset: "rag".to_string(),
+            model: "openai/gpt-4o-mini".to_string(),
+            judge_model: "openai/gpt-4o-mini".to_string(),
+            route: String::new(),
+            n: Some(1),
+            config: None,
+            pricing: PathBuf::new(), // unused: offline never reads pricing
+            offline: true,
+            ablate: false,
+            json_out,
+        }
+    }
+
+    #[test]
+    fn offline_quality_writes_a_valid_enveloped_file() {
+        let dir = scratch_dir("offline");
+        let corpus = dir.join("c.jsonl");
+        std::fs::write(&corpus, format!("{CORPUS_LINE}\n")).unwrap();
+        let out = dir.join("out.json");
+
+        run_bench(offline_args(corpus, Some(out.clone()))).unwrap();
+
+        let doc: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&out).unwrap()).unwrap();
+        assert_eq!(doc["schema"], "llmtrim-bench/quality-offline-v1");
+        assert_eq!(doc["meta"]["preset"], "rag");
+        assert_eq!(doc["result"]["n"], 1);
+        assert_eq!(doc["result"]["cases"].as_array().unwrap().len(), 1);
+        // The Python readers flatten {meta, result}; the keys they read must be present.
+        assert!(doc["result"]["tokens_in_before"].is_number());
+        assert!(doc["meta"]["model"].is_string());
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn suite_runs_offline_and_skips_missing_corpora() {
+        let data = scratch_dir("suite_data");
+        let out = scratch_dir("suite_out");
+        // Provide just one of the eight matrix corpora; the rest must be skipped, not fatal.
+        std::fs::write(data.join("gsm8k.jsonl"), format!("{CORPUS_LINE}\n")).unwrap();
+
+        let args = SuiteArgs {
+            data_dir: data.clone(),
+            out: out.clone(),
+            model: "openai/gpt-4o-mini".to_string(),
+            judge_model: "openai/gpt-4o-mini".to_string(),
+            route: String::new(),
+            pricing: PathBuf::new(), // unused: offline never reads pricing
+            n: Some(1),
+            offline: true,
+        };
+        run_bench_suite(args).expect("missing corpora must not abort the matrix");
+
+        assert!(
+            out.join("gsm8k.json").is_file(),
+            "present corpus produced a result"
+        );
+        assert!(
+            !out.join("cnn.json").exists(),
+            "absent corpus left no result"
+        );
+        std::fs::remove_dir_all(&data).unwrap();
+        std::fs::remove_dir_all(&out).unwrap();
+    }
+
+    #[test]
+    fn latency_runs_on_the_builtin_fixture() {
+        let r = run_bench_latency(LatencyArgs {
+            request: None,
+            provider: None,
+            iterations: 3,
+        });
+        assert!(
+            r.is_ok(),
+            "latency on the built-in fixture should not error: {r:?}"
+        );
+    }
+
+    #[test]
+    fn compare_rejects_an_unknown_tool() {
+        let err = run_bench_compare(CompareArgs {
+            tool: "nope".to_string(),
+            live: false,
+            extra: vec![],
+        })
+        .unwrap_err();
+        assert!(err.to_string().contains("unknown comparator"), "{err}");
     }
 }
