@@ -187,7 +187,8 @@ pub fn run() -> Result<()> {
         Channel::Homebrew => instructions(
             "update via Homebrew",
             &[
-                "brew upgrade llmtrim",
+                "brew tap fkiene/tap",
+                "brew upgrade fkiene/tap/llmtrim",
                 "llmtrim setup    # restart the daemon on the new binary",
             ],
         ),
