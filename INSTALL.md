@@ -48,7 +48,7 @@ brew install --build-from-source ./Formula/llmtrim.rb
 ## With npm
 
 ```bash
-npm install -g @llmtrim/cli && llmtrim setup   # prebuilt binary for your platform (no Rust needed)
+npm install -g @llmtrim/cli@latest && llmtrim setup   # prebuilt binary for your platform (no Rust needed)
 ```
 
 `npx @llmtrim/cli compress < req.json` works for trying it without installing, but use the

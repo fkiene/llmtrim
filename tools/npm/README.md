@@ -10,7 +10,7 @@ Every cut is re-counted with the provider's real tokenizer and auto-reverted if 
 save, so it can never increase your bill or break a request.
 
 ```bash
-npm install -g @llmtrim/cli && llmtrim setup
+npm install -g @llmtrim/cli@latest && llmtrim setup
 # open a new shell, then watch the bill shrink:
 llmtrim status --watch
 ```

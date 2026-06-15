@@ -29,7 +29,7 @@ llmtrim setup           # configure the local interceptor + environment
 llmtrim doctor          # verify it
 ```
 
-Other channels (same binary): `brew install fkiene/tap/llmtrim` · `scoop install llmtrim` · `npm i -g @llmtrim/cli` · `docker run ghcr.io/fkiene/llmtrim`. See [INSTALL.md](https://github.com/fkiene/llmtrim/blob/main/INSTALL.md).
+Other channels (same binary): `brew install fkiene/tap/llmtrim` · `scoop install llmtrim` · `npm i -g @llmtrim/cli@latest` · `docker run ghcr.io/fkiene/llmtrim`. See [INSTALL.md](https://github.com/fkiene/llmtrim/blob/main/INSTALL.md).
 
 ## Use it
 
