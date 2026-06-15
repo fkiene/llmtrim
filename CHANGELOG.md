@@ -7,6 +7,9 @@ All notable changes to this project are documented here. The format follows
 ## [Unreleased]
 
 ### Fixed
+- **`llmtrim update` now prints the correct npm upgrade command.** It printed
+  `npm update -g @llmtrim/cli`, which npm treats as a no-op for a globally installed package
+  already on a satisfying version; it now prints `npm install -g @llmtrim/cli@latest`.
 - **`status` no longer reports "stopped" while the proxy is serving.** Health was decided
   from the pidfile alone, so a daemon whose pidfile went missing (e.g. lost to a full disk)
   showed the loud "stopped — LLM calls will fail" banner even though the proxy was still

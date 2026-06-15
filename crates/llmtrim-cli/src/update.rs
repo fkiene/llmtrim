@@ -194,7 +194,7 @@ pub fn run() -> Result<()> {
         Channel::Npm => instructions(
             "update via npm",
             &[
-                "npm update -g @llmtrim/cli",
+                "npm install -g @llmtrim/cli@latest",
                 "llmtrim setup    # restart the daemon on the new binary",
             ],
         ),
