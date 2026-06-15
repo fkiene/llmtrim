@@ -1430,6 +1430,77 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// Evidence test for the Drain3 "regex pre-masking" proposal. The existing pipeline
+    /// already masks volatile tokens (timestamps, hex addresses, hashes, UUIDs, IPv4,
+    /// numbers) via [`VARIABLE`] before grouping. This measures what that pre-masking buys:
+    /// distinct templates and token savings WITH masking vs. a no-mask baseline (where each
+    /// line is its own group because the volatile fields differ).
+    #[test]
+    fn premasking_drives_grouping_and_savings() {
+        // Realistic repetitive tool output: a stack trace repeated by many worker threads,
+        // each frame differing only in volatile fields — a wall-clock timestamp, a hex
+        // return address, a thread id, and a line number. This is exactly the shape the
+        // Drain3 proposal targets.
+        let mut lines = Vec::new();
+        for i in 0..40 {
+            let addr = 0x7f00_0000u64 + (i as u64) * 0x40;
+            lines.push(format!(
+                "2026-06-13T10:{:02}:{:02}Z thread-{i} at 0x{addr:x} (worker.rs:{}) panicked: send failed",
+                i / 60,
+                i % 60,
+                120 + i
+            ));
+        }
+        let text = lines.join("\n");
+
+        // Baseline: distinct templates WITHOUT pre-masking = number of byte-distinct lines.
+        // Every line differs (timestamp/addr/id/line), so each is its own group → 40.
+        let distinct_unmasked = {
+            let mut set = std::collections::HashSet::new();
+            for l in text.lines() {
+                set.insert(l);
+            }
+            set.len()
+        };
+        assert_eq!(
+            distinct_unmasked, 40,
+            "no-mask baseline: every line is unique"
+        );
+
+        // With pre-masking: collapse the volatile fields, then count distinct templates.
+        let distinct_masked = {
+            let mut set = std::collections::HashSet::new();
+            for l in text.lines() {
+                set.insert(template_of(l).0);
+            }
+            set.len()
+        };
+        assert_eq!(
+            distinct_masked, 1,
+            "pre-masking folds all 40 lines into ONE template"
+        );
+
+        // The whole point: real token savings on this shape.
+        let (out, folded) = collapse(&text);
+        assert!(folded, "the masked run folds");
+        let saved = 100.0 - (count_tokens(&out) as f64 / count_tokens(&text) as f64 * 100.0);
+        assert!(
+            saved >= 60.0,
+            "expected >=60% token savings, got {saved:.1}%"
+        );
+
+        // Lossless: the line-number column is a regular sequence, so it range-folds to
+        // `120..159` (every value reconstructible from the notation) rather than listing all
+        // 40. Both endpoints survive verbatim, and the hex-address column keeps its explicit
+        // list — no value is dropped.
+        assert!(
+            out.contains("120..159"),
+            "line-number range preserved: {out}"
+        );
+        assert!(out.contains("0x7f000000"), "first address preserved: {out}");
+        assert!(out.contains("0x7f0009c0"), "last address preserved: {out}");
+    }
+
     #[test]
     fn end_to_end_collapse_range_folds_regular_run() {
         let text: String = (0..30)
