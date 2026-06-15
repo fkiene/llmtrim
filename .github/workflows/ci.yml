@@ -27,12 +27,13 @@ env:
   RUSTFLAGS: "-D warnings"
 
 jobs:
-  # Detect whether anything other than docs/assets changed. The heavy jobs below gate on
-  # `needs.changes.outputs.code` and skip (reporting "Success", which satisfies the required
-  # status check) on docs-only PRs. The gate is fail-safe: jobs run unless `code` is
-  # explicitly "false", so a docs-only change skips them, but if the `changes` job itself
-  # fails or is skipped (empty output), the heavy jobs still run rather than letting code
-  # through untested. A docs-only push to main likewise skips the matrix (nothing to test).
+  # Detect whether anything other than docs/assets changed. On a docs-only change the
+  # single-name jobs below skip outright (a skipped required check reports "Success" and
+  # satisfies branch protection), while the `test` matrix job runs but no-ops per-step (a
+  # *skipped* matrix job never expands its per-OS contexts, which branch protection requires
+  # by name — see that job). The gate is fail-safe: jobs run unless `code` is explicitly
+  # "false", so if the `changes` job itself fails or is skipped (empty output) the real work
+  # still runs rather than letting code through untested.
   changes:
     name: Detect code changes
     runs-on: ubuntu-latest
@@ -65,38 +66,58 @@ jobs:
   test:
     name: Test (${{ matrix.os }})
     needs: changes
-    if: ${{ !cancelled() && needs.changes.outputs.code != 'false' }}
+    # Unlike the single-name jobs below, a *matrix* job that is skipped at the job level
+    # never expands, so its per-OS contexts (`Test (ubuntu-latest)` …) — which branch
+    # protection requires by name — are never reported and a docs-only PR stays blocked
+    # forever. So this job always runs (matrix expands → contexts report) and instead skips
+    # its work per-step on docs-only changes, completing as a fast success. `!cancelled()`
+    # keeps it running even if the `changes` job failed (fail-safe — never skip real tests).
+    if: ${{ !cancelled() }}
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, macos-latest, windows-latest]
+    # `RUN` is false only on a docs-only change; every step gates on it so the job no-ops
+    # (and reports success under each required context name) without doing real work.
+    env:
+      RUN: ${{ needs.changes.outputs.code != 'false' }}
     steps:
-      - uses: actions/checkout@v6
-      - uses: dtolnay/rust-toolchain@stable
+      - if: ${{ env.RUN != 'false' }}
+        uses: actions/checkout@v6
+      - if: ${{ env.RUN != 'false' }}
+        uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
-      - uses: Swatinem/rust-cache@v2
+      - if: ${{ env.RUN != 'false' }}
+        uses: Swatinem/rust-cache@v2
       # aws-lc-rs (pulled in by the interceptor's rustls stack) assembles with NASM on Windows.
       - name: Install NASM (Windows)
-        if: runner.os == 'Windows'
+        if: ${{ env.RUN != 'false' && runner.os == 'Windows' }}
         uses: ilammy/setup-nasm@v1
       - name: Format
+        if: ${{ env.RUN != 'false' }}
         run: cargo fmt --all -- --check
       - name: Clippy
+        if: ${{ env.RUN != 'false' }}
         run: cargo clippy --all-targets -- -D warnings
       - name: Test
+        if: ${{ env.RUN != 'false' }}
         run: cargo test
       - name: Build (release)
+        if: ${{ env.RUN != 'false' }}
         run: cargo build --release
       - name: Compile live feature
+        if: ${{ env.RUN != 'false' }}
         run: cargo build -p llmtrim --features live
       # Guard the embeddable engine: llmtrim-core must build standalone, and the CLI lib
       # must still compile with the interceptor (+ tokio) dropped. `--features`/`--lib` are
       # package-scoped — they can't run at the virtual workspace root.
       - name: Compile embedder core (llmtrim-core)
+        if: ${{ env.RUN != 'false' }}
         run: cargo check -p llmtrim-core
       - name: Compile CLI lib without the interceptor
+        if: ${{ env.RUN != 'false' }}
         run: cargo check -p llmtrim --no-default-features --lib
 
   # Exercise the UniFFI bindings end-to-end, not just the Rust-side tests in the `test`
