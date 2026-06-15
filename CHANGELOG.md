@@ -6,6 +6,8 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.1.12] - 2026-06-15
+
 ### Added
 - **Logo-faithful terminal motifs in the shared UI.** The `ui` design system speaks the
   logo's "trim the wool, same sheep" story in one voice: a `wordmark` banner
@@ -412,7 +414,8 @@ bill, never a broken call.
   (6 targets with SLSA build provenance), CI on Linux/macOS/Windows with secret
   scanning, license compliance, and MSRV gates.
 
-[Unreleased]: https://github.com/fkiene/llmtrim/compare/v0.1.11...HEAD
+[Unreleased]: https://github.com/fkiene/llmtrim/compare/v0.1.12...HEAD
+[0.1.12]: https://github.com/fkiene/llmtrim/compare/v0.1.11...v0.1.12
 [0.1.11]: https://github.com/fkiene/llmtrim/compare/v0.1.10...v0.1.11
 [0.1.10]: https://github.com/fkiene/llmtrim/compare/v0.1.9...v0.1.10
 [0.1.9]: https://github.com/fkiene/llmtrim/compare/v0.1.8...v0.1.9
