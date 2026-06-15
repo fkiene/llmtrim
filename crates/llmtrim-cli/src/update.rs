@@ -136,11 +136,12 @@ fn newer(latest: &str) -> Option<String> {
 pub fn run() -> Result<()> {
     let color = crate::ui::color_stdout();
     println!(
-        "{}",
+        "{}  {}",
+        crate::ui::wordmark(color),
         crate::ui::paint(
             color,
             crate::ui::Tone::Dim,
-            &format!("llmtrim v{CURRENT} — checking the latest release…")
+            &format!("v{CURRENT} · checking the latest release…")
         )
     );
     let latest = fetch_latest();

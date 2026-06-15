@@ -129,7 +129,8 @@ fn projected_round_trip_pct(saved: f64, spend: f64, out_spend_shaped: f64) -> f6
 /// saving on the shaped share only.
 #[derive(Clone, Copy)]
 pub struct Cost {
-    /// Input tokens cut × list input rate — the headline (what those tokens cost at list).
+    /// Input tokens cut × list input rate — the list-rate value of the cut. Used for the
+    /// JSON/accounting outputs; the dashboard hero shows the measured `net_saved`, not this.
     pub saved: f64,
     /// Compressed bill at list rates: input_after + measured output.
     pub spend: f64,
@@ -142,10 +143,11 @@ pub struct Cost {
     /// Output spend from requests that carried the shaping instruction — the only spend
     /// the A/B benchmark factor may be projected onto.
     pub out_spend_shaped: f64,
-    /// The measured saving priced at the live-zone rate: cut tokens live in the
-    /// compressible zone, which bills as fresh (1×) / cache-write (1.25×) — never at the
-    /// ~10% cache-read rate the `net_saved` blend assumes. The honest mid of the
-    /// `net_saved → saved` range; equals `saved` when the traffic reports no usage split.
+    /// The measured saving priced at the live-zone rate: cut tokens live in the compressible
+    /// zone, which bills as fresh (1×) / cache-write (1.25× on Anthropic) — never at the ~10%
+    /// cache-read rate the `net_saved` blend assumes, so this runs `≥ net_saved` (and can top
+    /// `saved` when cache writes are involved). Kept for accounting; the dashboard no longer
+    /// renders it (the hero is the conservative `net_saved`).
     pub live_saved: f64,
 }
 
@@ -192,32 +194,53 @@ pub struct ModelView {
 
 // ── rendering helpers ───────────────────────────────────────────────────────────
 
-/// A `width`-cell depletion bar for a `saved` percentage (0–100, clamped): the kept portion
-/// is filled + dim (what you still pay), the saved tail is dotted + the accent (what was cut),
-/// so the accent dots line up with the accent savings label. ≥100 → all dots, ≤0 → all filled.
+/// A `width`-cell gauge for a `saved` percentage (0–100, clamped): the saved portion is a
+/// solid accent (blue) block — the win, growing left-to-right with the accent `-pct` label —
+/// and the kept portion trails as dim dots (what you still pay). ≥100 → all filled, ≤0 → all dots.
 fn bar(color: bool, saved: f64, width: usize) -> String {
     let cut = ((saved.clamp(0.0, 100.0) / 100.0) * width as f64).round() as usize;
     let kept = width.saturating_sub(cut);
     format!(
         "{}{}",
-        ui::paint(color, Tone::Dim, &"█".repeat(kept)),
-        ui::paint(color, Tone::Accent, &"░".repeat(cut)),
+        ui::paint(color, Tone::Accent, &"█".repeat(cut)),
+        ui::paint(color, Tone::Dim, &"░".repeat(kept)),
     )
 }
 
-/// A `saved → label` line with a bar and a signed percentage (accent when saving, warn
-/// when it grew). `before`/`after` are token counts.
+/// Cells reserved for the savings field (`before ─✂─▶ after`, or `N billed`) so the bars
+/// line up across axes regardless of how wide each number prints. Sized for the widest
+/// realistic value (`999.9M ─✂─▶ 999.9M`).
+const SHEAR_FIELD_W: usize = 20;
+
+/// Pad an already-styled cell to [`SHEAR_FIELD_W`] display cells (ANSI-aware).
+fn pad_field(styled: &str) -> String {
+    let pad = " ".repeat(SHEAR_FIELD_W.saturating_sub(ui::visible_width(styled)));
+    format!("{styled}{pad}")
+}
+
+/// `before ─✂─▶ after`, padded to [`SHEAR_FIELD_W`] — the shear metaphor over a measured
+/// before/after.
+fn shear_field(color: bool, before: i64, after: i64) -> String {
+    pad_field(&format!(
+        "{} {} {}",
+        ui::paint(color, Tone::Dim, &ui::human(before)),
+        ui::paint(color, Tone::Dim, "─✂─▶"),
+        ui::paint(color, Tone::Bold, &ui::human(after)),
+    ))
+}
+
+/// A `name  before ─✂─▶ after  [bar]  ±pct` line — the shear metaphor over a measured
+/// before/after. Percent is accent when saving, warn when it grew. Counts are token totals.
 fn axis(color: bool, name: &str, before: i64, after: i64) -> String {
     let pct = ui::saved_pct(before as f64, after as f64);
-    let pct_str = format!("{:+.0}%", -pct); // show as a signed delta (-41% = saved 41%)
+    let pct_str = format!("{:>5}", format!("{:+.0}%", -pct)); // signed delta, -41% = saved 41%
     let pct_tone = if pct >= 0.0 { Tone::Accent } else { Tone::Warn };
     format!(
-        "  {:<7} {} {:>6}   {} → {}",
+        "  {:<7} {}   {}   {}",
         name,
-        bar(color, pct, 22),
+        shear_field(color, before, after),
+        bar(color, pct, 18),
         ui::paint(color, pct_tone, &pct_str),
-        ui::human(before),
-        ui::human(after),
     )
 }
 
@@ -236,7 +259,7 @@ fn render_header(color: bool, d: &DaemonView) -> String {
         let mut meta = if unmanaged {
             format!(":{}", d.port)
         } else {
-            format!("pid {} · :{} · up {}", d.pid, d.port, d.uptime)
+            format!(":{} · up {}", d.port, d.uptime)
         };
         if let Some(v) = &d.version {
             meta.push_str(&format!(" · v{v}"));
@@ -244,36 +267,23 @@ fn render_header(color: bool, d: &DaemonView) -> String {
         if d.autostart {
             meta.push_str(" · autostart on");
         }
+        // One calm strip: wordmark, the live dot + meta, and the overall health word. The
+        // per-check detail collapses into that word; broken links still get their own warn
+        // lines below (and `llmtrim doctor` carries the full chain).
+        let badge = match health(d) {
+            Health::Healthy => ui::paint(color, Tone::Accent, "✓ healthy"),
+            _ => ui::paint(color, Tone::Warn, "⚠ degraded"),
+        };
         o.push_str(&format!(
-            " {} {}  {}\n",
-            ui::paint(color, Tone::Accent, "llmtrim ●"),
+            " {} {} {} {}   {}\n",
+            ui::wordmark(color),
+            ui::paint(color, Tone::Accent, "●"),
             ui::paint(color, Tone::Dim, "running"),
-            ui::paint(color, Tone::Dim, &meta),
+            ui::paint(color, Tone::Dim, &format!("· {meta}")),
+            badge,
         ));
 
-        // The chain, healthy links first…
-        let env_ok = d.env_port == Some(d.port);
-        let mut ok_bits: Vec<String> = Vec::new();
-        if d.port_accepting {
-            ok_bits.push(format!("{} port", ui::OK));
-        }
-        if env_ok {
-            ok_bits.push(format!("{} env :{}", ui::OK, d.port));
-        }
-        if d.ca_present {
-            ok_bits.push(format!("{} ca", ui::OK));
-        }
-        ok_bits.push(match &d.last_request {
-            Some(age) => format!("last request {age}"),
-            None => "no requests yet".to_string(),
-        });
-        o.push_str(&ui::paint(
-            color,
-            Tone::Dim,
-            &format!("  {}\n", ok_bits.join("   ")),
-        ));
-
-        // …then one warn line per broken link, each naming its fix.
+        // One warn line per broken link, each naming its fix.
         let log = d.log_path.as_deref().unwrap_or("~/.llmtrim/serve.log");
         if !d.port_accepting {
             o.push_str(&ui::paint(
@@ -392,6 +402,7 @@ pub fn snapshot(
     models: &[ModelView],
     cost: Option<&Cost>,
     today_saved_usd: Option<f64>,
+    trend: &[i64],
 ) -> String {
     let mut o = String::new();
 
@@ -416,80 +427,73 @@ pub fn snapshot(
         return o;
     }
 
-    // Hero panel — the headline is the MEASURED input-side saving (real, per-row): every
-    // request's input is compressed and re-tokenized, so this is honest for all traffic.
-    // The output side is NOT in the headline: the proxy never sees the un-instructed reply,
-    // so any output saving is a benchmark projection that only holds when output is actually
-    // shaped — projecting it onto agent traffic (output left unshaped by design) would
-    // overstate the number ~2.7×. We surface it separately, clearly labeled, below.
-    // Hero — the biggest TRUE numbers first: tokens trimmed (measured, absolute) and the
-    // dollars that actually came off the bill (`net_saved`, cache-discounted). The gross
-    // list-rate figure moves to a dim support line below: it's the ceiling, not the claim.
-    let hero = match cost {
+    // Hero box — one dominant figure, supporting facts demoted to a second line. The
+    // headline is the MEASURED input-side saving (real, per-row): every request's input is
+    // compressed and re-tokenized, so it is honest for all traffic. The output side is NOT
+    // in the headline — the proxy never sees the un-instructed reply, so any output saving
+    // is a benchmark projection that only holds when output is actually shaped (projecting
+    // it onto agent traffic would overstate ~2.7×); it is surfaced separately, below.
+    o.push('\n');
+    let (line1, line2) = match cost {
         Some(c) => {
             // Anchor the all-time number in the present: "what did it do for me today?"
             // Hidden when today has no priced saving — a perpetual $0.00 reads like fake data.
             let today = today_saved_usd
                 .filter(|t| *t >= 0.005)
-                .map(|t| ui::paint(color, Tone::Dim, &format!(" · today ${t:.2}")))
+                .map(|t| {
+                    format!(
+                        " {} {}",
+                        ui::paint(color, Tone::Dim, "·"),
+                        // "saved today", not a bare "↑ $X" — an up-arrow next to a dollar on a
+                        // billing screen reads as spend going up, the opposite of the truth.
+                        ui::paint(color, Tone::Accent, &format!("${t:.2} saved today")),
+                    )
+                })
                 .unwrap_or_default();
-            // The $ headline is the live-zone estimate when usage data supports it (cut
-            // tokens bill at the fresh/write rate, not the cache-read blend) — marked `~`;
-            // the measured floor moves to the ladder line below. Without a usage split the
-            // two coincide and the figure prints unmarked.
-            let real = if c.live_saved > c.net_saved + 0.005 {
-                format!("~${:.2} off your real bill", c.live_saved)
-            } else {
-                format!("${:.2} off your real bill", c.net_saved)
-            };
-            format!(
-                "{} trimmed{}   {}   {} requests",
-                ui::paint(
-                    color,
-                    Tone::Accent,
-                    &format!("{} tokens", ui::human(s.saved()))
+            // The headline is the MEASURED figure that came off the real, cache-discounted
+            // bill — the conservative truth, so it owns "off your real bill". The list-rate
+            // value and the higher live-zone estimate are upside, shown dim below as an
+            // ascending ladder, never as the hero (a headline above its own list ceiling
+            // reads as cooked).
+            (
+                format!(
+                    "{} {}{}",
+                    ui::hero(color, &format!("${:.2}", c.net_saved)),
+                    ui::paint(color, Tone::Dim, "off your real bill"),
+                    today,
                 ),
-                today,
-                ui::paint(color, Tone::Bold, &real),
-                ui::commas(s.events),
+                // No input % here: the SAVINGS axis below carries the honest figure (over
+                // the compressible surface). Repeating the diluted all-input % would
+                // contradict it.
+                format!(
+                    "{} tokens trimmed {} {} requests",
+                    ui::human(s.saved()),
+                    ui::paint(color, Tone::Dim, "·"),
+                    ui::commas(s.events),
+                ),
             )
         }
-        None => format!(
-            "{}   {} requests",
-            ui::paint(
-                color,
-                Tone::Accent,
-                &format!("-{:.0}% input tokens", s.saved_pct())
+        None => (
+            format!(
+                "{} {}",
+                ui::hero(color, &format!("-{:.0}%", s.saved_pct())),
+                ui::paint(color, Tone::Dim, "input tokens trimmed"),
             ),
-            ui::commas(s.events),
+            format!("{} requests", ui::commas(s.events)),
         ),
     };
-    o.push('\n');
-    let title = if cost.is_some() {
-        "llmtrim"
-    } else {
-        "saved (all time)"
-    };
-    o.push_str(&ui::panel(color, title, &[hero]));
-    o.push('\n');
-    // The honesty ladder, one quiet line: the same cut is worth more at list rates — show
-    // the ceiling so the hero floor never reads as the whole story. Hidden when the traffic
-    // uses no prompt cache (the two figures coincide).
-    if let Some(c) = cost
-        && c.net_saved + 0.005 < c.saved
-    {
-        o.push_str(&ui::paint(
-            color,
-            Tone::Dim,
-            &format!(
-                "  floor ${:.2} measured off the bill · ${:.2} at list — the estimate prices the cut where it bills (cache writes run 1.25×)\n",
-                c.net_saved, c.saved
-            ),
-        ));
-    }
+    o.push_str(&ui::boxed(
+        color,
+        &[line1, ui::paint(color, Tone::Dim, &line2)],
+    ));
+    // The logo's promise, free of brackets, right under the box.
+    o.push_str(&format!("   {}\n", ui::ok(color, ui::TAGLINE)));
+    // (No list-rate / live-zone "upside" line: the hero is the real, cache-discounted dollars
+    // that came off the bill — the number the user actually cares about. Pricing the same cut
+    // at list or cache-write rates is internal accounting, not a saving they can spend.)
 
     // savings axes, one gauge language for the whole section
-    o.push_str(&ui::paint(color, Tone::Dim, "\n savings\n"));
+    o.push_str(&ui::paint(color, Tone::Dim, "\n SAVINGS\n"));
     // Input axis — measured over the compressible surface only (input minus the frozen
     // cached prefix the stages skip by design), the honest % of what we're allowed to
     // touch. Metered rows only, so the figure is never diluted by legacy rows; ledgers
@@ -505,27 +509,64 @@ pub fn snapshot(
         o.push('\n');
     }
     if s.output_events > 0 {
-        // No live output baseline (the proxy never sees the un-instructed reply), so this is
-        // the A/B benchmark factor, not a measurement — and it only holds where output is
-        // actually shaped. Show the real billed volume + the benchmark bar, tagged as an
-        // estimate so it's never read as measured per-row data.
+        // No live output baseline (the proxy never sees the un-instructed reply), so we show
+        // the real billed volume and the A/B-benchmark reduction as a clearly-tagged estimate
+        // — never a fabricated before→after that would read as a measured trim. The `~%` and
+        // "(est · if output shaped)" tag mark it; the bar aligns with the input axis.
+        let billed = pad_field(&format!(
+            "{} {}",
+            ui::paint(color, Tone::Bold, &ui::human(s.output_after)),
+            ui::paint(color, Tone::Dim, "billed"),
+        ));
         o.push_str(&format!(
-            "  {:<7} {} {:>6}   {} billed   {}",
+            "  {:<7} {}   {}   {}   {}\n",
             "output",
-            bar(color, BENCH_OUTPUT_REDUCTION * 100.0, 22),
+            billed,
+            bar(color, BENCH_OUTPUT_REDUCTION * 100.0, 18),
             ui::paint(
                 color,
                 Tone::Accent,
-                &format!("~{:+.0}%", -BENCH_OUTPUT_REDUCTION * 100.0)
+                &format!(
+                    "{:>5}",
+                    format!("~{:+.0}%", -BENCH_OUTPUT_REDUCTION * 100.0)
+                ),
             ),
-            ui::human(s.output_after),
             ui::paint(color, Tone::Dim, "(est · if output shaped)"),
         ));
-        o.push('\n');
     }
     // (No cache line: cache-safety is a property, not a per-run number. A token count here
     // credited llmtrim for the provider's own cache discount, and a static "we don't bust
     // your cache" reassurance is dashboard clutter — that belongs in the docs, not status.)
+
+    // 7-day trend — a sparkline of daily tokens saved, oldest→newest. Sells the recurring
+    // win the all-time hero can't. Hidden when there's no day-over-day data to plot.
+    if trend.len() >= 2 {
+        o.push_str(&ui::paint(
+            color,
+            Tone::Dim,
+            "\n 7-DAY TREND  tokens saved / day\n",
+        ));
+        let peak = trend.iter().copied().max().unwrap_or(0);
+        let last = *trend.last().unwrap_or(&0);
+        // Direction compares the first and last bucket; the arrow points the way it moved and
+        // is coloured so the signal reads at a glance (accent up, warn down).
+        let (arrow, word, tone) = match (trend.first(), trend.last()) {
+            (Some(a), Some(b)) if b > a => ("▲", "up", Tone::Accent),
+            (Some(a), Some(b)) if b < a => ("▼", "down", Tone::Warn),
+            _ => ("→", "flat", Tone::Dim),
+        };
+        o.push_str(&format!(
+            "  {}   {} {} {}\n",
+            ui::paint(color, Tone::Accent, &ui::sparkline(trend)),
+            ui::paint(
+                color,
+                Tone::Dim,
+                &format!("peak {} · last {} ·", ui::human(peak), ui::human(last)),
+            ),
+            ui::paint(color, tone, arrow),
+            ui::paint(color, Tone::Dim, word),
+        ));
+    }
 
     // by-model table — MEASURED input-side saving per model (matches the honest headline):
     // input % saved and the input-side $ saved where the registry prices the model. No output
@@ -534,7 +575,7 @@ pub fn snapshot(
     // cached $ is list value (the real bill is already cache-discounted) — the honesty split
     // is structural instead of an asterisk per row.
     if !models.is_empty() {
-        o.push_str(&ui::paint(color, Tone::Dim, "\n by model\n"));
+        o.push_str(&ui::paint(color, Tone::Dim, "\n BY MODEL\n"));
         let mut t = ui::table(color, &["model", "requests", "saved", "$ saved"]);
         let grouped = models.iter().any(|m| m.cached) && models.iter().any(|m| !m.cached);
         let add_rows = |t: &mut comfy_table::Table, cached: bool| {
@@ -550,35 +591,43 @@ pub fn snapshot(
                     label,
                 ))]);
             }
-            for m in models.iter().filter(|m| m.cached == cached) {
+            // Biggest $ saved first within each group (unpriced rows last).
+            let mut group: Vec<&ModelView> = models.iter().filter(|m| m.cached == cached).collect();
+            group.sort_by(|a, b| {
+                b.cost_saved
+                    .unwrap_or(f64::NEG_INFINITY)
+                    .partial_cmp(&a.cost_saved.unwrap_or(f64::NEG_INFINITY))
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            });
+            for m in group {
                 // Metered models show the new-content % (the compressible surface, the
                 // honest big number); pre-meter models fall back to the all-input figure.
                 let pct = m.new_pct.unwrap_or(m.saved_pct);
                 let pct_tone = if pct >= 0.0 { Tone::Accent } else { Tone::Warn };
                 let name = ui::truncate(&m.name, 28);
+                // `$0.00` reads as "did nothing"; a real but sub-cent saving shows `<$0.01`,
+                // and an unpriced model shows a dim placeholder.
+                let dollars = match m.cost_saved {
+                    Some(c) if c >= 0.005 => ui::paint(color, Tone::Accent, &format!("${c:.2}")),
+                    Some(_) => ui::paint(color, Tone::Dim, "<$0.01"),
+                    None => ui::paint(color, Tone::Dim, "—"),
+                };
                 t.add_row(vec![
                     comfy_table::Cell::new(if grouped { format!("  {name}") } else { name }),
                     ui::right(ui::commas(m.events)),
                     ui::right(ui::paint(color, pct_tone, &format!("{:+.0}%", -pct))),
-                    ui::right(
-                        m.cost_saved
-                            .map(|c| ui::paint(color, Tone::Accent, &format!("${c:.2}")))
-                            .unwrap_or_default(),
-                    ),
+                    ui::right(dollars),
                 ]);
             }
         };
         add_rows(&mut t, false);
         add_rows(&mut t, true);
+        // Indent the boxed table one space, lining its left border up with the hero box, and
+        // lighten the header rule (heavy ╞═══╡ → light ├───┤) so this secondary table doesn't
+        // out-weight the hero. (BORDERS_ONLY uses ═ only for that rule, so the swap is safe.)
         for line in t.to_string().lines() {
-            o.push_str(&format!(" {line}\n"));
-        }
-        if models.iter().any(|m| m.new_pct.is_some()) {
-            o.push_str(&ui::paint(
-                color,
-                Tone::Dim,
-                " saved % measured without the cached prefix where metered\n",
-            ));
+            let light = line.replace('╞', "├").replace('╡', "┤").replace('═', "─");
+            o.push_str(&format!(" {light}\n"));
         }
     }
 
@@ -586,10 +635,7 @@ pub fn snapshot(
         o.push_str(&ui::paint(
             color,
             Tone::Dim,
-            &format!(
-                " added latency ~{:.2} ms/req · llmtrim compression overhead\n",
-                us / 1000.0
-            ),
+            &format!(" + ~{:.0} ms/req · compression overhead\n", us / 1000.0),
         ));
     }
     if let Some(c) = cost {
@@ -619,8 +665,9 @@ pub fn snapshot(
 /// A `--daily/--weekly/--monthly` table: one row per bucket with input/output savings.
 pub fn period_report(color: bool, label: &str, rows: &[PeriodRow]) -> String {
     let mut o = format!(
-        "{}\n",
-        ui::paint(color, Tone::Bold, &format!("llmtrim — {label} savings"))
+        "{}  {}\n",
+        ui::wordmark(color),
+        ui::paint(color, Tone::Dim, &format!("{label} savings")),
     );
     if rows.is_empty() {
         o.push_str(&ui::paint(color, Tone::Dim, " no activity recorded yet\n"));
@@ -927,13 +974,69 @@ mod tests {
         }
     }
 
+    fn priced() -> Cost {
+        Cost {
+            saved: 10.0,
+            spend: 10.0,
+            out_spend: 0.0,
+            net_saved: 10.0,
+            live_saved: 10.0,
+            out_spend_shaped: 0.0,
+        }
+    }
+
+    #[test]
+    fn trend_section_renders_sparkline_and_direction() {
+        let c = priced();
+        // Rising series → ▲ up, sparkline scaled to the series max (0 → ▁, max → █).
+        let up = snapshot(false, None, &summ(), &[], Some(&c), None, &[0, 20, 80]);
+        assert!(up.contains("7-DAY TREND"));
+        assert!(
+            up.contains('▁') && up.contains('█'),
+            "sparkline scaled: {up}"
+        );
+        assert!(up.contains("peak 80") && up.contains("last 80"));
+        assert!(up.contains('▲') && up.contains("up"), "rising → up: {up}");
+        // Falling series → ▼ down.
+        let down = snapshot(false, None, &summ(), &[], Some(&c), None, &[80, 10]);
+        assert!(
+            down.contains('▼') && down.contains("down"),
+            "falling → down: {down}"
+        );
+        // Fewer than two buckets → the whole section is hidden.
+        let one = snapshot(false, None, &summ(), &[], Some(&c), None, &[5]);
+        assert!(
+            !one.contains("7-DAY TREND"),
+            "single bucket hides trend: {one}"
+        );
+    }
+
+    #[test]
+    fn by_model_unpriced_row_shows_dash_placeholder() {
+        let models = vec![ModelView {
+            name: "mystery-model".into(),
+            events: 7,
+            saved_pct: 20.0,
+            cost_saved: None, // registry doesn't price it → dim — placeholder, not blank
+            spend: None,
+            out_spend: None,
+            cached: false,
+            new_pct: None,
+        }];
+        let out = snapshot(false, None, &summ(), &models, Some(&priced()), None, &[]);
+        assert!(
+            out.contains("mystery-model") && out.contains('—'),
+            "unpriced $ saved shows a dash: {out}"
+        );
+    }
+
     #[test]
     fn bar_clamps_and_fills() {
-        assert_eq!(bar(false, 50.0, 10), "█████░░░░░"); // 50% saved: 5 kept, 5 cut
-        assert_eq!(bar(false, 0.0, 4), "████"); // nothing saved → all filled
-        assert_eq!(bar(false, 100.0, 4), "░░░░"); // all saved → all dotted
-        assert_eq!(bar(false, 150.0, 4), "░░░░"); // clamp high → all dotted
-        assert_eq!(bar(false, -20.0, 4), "████"); // clamp low → all filled
+        assert_eq!(bar(false, 50.0, 10), "█████░░░░░"); // 50% saved: 5 filled (accent), 5 dots
+        assert_eq!(bar(false, 0.0, 4), "░░░░"); // nothing saved → all dots
+        assert_eq!(bar(false, 100.0, 4), "████"); // all saved → all filled (accent)
+        assert_eq!(bar(false, 150.0, 4), "████"); // clamp high → all filled
+        assert_eq!(bar(false, -20.0, 4), "░░░░"); // clamp low → all dots
     }
 
     #[test]
@@ -956,7 +1059,7 @@ mod tests {
             cached: false,
             new_pct: None,
         }];
-        let out = snapshot(false, None, &summ(), &models, Some(&cost), None);
+        let out = snapshot(false, None, &summ(), &models, Some(&cost), None, &[]);
         // Headline shows the MEASURED figures (tokens trimmed + real-bill $), not a
         // projection that assumes shaping.
         assert!(
@@ -965,7 +1068,11 @@ mod tests {
         );
         assert!(out.contains("1,204 requests"), "request count");
         assert!(
-            out.contains("input") && out.contains("2.1M → 1.2M"),
+            out.contains("✓ same answers, smaller bill"),
+            "logo value promise stamped under the hero"
+        );
+        assert!(
+            out.contains("input") && out.contains("2.1M ─✂─▶ 1.2M"),
             "input axis"
         );
         assert!(out.contains("gpt-4o") && out.contains("$4.10"), "model row");
@@ -991,7 +1098,7 @@ mod tests {
             live_saved: 10.0,
             out_spend_shaped: 5.0,
         };
-        let out = snapshot(false, None, &summ(), &[], Some(&cost), None);
+        let out = snapshot(false, None, &summ(), &[], Some(&cost), None, &[]);
         assert!(
             out.contains("$10.00 off your real bill"),
             "headline = measured net saving"
@@ -1035,47 +1142,38 @@ mod tests {
             out_spend_shaped: 0.0,
         };
         assert!((c.projected_saved() - c.saved).abs() < 1e-9);
-        let out = snapshot(false, None, &summ(), &[], Some(&c), None);
+        let out = snapshot(false, None, &summ(), &[], Some(&c), None, &[]);
         // No footnote either way: the output axis' "(est · if output shaped)" tag carries
         // the caveat; a dedicated line only appears when the projection is ≥ $1.
         assert!(!out.contains("more saved by output shaping"));
     }
 
     #[test]
-    fn net_line_surfaces_cache_discounted_saving() {
-        // Cache-heavy traffic: tokens cut are worth $100 at list rates but $25 came off
-        // the real (cache-discounted) bill. Both must be visible — the hero leads with the
-        // real-bill figure, the dim line right under it carries the list-rate ceiling.
+    fn hero_is_the_measured_real_bill_only() {
+        // Cache-heavy traffic: cut tokens are worth $100 at list rates but $25 came off the
+        // real (cache-discounted) bill. The hero is the measured $25 — the dollars the user
+        // can actually spend — and the list/live-zone figures are deliberately NOT shown.
         let c = Cost {
             saved: 100.0,
             spend: 50.0,
             out_spend: 5.0,
             net_saved: 25.0,
-            live_saved: 25.0,
+            live_saved: 130.0,
             out_spend_shaped: 0.0,
         };
-        let out = snapshot(false, None, &summ(), &[], Some(&c), None);
+        let out = snapshot(false, None, &summ(), &[], Some(&c), None, &[]);
         assert!(
             out.contains("$25.00 off your real bill"),
-            "hero leads with the real-bill figure"
+            "hero is the measured real-bill figure: {out}"
         );
         assert!(
-            out.contains("$100.00 at list"),
-            "list-rate ceiling printed under the hero"
+            !out.contains("at list") && !out.contains("$100.00") && !out.contains("$130.00"),
+            "no list-rate / live-zone upside line: {out}"
         );
-
-        // No prompt cache → the figures coincide → no redundant line.
-        let same = Cost {
-            net_saved: 100.0,
-            live_saved: 100.0,
-            ..c
-        };
-        let out = snapshot(false, None, &summ(), &[], Some(&same), None);
-        assert!(!out.contains("at list"));
     }
 
     #[test]
-    fn new_content_axis_and_live_hero() {
+    fn new_content_axis_and_measured_hero() {
         // Metered traffic: 1.0M of the 1.5M metered prompt is frozen prefix, so the
         // compressible surface went 500K → 100K (−80%) — the axis the meter unlocks.
         let mut s = summ();
@@ -1088,35 +1186,35 @@ mod tests {
             out_spend: 5.0,
             net_saved: 25.0,
             out_spend_shaped: 0.0,
-            live_saved: 80.0,
+            live_saved: 130.0,
         };
-        let out = snapshot(false, None, &s, &[], Some(&c), None);
+        let out = snapshot(false, None, &s, &[], Some(&c), None, &[]);
         assert!(
-            out.contains("~$80.00 off your real bill"),
-            "hero = live-zone estimate, ~-marked: {out}"
+            out.contains("$25.00 off your real bill"),
+            "hero is the measured real-bill figure: {out}"
         );
         assert!(
-            out.contains("floor $25.00 measured"),
-            "measured floor on the ladder line: {out}"
+            !out.contains("at list") && !out.contains("$130.00"),
+            "no list-rate / live-zone upside line: {out}"
         );
         assert!(
-            out.contains("500.0K → 100.0K") && out.contains("(cache excluded)"),
+            out.contains("500.0K ─✂─▶ 100.0K") && out.contains("(cache excluded)"),
             "input axis over the compressible surface: {out}"
         );
         assert!(
-            !out.contains("2.1M → 1.2M"),
+            !out.contains("2.1M ─✂─▶ 1.2M"),
             "diluted all-input axis replaced, not shown alongside: {out}"
         );
 
         // No metered rows → fall back to the all-input axis (pre-meter ledgers unchanged).
-        let out = snapshot(false, None, &summ(), &[], Some(&c), None);
+        let out = snapshot(false, None, &summ(), &[], Some(&c), None, &[]);
         assert!(!out.contains("cache excluded"));
-        assert!(out.contains("2.1M → 1.2M"), "fallback axis: {out}");
+        assert!(out.contains("2.1M ─✂─▶ 1.2M"), "fallback axis: {out}");
     }
 
     #[test]
     fn snapshot_empty_ledger_guides_user() {
-        let out = snapshot(false, None, &Summary::default(), &[], None, None);
+        let out = snapshot(false, None, &Summary::default(), &[], None, None, &[]);
         assert!(out.contains("no activity yet"));
     }
 
@@ -1261,19 +1359,18 @@ mod tests {
         );
         assert!(out.contains("no pidfile"), "should explain the gap: {out}");
         assert!(
-            out.contains("✓ port") && out.contains("✓ ca"),
-            "links still verified: {out}"
+            out.contains("degraded"),
+            "unmanaged proxy reads as degraded, not healthy: {out}"
         );
     }
 
     #[test]
     fn header_healthy_collapses_to_one_calm_line() {
         let out = render_header(false, &dv());
-        assert!(out.contains("running"));
-        assert!(out.contains("✓ port") && out.contains("✓ env :8788") && out.contains("✓ ca"));
-        assert!(out.contains("last request 4s ago"));
-        assert!(out.contains("autostart on"));
-        assert!(out.contains("v0.1.0"));
+        assert!(out.contains("running") && out.contains("✓ healthy"));
+        // The per-check chain collapses into the health word — no detail line, no warnings.
+        assert!(!out.contains("✓ port") && !out.contains("last request"));
+        assert!(out.contains(":8788") && out.contains("autostart on") && out.contains("v0.1.0"));
         assert!(!out.contains('⚠'), "healthy header has no warnings");
     }
 
@@ -1375,11 +1472,27 @@ mod tests {
             env_port: None,
             ..dv()
         };
-        let out = snapshot(false, Some(&unwired), &Summary::default(), &[], None, None);
+        let out = snapshot(
+            false,
+            Some(&unwired),
+            &Summary::default(),
+            &[],
+            None,
+            None,
+            &[],
+        );
         assert!(out.contains("nothing routes through it"));
 
         // Running and wired → it's just waiting; don't tell the user to re-setup.
-        let out = snapshot(false, Some(&dv()), &Summary::default(), &[], None, None);
+        let out = snapshot(
+            false,
+            Some(&dv()),
+            &Summary::default(),
+            &[],
+            None,
+            None,
+            &[],
+        );
         assert!(out.contains("waiting for the first request"));
 
         // Not installed at all → the original guidance.
@@ -1388,7 +1501,7 @@ mod tests {
             env_port: None,
             ..dv()
         };
-        let out = snapshot(false, Some(&off), &Summary::default(), &[], None, None);
+        let out = snapshot(false, Some(&off), &Summary::default(), &[], None, None, &[]);
         assert!(out.contains("no activity yet"));
     }
 
@@ -1402,13 +1515,13 @@ mod tests {
             live_saved: 100.0,
             out_spend_shaped: 0.0,
         };
-        let out = snapshot(false, None, &summ(), &[], Some(&cost), Some(1.84));
-        assert!(out.contains("today $1.84"));
-        // A ~zero today figure is hidden — an idle proxy must not print "$0.00 today".
-        let out = snapshot(false, None, &summ(), &[], Some(&cost), Some(0.0));
-        assert!(!out.contains("today $"));
-        let out = snapshot(false, None, &summ(), &[], Some(&cost), None);
-        assert!(!out.contains("today $"));
+        let out = snapshot(false, None, &summ(), &[], Some(&cost), Some(1.84), &[]);
+        assert!(out.contains("$1.84 saved today"));
+        // A ~zero today figure is hidden — an idle proxy must not print a "today" delta.
+        let out = snapshot(false, None, &summ(), &[], Some(&cost), Some(0.0), &[]);
+        assert!(!out.contains("saved today"));
+        let out = snapshot(false, None, &summ(), &[], Some(&cost), None, &[]);
+        assert!(!out.contains("saved today"));
     }
 
     #[test]

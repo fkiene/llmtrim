@@ -6,6 +6,28 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+- **Logo-faithful terminal motifs in the shared UI.** The `ui` design system speaks the
+  logo's "trim the wool, same sheep" story in one voice: a `wordmark` banner
+  (`‹‹ llmtrim ››`), the shear before→after metaphor on the savings axes
+  (`108.8M ─✂─▶ 34.8M`), a `hero` accent style, and a `sparkline`. `monitor`'s hero carries
+  the `✓ same answers, smaller bill` promise, and `monitor --daily/--weekly/--monthly` and
+  `update` lead with the wordmark.
+- **Redesigned `status` dashboard.** A single dominant hero figure in a clean box — the
+  real, cache-discounted dollars that came off the bill — with the promise
+  (`✓ same answers, smaller bill`) beneath it, the input savings drawn with the shear metaphor
+  (`108.8M ─✂─▶ 34.8M`), and a new `7-DAY TREND` sparkline of daily tokens saved. The header
+  collapses to one calm strip (`‹‹ llmtrim ›› ● running · … ✓ healthy`) when healthy, expanding
+  to per-link warnings only when degraded. The savings bars fill with the accent (the win grows
+  the solid block), and the `BY MODEL` table is sorted by `$` saved with a light header rule.
+  The added-latency footer and every honesty caveat are preserved.
+
+### Fixed
+- **`status --watch` no longer drifts on terminals narrower than its longest line.** The
+  in-place repaint assumed one logical line per screen row, so a soft-wrapped line (e.g. a
+  daemon warning) left stale rows. Lines are now truncated to the terminal width (ANSI-aware)
+  before the repaint; the full text still prints in the one-shot `status`.
+
 ### Changed
 - **The `LLMTRIM_CAPTURE_DIR` corpus is now size-capped.** Capture wrote one JSON per
   request with no ceiling, so a long-lived daemon could fill the disk (which then starves

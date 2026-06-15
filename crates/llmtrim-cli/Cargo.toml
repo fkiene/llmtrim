@@ -53,6 +53,9 @@ rusqlite = { version = "0.39", features = ["bundled"] }
 serde.workspace = true
 serde_json.workspace = true
 statrs = "0.18.0"
+# Terminal width for the watch-mode repaint (truncates lines to one screen row so the
+# in-place repaint never drifts on narrow terminals). Wraps the already-present rustix.
+terminal_size = "0.4"
 tiktoken-rs.workspace = true
 toml.workspace = true
 unicode-width = "0.2"

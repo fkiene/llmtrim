@@ -1636,6 +1636,16 @@ fn render_snapshot(tracker: &Tracker, color: bool) -> Result<(String, monitor::H
     let cost = monitor::monitor_cost(tracker);
     let daemon = daemon_view(&summary);
     let health = monitor::health(&daemon);
+    // Last (up to) 7 days of input tokens saved, oldest→newest, for the 7-DAY TREND sparkline.
+    let trend: Vec<i64> = tracker
+        .by_period(Period::Day)
+        .unwrap_or_default()
+        .iter()
+        .rev()
+        .take(7)
+        .rev()
+        .map(|r| (r.input_before - r.input_after).max(0))
+        .collect();
     let mut out = monitor::snapshot(
         color,
         Some(&daemon),
@@ -1643,6 +1653,7 @@ fn render_snapshot(tracker: &Tracker, color: bool) -> Result<(String, monitor::H
         &models,
         cost.as_ref(),
         monitor::today_saved_usd(tracker),
+        &trend,
     );
     // Passive, cached (≤24h), opt-out update notice (LLMTRIM_NO_UPDATE_CHECK to disable).
     if let Some(v) = llmtrim::update::check(false) {
@@ -1695,30 +1706,74 @@ fn run_watch(tracker: &Tracker, interval: u64) -> Result<()> {
         None
     };
     let mut prev: Option<i64> = None;
+    let mut frame_n: usize = 0;
     loop {
         let summary = tracker.summary()?;
         let mut body = render_snapshot(tracker, color)?.0;
-        if let Some(p) = prev {
-            let rate = (summary.saved() - p) as f64 / interval as f64;
-            // Only show the rate when traffic actually flowed this interval — a perpetual
-            // "+0/s" on an idle proxy reads like fake data.
-            if rate.abs() >= 0.5 {
-                body.push_str(&format!("\n  {rate:+.0} input tokens/s saved\n"));
+        // Live throughput this interval, folded into the status bar below — only when traffic
+        // actually flowed (a perpetual "+0/s" on an idle proxy reads like fake data), and
+        // humanised to match the rest of the dashboard.
+        let rate_seg = match prev {
+            Some(p) if (summary.saved() - p) as f64 / interval as f64 >= 0.5 => {
+                let rate = (summary.saved() - p) as f64 / interval as f64;
+                format!(" · +{} tok/s saved", ui::human(rate as i64))
             }
-        }
+            _ => String::new(),
+        };
         prev = Some(summary.saved());
-        body.push_str(&ui::paint(
-            color,
-            Tone::Dim,
-            &format!("  refreshing every {interval}s · Ctrl-C to exit\n"),
-        ));
+
+        // Live status-bar footer. On a TTY: a spinner that advances every refresh (proves the
+        // view is live even when the numbers don't move), a ticking clock, the live rate when
+        // traffic flowed, and a right-aligned quit keycap. Piped output keeps a plain one-liner.
+        let cols = if tty {
+            terminal_size::terminal_size()
+                .map(|(w, _)| w.0 as usize)
+                .unwrap_or(80)
+        } else {
+            0
+        };
+        if tty {
+            const SPIN: [&str; 8] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧"];
+            // Workload liveness — "is traffic flowing?" — is more useful here than a wall
+            // clock (the spinner already proves the UI is live). Idle shows how long ago the
+            // last request was, so a stalled workload is obvious.
+            let traffic = summary
+                .last_ts
+                .as_deref()
+                .and_then(llmtrim::daemon::human_age)
+                .map(|age| format!("last request {age}"))
+                .unwrap_or_else(|| "no requests yet".to_string());
+            let left = format!(
+                "{}  {}",
+                ui::paint(color, Tone::Accent, SPIN[frame_n % SPIN.len()]),
+                ui::paint(color, Tone::Dim, &format!("{traffic}{rate_seg}")),
+            );
+            let right = format!(
+                "{} {}",
+                ui::paint(color, Tone::Bold, "Ctrl-C"),
+                ui::paint(color, Tone::Dim, "exit"),
+            );
+            let used = 1 + ui::visible_width(&left) + ui::visible_width(&right);
+            let pad = " ".repeat(cols.saturating_sub(used).max(1));
+            body.push_str(&format!(" {left}{pad}{right}\n"));
+        } else {
+            body.push_str(&format!(
+                "  refreshing every {interval}s{rate_seg} · Ctrl-C to exit\n"
+            ));
+        }
+        frame_n += 1;
+
         let frame = if tty {
-            // Sync-begin + home, overwrite each line clearing its tail (`\x1b[K`), then
-            // clear everything below the new frame (`\x1b[0J`) and sync-end.
-            format!(
-                "\x1b[?2026h\x1b[H{}\x1b[0J\x1b[?2026l",
-                body.replace('\n', "\x1b[K\n")
-            )
+            // Each logical line must occupy exactly one screen row, or the home + per-line
+            // `\x1b[K` repaint drifts when a line soft-wraps. Truncate to the terminal width
+            // (ANSI-aware), then sync-begin + home, clear each line's tail (`\x1b[K`), clear
+            // below the frame (`\x1b[0J`), sync-end. The full untruncated text stays in the
+            // one-shot `status` (no repaint there, so wrapping is harmless).
+            let painted: String = body
+                .lines()
+                .map(|l| format!("{}\x1b[K\n", ui::truncate_visible(l, cols)))
+                .collect();
+            format!("\x1b[?2026h\x1b[H{painted}\x1b[0J\x1b[?2026l")
         } else {
             body
         };
