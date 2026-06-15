@@ -20,7 +20,9 @@
 <p align="center">
   <a href="https://github.com/fkiene/llmtrim/actions/workflows/ci.yml"><img src="https://github.com/fkiene/llmtrim/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-AGPL--3.0-blue" alt="License: AGPL v3"></a>
-  <a href="https://crates.io/crates/llmtrim"><img src="https://img.shields.io/crates/v/llmtrim" alt="crates.io"></a>
+  <a href="https://crates.io/crates/llmtrim"><img src="https://img.shields.io/crates/v/llmtrim?logo=rust" alt="crates.io"></a>
+  <a href="https://www.npmjs.com/package/@llmtrim/cli"><img src="https://img.shields.io/npm/v/@llmtrim/cli?logo=npm" alt="npm"></a>
+  <a href="https://www.npmjs.com/package/@llmtrim/cli"><img src="https://img.shields.io/npm/dm/@llmtrim/cli" alt="npm downloads"></a>
   <img src="https://img.shields.io/badge/rust-1.88%2B-orange" alt="Rust 1.88+">
 </p>
 
