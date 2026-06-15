@@ -95,7 +95,10 @@ pub fn visible_width(s: &str) -> usize {
     let mut in_esc = false;
     for c in s.chars() {
         if in_esc {
-            if c == 'm' {
+            // A CSI sequence ends at its final byte (an ASCII letter: `m` for SGR colour,
+            // `H`/`J`/`K`/`h` for cursor/screen control); params/intermediates like `[`, `;`,
+            // `?`, digits are not letters, so they don't end it.
+            if c.is_ascii_alphabetic() {
                 in_esc = false;
             }
         } else if c == '\x1b' {
@@ -124,6 +127,44 @@ pub fn truncate(s: &str, max: usize) -> String {
         w += cw;
     }
     out.push('…');
+    out
+}
+
+/// Truncate to `max` display cells like [`truncate`], but ANSI-aware: escape sequences pass
+/// through with zero width (never counted or cut mid-sequence), and a reset is appended after
+/// the `…` so a cut inside a styled run doesn't bleed colour onto the rest of the screen. For
+/// the watch repaint, which needs each line to be exactly one screen row.
+pub fn truncate_visible(s: &str, max: usize) -> String {
+    if visible_width(s) <= max {
+        return s.to_string();
+    }
+    if max == 0 {
+        return String::new();
+    }
+    let budget = max.saturating_sub(1);
+    let mut out = String::new();
+    let mut w = 0;
+    let mut in_esc = false;
+    for c in s.chars() {
+        if in_esc {
+            out.push(c);
+            if c.is_ascii_alphabetic() {
+                in_esc = false;
+            }
+        } else if c == '\x1b' {
+            in_esc = true;
+            out.push(c);
+        } else {
+            let cw = c.width().unwrap_or(0);
+            if w + cw > budget {
+                break;
+            }
+            out.push(c);
+            w += cw;
+        }
+    }
+    out.push('…');
+    out.push_str("\x1b[0m");
     out
 }
 
@@ -156,6 +197,30 @@ pub fn panel(color: bool, title: &str, lines: &[String]) -> String {
         paint(color, Tone::Bold, title),
         border(&format!(" {}╮", "─".repeat(fill))),
     );
+    for l in lines {
+        let pad = " ".repeat(content_w.saturating_sub(visible_width(l)));
+        o.push_str(&format!(" {} {l}{pad} {}\n", border("│"), border("│")));
+    }
+    o.push_str(&format!(
+        " {}\n",
+        border(&format!("╰{}╯", "─".repeat(inner)))
+    ));
+    o
+}
+
+/// A rounded box with no title, sized to the widest line (display cells, ANSI-stripped).
+/// Like [`panel`] but for a free-form hero block rather than a labelled summary.
+///
+/// ```text
+///  ╭────────────────────────╮
+///  │ $746 off your real bill │
+///  ╰────────────────────────╯
+/// ```
+pub fn boxed(color: bool, lines: &[String]) -> String {
+    let content_w = lines.iter().map(|l| visible_width(l)).max().unwrap_or(0);
+    let inner = content_w + 2; // one space of padding each side
+    let border = |s: &str| paint(color, Tone::Dim, s);
+    let mut o = format!(" {}\n", border(&format!("╭{}╮", "─".repeat(inner))));
     for l in lines {
         let pad = " ".repeat(content_w.saturating_sub(visible_width(l)));
         o.push_str(&format!(" {} {l}{pad} {}\n", border("│"), border("│")));
@@ -251,6 +316,49 @@ pub fn saved_pct(before: f64, after: f64) -> f64 {
     }
 }
 
+// ── logo motifs ───────────────────────────────────────────────────────────────────
+//
+// The visual narrative from the logo: a fluffy request is sheared down to just what
+// matters, and the promise — "same answers, smaller bill" — is stamped beneath it.
+
+/// The logo tagline, also the default `badge` message.
+pub const TAGLINE: &str = "same answers, smaller bill";
+
+/// The wordmark banner — the logo's hand-drawn `llmtrim` with its motion ticks:
+///
+/// ```text
+/// ‹‹ llmtrim ››
+/// ```
+pub fn wordmark(color: bool) -> String {
+    format!(
+        "{} {} {}",
+        paint(color, Tone::Dim, "‹‹"),
+        paint(color, Tone::Bold, "llmtrim"),
+        paint(color, Tone::Dim, "››"),
+    )
+}
+
+/// The hero-number style: the one place the accent is combined with bold weight, for the
+/// single dominant figure on the dashboard (`$746`).
+pub fn hero(color: bool, s: &str) -> String {
+    if color {
+        s.style(style(Tone::Accent).bold()).to_string()
+    } else {
+        s.to_string()
+    }
+}
+
+/// A compact Unicode block sparkline over `vals` (e.g. tokens saved per day), scaled to the
+/// series max. Empty input → empty string; negatives floor at zero. Caller paints it.
+pub fn sparkline(vals: &[i64]) -> String {
+    const BLOCKS: [char; 8] = ['▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'];
+    let max = vals.iter().copied().max().unwrap_or(0).max(1) as f64;
+    let top = BLOCKS.len() - 1; // scale each value into 0..=top of the block ramp
+    vals.iter()
+        .map(|&v| BLOCKS[(((v.max(0) as f64 / max) * top as f64).round() as usize).min(top)])
+        .collect()
+}
+
 // ── errors ──────────────────────────────────────────────────────────────────────
 
 /// Cargo-style fatal error: bold red `error:`, the message, then the dim
@@ -321,6 +429,50 @@ mod tests {
         assert_eq!(human(12_345), "12.3K");
         assert_eq!(human(512), "512");
         assert_eq!(commas(1_234_567), "1,234,567");
+    }
+
+    #[test]
+    fn boxed_borders_align_and_plain_has_no_ansi() {
+        let out = boxed(false, &["short".into(), "a longer line here".into()]);
+        assert!(!out.contains('\x1b'));
+        let widths: Vec<usize> = out.lines().map(visible_width).collect();
+        assert!(widths.windows(2).all(|w| w[0] == w[1]), "ragged box: {out}");
+    }
+
+    #[test]
+    fn sparkline_scales_to_series_max() {
+        assert_eq!(sparkline(&[]), "");
+        assert_eq!(sparkline(&[0, 10]), "▁█"); // min floor → top block at the max
+        let s = sparkline(&[1, 2, 3, 4, 5, 6, 7, 8]);
+        assert_eq!(s.chars().count(), 8);
+        assert_eq!(s.chars().last().unwrap(), '█');
+        assert_eq!(sparkline(&[-5, 10]).chars().next().unwrap(), '▁'); // negatives floor
+    }
+
+    #[test]
+    fn truncate_visible_keeps_escapes_and_resets() {
+        // Short string: unchanged.
+        assert_eq!(truncate_visible("hello", 10), "hello");
+        // Plain cut counts cells, not bytes.
+        assert_eq!(truncate_visible("hello world", 4), "hel…\x1b[0m");
+        // ANSI: the escape doesn't count toward width and isn't cut mid-sequence; result
+        // ends with a reset so colour can't bleed past the cut.
+        let colored = paint(true, Tone::Accent, "abcdef");
+        let out = truncate_visible(&colored, 3);
+        assert_eq!(visible_width(&out), 3); // 2 chars + the … = 3 cells
+        assert!(out.starts_with('\x1b') && out.ends_with("\x1b[0m"));
+    }
+
+    #[test]
+    fn hero_is_plain_without_color() {
+        assert_eq!(hero(false, "$746"), "$746");
+        assert!(hero(true, "$746").contains('\x1b'));
+    }
+
+    #[test]
+    fn wordmark_plain_and_colored() {
+        assert_eq!(wordmark(false), "‹‹ llmtrim ››");
+        assert!(wordmark(true).contains('\x1b'));
     }
 
     #[test]
