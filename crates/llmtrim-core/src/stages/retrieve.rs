@@ -1998,6 +1998,56 @@ mod tests {
         );
     }
 
+    #[test]
+    fn bm25_plus_does_not_change_kept_set_on_long_short_mix() {
+        // SELECTION-LEVEL EVIDENCE (the question the BM25+ proposal hinges on): does the δ floor
+        // change *which* chunks survive a top-k token budget on a realistic long/short mix?
+        //
+        // Setup designed to be maximally favorable to a flip: chunk 0 is the relevant long chunk
+        // holding the high-IDF query term "rollback" exactly once, drowned in 6× filler (heavy
+        // length penalty). Six short decoys each densely match the OTHER query term "procedure"
+        // but never "rollback". This is exactly the "long chunk over-penalized vs short chunks"
+        // case Lv & Zhai describe.
+        //
+        // Observed: plain BM25 already keeps chunk 0 (0.513 vs the decoys' 0.334) — the crate's
+        // length normalization never pushes a matched rare term below a different-term short
+        // match. δ then only RESCALES (chunk 0 → 2.187, decoys → 0.541), widening the gap
+        // monotonically; it never reorders. So on this mix BM25+ changes no selection.
+        let filler = "and the report further covered assorted routine operational matters across \
+                      the wider organisation in considerable repetitive and largely unremarkable \
+                      detail spanning many additional unrelated paragraphs of background prose \
+                      that nobody on the team ever actually reads in full at any point";
+        let long_relevant =
+            format!("rollback {filler} {filler} {filler} {filler} {filler} {filler}");
+        let mut chunks = vec![long_relevant];
+        for w in [
+            "onboarding",
+            "billing",
+            "cleanup",
+            "review",
+            "handover",
+            "intake",
+        ] {
+            chunks.push(format!("the {w} procedure"));
+        }
+        let query = lex_words("rollback procedure");
+        let keep = 3usize;
+
+        let plain_rank = argsort_desc(&bm25_scores(&chunks, &query, 0.0));
+        let plus_rank = argsort_desc(&bm25_scores(&chunks, &query, BM25_PLUS_DELTA));
+
+        let plain_kept: HashSet<usize> = plain_rank.iter().copied().take(keep).collect();
+        let plus_kept: HashSet<usize> = plus_rank.iter().copied().take(keep).collect();
+
+        // The relevant long chunk survives either way — plain BM25 was never the problem here.
+        assert!(plain_kept.contains(&0) && plus_kept.contains(&0));
+        // The kept set is IDENTICAL: BM25+ has no selection-level effect on this mix.
+        assert_eq!(
+            plain_kept, plus_kept,
+            "δ rescales scores but does not change which chunks survive the budget"
+        );
+    }
+
     // --- RM3 pseudo-relevance feedback (Lavrenko & Croft, SIGIR 2001) ------------------------
 
     /// Corpus where the true answer chunk shares vocabulary with the chunk the sparse query hits
