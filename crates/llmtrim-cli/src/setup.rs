@@ -1400,6 +1400,19 @@ mod tests {
         );
     }
 
+    /// The public boundary `llmtrim autostart` resolves through. A running daemon's port must
+    /// win over any default — this is the regression `fix/autostart-port-resolve` locks in
+    /// (bare `autostart` used to hardcode the default). Deterministic: `running` short-circuits
+    /// `choose_port` before `configured_port()` reads any real env.
+    #[test]
+    fn resolve_port_prefers_running_over_default() {
+        assert_eq!(resolve_port(None, Some(9001)).expect("running port"), 9001);
+        assert_eq!(
+            resolve_port(Some(7000), Some(9001)).expect("explicit"),
+            7000
+        );
+    }
+
     #[test]
     fn parse_proxy_port_reads_the_wired_port() {
         assert_eq!(parse_proxy_port("http://127.0.0.1:8787"), Some(8787));

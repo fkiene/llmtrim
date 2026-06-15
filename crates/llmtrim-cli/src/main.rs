@@ -222,9 +222,11 @@ enum Commands {
         /// Disable autostart instead of enabling it.
         #[arg(long)]
         off: bool,
-        /// Port the autostarted interceptor listens on.
-        #[arg(long, default_value_t = llmtrim::setup::DEFAULT_PORT)]
-        port: u16,
+        /// Port the autostarted interceptor listens on. Omit to reuse the port already
+        /// wired into your environment / the running daemon (only a first install with
+        /// nothing pinned falls back to the default port).
+        #[arg(long)]
+        port: Option<u16>,
     },
     /// Print the local CA certificate path and how to trust it
     ///
@@ -637,11 +639,20 @@ fn run() -> Result<()> {
             }
         }
         Commands::Autostart { off, port } => {
-            llmtrim::autostart::configure(!off, port)?;
             let color = ui::color_stdout();
             if off {
+                // Port is unused when disabling; pass the default to match `uninstall`.
+                llmtrim::autostart::configure(false, llmtrim::setup::DEFAULT_PORT)?;
                 println!("{}", ui::ok(color, "Autostart disabled."));
             } else {
+                // Match the daemon/env so login doesn't come up on a port the env isn't
+                // wired to. `resolve_port` prefers an explicit `--port`, then the running
+                // daemon, then the configured env, and only scans from the default when
+                // nothing is pinned (a first install).
+                let running = llmtrim::daemon::running().map(|s| s.port);
+                let port = llmtrim::setup::resolve_port(port, running)
+                    .context("llmtrim autostart: could not pick a port — pass --port explicitly")?;
+                llmtrim::autostart::configure(true, port)?;
                 println!(
                     "{}",
                     ui::ok(
