@@ -1,13 +1,16 @@
 name: CI
 
 on:
+  # No workflow-level paths-ignore: a workflow skipped that way leaves required status
+  # contexts stuck "Pending", which permanently blocks docs-only PRs (branch protection on
+  # main requires the job contexts below). Instead the workflow always runs and the heavy
+  # jobs are gated per-job on the `changes` filter — a job skipped via its `if:` reports
+  # "Success" and satisfies the required check, while still running for real on any code
+  # change. A workflow skipped by paths-ignore, by contrast, leaves the context pending
+  # forever.
   push:
     branches: [main, master]
-    # Docs/assets don't affect the build — skip the whole matrix. Secrets in these files
-    # are still covered by the pre-commit/pre-push gitleaks hooks and GitHub push protection.
-    paths-ignore: ["**.md", "**.svg", "LICENSE", ".gitignore", ".gitattributes"]
   pull_request:
-    paths-ignore: ["**.md", "**.svg", "LICENSE", ".gitignore", ".gitattributes"]
 
 # Rapid pushes stack runs that all execute to completion — cancel the superseded one.
 # Tag/release runs are unaffected (separate workflow, no shared group).
@@ -24,8 +27,45 @@ env:
   RUSTFLAGS: "-D warnings"
 
 jobs:
+  # Detect whether anything other than docs/assets changed. The heavy jobs below gate on
+  # `needs.changes.outputs.code` and skip (reporting "Success", which satisfies the required
+  # status check) on docs-only PRs. The gate is fail-safe: jobs run unless `code` is
+  # explicitly "false", so a docs-only change skips them, but if the `changes` job itself
+  # fails or is skipped (empty output), the heavy jobs still run rather than letting code
+  # through untested. A docs-only push to main likewise skips the matrix (nothing to test).
+  changes:
+    name: Detect code changes
+    runs-on: ubuntu-latest
+    # paths-filter reads the PR file list via the API on pull_request events.
+    permissions:
+      contents: read
+      pull-requests: read
+    outputs:
+      code: ${{ steps.filter.outputs.code }}
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dorny/paths-filter@v3
+        id: filter
+        with:
+          # `code` is true when the push/PR touches anything that is NOT a doc/asset.
+          # `every` makes a file count toward `code` only when it matches ALL patterns (the
+          # `**` catch-all and every `!` exclusion) — the documented idiom for "any non-doc
+          # file". The filter is still true if at least one changed file qualifies, so a
+          # mixed code+docs PR is correctly treated as code.
+          predicate-quantifier: 'every'
+          filters: |
+            code:
+              - '**'
+              - '!**/*.md'
+              - '!**/*.svg'
+              - '!LICENSE'
+              - '!.gitignore'
+              - '!.gitattributes'
+
   test:
     name: Test (${{ matrix.os }})
+    needs: changes
+    if: ${{ !cancelled() && needs.changes.outputs.code != 'false' }}
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -65,6 +105,8 @@ jobs:
   # the FFI surface actually loads and compresses from each host language.
   bindings:
     name: UniFFI bindings
+    needs: changes
+    if: ${{ !cancelled() && needs.changes.outputs.code != 'false' }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
@@ -97,6 +139,8 @@ jobs:
   # SwiftPM package); full xcframework/SwiftPM packaging is a later step.
   bindings-swift:
     name: Swift binding (smoke)
+    needs: changes
+    if: ${{ !cancelled() && needs.changes.outputs.code != 'false' }}
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v6
@@ -120,6 +164,8 @@ jobs:
   # Compile-and-load verification for the Kotlin target; full Gradle/Maven packaging later.
   bindings-kotlin:
     name: Kotlin binding (smoke)
+    needs: changes
+    if: ${{ !cancelled() && needs.changes.outputs.code != 'false' }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
@@ -153,6 +199,8 @@ jobs:
   # release-only if macOS minutes get tight.
   bindings-swift-package:
     name: Swift package (xcframework)
+    needs: changes
+    if: ${{ !cancelled() && needs.changes.outputs.code != 'false' }}
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v6
@@ -167,6 +215,8 @@ jobs:
   # outside deny.toml's allow-list (e.g. GPL/proprietary) or an unknown source.
   license-check:
     name: License compliance
+    needs: changes
+    if: ${{ !cancelled() && needs.changes.outputs.code != 'false' }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
@@ -191,6 +241,8 @@ jobs:
   # Homebrew formula must stay valid Ruby (a lowercase class name once broke `brew install`).
   formula:
     name: Formula syntax
+    needs: changes
+    if: ${{ !cancelled() && needs.changes.outputs.code != 'false' }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
@@ -200,6 +252,8 @@ jobs:
   # adopt a newer-than-1.88 API; this job fails when that happens.
   msrv:
     name: MSRV (1.88)
+    needs: changes
+    if: ${{ !cancelled() && needs.changes.outputs.code != 'false' }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
