@@ -22,12 +22,6 @@ All notable changes to this project are documented here. The format follows
   the solid block), and the `BY MODEL` table is sorted by `$` saved with a light header rule.
   The added-latency footer and every honesty caveat are preserved.
 
-### Fixed
-- **`status --watch` no longer drifts on terminals narrower than its longest line.** The
-  in-place repaint assumed one logical line per screen row, so a soft-wrapped line (e.g. a
-  daemon warning) left stale rows. Lines are now truncated to the terminal width (ANSI-aware)
-  before the repaint; the full text still prints in the one-shot `status`.
-
 ### Changed
 - **The `LLMTRIM_CAPTURE_DIR` corpus is now size-capped.** Capture wrote one JSON per
   request with no ceiling, so a long-lived daemon could fill the disk (which then starves
@@ -37,6 +31,10 @@ All notable changes to this project are documented here. The format follows
   and runs on a background thread, so it never blocks request handling.
 
 ### Fixed
+- **`status --watch` no longer drifts on terminals narrower than its longest line.** The
+  in-place repaint assumed one logical line per screen row, so a soft-wrapped line (e.g. a
+  daemon warning) left stale rows. Lines are now truncated to the terminal width (ANSI-aware)
+  before the repaint; the full text still prints in the one-shot `status`.
 - **`llmtrim update` now prints the correct npm upgrade command.** It printed
   `npm update -g @llmtrim/cli`, which npm treats as a no-op for a globally installed package
   already on a satisfying version; it now prints `npm install -g @llmtrim/cli@latest`.
