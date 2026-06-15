@@ -29,6 +29,12 @@ All notable changes to this project are documented here. The format follows
   the environment wasn't wired to (LLM calls then fail until re-fixed). It now resolves the
   port the same way `setup`/`start` do — explicit `--port`, else the running daemon, else
   the configured env — and only falls back to the default when nothing is pinned.
+- **`uninstall`'s closing message now names the leftover env vars and gives a remedy that
+  works.** It said only "open a new shell", which never told you what was left behind and
+  read as optional. It now spells out that the current shell still has `HTTPS_PROXY`,
+  `HTTP_PROXY`, and `NODE_EXTRA_CA_CERTS` exported (the exact set `setup` writes) and that
+  clearing them means a new shell or `unset HTTPS_PROXY HTTP_PROXY NODE_EXTRA_CA_CERTS` —
+  not re-sourcing the profile, which leaves an already-exported var set.
 
 ## [0.1.11] - 2026-06-14
 
