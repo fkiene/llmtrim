@@ -18,6 +18,12 @@ All notable changes to this project are documented here. The format follows
 - **`llmtrim update` now prints the correct npm upgrade command.** It printed
   `npm update -g @llmtrim/cli`, which npm treats as a no-op for a globally installed package
   already on a satisfying version; it now prints `npm install -g @llmtrim/cli@latest`.
+- **`llmtrim update` on a Homebrew install now prints a command that works.** The Homebrew
+  arm told you to run `brew upgrade llmtrim`, but the formula is tapped as
+  `fkiene/tap/llmtrim`. On a machine that never added the tap, that errors with "no
+  available formula named llmtrim" and you stay on the old binary. It now prints the
+  tap-qualified, idempotent form (`brew tap fkiene/tap` then
+  `brew upgrade fkiene/tap/llmtrim`).
 - **`status` no longer reports "stopped" while the proxy is serving.** Health was decided
   from the pidfile alone, so a daemon whose pidfile went missing (e.g. lost to a full disk)
   showed the loud "stopped — LLM calls will fail" banner even though the proxy was still
