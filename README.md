@@ -410,7 +410,7 @@ Every compressor is a deterministic implementation of published research: the id
 <details>
 <summary><b>Papers + crates behind each stage</b></summary>
 
-**Retrieval & context:** BM25 (Robertson & Zaragoza 2009, [`bm25`](https://crates.io/crates/bm25)); BM25+ (Lv & Zhai, CIKM 2011); RM3 (Lavrenko & Croft, SIGIR 2001); TextTiling (Hearst, CL 1997); TextRank (Mihalcea & Tarau, EMNLP 2004); MMR (Carbonell & Goldstein, SIGIR 1998); Submodular selection (Lin & Bilmes, ACL 2011, [arXiv:2008.05391](https://arxiv.org/abs/2008.05391)); DPP diverse sampling (Chen et al., NeurIPS 2018); Lost in the Middle ([arXiv:2307.03172](https://arxiv.org/abs/2307.03172)); DSLR ([arXiv:2407.03627](https://arxiv.org/abs/2407.03627)).
+**Retrieval & context:** BM25 (Robertson & Zaragoza 2009, [`bm25`](https://crates.io/crates/bm25)); BM25+ (Lv & Zhai, CIKM 2011); RM3 (Lavrenko & Croft, SIGIR 2001); TextTiling (Hearst, CL 1997); TextRank (Mihalcea & Tarau, EMNLP 2004); MMR (Carbonell & Goldstein, SIGIR 1998); Submodular objective (Lin & Bilmes, ACL 2011); modified-greedy knapsack maximizer (Tang et al., SIGMETRICS 2021, [arXiv:2008.05391](https://arxiv.org/abs/2008.05391)); DPP diverse sampling (Chen et al., NeurIPS 2018); Lost in the Middle ([arXiv:2307.03172](https://arxiv.org/abs/2307.03172)); DSLR ([arXiv:2407.03627](https://arxiv.org/abs/2407.03627)).
 
 **Code:** RepoCoder ([arXiv:2303.12570](https://arxiv.org/abs/2303.12570)); Hierarchical Context Pruning ([arXiv:2406.18294](https://arxiv.org/abs/2406.18294)); The Hidden Cost of Readability ([arXiv:2508.13666](https://arxiv.org/abs/2508.13666)); Minification token accounting ([arXiv:2606.01326](https://arxiv.org/abs/2606.01326)).
 
