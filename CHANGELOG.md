@@ -15,6 +15,12 @@ All notable changes to this project are documented here. The format follows
   flags "no pidfile … re-run `llmtrim setup`") instead of the false "stopped". The
   supervised daemon also re-records its own pidfile on restart, so a transient loss
   self-heals.
+- **`llmtrim autostart` no longer hardcodes the default port.** Run with no `--port`, the
+  command wrote the default port into the login entry regardless of the port your daemon
+  and `HTTPS_PROXY` were actually on, so a reboot could bring the interceptor up on a port
+  the environment wasn't wired to (LLM calls then fail until re-fixed). It now resolves the
+  port the same way `setup`/`start` do — explicit `--port`, else the running daemon, else
+  the configured env — and only falls back to the default when nothing is pinned.
 
 ## [0.1.11] - 2026-06-14
 
