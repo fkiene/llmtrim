@@ -23,8 +23,9 @@ pub struct DaemonView {
     pub uptime: String,
     pub uptime_secs: i64,
     pub ca_present: bool,
-    /// TCP probe of the daemon's port (always `false` when not running) — a live pidfile
-    /// only proves the supervisor exists, not that the proxy is accepting.
+    /// TCP probe of the daemon's port — a live pidfile only proves the supervisor exists,
+    /// not that the proxy is accepting. Also set when a proxy is found on the wired port
+    /// with no pidfile to read (a `running: true`, `pid: 0` view).
     pub port_accepting: bool,
     /// Interceptor port wired into the persistent env (shell profile / registry), if any.
     pub env_port: Option<u16>,
@@ -79,7 +80,12 @@ impl Health {
 /// Derive overall health from the view (see [`Health`] for the rules).
 pub fn health(d: &DaemonView) -> Health {
     if d.running {
-        if d.port_accepting && d.env_port == Some(d.port) && d.ca_present {
+        // `pid == 0` ⇒ detected only by a live port probe, no pidfile. The proxy appears
+        // to be serving, but we can't confirm it's *ours* (any listener on the wired port
+        // passes the probe), so this is "needs a look", not Healthy.
+        if d.pid == 0 {
+            Health::Degraded
+        } else if d.port_accepting && d.env_port == Some(d.port) && d.ca_present {
             Health::Healthy
         } else {
             Health::Degraded
@@ -223,7 +229,15 @@ fn axis(color: bool, name: &str, before: i64, after: i64) -> String {
 fn render_header(color: bool, d: &DaemonView) -> String {
     let mut o = String::new();
     if d.running {
-        let mut meta = format!("pid {} · :{} · up {}", d.pid, d.port, d.uptime);
+        // `pid == 0` ⇒ detected by a live port probe with no pidfile to read from
+        // (never recorded, or lost to a full disk). The proxy serves fine; it's just
+        // unmanaged by our bookkeeping, so we can't show pid/uptime/version.
+        let unmanaged = d.pid == 0;
+        let mut meta = if unmanaged {
+            format!(":{}", d.port)
+        } else {
+            format!("pid {} · :{} · up {}", d.pid, d.port, d.uptime)
+        };
         if let Some(v) = &d.version {
             meta.push_str(&format!(" · v{v}"));
         }
@@ -319,6 +333,17 @@ fn render_header(color: bool, d: &DaemonView) -> String {
                     "  {} crashed and restarted {}× since start — check log: {log}\n",
                     ui::WARN,
                     d.restarts
+                ),
+            ));
+        }
+        if unmanaged {
+            o.push_str(&ui::paint(
+                color,
+                Tone::Warn,
+                &format!(
+                    "  {} no pidfile — a proxy is answering on :{}, but llmtrim can't confirm it owns it (pidfile lost to a full disk, or a foreign listener); re-run: llmtrim setup\n",
+                    ui::WARN,
+                    d.port
                 ),
             ));
         }
@@ -647,9 +672,9 @@ pub fn export_json(
         "daemon": daemon.map(|d| json!({
             "running": d.running,
             "health": health(d).label(),
-            "pid": d.running.then_some(d.pid),
+            "pid": (d.running && d.pid != 0).then_some(d.pid),
             "port": d.running.then_some(d.port),
-            "uptime_secs": d.running.then_some(d.uptime_secs),
+            "uptime_secs": (d.running && d.pid != 0).then_some(d.uptime_secs),
             "port_accepting": d.port_accepting,
             "env_port": d.env_port,
             "autostart": d.autostart,
@@ -1211,6 +1236,34 @@ mod tests {
         assert_eq!(Health::Healthy.exit_code(), 0);
         assert_eq!(Health::Stopped.exit_code(), 1);
         assert_eq!(Health::Degraded.exit_code(), 2);
+    }
+
+    /// A live proxy on the wired port with no pidfile (`pid: 0`) must read as running (not
+    /// the false "stopped — LLM calls will fail" a missing pidfile used to trigger), but
+    /// only Degraded — we can't confirm the listener is ours, so it's not a clean Healthy.
+    #[test]
+    fn unmanaged_live_proxy_is_running_but_degraded() {
+        let unmanaged = DaemonView {
+            pid: 0,
+            uptime: String::new(),
+            uptime_secs: 0,
+            version: None,
+            ..dv()
+        };
+        assert_eq!(health(&unmanaged), Health::Degraded);
+
+        let out = render_header(false, &unmanaged);
+        assert!(out.contains("running"), "should report running: {out}");
+        assert!(!out.contains("stopped"), "must not say stopped: {out}");
+        assert!(
+            !out.contains("pid 0"),
+            "must not print the bogus pid 0: {out}"
+        );
+        assert!(out.contains("no pidfile"), "should explain the gap: {out}");
+        assert!(
+            out.contains("✓ port") && out.contains("✓ ca"),
+            "links still verified: {out}"
+        );
     }
 
     #[test]

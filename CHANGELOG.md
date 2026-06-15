@@ -6,6 +6,16 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Fixed
+- **`status` no longer reports "stopped" while the proxy is serving.** Health was decided
+  from the pidfile alone, so a daemon whose pidfile went missing (e.g. lost to a full disk)
+  showed the loud "stopped — LLM calls will fail" banner even though the proxy was still
+  live on the wired port. `status` now probes that port directly: a proxy answering with no
+  pidfile reads as running-but-degraded (llmtrim can't confirm it owns the listener, so it
+  flags "no pidfile … re-run `llmtrim setup`") instead of the false "stopped". The
+  supervised daemon also re-records its own pidfile on restart, so a transient loss
+  self-heals.
+
 ## [0.1.11] - 2026-06-14
 
 ### Added

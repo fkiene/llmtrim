@@ -66,6 +66,16 @@ pub fn write_state(pid: u32, port: u16) -> Result<()> {
     Ok(())
 }
 
+/// Record the pidfile only if it's missing or stale (no live process behind it). Lets a
+/// `--supervised` daemon adopt itself and recover a pidfile lost to a transient I/O failure
+/// (e.g. a full disk) on its next restart, without clobbering a healthy entry's uptime.
+pub fn write_state_if_absent(pid: u32, port: u16) -> Result<()> {
+    if running().is_some() {
+        return Ok(());
+    }
+    write_state(pid, port)
+}
+
 /// Bump the supervisor's crash-restart counter in the pidfile (best-effort: the counter
 /// is diagnostics for `status`, never worth failing a restart over).
 pub fn bump_restarts() {

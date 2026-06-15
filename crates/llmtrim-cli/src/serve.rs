@@ -1106,6 +1106,10 @@ mod imp {
         use std::time::{Duration, Instant};
         let mut fast_fails = 0u32;
         loop {
+            // Adopt the pidfile if it's missing (a manually-launched supervised daemon, or
+            // one whose pidfile was lost to a transient full disk). Best-effort: never let a
+            // bookkeeping write stop the proxy from serving.
+            let _ = crate::daemon::write_state_if_absent(std::process::id(), port);
             let started = Instant::now();
             let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| run(port)));
             match outcome {
