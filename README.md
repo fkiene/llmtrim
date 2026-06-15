@@ -321,7 +321,7 @@ Env: `LLMTRIM_PRESET` (preset), `LLMTRIM_CONFIG` (config-file path), `LLMTRIM_DB
 
 ## The numbers
 
-The savings are measured live, not estimated. Each of 112 benchmark cases is sent **twice** (once original, once compressed), then both answers are scored and billed at real rates, so the saving and the answer quality are measured together.
+Every case is sent twice, once original and once compressed, then both answers are scored and billed at real rates. Cost and quality are measured together, not estimated, across 112 cases:
 
 <p align="center">
   <picture>
@@ -337,11 +337,12 @@ The savings are measured live, not estimated. Each of 112 benchmark cases is sen
 | **round-trip cost** | **$0.0365** | **$0.0126** | **−66%** |
 | answer quality | 78.9% | 82.2% | no measured degradation |
 
-The token cuts are model-independent (−31% input, −74% output); the dollar saving depends on the model's output-to-input price ratio: −66% on the benchmark model, projected −57–59% at GPT-4o / Claude Sonnet rates. On live Claude Code traffic, llmtrim cuts **−68% of compressible input** without ever touching the cached prefix, so your prompt-cache discount stays intact.
+The token cuts are model-independent (−31% input, −74% output). The dollar saving tracks the model's output-to-input price ratio: −66% here, projecting to −57% at GPT-4o rates and −59% at Claude Sonnet rates. The proxy compresses only the new-content surface and never rewrites the cache-controlled prefix, so your prompt-cache discount survives.
 
-### Accuracy preserved on standard benchmarks
+<details>
+<summary><b>Accuracy preserved on standard benchmarks</b></summary>
 
-The same A/B, run on the academic suites you already know, at a conservative shape-matched preset. Quality is the score on the original request vs the compressed one (`qwen3-next-80b`, n=20 each, paired 95% CI):
+The same A/B on the standard academic suites, at a conservative shape-matched preset (`qwen3-next-80b`, paired 95% CI). Quality is the score on the original request vs the compressed one. GSM8K comes from the frontier above (n=12); the other three are the named benchmarks readers compare against (n=20 each):
 
 | benchmark | task | scorer | input saved | quality (orig → comp) | retention |
 |---|---|---|--:|:--:|--:|
@@ -350,7 +351,14 @@ The same A/B, run on the academic suites you already know, at a conservative sha
 | SQuAD v2 | extractive QA | token-F1 / EM | 11% | 84% → 84% | −0.0±15.2pp |
 | BFCL (live_multiple) | function calling | tool-call match | 33% | 95% → 95% | +0.0±15.2pp |
 
-BFCL and SQuAD v2 are the compression wins at no quality cost: BFCL cuts 33% of input by dropping the tool schemas the query doesn't need (a multi-tool menu, 2 to 37 candidates per call), and SQuAD v2 cuts 11% while answering its unanswerable questions correctly (a right "no answer" counts as a hit). TruthfulQA MC1 is the quality-preservation row: a ~75-token prompt that is almost all answer text, so a safe preset finds nothing to cut and the factual accuracy is held exactly. GSM8K is the one measured dip: its reasoning preset trades −8pp for a large cost cut, so measure per workload before enabling it. ¹GSM8K input goes negative because that preset injects a Chain-of-Draft instruction whose payoff is output-side (see the frontier table). Evidence and a one-line reproduce are in [the named-benchmark snapshot](crates/llmtrim-cli/bench/snapshots/named-benchmarks/README.md):
+Three rows compress with no quality loss; GSM8K is the one dip:
+
+- **BFCL** drops the tool schemas the query doesn't need (a menu of 2 to 37 candidates per call).
+- **SQuAD v2** still answers its unanswerable questions correctly.
+- **TruthfulQA** holds factual accuracy exactly: its ~75-token prompts are almost all answer text, so the safe preset finds nothing to cut.
+- **GSM8K** trades −8pp of accuracy for −71% cost, so measure per workload before enabling its reasoning preset. ¹Its input goes negative because that preset injects a Chain-of-Draft instruction whose payoff is output-side (see the frontier table).
+
+Evidence and a one-line reproduce ([named-benchmark snapshot](crates/llmtrim-cli/bench/snapshots/named-benchmarks/README.md)):
 
 ```bash
 python3 crates/llmtrim-cli/bench/scripts/download.py 40 truthfulqa,squad2,bfcl
@@ -359,7 +367,9 @@ python3 crates/llmtrim-cli/bench/scripts/download.py 40 truthfulqa,squad2,bfcl
    --model qwen/qwen3-next-80b-a3b-instruct --route "" --n 20)
 ```
 
-Full methodology, per-corpus frontier, and confidence intervals are in [crates/llmtrim-cli/bench/README.md](crates/llmtrim-cli/bench/README.md). Reproduce it:
+</details>
+
+Methodology, per-corpus frontier, and confidence intervals: [crates/llmtrim-cli/bench/README.md](crates/llmtrim-cli/bench/README.md). Reproduce it:
 
 ```bash
 python3 crates/llmtrim-cli/bench/scripts/download.py 40   # pull real corpora (gsm8k, humaneval, dolly, hotpotqa, …)
@@ -391,7 +401,7 @@ Headroom is the closest comparison, so we measured it directly: both libraries r
 
 llmtrim removes more, compresses faster (pure algorithm, no model to load), and reports which stage removed what. Latency jitters run to run; the [artifact](crates/llmtrim-cli/bench/snapshots/vs-headroom/README.md#head-to-head-headroom) holds the committed warm medians. The gap is wider on everyday traffic: Headroom only rewrites tool results, and runs a local ModernBERT model to do it, so on plain chat, RAG, and code requests it mostly passes through while llmtrim still compresses. Method notes and full tables are in [bench/README.md](crates/llmtrim-cli/bench/README.md#head-to-head-headroom); reproduce with `bench/scripts/vs_headroom.py`.
 
-They also **stack**: llmtrim removes another ~35% from Claude Code's resent tool schemas on top of RTK. Detailed head-to-heads with [RTK](https://github.com/rtk-ai/rtk), [Headroom](https://github.com/chopratejas/headroom), and [caveman](https://github.com/JuliusBrussee/caveman) are in [crates/llmtrim-cli/bench/README.md](crates/llmtrim-cli/bench/README.md).
+They also stack: RTK shrinks the CLI output, then llmtrim compresses the tool schemas Claude Code resends on top of it. Detailed head-to-heads with [RTK](https://github.com/rtk-ai/rtk), [Headroom](https://github.com/chopratejas/headroom), and [caveman](https://github.com/JuliusBrussee/caveman) are in [crates/llmtrim-cli/bench/README.md](crates/llmtrim-cli/bench/README.md).
 
 </details>
 
