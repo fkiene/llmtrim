@@ -6,6 +6,14 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Changed
+- **The `LLMTRIM_CAPTURE_DIR` corpus is now size-capped.** Capture wrote one JSON per
+  request with no ceiling, so a long-lived daemon could fill the disk (which then starves
+  the daemon's own pidfile and ledger writes). It now evicts the oldest `*.json` captures
+  once they exceed `LLMTRIM_CAPTURE_MAX_MB` (default 1024; set 0 to disable). The sweep
+  counts only top-level capture files (any other files you keep in the dir are left alone)
+  and runs on a background thread, so it never blocks request handling.
+
 ### Fixed
 - **`status` no longer reports "stopped" while the proxy is serving.** Health was decided
   from the pidfile alone, so a daemon whose pidfile went missing (e.g. lost to a full disk)

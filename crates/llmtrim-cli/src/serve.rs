@@ -35,6 +35,7 @@ pub use imp::{ca_cert_path, ensure_ca, run, run_supervised};
 mod imp {
     use std::net::SocketAddr;
     use std::path::PathBuf;
+    use std::sync::atomic::{AtomicU64, Ordering};
     use std::sync::mpsc::Sender;
     use std::sync::{Arc, Mutex};
 
@@ -719,11 +720,69 @@ mod imp {
             chrono::Utc::now().timestamp_micros(),
             std::process::id()
         );
-        let path = std::path::Path::new(&dir).join(name);
+        let dir_path = std::path::Path::new(&dir);
+        let path = dir_path.join(name);
         if let Err(e) =
             std::fs::create_dir_all(&dir).and_then(|_| std::fs::write(&path, record.to_string()))
         {
             eprintln!("llmtrim: capture failed ({}): {e}", path.display());
+        }
+
+        // Bound the corpus so it can't fill the disk (which starves the daemon's pidfile and
+        // ledger writes). Checked every N captures — read_dir over the whole corpus is too
+        // costly to run per request. `LLMTRIM_CAPTURE_MAX_MB` sets the ceiling (default 1024;
+        // 0 disables the cap). The sweep runs on a detached thread so the read_dir + per-file
+        // stat over a large corpus never blocks the request that triggered it.
+        static SINCE_CHECK: AtomicU64 = AtomicU64::new(0);
+        const CHECK_EVERY: u64 = 512;
+        if SINCE_CHECK
+            .fetch_add(1, Ordering::Relaxed)
+            .is_multiple_of(CHECK_EVERY)
+        {
+            let max_bytes = std::env::var("LLMTRIM_CAPTURE_MAX_MB")
+                .ok()
+                .and_then(|s| s.trim().parse::<u64>().ok())
+                .unwrap_or(1024)
+                .saturating_mul(1024 * 1024);
+            if max_bytes > 0 {
+                let dir = dir_path.to_path_buf();
+                std::thread::spawn(move || enforce_capture_cap(&dir, max_bytes));
+            }
+        }
+    }
+
+    /// Evict oldest capture files until the directory's total size is within `max_bytes`.
+    /// Only the top-level `*.json` captures count (other files a user may keep in the dir are
+    /// left alone, and subdirectories are not recursed into). Capture filenames are
+    /// `<timestamp_micros>-<pid>.json`, so a lexicographic sort is chronological — the oldest
+    /// go first. Best-effort: any I/O error just leaves the file.
+    fn enforce_capture_cap(dir: &std::path::Path, max_bytes: u64) {
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return;
+        };
+        let mut files: Vec<(std::ffi::OsString, u64)> = entries
+            .flatten()
+            .filter_map(|e| {
+                let name = e.file_name();
+                let is_capture = std::path::Path::new(&name)
+                    .extension()
+                    .is_some_and(|x| x == "json");
+                let meta = e.metadata().ok()?;
+                (is_capture && meta.is_file()).then_some((name, meta.len()))
+            })
+            .collect();
+        let total: u64 = files.iter().map(|(_, len)| len).sum();
+        let Some(mut to_free) = total.checked_sub(max_bytes).filter(|&x| x > 0) else {
+            return;
+        };
+        files.sort_by(|a, b| a.0.cmp(&b.0)); // oldest first
+        for (name, len) in files {
+            if to_free == 0 {
+                break;
+            }
+            if std::fs::remove_file(dir.join(&name)).is_ok() {
+                to_free = to_free.saturating_sub(len);
+            }
         }
     }
 
@@ -1366,6 +1425,89 @@ mod imp {
     #[cfg(test)]
     mod tests {
         use super::*;
+
+        #[test]
+        fn capture_cap_evicts_oldest_until_under_limit() {
+            let dir = std::env::temp_dir().join(format!(
+                "llmtrim-captest-{}-{}",
+                std::process::id(),
+                chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0)
+            ));
+            std::fs::create_dir_all(&dir).unwrap();
+            // Ten 100-byte files, oldest (lowest timestamp prefix) first.
+            for i in 0..10u32 {
+                std::fs::write(dir.join(format!("{i:020}-abc.json")), vec![b'x'; 100]).unwrap();
+            }
+            // Cap at 450 bytes → must drop the 6 oldest to land at 4 files (400 bytes).
+            enforce_capture_cap(&dir, 450);
+            let mut left: Vec<String> = std::fs::read_dir(&dir)
+                .unwrap()
+                .flatten()
+                .map(|e| e.file_name().to_string_lossy().into_owned())
+                .collect();
+            left.sort();
+            assert_eq!(left.len(), 4, "should keep only what fits: {left:?}");
+            assert!(
+                left[0].starts_with(&format!("{:020}", 6)),
+                "the 6 oldest go first: {left:?}"
+            );
+            std::fs::remove_dir_all(&dir).ok();
+        }
+
+        #[test]
+        fn capture_cap_keeps_everything_under_limit() {
+            let dir = std::env::temp_dir().join(format!(
+                "llmtrim-captest2-{}-{}",
+                std::process::id(),
+                chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0)
+            ));
+            std::fs::create_dir_all(&dir).unwrap();
+            for i in 0..3u32 {
+                std::fs::write(dir.join(format!("{i:020}-abc.json")), vec![b'x'; 100]).unwrap();
+            }
+            enforce_capture_cap(&dir, 10_000);
+            assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 3);
+            std::fs::remove_dir_all(&dir).ok();
+        }
+
+        #[test]
+        fn capture_cap_ignores_non_json_and_subdirs() {
+            let dir = std::env::temp_dir().join(format!(
+                "llmtrim-captest3-{}-{}",
+                std::process::id(),
+                chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0)
+            ));
+            std::fs::create_dir_all(&dir).unwrap();
+            // A README and a subdir that must survive even when the cap is breached, plus two
+            // captures whose combined size already exceeds the limit.
+            std::fs::write(dir.join("README.md"), vec![b'x'; 100]).unwrap();
+            std::fs::create_dir(dir.join("0000-sub")).unwrap();
+            std::fs::write(dir.join(format!("{:020}-abc.json", 1)), vec![b'x'; 100]).unwrap();
+            std::fs::write(dir.join(format!("{:020}-abc.json", 2)), vec![b'x'; 100]).unwrap();
+            // Cap of 50 bytes is below the 200 bytes of .json → both captures must go, but the
+            // README and subdir (which sort first) must be untouched.
+            enforce_capture_cap(&dir, 50);
+            assert!(dir.join("README.md").exists(), "non-capture file kept");
+            assert!(dir.join("0000-sub").is_dir(), "subdir kept");
+            assert!(
+                !dir.join(format!("{:020}-abc.json", 1)).exists(),
+                "old capture evicted"
+            );
+            std::fs::remove_dir_all(&dir).ok();
+        }
+
+        #[test]
+        fn capture_cap_handles_empty_dir() {
+            let dir = std::env::temp_dir().join(format!(
+                "llmtrim-captest4-{}-{}",
+                std::process::id(),
+                chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0)
+            ));
+            std::fs::create_dir_all(&dir).unwrap();
+            enforce_capture_cap(&dir, 10); // no panic, nothing to do
+            assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 0);
+            std::fs::remove_dir_all(&dir).ok();
+        }
 
         #[test]
         fn extract_output_from_openai_json_and_sse() {
