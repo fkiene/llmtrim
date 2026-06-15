@@ -752,7 +752,9 @@ pub fn uninstall(purge: bool, keep_binary: bool) -> Result<()> {
         ui::paint(
             color,
             Tone::Bold,
-            "Done. Open a new shell so the environment changes take effect."
+            "Done. Your current shell still has HTTPS_PROXY, HTTP_PROXY, and \
+             NODE_EXTRA_CA_CERTS exported. Open a new shell to clear them, or run: \
+             unset HTTPS_PROXY HTTP_PROXY NODE_EXTRA_CA_CERTS"
         )
     );
     // The env is gone from disk, but processes that were already running inherited it at
