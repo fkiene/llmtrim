@@ -129,7 +129,7 @@ Stages run in savings order. Nothing under a `cache_control` marker is ever rewr
 | **dedup** | Collapse duplicate + near-duplicate lines (prose only) | always |
 | **output control** | Terse instruction · Chain-of-Draft · token budget · native JSON schema | auto |
 | **tool layer** | Static tool selection + description trimming | tools |
-| **multimodal** | Downscale images to the provider's resolution cap | images |
+| **multimodal** | Downscale images to each provider's resolution cap, with OpenAI tile-snapping | images |
 
 Default `auto` switches each stage on only where it pays. `safe` runs the lossless stages only. [Full config →](#configuration)
 
