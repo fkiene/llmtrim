@@ -148,8 +148,9 @@ mod imp {
         /// Patterns that exclude files or directories. Supports `*` wildcards.
         /// Defaults to `["node_modules", "dist", "build", ".git", ".next",
         /// "coverage", "target", "*.lock", ".env*", "*.pem", "*.key"]`.
+        /// Pass an empty array `[]` to disable exclusions entirely.
         #[serde(default)]
-        exclude_patterns: Vec<String>,
+        exclude_patterns: Option<Vec<String>>,
         /// Optional glob patterns that further restrict which files are included.
         #[serde(default)]
         include_globs: Vec<String>,
@@ -206,7 +207,11 @@ mod imp {
             Parameters(args): Parameters<CompressArgs>,
         ) -> Result<CallToolResult, McpError> {
             let result = compress(&args.request.into_body(), args.provider.as_deref())?;
-            self.record(&ledger_record(&result, args.client.as_deref(), args.model.as_deref()));
+            self.record(&ledger_record(
+                &result,
+                args.client.as_deref(),
+                args.model.as_deref(),
+            ));
             ok_json(&compress_payload(&result))
         }
 
@@ -217,7 +222,8 @@ mod imp {
             &self,
             Parameters(args): Parameters<CompressTextArgs>,
         ) -> Result<CallToolResult, McpError> {
-            let (payload, record) = compress_text(&args.text, args.client.as_deref(), args.model.as_deref())?;
+            let (payload, record) =
+                compress_text(&args.text, args.client.as_deref(), args.model.as_deref())?;
             self.record(&record);
             ok_json(&payload)
         }
@@ -312,10 +318,9 @@ mod imp {
                 max_files: args.max_files.unwrap_or(25),
                 max_total_input_tokens: args.max_total_input_tokens.unwrap_or(1_000_000),
                 max_total_output_tokens: args.max_total_output_tokens.unwrap_or(100_000),
-                exclude_patterns: if args.exclude_patterns.is_empty() {
-                    default_exclude()
-                } else {
-                    args.exclude_patterns
+                exclude_patterns: match args.exclude_patterns {
+                    Some(v) => v,
+                    None => default_exclude(),
                 },
                 include_globs: args.include_globs,
                 recursive: args.recursive.unwrap_or(true),
@@ -411,7 +416,10 @@ mod imp {
                 .collect();
 
             let saved_pct = if result.total_input_tokens_before > 0 {
-                (result.total_tokens_saved as f64 / result.total_input_tokens_before as f64 * 1000.0).round() / 10.0
+                (result.total_tokens_saved as f64 / result.total_input_tokens_before as f64
+                    * 1000.0)
+                    .round()
+                    / 10.0
             } else {
                 0.0
             };
@@ -569,11 +577,7 @@ mod imp {
     /// here (no upstream round-trip), exactly as in the one-shot CLI.
     /// When client/model are provided they override the request's natural provider/model
     /// for stats grouping.
-    fn ledger_record(
-        result: &CompressResult,
-        client: Option<&str>,
-        model: Option<&str>,
-    ) -> Record {
+    fn ledger_record(result: &CompressResult, client: Option<&str>, model: Option<&str>) -> Record {
         let (provider, model) = if client.is_some() || model.is_some() {
             mcp_label(client, model)
         } else {
@@ -729,6 +733,46 @@ mod imp {
             .to_string()
         }
 
+        /// Extract the first user message content from an OpenAI-style request JSON.
+        /// Supports string content and array-of-blocks content. Falls back to returning
+        /// the whole input string on any unexpected shape so data is never lost.
+        fn user_content(input: &str) -> String {
+            let value: serde_json::Value = match serde_json::from_str(input) {
+                Ok(v) => v,
+                Err(_) => return input.to_string(),
+            };
+            let messages = match value.get("messages") {
+                Some(serde_json::Value::Array(arr)) => arr,
+                _ => return input.to_string(),
+            };
+            let user_msg = match messages
+                .iter()
+                .find(|m| m.get("role").and_then(|r| r.as_str()) == Some("user"))
+            {
+                Some(m) => m,
+                None => return input.to_string(),
+            };
+            match user_msg.get("content") {
+                Some(serde_json::Value::String(s)) => s.clone(),
+                Some(serde_json::Value::Array(blocks)) => {
+                    let mut text = String::new();
+                    for block in blocks {
+                        if block.get("type").and_then(|t| t.as_str()) == Some("text")
+                            && let Some(t) = block.get("text").and_then(|t| t.as_str())
+                        {
+                            text.push_str(t);
+                        }
+                    }
+                    if text.is_empty() {
+                        input.to_string()
+                    } else {
+                        text
+                    }
+                }
+                _ => input.to_string(),
+            }
+        }
+
         #[test]
         fn compress_maps_result_to_payload() {
             let result = llmtrim_core::compress_with_config(&req(), None, &DenseConfig::default())
@@ -808,11 +852,13 @@ mod imp {
             assert_eq!(mcp.provider, "mcp");
             assert_eq!(mcp.model.as_deref(), Some("mcp · Devin · Kimi K2.6"));
 
-            let mcp_client_only = text_ledger_record(Some("Windsurf"), None, "tiktoken", true, 10, 5);
+            let mcp_client_only =
+                text_ledger_record(Some("Windsurf"), None, "tiktoken", true, 10, 5);
             assert_eq!(mcp_client_only.provider, "mcp");
             assert_eq!(mcp_client_only.model.as_deref(), Some("mcp · Windsurf"));
 
-            let mcp_model_only = text_ledger_record(None, Some("Kimi K2.6"), "tiktoken", true, 10, 5);
+            let mcp_model_only =
+                text_ledger_record(None, Some("Kimi K2.6"), "tiktoken", true, 10, 5);
             assert_eq!(mcp_model_only.provider, "mcp");
             assert_eq!(mcp_model_only.model.as_deref(), Some("mcp · Kimi K2.6"));
         }
@@ -834,7 +880,8 @@ mod imp {
             // An exact duplicate line: the lossless `safe` config collapses it via dedup.
             let blob =
                 "the quick brown fox jumps\nthe quick brown fox jumps\nfoo bar baz qux quux corge";
-            let (payload, record) = compress_text(blob, None, None).expect("compress_text should succeed");
+            let (payload, record) =
+                compress_text(blob, None, None).expect("compress_text should succeed");
 
             let before = payload["input_tokens_before"].as_u64().unwrap();
             let after = payload["input_tokens_after"].as_u64().unwrap();

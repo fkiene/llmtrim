@@ -306,6 +306,14 @@ All four compression tools accept optional `client` and `model` arguments (e.g. 
 }
 ```
 
+### Agent rules / skills (Windsurf, Devin, and custom agents)
+
+If you build an AI agent or maintain a client like Windsurf or Devin, add these rules to your system prompt or skill file so the agent uses llmtrim automatically:
+
+- **Reading files**: Use internal codebase inspection tools (`read_file`, `grep_search`, `code_search`, etc.) for normal exploration. When the purpose is to send large file contents, tool output, or request context to a model for analysis, prefer `llmtrim_read_file_compressed` (for individual files), `llmtrim_read_folder_compressed` (for multiple source files in a folder), `llmtrim_compress`, or `llmtrim_compress_text` first and analyze the compressed result whenever the MCP/tooling makes that possible. Pass `"client": "<your-client>"` and `"model": "<model>"` to compression tools so `llmtrim_stats` groups savings correctly.
+- **Model context compression**: For any large prompt, file content, tool output, or request body that will be analyzed by a model, use `llmtrim_compress`, `llmtrim_compress_text`, `llmtrim_read_file_compressed`, or `llmtrim_read_folder_compressed` before substantive analysis whenever available. `llmtrim_read_folder_compressed` returns a structured `summary` with top savings and skipped files before the full payload. If `llmtrim_read_file_compressed` cannot read the file directly, fall back to targeted internal search/partial reads. Do not read a large full file only to compress it afterward.
+- **`llmtrim_read_folder_compressed`**: Always include `max_files` explicitly. Never call the same folder compression tool more than once for the same path/settings.
+
 ## Works with
 
 Any tool that honors `HTTPS_PROXY` and an env-provided CA, which is essentially every CLI agent and most Node apps:

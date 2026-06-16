@@ -405,19 +405,16 @@ fn matches_glob(name: &str, pattern: &str) -> bool {
 /// Check whether a path is excluded by any of the exclude patterns.
 /// Patterns are matched against both the leaf file/directory name and every parent component.
 fn is_excluded(path: &std::path::Path, patterns: &[String]) -> bool {
-    let name = path
-        .file_name()
-        .and_then(|n| n.to_str())
-        .unwrap_or("");
+    let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
     for pattern in patterns {
         if matches_glob(name, pattern) {
             return true;
         }
         for component in path.components() {
-            if let Some(s) = component.as_os_str().to_str() {
-                if matches_glob(s, pattern) {
-                    return true;
-                }
+            if let Some(s) = component.as_os_str().to_str()
+                && matches_glob(s, pattern)
+            {
+                return true;
             }
         }
     }
@@ -514,10 +511,7 @@ fn importance_score(path: &std::path::Path) -> i32 {
     }
 
     // Hooks
-    if path_str.contains("/hook")
-        || path_str.contains("\\hook")
-        || name.starts_with("use")
-    {
+    if path_str.contains("/hook") || path_str.contains("\\hook") || name.starts_with("use") {
         return 70;
     }
 
@@ -625,6 +619,14 @@ fn collect_files(
                 skipped.push(SkippedFile {
                     path: path.to_string_lossy().to_string(),
                     reason: "excluded".to_string(),
+                });
+                continue;
+            }
+
+            if is_secret_file(&path) {
+                skipped.push(SkippedFile {
+                    path: path.to_string_lossy().to_string(),
+                    reason: "secret".to_string(),
                 });
                 continue;
             }
@@ -783,18 +785,47 @@ pub fn compress_text_blob(text: &str) -> Result<CompressTextBlobResult> {
 
 /// Reject list for secret/environment files by exact filename (case-insensitive).
 const SECRET_FILES: &[&str] = &[
-    ".env", ".env.local", ".env.development", ".env.production", ".env.test",
-    ".envrc", ".env.sample", ".env.example", ".env.template",
-    ".gitconfig", ".netrc", ".npmrc", ".pypirc",
-    "id_rsa", "id_dsa", "id_ecdsa", "id_ed25519",
-    "credentials", "credentials.json", "service_account.json",
-    "token", "token.json", "tokens.json", "secrets.json", "secret.json",
+    ".env",
+    ".env.local",
+    ".env.development",
+    ".env.production",
+    ".env.test",
+    ".envrc",
+    ".env.sample",
+    ".env.example",
+    ".env.template",
+    ".gitconfig",
+    ".netrc",
+    ".npmrc",
+    ".pypirc",
+    "id_rsa",
+    "id_dsa",
+    "id_ecdsa",
+    "id_ed25519",
+    "credentials",
+    "credentials.json",
+    "service_account.json",
+    "token",
+    "token.json",
+    "tokens.json",
+    "secrets.json",
+    "secret.json",
 ];
 
 /// Reject list for secret/environment file extensions (case-insensitive).
 const SECRET_EXTENSIONS: &[&str] = &[
-    ".pem", ".key", ".p12", ".pfx", ".crt", ".cer", ".der",
-    ".pub", ".gpg", ".asc", ".keystore", ".jks",
+    ".pem",
+    ".key",
+    ".p12",
+    ".pfx",
+    ".crt",
+    ".cer",
+    ".der",
+    ".pub",
+    ".gpg",
+    ".asc",
+    ".keystore",
+    ".jks",
 ];
 
 fn is_secret_file(path: &std::path::Path) -> bool {
@@ -918,7 +949,10 @@ pub fn compress_file(
     let path = path.as_ref();
 
     if is_secret_file(path) {
-        anyhow::bail!("refusing to read secret or environment file: {}", path.display());
+        anyhow::bail!(
+            "refusing to read secret or environment file: {}",
+            path.display()
+        );
     }
 
     let metadata = fs::metadata(path)
@@ -936,8 +970,7 @@ pub fn compress_file(
         buf.truncate(n);
         buf
     } else {
-        fs::read(path)
-            .with_context(|| format!("failed to read {}", path.display()))?
+        fs::read(path).with_context(|| format!("failed to read {}", path.display()))?
     };
 
     if is_likely_binary(&data) {
@@ -1341,7 +1374,7 @@ mod tests {
             result.input_tokens_before as i64 - result.input_tokens_after as i64,
             result.input_tokens_before as i64 - result.input_tokens_after as i64
         );
-        assert!(result.text.len() > 0);
+        assert!(!result.text.is_empty());
     }
 
     // ── compress_file ──────────────────────────────────────────────────────────────────
@@ -1354,7 +1387,7 @@ mod tests {
         std::fs::write(&path, "Hello    world\nwith   extra   spaces.\n").unwrap();
 
         let result = compress_file(&path, &CompressFileOptions::default()).expect("compress_file");
-        assert!(result.text.len() > 0);
+        assert!(!result.text.is_empty());
         assert!(result.input_tokens_before > 0);
         assert!(result.input_tokens_after > 0);
 
@@ -1519,20 +1552,15 @@ mod tests {
 
     #[test]
     fn compress_folder_reads_and_compresses_source_files() {
-        let dir =
-            std::env::temp_dir().join(format!("llmtrim-folder-test-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("llmtrim-folder-test-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(
-            &dir.join("main.rs"),
+            dir.join("main.rs"),
             "fn main() {\n    println!(\"hello\");\n}\n",
         )
         .unwrap();
-        std::fs::write(
-            &dir.join("helper.rs"),
-            "fn helper() {\n    let x = 42;\n}\n",
-        )
-        .unwrap();
-        std::fs::write(&dir.join("readme.md"), "# Hello\n\nWorld.\n").unwrap();
+        std::fs::write(dir.join("helper.rs"), "fn helper() {\n    let x = 42;\n}\n").unwrap();
+        std::fs::write(dir.join("readme.md"), "# Hello\n\nWorld.\n").unwrap();
 
         let options = CompressFolderOptions {
             extensions: vec!["rs".to_string(), "md".to_string()],
@@ -1549,8 +1577,14 @@ mod tests {
         assert_eq!(result.files.len(), 3, "should include .rs and .md files");
         // main.rs should be first (importance score 100 vs 40 for helper.rs)
         assert!(result.files[0].path.contains("main.rs"));
-        assert!(result.files[0].text.contains("{ /* … */ }"), "rust should be skeletonized");
-        assert!(result.files[2].path.contains("helper.rs") || result.files[1].path.contains("helper.rs"));
+        assert!(
+            result.files[0].text.contains("{ /* … */ }"),
+            "rust should be skeletonized"
+        );
+        assert!(
+            result.files[2].path.contains("helper.rs")
+                || result.files[1].path.contains("helper.rs")
+        );
         assert!(result.total_input_tokens_before > 0);
         assert!(result.total_tokens_saved >= 0);
 
@@ -1559,13 +1593,12 @@ mod tests {
 
     #[test]
     fn compress_folder_respects_exclude_patterns() {
-        let dir =
-            std::env::temp_dir().join(format!("llmtrim-exclude-test-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("llmtrim-exclude-test-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
-        std::fs::write(&dir.join("good.rs"), "fn good() {}\n").unwrap();
+        std::fs::write(dir.join("good.rs"), "fn good() {}\n").unwrap();
         let bad_dir = dir.join("node_modules");
         std::fs::create_dir_all(&bad_dir).unwrap();
-        std::fs::write(&bad_dir.join("bad.rs"), "fn bad() {}\n").unwrap();
+        std::fs::write(bad_dir.join("bad.rs"), "fn bad() {}\n").unwrap();
 
         let options = CompressFolderOptions {
             extensions: vec!["rs".to_string()],
@@ -1590,11 +1623,12 @@ mod tests {
 
     #[test]
     fn compress_folder_respects_max_files() {
-        let dir = std::env::temp_dir().join(format!("llmtrim-maxfiles-test-{}", std::process::id()));
+        let dir =
+            std::env::temp_dir().join(format!("llmtrim-maxfiles-test-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         for i in 0..5 {
             std::fs::write(
-                &dir.join(format!("file{}.rs", i)),
+                dir.join(format!("file{}.rs", i)),
                 format!("fn f{}() {{}}\n", i),
             )
             .unwrap();
@@ -1623,7 +1657,7 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         for i in 0..3 {
             std::fs::write(
-                &dir.join(format!("file{}.rs", i)),
+                dir.join(format!("file{}.rs", i)),
                 format!("fn f{}() {{}}\n", i),
             )
             .unwrap();
@@ -1640,9 +1674,16 @@ mod tests {
         };
         let result = compress_folder(&dir, &options).expect("compress_folder");
 
-        assert_eq!(result.files.len(), 0, "no file should fit under 1 token limit");
+        assert_eq!(
+            result.files.len(),
+            0,
+            "no file should fit under 1 token limit"
+        );
         assert!(
-            result.skipped.iter().any(|s| s.reason == "input_token_limit"),
+            result
+                .skipped
+                .iter()
+                .any(|s| s.reason == "input_token_limit"),
             "files should be skipped due to input token limit"
         );
 
@@ -1654,8 +1695,8 @@ mod tests {
         let dir =
             std::env::temp_dir().join(format!("llmtrim-folder-secret-test-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
-        std::fs::write(&dir.join("normal.rs"), "fn normal() {}\n").unwrap();
-        std::fs::write(&dir.join(".env"), "SECRET=123\n").unwrap();
+        std::fs::write(dir.join("normal.rs"), "fn normal() {}\n").unwrap();
+        std::fs::write(dir.join(".env"), "SECRET=123\n").unwrap();
 
         let options = CompressFolderOptions {
             extensions: vec!["rs".to_string(), "".to_string()], // allow no-extension for .env
@@ -1670,7 +1711,10 @@ mod tests {
 
         assert!(result.files.iter().any(|f| f.path.contains("normal.rs")));
         assert!(
-            result.skipped.iter().any(|s| s.path.contains(".env") && s.reason == "secret"),
+            result
+                .skipped
+                .iter()
+                .any(|s| s.path.contains(".env") && s.reason == "secret"),
             "secret file should be skipped with reason 'secret'"
         );
 
@@ -1678,6 +1722,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::needless_borrows_for_generic_args)]
     fn compress_folder_non_directory_fails() {
         let file = std::env::temp_dir().join(format!("llmtrim-notdir-{}", std::process::id()));
         std::fs::write(&file, "not a dir\n").unwrap();
@@ -1697,7 +1742,7 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         for i in 0..3 {
             std::fs::write(
-                &dir.join(format!("file{}.rs", i)),
+                dir.join(format!("file{}.rs", i)),
                 format!("fn f{}() {{}}\n", i),
             )
             .unwrap();
@@ -1714,9 +1759,16 @@ mod tests {
         };
         let result = compress_folder(&dir, &options).expect("compress_folder");
 
-        assert_eq!(result.files.len(), 0, "no file should fit under 1 output token limit");
+        assert_eq!(
+            result.files.len(),
+            0,
+            "no file should fit under 1 output token limit"
+        );
         assert!(
-            result.skipped.iter().any(|s| s.reason == "output_token_limit"),
+            result
+                .skipped
+                .iter()
+                .any(|s| s.reason == "output_token_limit"),
             "files should be skipped due to output token limit"
         );
 
@@ -1725,13 +1777,15 @@ mod tests {
 
     #[test]
     fn compress_folder_tracks_excluded_in_skipped() {
-        let dir =
-            std::env::temp_dir().join(format!("llmtrim-excluded-skipped-test-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!(
+            "llmtrim-excluded-skipped-test-{}",
+            std::process::id()
+        ));
         std::fs::create_dir_all(&dir).unwrap();
-        std::fs::write(&dir.join("good.rs"), "fn good() {}\n").unwrap();
+        std::fs::write(dir.join("good.rs"), "fn good() {}\n").unwrap();
         let excluded_dir = dir.join("node_modules");
         std::fs::create_dir_all(&excluded_dir).unwrap();
-        std::fs::write(&excluded_dir.join("bad.rs"), "fn bad() {}\n").unwrap();
+        std::fs::write(excluded_dir.join("bad.rs"), "fn bad() {}\n").unwrap();
 
         let options = CompressFolderOptions {
             extensions: vec!["rs".to_string()],
@@ -1746,7 +1800,10 @@ mod tests {
 
         assert_eq!(result.files.len(), 1);
         assert!(
-            result.skipped.iter().any(|s| s.path.contains("node_modules") && s.reason == "excluded"),
+            result
+                .skipped
+                .iter()
+                .any(|s| s.path.contains("node_modules") && s.reason == "excluded"),
             "excluded directory should appear in skipped with reason 'excluded'"
         );
 
@@ -1755,12 +1812,11 @@ mod tests {
 
     #[test]
     fn compress_folder_importance_sorts_correctly() {
-        let dir =
-            std::env::temp_dir().join(format!("llmtrim-sort-test-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("llmtrim-sort-test-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
-        std::fs::write(&dir.join("util.rs"), "fn util() {}\n").unwrap();
-        std::fs::write(&dir.join("main.rs"), "fn main() {}\n").unwrap();
-        std::fs::write(&dir.join("Cargo.toml"), "[package]\n").unwrap();
+        std::fs::write(dir.join("util.rs"), "fn util() {}\n").unwrap();
+        std::fs::write(dir.join("main.rs"), "fn main() {}\n").unwrap();
+        std::fs::write(dir.join("Cargo.toml"), "[package]\n").unwrap();
 
         let options = CompressFolderOptions {
             extensions: vec!["rs".to_string(), "toml".to_string()],
