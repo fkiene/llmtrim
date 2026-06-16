@@ -6,6 +6,14 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+- **`llmtrim wrap <agent>` convenience launcher.** A one-command way to run a coding agent
+  through the interceptor: `llmtrim wrap claude`, `llmtrim wrap codex -- --model …`, or any
+  binary on PATH. It is sugar over `setup` plus a subprocess launch (no per-agent config and
+  no base-URL rewriting) and it refuses to launch when `HTTPS_PROXY` isn't pointing at
+  llmtrim in the current shell, so a wrapped agent can't silently bypass compression. Starts
+  the daemon for you if the environment is wired but the interceptor is down.
+
 ## [0.1.12] - 2026-06-15
 
 ### Added
