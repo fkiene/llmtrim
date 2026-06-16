@@ -6,6 +6,12 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+- **`llmtrim_read_file_compressed` MCP tool.** Reads a local text file, rejects binary files and secret/env files (`.env`, `*.pem`, `*.key`, etc.), optionally slices a line range, compresses the contents with the lossless `safe` preset, and returns only the compressed text plus token statistics. The raw file content is read and compressed entirely inside the MCP server process and never exposed to the model. Built on a new reusable core API: `llmtrim_core::compress_file(path, options)` and `llmtrim_core::compress_text_blob(text)`.
+- **Code-aware file compression.** `compress_file` now detects source-code extensions (`.rs`, `.ts`, `.tsx`, `.js`, `.jsx`, `.py`, `.go`, `.java`, `.c`, `.cpp`, `.cs`, `.kt`, `.swift`, `.zig`, `.rb`, `.php`, `.ps1`) and wraps the content in a fenced code block so the existing skeletonization and minify-code stages can fire. Function bodies are collapsed to `{ /* … */ }` stubs, irrelevant whitespace is stripped, and token savings are reported normally. Non-code files continue to use the lossless `safe` preset.
+- **`llmtrim_read_folder_compressed` MCP tool.** Reads and compresses multiple source files inside a folder without exposing raw file contents to the model. Supports recursive walking, configurable extension filtering, exclude patterns (with `*` wildcards), `max_files`, `max_total_input_tokens`, and `max_total_output_tokens` limits, and importance-based sorting (package entry files first, then routes/pages, contexts, hooks, services, components, utilities last). Each file is compressed via the existing `compress_file` pipeline so code-aware skeletonization is applied. Returns a combined result with per-file compressed text, aggregated token statistics, applied budgets, and a skipped-files report with standardised reasons (`excluded`, `max_files`, `input_token_limit`, `output_token_limit`, `secret`, `binary`). Built on the new `llmtrim_core::compress_folder(path, options)` core API.
+- **MCP client/model labeling.** All four compression MCP tools (`llmtrim_compress`, `llmtrim_compress_text`, `llmtrim_read_file_compressed`, `llmtrim_read_folder_compressed`) accept optional `client` and `model` arguments. When provided, the savings ledger records the entry under `mcp · {client} · {model}` so `llmtrim_stats` and `llmtrim status` group by the actual MCP client and model instead of defaulting to `"openai · unknown model"`.
+
 ## [0.1.12] - 2026-06-15
 
 ### Added

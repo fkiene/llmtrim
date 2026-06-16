@@ -250,7 +250,7 @@ print(out.input_tokens_before, "->", out.input_tokens_after)
 > [!NOTE]
 > Every binding returns the compressed `request_json` plus the before/after token counts, and maps errors to native exceptions. Per-language install and usage live in [`crates/llmtrim-uniffi`](crates/llmtrim-uniffi).
 
-**MCP server.** `llmtrim mcp` speaks the [Model Context Protocol](https://modelcontextprotocol.io) over stdin/stdout, so any MCP client can compress payloads and read your savings without the proxy. It exposes three tools: `llmtrim_compress` (compress a full request body, honoring your `~/.llmtrim` config like the proxy), `llmtrim_compress_text` (shrink one text blob, lossless), and `llmtrim_stats` (your savings ledger). Every call records to the same ledger, so MCP traffic shows up in `llmtrim status`.
+**MCP server.** `llmtrim mcp` speaks the [Model Context Protocol](https://modelcontextprotocol.io) over stdin/stdout, so any MCP client can compress payloads and read your savings without the proxy. It exposes five tools: `llmtrim_compress` (compress a full request body, honoring your `~/.llmtrim` config like the proxy), `llmtrim_compress_text` (shrink one text blob, lossless), `llmtrim_read_file_compressed` (read and compress a local text file, rejecting secrets and binaries — the raw content never leaves the server), `llmtrim_read_folder_compressed` (read and compress multiple source files in a folder with code-aware skeletonization, importance sorting, and configurable limits), and `llmtrim_stats` (your savings ledger). Every call records to the same ledger, so MCP traffic shows up in `llmtrim status`.
 
 ```bash
 llmtrim mcp install          # register with Claude Code (one command)
@@ -264,6 +264,45 @@ The printed block is the standard MCP config; for a client you edit by hand it l
   "mcpServers": {
     "llmtrim": { "command": "llmtrim", "args": ["mcp"] }
   }
+}
+```
+
+All four compression tools accept optional `client` and `model` arguments (e.g. `"client": "Devin"`, `"model": "Kimi K2.6"`) so `llmtrim_stats` and `llmtrim status` can group savings by the actual MCP client and model instead of defaulting to `"openai · unknown model"`.
+
+`llmtrim_read_folder_compressed` returns a structured `summary` before the full file payload, so you can see what was included, skipped, and saved even when the UI truncates large outputs:
+
+```json
+{
+  "folder_path": "D:\\git\\llmtrim",
+  "summary": {
+    "folder": "D:\\git\\llmtrim",
+    "included_count": 36,
+    "skipped_count": 112,
+    "total_input_tokens_before": 122841,
+    "total_input_tokens_after": 99961,
+    "total_tokens_saved": 22880,
+    "saved_pct": 18.6,
+    "budgets": {
+      "max_total_input_tokens": 1000000,
+      "max_total_output_tokens": 100000
+    },
+    "top_savings": [
+      {
+        "path": "D:\\git\\llmtrim\\crates\\llmtrim-core\\src\\provider\\openai.rs",
+        "input_tokens_before": 4963,
+        "input_tokens_after": 953,
+        "tokens_saved": 4010,
+        "saved_pct": 80.8
+      }
+    ],
+    "top_skipped": [
+            {
+        "path": "D:\\git\\llmtrim\\crates\\llmtrim-core\\src\\cache_zone.rs",
+        "reason": "output_token_limit"
+      }
+    ]
+  },
+  "files": [ ... ]
 }
 ```
 

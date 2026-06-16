@@ -50,11 +50,6 @@ mod imp {
     use llmtrim_core::CompressResult;
     use llmtrim_core::config::DenseConfig;
     use llmtrim_core::ir::ProviderKind;
-    use llmtrim_core::tokenizer;
-
-    /// The model `llmtrim_compress_text` wraps a blob under. Arbitrary (the request is
-    /// synthetic and never sent); it only selects the tokenizer for the reported counts.
-    const TEXT_WRAP_MODEL: &str = "gpt-4o";
 
     #[derive(Debug, Deserialize, schemars::JsonSchema)]
     struct CompressArgs {
@@ -66,6 +61,12 @@ mod imp {
         /// from the request shape.
         #[serde(default)]
         provider: Option<String>,
+        /// Optional client name (e.g. `Devin`, `Windsurf`). Used for stats grouping.
+        #[serde(default)]
+        client: Option<String>,
+        /// Optional model name (e.g. `Kimi K2.6`). Used for stats grouping.
+        #[serde(default)]
+        model: Option<String>,
     }
 
     /// A request body passed as either a JSON object (the natural form an agent emits) or a
@@ -91,12 +92,77 @@ mod imp {
         /// A single text blob to shrink (a tool output, a document, a message). It is
         /// wrapped in a one-message request, compressed, and the shrunk text is returned.
         text: String,
+        /// Optional client name (e.g. `Devin`, `Windsurf`). Used for stats grouping.
+        #[serde(default)]
+        client: Option<String>,
+        /// Optional model name (e.g. `Kimi K2.6`). Used for stats grouping.
+        #[serde(default)]
+        model: Option<String>,
     }
 
     // `llmtrim_stats` takes no parameters, but the `#[tool]` macro still wants a typed args
     // struct, so this is an empty one (the advertised input schema is `{}`).
     #[derive(Debug, Deserialize, schemars::JsonSchema)]
     struct StatsArgs {}
+
+    #[derive(Debug, Deserialize, schemars::JsonSchema)]
+    struct ReadFileCompressedArgs {
+        /// Absolute or relative path to the text file to read and compress. Accepts both
+        /// Windows and Unix path separators.
+        path: String,
+        /// Optional 1-based inclusive start line. If omitted, starts from line 1.
+        #[serde(default)]
+        start_line: Option<usize>,
+        /// Optional 1-based inclusive end line. If omitted, reads to end of file.
+        #[serde(default)]
+        end_line: Option<usize>,
+        /// Optional client name (e.g. `Devin`, `Windsurf`). Used for stats grouping.
+        #[serde(default)]
+        client: Option<String>,
+        /// Optional model name (e.g. `Kimi K2.6`). Used for stats grouping.
+        #[serde(default)]
+        model: Option<String>,
+    }
+
+    #[derive(Debug, Deserialize, schemars::JsonSchema)]
+    struct ReadFolderCompressedArgs {
+        /// Absolute or relative path to the folder to read and compress. Accepts both
+        /// Windows and Unix path separators.
+        path: String,
+        /// File extensions to include (without the leading dot). Defaults to
+        /// `["ts", "tsx", "js", "jsx", "rs", "py", "ps1", "json", "md"]`.
+        #[serde(default)]
+        extensions: Vec<String>,
+        /// Maximum number of files to include. Defaults to 25.
+        #[serde(default)]
+        max_files: Option<usize>,
+        /// Maximum total input tokens (before compression) across all included files.
+        /// This is a safety/performance limit on how much raw text llmtrim may read.
+        /// Defaults to 1000000.
+        #[serde(default)]
+        max_total_input_tokens: Option<usize>,
+        /// Maximum total output tokens (after compression) that may be returned to the model.
+        /// This is the real context budget. Defaults to 100000.
+        #[serde(default)]
+        max_total_output_tokens: Option<usize>,
+        /// Patterns that exclude files or directories. Supports `*` wildcards.
+        /// Defaults to `["node_modules", "dist", "build", ".git", ".next",
+        /// "coverage", "target", "*.lock", ".env*", "*.pem", "*.key"]`.
+        #[serde(default)]
+        exclude_patterns: Vec<String>,
+        /// Optional glob patterns that further restrict which files are included.
+        #[serde(default)]
+        include_globs: Vec<String>,
+        /// Whether to walk subdirectories recursively. Defaults to true.
+        #[serde(default)]
+        recursive: Option<bool>,
+        /// Optional client name (e.g. `Devin`, `Windsurf`). Used for stats grouping.
+        #[serde(default)]
+        client: Option<String>,
+        /// Optional model name (e.g. `Kimi K2.6`). Used for stats grouping.
+        #[serde(default)]
+        model: Option<String>,
+    }
 
     /// The MCP handler. `db` selects the ledger: `None` is the real one (`Tracker::open`,
     /// honoring `LLMTRIM_DB_PATH`/XDG like every other front-end); `Some(path)` is an
@@ -140,7 +206,7 @@ mod imp {
             Parameters(args): Parameters<CompressArgs>,
         ) -> Result<CallToolResult, McpError> {
             let result = compress(&args.request.into_body(), args.provider.as_deref())?;
-            self.record(&ledger_record(&result));
+            self.record(&ledger_record(&result, args.client.as_deref(), args.model.as_deref()));
             ok_json(&compress_payload(&result))
         }
 
@@ -151,7 +217,7 @@ mod imp {
             &self,
             Parameters(args): Parameters<CompressTextArgs>,
         ) -> Result<CallToolResult, McpError> {
-            let (payload, record) = compress_text(&args.text)?;
+            let (payload, record) = compress_text(&args.text, args.client.as_deref(), args.model.as_deref())?;
             self.record(&record);
             ok_json(&payload)
         }
@@ -167,11 +233,223 @@ mod imp {
             let stats = crate::monitor::stats_json(&tracker, None).map_err(internal)?;
             Ok(CallToolResult::success(vec![Content::text(stats)]))
         }
+
+        #[tool(
+            description = "Read a local text file and return only its compressed content plus token statistics. Rejects binary files, secrets, and environment files. The raw file content never leaves the server process."
+        )]
+        fn llmtrim_read_file_compressed(
+            &self,
+            Parameters(args): Parameters<ReadFileCompressedArgs>,
+        ) -> Result<CallToolResult, McpError> {
+            let path = std::path::PathBuf::from(&args.path);
+            let options = llmtrim_core::CompressFileOptions {
+                start_line: args.start_line,
+                end_line: args.end_line,
+                max_bytes: None,
+            };
+            let result = llmtrim_core::compress_file(&path, &options)
+                .map_err(|e| McpError::invalid_params(e.to_string(), None))?;
+            let record = text_ledger_record(
+                args.client.as_deref(),
+                args.model.as_deref(),
+                &result.tokenizer_label,
+                result.tokenizer_exact,
+                result.input_tokens_before,
+                result.input_tokens_after,
+            );
+            self.record(&record);
+            let payload = json!({
+                "text": result.text,
+                "input_tokens_before": result.input_tokens_before,
+                "input_tokens_after": result.input_tokens_after,
+                "tokens_saved": result.input_tokens_before as i64 - result.input_tokens_after as i64,
+            });
+            ok_json(&payload)
+        }
+
+        #[tool(
+            description = "Read and compress multiple source files inside a folder without exposing raw file contents to the model. Rejects binary files, secrets, and environment files. Applies code-aware skeletonization for recognised source extensions. Returns compressed text grouped by file path plus combined token statistics."
+        )]
+        fn llmtrim_read_folder_compressed(
+            &self,
+            Parameters(args): Parameters<ReadFolderCompressedArgs>,
+        ) -> Result<CallToolResult, McpError> {
+            let default_ext = || {
+                vec![
+                    "ts".to_string(),
+                    "tsx".to_string(),
+                    "js".to_string(),
+                    "jsx".to_string(),
+                    "rs".to_string(),
+                    "py".to_string(),
+                    "ps1".to_string(),
+                    "json".to_string(),
+                    "md".to_string(),
+                ]
+            };
+            let default_exclude = || {
+                vec![
+                    "node_modules".to_string(),
+                    "dist".to_string(),
+                    "build".to_string(),
+                    ".git".to_string(),
+                    ".next".to_string(),
+                    "coverage".to_string(),
+                    "target".to_string(),
+                    "*.lock".to_string(),
+                    ".env*".to_string(),
+                    "*.pem".to_string(),
+                    "*.key".to_string(),
+                ]
+            };
+
+            let options = llmtrim_core::CompressFolderOptions {
+                extensions: if args.extensions.is_empty() {
+                    default_ext()
+                } else {
+                    args.extensions
+                },
+                max_files: args.max_files.unwrap_or(25),
+                max_total_input_tokens: args.max_total_input_tokens.unwrap_or(1_000_000),
+                max_total_output_tokens: args.max_total_output_tokens.unwrap_or(100_000),
+                exclude_patterns: if args.exclude_patterns.is_empty() {
+                    default_exclude()
+                } else {
+                    args.exclude_patterns
+                },
+                include_globs: args.include_globs,
+                recursive: args.recursive.unwrap_or(true),
+            };
+
+            let result = llmtrim_core::compress_folder(&args.path, &options)
+                .map_err(|e| McpError::invalid_params(e.to_string(), None))?;
+
+            let record = text_ledger_record(
+                args.client.as_deref(),
+                args.model.as_deref(),
+                &result.tokenizer_label,
+                result.tokenizer_exact,
+                result.total_input_tokens_before,
+                result.total_input_tokens_after,
+            );
+            self.record(&record);
+
+            let files: Vec<Value> = result
+                .files
+                .iter()
+                .map(|f| {
+                    json!({
+                        "path": f.path,
+                        "text": f.text,
+                        "input_tokens_before": f.input_tokens_before,
+                        "input_tokens_after": f.input_tokens_after,
+                        "tokens_saved": f.input_tokens_before as i64 - f.input_tokens_after as i64,
+                    })
+                })
+                .collect();
+
+            let skipped: Vec<Value> = result
+                .skipped
+                .iter()
+                .map(|s| {
+                    json!({
+                        "path": s.path,
+                        "reason": s.reason,
+                    })
+                })
+                .collect();
+
+            let mut top_savings_files: Vec<_> = result.files.clone();
+            top_savings_files.sort_by(|a, b| {
+                let saved_a = a.input_tokens_before as i64 - a.input_tokens_after as i64;
+                let saved_b = b.input_tokens_before as i64 - b.input_tokens_after as i64;
+                saved_b.cmp(&saved_a) // descending by tokens_saved
+            });
+
+            let top_savings: Vec<Value> = top_savings_files
+                .iter()
+                .take(10)
+                .map(|f| {
+                    let saved = f.input_tokens_before as i64 - f.input_tokens_after as i64;
+                    let pct = if f.input_tokens_before > 0 {
+                        (saved as f64 / f.input_tokens_before as f64 * 1000.0).round() / 10.0
+                    } else {
+                        0.0
+                    };
+                    json!({
+                        "path": f.path,
+                        "input_tokens_before": f.input_tokens_before,
+                        "input_tokens_after": f.input_tokens_after,
+                        "tokens_saved": saved,
+                        "saved_pct": pct,
+                    })
+                })
+                .collect();
+
+            let skip_priority = |reason: &str| match reason {
+                "input_token_limit" | "output_token_limit" => 0,
+                "max_files" => 1,
+                "excluded" => 2,
+                _ => 3,
+            };
+            let mut top_skipped_files: Vec<_> = result.skipped.clone();
+            top_skipped_files.sort_by(|a, b| {
+                let pa = skip_priority(&a.reason);
+                let pb = skip_priority(&b.reason);
+                pa.cmp(&pb)
+            });
+
+            let top_skipped: Vec<Value> = top_skipped_files
+                .iter()
+                .take(10)
+                .map(|s| {
+                    json!({
+                        "path": s.path,
+                        "reason": s.reason,
+                    })
+                })
+                .collect();
+
+            let saved_pct = if result.total_input_tokens_before > 0 {
+                (result.total_tokens_saved as f64 / result.total_input_tokens_before as f64 * 1000.0).round() / 10.0
+            } else {
+                0.0
+            };
+
+            let payload = json!({
+                "folder_path": result.folder_path,
+                "summary": {
+                    "folder": result.folder_path,
+                    "included_count": result.files.len(),
+                    "skipped_count": result.skipped.len(),
+                    "total_input_tokens_before": result.total_input_tokens_before,
+                    "total_input_tokens_after": result.total_input_tokens_after,
+                    "total_tokens_saved": result.total_tokens_saved,
+                    "saved_pct": saved_pct,
+                    "budgets": {
+                        "max_total_input_tokens": result.max_total_input_tokens,
+                        "max_total_output_tokens": result.max_total_output_tokens,
+                    },
+                    "top_savings": top_savings,
+                    "top_skipped": top_skipped,
+                },
+                "files": files,
+                "files_included": result.files.len(),
+                "files_skipped": result.skipped.len(),
+                "skipped": skipped,
+                "total_input_tokens_before": result.total_input_tokens_before,
+                "total_input_tokens_after": result.total_input_tokens_after,
+                "total_tokens_saved": result.total_tokens_saved,
+                "max_total_input_tokens": result.max_total_input_tokens,
+                "max_total_output_tokens": result.max_total_output_tokens,
+            });
+            ok_json(&payload)
+        }
     }
 
     #[tool_handler(
         name = "llmtrim",
-        instructions = "llmtrim compresses LLM request payloads with no extra model calls. Use llmtrim_compress for a full request body, llmtrim_compress_text for a single text blob, and llmtrim_stats to read the savings ledger."
+        instructions = "llmtrim compresses LLM request payloads with no extra model calls. Use llmtrim_compress for a full request body, llmtrim_compress_text for a single text blob, llmtrim_read_file_compressed to read and compress a local text file, llmtrim_read_folder_compressed to read and compress multiple source files in a folder, and llmtrim_stats to read the savings ledger."
     )]
     impl ServerHandler for LlmtrimServer {}
 
@@ -188,13 +466,31 @@ mod imp {
             .map_err(|e| McpError::invalid_params(e.to_string(), None))
     }
 
+    /// Build a label for MCP-driven ledger entries.
+    fn mcp_label(client: Option<&str>, model: Option<&str>) -> (String, Option<String>) {
+        match (client, model) {
+            (Some(c), Some(m)) => ("mcp".to_string(), Some(format!("mcp · {} · {}", c, m))),
+            (Some(c), None) => ("mcp".to_string(), Some(format!("mcp · {}", c))),
+            (None, Some(m)) => ("mcp".to_string(), Some(format!("mcp · {}", m))),
+            (None, None) => ("mcp".to_string(), None),
+        }
+    }
+
     /// Ledger row for a `compress_text` blob: the content saving with no model attribution,
-    /// since no model call happened. Matches the proxy/CLI schema (the unknown fields are
-    /// `None`, exactly as the one-shot `compress` path leaves them).
-    fn text_ledger_record(tokenizer: &str, exact: bool, before: usize, after: usize) -> Record {
+    /// since no model call happened. When client/model are provided they are used for stats
+    /// grouping; otherwise the entry is marked as an MCP call with unknown attribution.
+    fn text_ledger_record(
+        client: Option<&str>,
+        model: Option<&str>,
+        tokenizer: &str,
+        exact: bool,
+        before: usize,
+        after: usize,
+    ) -> Record {
+        let (provider, model) = mcp_label(client, model);
         Record {
-            provider: ProviderKind::OpenAi.as_str().to_string(),
-            model: None,
+            provider,
+            model,
             tokenizer: tokenizer.to_string(),
             exact,
             input_before: before as i64,
@@ -242,36 +538,28 @@ mod imp {
         })
     }
 
-    /// Shrink a single text blob. The blob is wrapped in a one-message OpenAI request only so
-    /// the engine has something to operate on; we then run a **content-only** config (the
-    /// lossless `safe` preset) so the request-envelope stages never fire: `output_control`
-    /// would inject an instruction meant for a model answering a prompt, and `cache` a
-    /// `prompt_cache_key` for an API call — neither applies to a bare blob, and the caller
-    /// only gets the text back. The reported token counts are of the text itself (in vs out),
-    /// not the synthetic wrapper, so the numbers describe exactly what's returned. Pure: the
-    /// caller records the returned `Record`.
-    fn compress_text(text: &str) -> Result<(Value, Record), McpError> {
-        let body = json!({
-            "model": TEXT_WRAP_MODEL,
-            "messages": [{ "role": "user", "content": text }],
-        })
-        .to_string();
-        let config = DenseConfig::preset("safe").expect("built-in preset");
-        let result = llmtrim_core::compress_with_config(&body, Some(ProviderKind::OpenAi), &config)
-            .map_err(internal)?;
-        let out = user_content(&result.request_json);
-
-        let counter = tokenizer::counter_for(ProviderKind::OpenAi, Some(TEXT_WRAP_MODEL))
-            .map_err(internal)?;
-        let before = counter.count(text);
-        let after = counter.count(&out);
-
-        let record = text_ledger_record(counter.label(), counter.is_exact(), before, after);
+    /// Shrink a single text blob. Delegates to the core `compress_text_blob` so the logic
+    /// is shared with `llmtrim_read_file_compressed`. Pure: the caller records the returned
+    /// `Record`.
+    fn compress_text(
+        text: &str,
+        client: Option<&str>,
+        model: Option<&str>,
+    ) -> Result<(Value, Record), McpError> {
+        let result = llmtrim_core::compress_text_blob(text).map_err(internal)?;
+        let record = text_ledger_record(
+            client,
+            model,
+            &result.tokenizer_label,
+            result.tokenizer_exact,
+            result.input_tokens_before,
+            result.input_tokens_after,
+        );
         let payload = json!({
-            "text": out,
-            "input_tokens_before": before,
-            "input_tokens_after": after,
-            "tokens_saved": before as i64 - after as i64,
+            "text": result.text,
+            "input_tokens_before": result.input_tokens_before,
+            "input_tokens_after": result.input_tokens_after,
+            "tokens_saved": result.input_tokens_before as i64 - result.input_tokens_after as i64,
         });
         Ok((payload, record))
     }
@@ -279,10 +567,21 @@ mod imp {
     /// Mirror the ledger row the CLI `compress` path writes, so MCP-driven traffic shows
     /// up in `llmtrim status`/monitor identically — output/cache/timing fields are unknown
     /// here (no upstream round-trip), exactly as in the one-shot CLI.
-    fn ledger_record(result: &CompressResult) -> Record {
+    /// When client/model are provided they override the request's natural provider/model
+    /// for stats grouping.
+    fn ledger_record(
+        result: &CompressResult,
+        client: Option<&str>,
+        model: Option<&str>,
+    ) -> Record {
+        let (provider, model) = if client.is_some() || model.is_some() {
+            mcp_label(client, model)
+        } else {
+            (result.provider.as_str().to_string(), result.model.clone())
+        };
         Record {
-            provider: result.provider.as_str().to_string(),
-            model: result.model.clone(),
+            provider,
+            model,
             tokenizer: result.tokenizer_label.clone(),
             exact: result.tokenizer_exact,
             input_before: result.input_tokens_before.0 as i64,
@@ -295,42 +594,6 @@ mod imp {
             cache_write_tokens: None,
             output_shaped: Some(result.output_shaped),
             frozen_input_tokens: Some(result.frozen_input_tokens.0 as i64),
-        }
-    }
-
-    /// Pull the first user message's text back out of a compressed request, for
-    /// `llmtrim_compress_text`. Content may be a plain string or an array of typed blocks
-    /// (any provider, any language); concatenate the text parts. Falls back to the whole
-    /// compressed JSON if the shape is unexpected.
-    fn user_content(request_json: &str) -> String {
-        let parsed: Value = match serde_json::from_str(request_json) {
-            Ok(v) => v,
-            Err(_) => return request_json.to_string(),
-        };
-        let Some(msg) = parsed
-            .get("messages")
-            .and_then(Value::as_array)
-            .and_then(|m| {
-                m.iter()
-                    .find(|m| m.get("role").and_then(Value::as_str) == Some("user"))
-            })
-        else {
-            return request_json.to_string();
-        };
-        match msg.get("content") {
-            Some(Value::String(s)) => s.clone(),
-            Some(Value::Array(blocks)) => {
-                let text: Vec<&str> = blocks
-                    .iter()
-                    .filter_map(|b| b.get("text").and_then(Value::as_str))
-                    .collect();
-                if text.is_empty() {
-                    request_json.to_string()
-                } else {
-                    text.join("")
-                }
-            }
-            _ => request_json.to_string(),
         }
     }
 
@@ -525,20 +788,33 @@ mod imp {
             // Full-request record carries the model and the result's token counts.
             let result = llmtrim_core::compress_with_config(&req(), None, &DenseConfig::default())
                 .expect("compress should succeed");
-            let rec = ledger_record(&result);
+            let rec = ledger_record(&result, None, None);
             assert_eq!(rec.provider, "openai");
             assert_eq!(rec.model.as_deref(), Some("gpt-4o"));
             assert_eq!(rec.input_before, result.input_tokens_before.0 as i64);
             assert_eq!(rec.input_after, result.input_tokens_after.0 as i64);
             assert!(rec.output_after.is_none() && rec.compress_micros.is_none());
 
-            // Blob record has no model attribution (no model call happened).
-            let blob = text_ledger_record("tiktoken", true, 100, 60);
-            assert_eq!(blob.provider, "openai");
+            // Blob record with no client/model is tagged as an MCP call with unknown attribution.
+            let blob = text_ledger_record(None, None, "tiktoken", true, 100, 60);
+            assert_eq!(blob.provider, "mcp");
             assert_eq!(blob.model, None);
             assert_eq!(blob.input_before, 100);
             assert_eq!(blob.input_after, 60);
             assert_eq!(blob.output_shaped, Some(false));
+
+            // MCP labels override provider/model when client/model are provided.
+            let mcp = ledger_record(&result, Some("Devin"), Some("Kimi K2.6"));
+            assert_eq!(mcp.provider, "mcp");
+            assert_eq!(mcp.model.as_deref(), Some("mcp · Devin · Kimi K2.6"));
+
+            let mcp_client_only = text_ledger_record(Some("Windsurf"), None, "tiktoken", true, 10, 5);
+            assert_eq!(mcp_client_only.provider, "mcp");
+            assert_eq!(mcp_client_only.model.as_deref(), Some("mcp · Windsurf"));
+
+            let mcp_model_only = text_ledger_record(None, Some("Kimi K2.6"), "tiktoken", true, 10, 5);
+            assert_eq!(mcp_model_only.provider, "mcp");
+            assert_eq!(mcp_model_only.model.as_deref(), Some("mcp · Kimi K2.6"));
         }
 
         #[test]
@@ -558,7 +834,7 @@ mod imp {
             // An exact duplicate line: the lossless `safe` config collapses it via dedup.
             let blob =
                 "the quick brown fox jumps\nthe quick brown fox jumps\nfoo bar baz qux quux corge";
-            let (payload, record) = compress_text(blob).expect("compress_text should succeed");
+            let (payload, record) = compress_text(blob, None, None).expect("compress_text should succeed");
 
             let before = payload["input_tokens_before"].as_u64().unwrap();
             let after = payload["input_tokens_after"].as_u64().unwrap();

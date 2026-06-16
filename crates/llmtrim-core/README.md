@@ -48,8 +48,13 @@ Presets: `auto` (shape-routed, default), `aggressive`, `agent`, `code`, `rag`, `
 
 - `compress`: load configuration from the environment / config file, optionally auto-detect the provider.
 - `compress_with_config`: compress with an explicit `config::DenseConfig`; no environment access, fully deterministic (used by tests and embedders).
+- `compress_text_blob`: shrink a single text blob with the lossless `safe` preset; returns the compressed text and token counts.
+- `compress_file`: read a local text file (with optional line range), reject binary/secret/env files, and compress the contents; returns only compressed text and token counts — the raw content never leaves the function. Recognised source-code extensions trigger code-aware skeletonization.
+- `compress_folder`: read and compress multiple source files inside a folder, with recursive walking, extension filtering, exclude patterns (with `*` wildcards), `max_files`, `max_total_input_tokens`, and `max_total_output_tokens` limits, and importance-based sorting. Each file is compressed via `compress_file` so code-aware skeletonization applies. Returns a combined result with per-file compressed text, aggregated token statistics, applied budgets, a skipped-files report with standardised reasons (`excluded`, `max_files`, `input_token_limit`, `output_token_limit`, `secret`, `binary`), and a structured `summary` object for display-friendly consumption.
 - `route`: pick the workload preset for a request from its structure alone.
 - `CompressResult`: the compressed body, the per-stage report, and the before/after token counts.
+- `CompressFileOptions` / `CompressTextBlobResult`: options and results for the file/blob APIs.
+- `CompressFolderOptions` / `CompressFolderResult` / `FileCompressionResult` / `SkippedFile`: options and results for the folder API.
 
 Full reference on [docs.rs](https://docs.rs/llmtrim-core).
 
