@@ -31,7 +31,10 @@ pub struct ToolStage {
 
 impl Transform for ToolStage {
     fn name(&self) -> &str {
-        "tools"
+        // When description trimming is active the stage is lossy (content is dropped from tool
+        // descriptions). Use a distinct name so captures — and the audit protocol that reads the
+        // `stages` list to distinguish lossless from lossy runs — can tell the difference.
+        if self.trim_desc { "tool_trim" } else { "tools" }
     }
 
     fn gate_kind(&self) -> GateKind {
@@ -726,6 +729,26 @@ mod tests {
             minify_schema: false,
             max_desc_chars: 200,
         })
+    }
+
+    #[test]
+    fn stage_name_reflects_lossy_trim() {
+        // trim_desc drops description content, so it must report a distinct, lossy stage name
+        // for captures and the audit protocol; lossless selection/minification stays "tools".
+        let trimming = ToolStage {
+            select: false,
+            trim_desc: true,
+            minify_schema: false,
+            max_desc_chars: 200,
+        };
+        assert_eq!(trimming.name(), "tool_trim");
+        let lossless = ToolStage {
+            select: true,
+            trim_desc: false,
+            minify_schema: true,
+            max_desc_chars: 200,
+        };
+        assert_eq!(lossless.name(), "tools");
     }
 
     #[test]

@@ -14,6 +14,14 @@ All notable changes to this project are documented here. The format follows
   llmtrim in the current shell, so a wrapped agent can't silently bypass compression. Starts
   the daemon for you if the environment is wired but the interceptor is down.
 
+### Fixed
+- **`tool_trim` stage now appears as `"tool_trim"` in capture `stages` lists** (was `"tools"`).
+  When description trimming is active (`agent`/`aggressive` presets), the `ToolStage` stage name
+  is now `"tool_trim"` instead of `"tools"`. This lets QA auditors correctly identify
+  description-trimming runs as lossy and not flag them as category-4 bugs (lossless-only runs
+  that dropped content). Lossless-only uses (selection + schema minification without trimming)
+  continue to appear as `"tools"`.
+
 ## [0.1.12] - 2026-06-15
 
 ### Added
