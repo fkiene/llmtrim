@@ -1582,13 +1582,11 @@ mod tests {
             "occupied port not rejected"
         );
 
-        // Release it; the same port is now bindable and the probe returns it.
-        drop(held);
-        assert_eq!(
-            first_free_port(taken, 0),
-            Some(taken),
-            "free port not accepted"
-        );
+        // With the port still held, a wider scan skips the occupied port and returns a free
+        // one further along. (Re-probing the *same* port after drop is racy: under parallel
+        // tests another thread can grab the freed ephemeral port before we rebind it.)
+        let found = first_free_port(taken, 64).expect("a free port exists in the span");
+        assert_ne!(found, taken, "scan returned the still-occupied port");
     }
 
     // ── Multi-profile sweep tests (POSIX only) ─────────────────────────────────────
