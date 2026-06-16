@@ -18,11 +18,19 @@
 </p>
 
 <p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: light)" srcset="assets/status-watch-light.svg">
+    <img src="assets/status-watch-dark.svg" alt="llmtrim status --watch: a live dashboard showing tokens trimmed, dollars saved off your real bill, input/output savings bars, and a per-model breakdown" width="760">
+  </picture>
+</p>
+
+<p align="center">
   <a href="https://github.com/fkiene/llmtrim/actions/workflows/ci.yml"><img src="https://github.com/fkiene/llmtrim/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-AGPL--3.0-blue" alt="License: AGPL v3"></a>
   <a href="https://crates.io/crates/llmtrim"><img src="https://img.shields.io/crates/v/llmtrim?logo=rust" alt="crates.io"></a>
   <a href="https://www.npmjs.com/package/@llmtrim/cli"><img src="https://img.shields.io/npm/v/@llmtrim/cli?logo=npm" alt="npm"></a>
   <a href="https://www.npmjs.com/package/@llmtrim/cli"><img src="https://img.shields.io/npm/dm/@llmtrim/cli" alt="npm downloads"></a>
+  <a href="https://github.com/fkiene/llmtrim/stargazers"><img src="https://img.shields.io/github/stars/fkiene/llmtrim?style=flat&logo=github" alt="GitHub stars"></a>
   <img src="https://img.shields.io/badge/rust-1.88%2B-orange" alt="Rust 1.88+">
 </p>
 
@@ -89,6 +97,8 @@ Here's one real thing llmtrim does, end to end. An AI agent ran a build, and the
 
 Both errors and the summary survive **verbatim**. The repetitive INFO lines fold into a template plus their values, losslessly, because the range is regular (`task_0..task_29`). The model still sees exactly what happened; it just costs a fifth as much.
 
+> If that's useful to you, a ⭐ helps other people find it.
+
 Try it yourself on any request body:
 
 ```bash
@@ -149,13 +159,6 @@ npm install -g @llmtrim/cli@latest && llmtrim setup
 # 3. Watch the savings add up as you work
 llmtrim status --watch
 ```
-
-<p align="center">
-  <picture>
-    <source media="(prefers-color-scheme: light)" srcset="assets/status-watch-light.svg">
-    <img src="assets/status-watch-dark.svg" alt="llmtrim status --watch: a live dashboard showing tokens trimmed, dollars saved off your real bill, input/output savings bars, and a per-model breakdown" width="760">
-  </picture>
-</p>
 
 **No Node?** Use an installer instead:
 
@@ -440,6 +443,16 @@ Built on [`tiktoken-rs`](https://crates.io/crates/tiktoken-rs), [`tree-sitter`](
 ## Found a problem?
 
 Run `llmtrim doctor` for an end-to-end diagnosis; each failing check names its fix. Found a request it mangled? Set `LLMTRIM_CAPTURE_DIR` and [open an issue](https://github.com/fkiene/llmtrim/issues) with the before/after capture, since a repro is a fix. And if it saved you money, a ⭐ helps others find it.
+
+## Star history
+
+<a href="https://www.star-history.com/?repos=fkiene%2Fllmtrim&type=date&legend=top-left">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/chart?repos=fkiene/llmtrim&type=date&theme=dark&legend=top-left" />
+    <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/chart?repos=fkiene/llmtrim&type=date&legend=top-left" />
+    <img alt="Star history chart for fkiene/llmtrim" src="https://api.star-history.com/chart?repos=fkiene/llmtrim&type=date&legend=top-left" />
+  </picture>
+</a>
 
 ---
 
