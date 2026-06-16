@@ -198,6 +198,7 @@ llmtrim doctor      # something off? end-to-end diagnosis; each check names its 
 llmtrim start       # start the background proxy
 llmtrim stop        # stop it
 llmtrim serve       # run in the foreground instead (Ctrl-C to quit)
+llmtrim wrap claude # run an agent, guaranteeing this session routes through llmtrim (fails fast if it can't)
 llmtrim update      # update to the latest release + restart
 llmtrim uninstall   # exact inverse of setup: removes all three changes
 ```
