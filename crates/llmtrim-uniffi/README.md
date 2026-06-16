@@ -22,6 +22,27 @@ the tokenizer label/exactness, and the before/after/frozen input-token counts. E
 that need the full rehydration plan or per-stage reports should depend on [`llmtrim-core`]
 directly in Rust.
 
+## In-process vs. the proxy
+
+llmtrim has two integration routes:
+
+- **The proxy** (`HTTPS_PROXY=127.0.0.1:8788 llmtrim`) intercepts your existing traffic
+  and compresses it in flight. Nothing in your code changes, but the client has to route
+  through the proxy and trust its CA.
+- **These bindings** compress in your process. You call `compress()` on the request body,
+  then send the result with your own HTTP client. No proxy, no CA, no env-var setup.
+
+Use the in-process path when the proxy can't run:
+
+- **Sandboxed / serverless** functions where you can't set a process-wide `HTTPS_PROXY`
+  or run a side process.
+- **Certificate-pinned clients** that reject a MITM CA, so the proxy's interception fails.
+- Anywhere you'd rather not add a network hop or an extra moving part.
+
+It replaces a per-framework adapter: instead of wiring a hook into each SDK, you compress
+the body once and POST it yourself. Runnable end-to-end examples (compress, then send with
+your own client) are in [`examples/`](examples).
+
 ## Python
 
 ```bash
