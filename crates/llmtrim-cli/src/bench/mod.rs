@@ -114,22 +114,41 @@ pub fn score_text(scorer: Scorer, answer: &str, gold: &str) -> Option<f64> {
 /// model, not how we grade its reply against a reference. Article/punctuation
 /// removal here is the canonical SQuAD metric.
 fn normalize(s: &str) -> String {
-    let lowered = s.to_lowercase();
-    let spaced: String = lowered
-        .chars()
-        .map(|c| {
-            if c.is_alphanumeric() || c.is_whitespace() {
-                c
-            } else {
-                ' '
-            }
-        })
-        .collect();
+    // CJK scripts have no inter-word spaces, so whitespace tokenization collapses a whole
+    // answer into ONE token and makes token-F1 degenerate (0 unless byte-identical, even on
+    // the correct answer). Pad CJK codepoints with spaces so each becomes its own token —
+    // char-level F1 for CJK, word-level for space-delimited scripts. This mirrors the
+    // SQuAD-CJK / XQuAD convention and matches how `lex_words` (UAX#29) tokenizes CJK.
+    let mut spaced = String::with_capacity(s.len() + 16);
+    for c in s.to_lowercase().chars() {
+        if is_cjk(c) {
+            spaced.push(' ');
+            spaced.push(c);
+            spaced.push(' ');
+        } else if c.is_alphanumeric() || c.is_whitespace() {
+            spaced.push(c);
+        } else {
+            spaced.push(' ');
+        }
+    }
     spaced
         .split_whitespace()
         .filter(|w| !matches!(*w, "a" | "an" | "the"))
         .collect::<Vec<_>>()
         .join(" ")
+}
+
+/// Whether `c` is a CJK/Japanese/Korean codepoint that carries meaning per-character and is
+/// written without separating spaces. [`normalize`] pads these so token-F1 tokenizes them
+/// per character instead of swallowing a whole answer as a single whitespace-delimited token.
+fn is_cjk(c: char) -> bool {
+    matches!(c,
+        '\u{3040}'..='\u{30FF}'   // Hiragana + Katakana
+        | '\u{3400}'..='\u{4DBF}' // CJK Extension A
+        | '\u{4E00}'..='\u{9FFF}' // CJK Unified Ideographs
+        | '\u{AC00}'..='\u{D7AF}' // Hangul syllables
+        | '\u{F900}'..='\u{FAFF}' // CJK Compatibility Ideographs
+    )
 }
 
 /// Token-level F1 between answer and gold over normalized tokens (SQuAD metric):
@@ -1172,6 +1191,25 @@ pub fn frontier_markdown(rows: &[(String, Frontier)]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn token_f1_handles_cjk_without_whitespace() {
+        // Before the CJK-aware normalize, Chinese answers scored 0 even on an exact match
+        // (no spaces → one whitespace token). Now CJK is char-tokenized.
+        assert!((token_f1("报酬一万二千元", "报酬一万二千元") - 1.0).abs() < 1e-9);
+        let partial = token_f1("月度报酬为一万二千元", "一万二千元");
+        assert!(
+            partial > 0.0 && partial < 1.0,
+            "partial overlap, got {partial}"
+        );
+        assert_eq!(
+            token_f1("天气晴朗", "报酬待遇"),
+            0.0,
+            "disjoint CJK scores 0"
+        );
+        // Latin behavior is unchanged (article dropped, exact overlap → 1.0).
+        assert!((token_f1("the answer is 42", "answer is 42") - 1.0).abs() < 1e-9);
+    }
 
     #[test]
     fn numeric_exact_ignores_prose_commas_and_units() {
