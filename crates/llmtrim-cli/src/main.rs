@@ -48,6 +48,7 @@ const HELP_TEMPLATE: &str = "\
 Get started:
   setup      Set everything up and start saving (CA, env, autostart, daemon)
   status     Show the savings dashboard + interceptor health  [aliases: monitor, gain]
+  wrap       Launch an agent (claude, codex, …) routed through the interceptor
 
 Daemon:
   start      Start the background interceptor (no-op if already running)
@@ -158,6 +159,20 @@ enum Commands {
         /// Port to listen on. Omit to reuse the configured port (or 43117).
         #[arg(long)]
         port: Option<u16>,
+    },
+    /// Run an agent, guaranteeing its traffic routes through llmtrim
+    ///
+    /// After `setup`, tools route through llmtrim automatically, so you rarely need this. Use
+    /// it to be certain a session is compressed: `wrap` refuses to launch when HTTPS_PROXY
+    /// isn't pointing at llmtrim in this shell (a shell opened before `setup`, say), instead of
+    /// letting the agent run uncompressed without you noticing. When the environment is wired
+    /// but the daemon is down, it starts the daemon for you. `<agent>` is any binary on PATH
+    /// (claude, codex, cursor, aider, …); args after it (or after `--`) are forwarded verbatim,
+    /// and the agent's exit code is propagated.
+    Wrap {
+        /// The agent binary to launch, followed by its arguments (use `--` before flags).
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
     },
     /// Stop the background interceptor daemon
     Stop,
@@ -590,6 +605,7 @@ fn run() -> Result<()> {
                 }
             }
         }
+        Commands::Wrap { args } => llmtrim::wrap::run(args)?,
         Commands::Stop => match llmtrim::daemon::stop()? {
             Some(pid) => {
                 println!(
