@@ -31,6 +31,21 @@ Each stage's own token delta, the breakdown the binding now exposes and Headroom
 | tools | 0/5 | 0 |
 | cache | 5/5 | 0 |
 
+## Image compression (head-to-head)
+
+Verified against both codebases. On the bench corpus the image stage removed 0 tokens (the images were already under each provider's cap), so this is a capability comparison, not a savings claim on this set.
+
+| capability | llmtrim | Headroom |
+|---|---|---|
+| image-pixel compression | yes (Stage H) | none |
+| decode + Lanczos3 downscale | yes | none |
+| tile optimizer | yes (`snap_tile`) | none |
+
+- llmtrim ships image-pixel compression (Stage H): decode plus Lanczos3 downscale to per-provider effective-resolution caps (OpenAI 2048/768 with 512px tiles, Anthropic 1568/1.15MP, Gemini 3072), a tile optimizer (`snap_tile` for OpenAI's 512px tile pricing), EXIF-orientation pass-through, decode-bomb limits, JPEG q90, and a size-regression guard. Files: `crates/llmtrim-core/src/media.rs`, `stages/image.rs`.
+- Headroom (Rust port in `../headroom`) ships no image-pixel compression: no `image` crate or codec dependency, no resize/downscale code. It skips `image_url` blocks as non-compressible and only redacts base64 image bytes from logs.
+- Headroom's ONNX runtime is a text router, not an image router. The Rust port uses `fastembed` (bge-small-en text embeddings) plus `magika` (content classifier); the Python `headroom` package uses a ModernBERT encoder instead (see Method notes). The port enables fastembed's `image-models` feature flag but never calls it (dead flag).
+- The gap runs the other way: Headroom has ML/embedding semantic relevance routing; llmtrim is lexical-only (BM25 plus TextRank, `crates/llmtrim-core/src/stages/retrieve.rs`, no embeddings by spec). That gap is text routing, not images, and is a separate line item.
+
 ## Method notes
 
 - Latency is the median compress call, with a warm-up first so neither library is charged for one-time setup. llmtrim must run on the **release** wheel (`build-wheel.sh --release`); the debug build is several times slower and not representative.
