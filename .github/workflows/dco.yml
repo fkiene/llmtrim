@@ -1,0 +1,52 @@
+name: DCO
+
+# Verify every commit in a pull request carries a `Signed-off-by` line, certifying the
+# Developer Certificate of Origin (https://developercertificate.org/). CONTRIBUTING.md
+# states inbound=outbound (contributions are licensed under AGPL-3.0-only); this check
+# enforces that the sign-off is actually present rather than trusting the PR checkbox.
+
+on:
+  pull_request:
+
+# Least privilege: read the repo, nothing else.
+permissions:
+  contents: read
+
+jobs:
+  dco:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          # Need the full PR commit range, not just the tip.
+          fetch-depth: 0
+          ref: ${{ github.event.pull_request.head.sha }}
+
+      - name: Check Signed-off-by on every PR commit
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+          missing=0
+          # Require a well-formed Signed-off-by on every non-merge commit. Per the DCO, the
+          # sign-off only has to be present and well-formed; it need not match the commit
+          # author (sign-off email often differs after a rebase or a web-UI commit).
+          for sha in $(git rev-list --no-merges "$BASE_SHA".."$HEAD_SHA"); do
+            if git show -s --format='%(trailers:key=Signed-off-by)' "$sha" \
+              | grep -qiE '^Signed-off-by: .+ <[^@ ]+@[^@ ]+>'; then
+              continue
+            fi
+            if [ "$missing" -eq 0 ]; then
+              echo "Commits missing a well-formed 'Signed-off-by' line:"
+            fi
+            echo "  $(git show -s --format='%h %s' "$sha")"
+            missing=1
+          done
+          if [ "$missing" -ne 0 ]; then
+            echo
+            echo "Sign off your commits with 'git commit -s' (see CONTRIBUTING.md)."
+            echo "To fix existing commits: git rebase --signoff $BASE_SHA && git push --force-with-lease"
+            exit 1
+          fi
+          echo "All PR commits are signed off."

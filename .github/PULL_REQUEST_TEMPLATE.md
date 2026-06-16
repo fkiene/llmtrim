@@ -4,15 +4,22 @@
 
 <!-- What does this change do, and what problem does it solve? -->
 
+## Linked issue
+
+<!-- Large changes should be agreed in an issue first (see CONTRIBUTING.md). -->
+
+Closes #
+
 ## How it was verified
 
-<!-- Tests added/updated? `cargo test`, `cargo clippy`, `cargo fmt --check` all green? -->
+<!-- Tests added/updated? Did the check loop pass? -->
 
-- [ ] `cargo test` passes
-- [ ] `cargo clippy --all-targets -- -D warnings` is clean
-- [ ] `cargo fmt --all -- --check` is clean
+- [ ] `cargo fmt` is clean
+- [ ] `cargo clippy --features intercept` is clean
+- [ ] `cargo nextest run --features intercept` passes
 - [ ] New behavior is covered by a test
-- [ ] Commits are signed off (`git commit -s` — DCO, see CONTRIBUTING.md)
+- [ ] `CHANGELOG.md` has an entry under `## [Unreleased]` (or the change is invisible to users)
+- [ ] Commits are signed off (`git commit -s`, DCO, see CONTRIBUTING.md)
 
 ## Notes
 

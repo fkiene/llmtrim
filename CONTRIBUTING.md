@@ -3,6 +3,8 @@
 Thanks for your interest! llmtrim is a static, deterministic LLM prompt compressor:
 zero auxiliary model calls, every transform measured with the real target tokenizer.
 
+By participating you agree to the [Code of Conduct](CODE_OF_CONDUCT.md).
+
 ## Ground rules
 
 Four principles guide every change:
@@ -15,15 +17,32 @@ Four principles guide every change:
 
 ## Development
 
+The standard check loop (run all three before pushing):
+
 ```bash
-cargo build                  # debug build
-cargo test                   # run the suite (deterministic, no network)
-cargo clippy --all-targets -- -D warnings
-cargo fmt --all
-cargo build --features live  # the bench network path (async-openai + tokio)
+cargo fmt
+cargo clippy --features intercept
+cargo nextest run --features intercept
 ```
 
-CI runs fmt, clippy (`-D warnings`), and the test suite on Linux, macOS, and Windows. Keep all three green.
+Notes:
+
+- Use `cargo nextest run`, not `cargo test`: it runs in parallel and prints compact output.
+- Do not pass `-- -D warnings` to clippy. `warnings = "deny"` is already set in the
+  workspace `[lints.rust]`, and adding the flag forks the build cache between clippy and test.
+- Keep `--features intercept` consistent across commands so the incremental cache is reused.
+
+The suite is deterministic and hits no network. `cargo build --features live` builds the
+optional bench network path (async-openai + tokio); async is confined to that path and is
+not allowed in the core compression stages.
+
+Before the first push that opens a PR, also check coverage of the files you changed:
+
+```bash
+cargo llvm-cov --features intercept,mcp --summary-only
+```
+
+CI runs fmt, clippy, and the test suite on Linux, macOS, and Windows. Keep all three green.
 
 Enable the local git hooks (mirror of CI plus a gitleaks secret scan; needs `gitleaks` or Docker):
 
@@ -45,12 +64,35 @@ Stages implement the `Transform` trait (`src/gate.rs`) and are assembled in
 
 Lossy stages stay **off by default** and are quality-checked offline (see README §6).
 
+## Before a large change
+
+Open an issue first for anything beyond a small fix. Describe the problem and the approach
+you have in mind, and wait for a maintainer to confirm the direction. A short agreement up
+front saves a large PR from a redesign in review. New user-facing surfaces (a CLI mode, an
+MCP tool, an output channel) and any change to the published `llmtrim-core` public API need
+this step.
+
 ## Pull requests
 
 - One logical change per PR; every changed line should trace to the stated goal.
+- Link the issue the PR addresses (`Closes #123`).
 - Add or update tests for new behavior.
-- Run fmt + clippy + tests before pushing.
+- Add a `CHANGELOG.md` entry under `## [Unreleased]` for any user-observable change, written
+  for users. Skip it only for invisible changes (cosmetic, docs, tests, no-op refactors).
+- Run the check loop above before pushing.
 - Fill in the PR template.
+
+## Commit hygiene
+
+One coherent change per commit, with a message that explains it for a reviewer. Fold every
+fixup, "wip", or review-fix tweak into the commit it belongs to before you push. Force-push a
+rewritten branch with `--force-with-lease`, never a bare `--force`.
+
+## Review
+
+A maintainer reviews each PR and may ask you to split a large change into smaller pieces or to
+move ecosystem-specific logic out of `llmtrim-core`. Expect a first response within a week. A
+request for changes is about the code, not about you.
 
 ## Sign your commits (DCO)
 
