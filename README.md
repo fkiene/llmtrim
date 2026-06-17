@@ -394,15 +394,9 @@ Three neighbors each compress one layer of the problem; llmtrim does the whole r
 | Overhead added / request | **<10 ms** | 52 ms median | <10 ms | n/a |
 | Prompt overhead injected | **19 tokens** | n/a | n/a | 949 tokens |
 
-Headroom is the closest comparison, so we measured it directly: both libraries run through their Python APIs on the same inputs and the same `o200k_base` tokenizer.
+Headroom is the closest comparison, so we measured it head to head at matched aggressiveness on the same `o200k_base` tokenizer. **Headroom compresses harder.** It removed more tokens than llmtrim at every matched setting we tried, for example 74% vs 58% on aggressive tool output.
 
-| on tool output | llmtrim | Headroom |
-|---|:--:|:--:|
-| input tokens removed | **84%** | 36% |
-| compress latency (warm median) | **~4 ms** | ~14 ms |
-| per-stage breakdown of where tokens went | yes | no |
-
-llmtrim removes more, compresses faster (pure algorithm, no model to load), and reports which stage removed what. Latency jitters run to run; the [artifact](crates/llmtrim-cli/bench/snapshots/vs-headroom/README.md#head-to-head-headroom) holds the committed warm medians. The gap is wider on everyday traffic: Headroom only rewrites tool results, and runs a local ModernBERT model to do it, so on plain chat, RAG, and code requests it mostly passes through while llmtrim still compresses. Method notes and full tables are in [bench/README.md](crates/llmtrim-cli/bench/README.md#head-to-head-headroom); reproduce with `bench/scripts/vs_headroom.py`.
+The two tools optimize for different things. Headroom maximizes raw input compression. llmtrim is quality-gated: it reverts any cut that drops answer-relevant content, and it also compresses output and leaves the cached prefix alone, which Headroom doesn't do. In our small answer-survival runs llmtrim held the answer better, but those cases lean on llmtrim's own tool-output corpus, so we don't lead with a quality number. The per-group tables, the caveats, and the repro are in the [artifact](crates/llmtrim-cli/bench/snapshots/vs-headroom/README.md); reproduce with `bench/scripts/vs_headroom.py`.
 
 They also stack: RTK shrinks the CLI output, then llmtrim compresses the tool schemas Claude Code resends on top of it. Detailed head-to-heads with [RTK](https://github.com/rtk-ai/rtk), [Headroom](https://github.com/chopratejas/headroom), and [caveman](https://github.com/JuliusBrussee/caveman) are in [crates/llmtrim-cli/bench/README.md](crates/llmtrim-cli/bench/README.md).
 
