@@ -7,6 +7,11 @@ on:
 permissions:
   contents: write
 
+# Retry transient crates.io download blips (curl 18 "Transferred a partial file" etc.) instead
+# of failing a job outright. Applies to every cargo invocation in the workflow (fetch, build).
+env:
+  CARGO_NET_RETRY: "10"
+
 jobs:
   # One published GitHub Release per tag, body taken from the matching CHANGELOG.md section.
   # Runs before the build matrix so every binary uploads into a release that already has notes.
@@ -34,8 +39,34 @@ jobs:
           title: llmtrim $version
           token: ${{ secrets.GITHUB_TOKEN }}
 
-  build:
+  # Generate the third-party license NOTICE exactly once, not per-target. `cargo metadata`
+  # returns the full cross-platform dependency set (no --filter-platform), so one run on Linux
+  # produces the same union every target needs — running it in all 6 build legs was pure
+  # redundancy that multiplied the flake surface. `cargo fetch --locked` warms the cache so the
+  # generator (now `--offline`) is network-free; the build legs consume the result as an artifact.
+  license-notice:
     needs: create-release
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.x'
+      # Pin the toolchain like every other rust job (publish-crate etc.) instead of relying on
+      # the runner image happening to preinstall cargo.
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Warm the cargo cache (the only network step here)
+        run: cargo fetch --locked
+      - name: Generate third-party license notice
+        run: python3 tools/gen_third_party_licenses.py
+      - uses: actions/upload-artifact@v4
+        with:
+          name: third-party-licenses
+          path: THIRD-PARTY-LICENSES.md
+          if-no-files-found: error
+
+  build:
+    needs: [create-release, license-notice]
     name: ${{ matrix.target }}
     permissions:
       contents: write
@@ -60,21 +91,17 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v6
-      # setup-python guarantees `python3` on every runner (Windows ships `python`, not
-      # `python3`) for the license-notice generator below.
-      - uses: actions/setup-python@v6
-        with:
-          python-version: '3.x'
       # aws-lc-rs assembles its x86 asm with NASM. Only x86_64 Windows needs it; the ARM64
       # runner uses a different assembler, and no arm64 NASM build exists.
       - name: Install NASM (Windows x64)
         if: runner.os == 'Windows' && runner.arch == 'X64'
         uses: ilammy/setup-nasm@v1
-      # Distributing a compiled binary statically links every dependency, so the archive
-      # must carry the AGPL license text + third-party attribution notices. The NOTICE is
-      # generated here (not committed) by harvesting LICENSE files from the cargo cache.
-      - name: Generate third-party license notice
-        run: python3 tools/gen_third_party_licenses.py
+      # The NOTICE is generated once in the `license-notice` job (the same union for every
+      # target) and pulled in here, so the archive can bundle it via `include` below.
+      - uses: actions/download-artifact@v4
+        with:
+          name: third-party-licenses
+          path: .
       # Cross-compiles, strips, archives as llmtrim-<target>.tar.gz (.zip on Windows) with a
       # matching .sha256, and uploads to the GitHub Release for this tag. The archive name
       # matches what install.sh and install.ps1 download. `include` bundles LICENSE + NOTICE.

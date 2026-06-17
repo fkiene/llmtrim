@@ -11,8 +11,12 @@ import json, os, re, subprocess, glob, hashlib
 # repo root = parent of this script's tools/ dir
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
+# `--offline`: the cache must already hold every crate (the CI release job runs
+# `cargo fetch --locked` first). This makes the harvest physically network-free, so it
+# can't fail on a transient crates.io download (curl 18 "Transferred a partial file").
+# Run `cargo fetch` yourself first if your local cache is cold.
 meta = json.loads(subprocess.check_output(
-    ["cargo", "metadata", "--format-version", "1", "--all-features", "--quiet"],
+    ["cargo", "metadata", "--format-version", "1", "--all-features", "--offline", "--quiet"],
     cwd=ROOT))
 ws = set(meta.get("workspace_members", []))
 
@@ -54,6 +58,18 @@ for p in meta["packages"]:
         texts[key]["crates"].add(f"{name} {ver}")
 
 pkgs.sort(key=lambda x: x[0].lower())
+
+# Refuse to write a degenerate NOTICE. The archives bundle this file to satisfy AGPL/third-party
+# attribution, so a near-empty one (broken metadata graph, cold/unextracted cache, no LICENSE
+# files harvested) is a compliance failure, not a smaller file — fail loudly instead of shipping
+# it. Floors are well below the real counts (~574 deps / ~295 texts) so normal dep churn never
+# trips them; a genuine breakage drops far past them.
+if len(pkgs) < 100 or len(texts) < 50:
+    raise SystemExit(
+        f"refusing to write a degenerate THIRD-PARTY-LICENSES.md: {len(pkgs)} deps, "
+        f"{len(texts)} license texts (expected hundreds). Is the cargo cache warm "
+        f"(`cargo fetch --locked`) and is `cargo metadata` resolving the full graph?"
+    )
 
 out = []
 out.append("# Third-Party Licenses\n")
