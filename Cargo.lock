@@ -2109,7 +2109,7 @@ dependencies = [
 
 [[package]]
 name = "llmtrim"
-version = "0.1.13-dev"
+version = "0.1.13"
 dependencies = [
  "anyhow",
  "async-openai",
@@ -2150,7 +2150,7 @@ dependencies = [
 
 [[package]]
 name = "llmtrim-core"
-version = "0.1.13-dev"
+version = "0.1.13"
 dependencies = [
  "anyhow",
  "base64",
@@ -2188,7 +2188,7 @@ dependencies = [
 
 [[package]]
 name = "llmtrim-uniffi"
-version = "0.1.13-dev"
+version = "0.1.13"
 dependencies = [
  "llmtrim-core",
  "serde_json",

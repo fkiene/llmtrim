@@ -6,6 +6,8 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.1.13] - 2026-06-17
+
 ### Added
 - **`llmtrim discover` finds where compressible tokens still escape compression.** A
   read-only scan over the before/after capture corpus (written when `LLMTRIM_CAPTURE_DIR`
@@ -454,7 +456,8 @@ bill, never a broken call.
   (6 targets with SLSA build provenance), CI on Linux/macOS/Windows with secret
   scanning, license compliance, and MSRV gates.
 
-[Unreleased]: https://github.com/fkiene/llmtrim/compare/v0.1.12...HEAD
+[Unreleased]: https://github.com/fkiene/llmtrim/compare/v0.1.13...HEAD
+[0.1.13]: https://github.com/fkiene/llmtrim/compare/v0.1.12...v0.1.13
 [0.1.12]: https://github.com/fkiene/llmtrim/compare/v0.1.11...v0.1.12
 [0.1.11]: https://github.com/fkiene/llmtrim/compare/v0.1.10...v0.1.11
 [0.1.10]: https://github.com/fkiene/llmtrim/compare/v0.1.9...v0.1.10
