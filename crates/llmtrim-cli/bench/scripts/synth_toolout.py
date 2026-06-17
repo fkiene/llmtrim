@@ -220,6 +220,82 @@ cases.append(case("adv-aggregate-count",
                   f"count={n_warn}",
                   adversarial=True))
 
+# ====================================================================================
+# Broader non-adversarial cases — raise n and vary the content shape (large JSON,
+# mixed log+grep, big multi-file diff, structured table, stack trace). Each gold sits
+# in a line a faithful compressor keeps, so all three tools (original / llmtrim /
+# Headroom) get a fair shot at the answer; these widen the corpus so a couple of fat
+# blobs can't carry the token-savings mean.
+# ====================================================================================
+
+# Large JSON tool result with one anomalous record carrying the answer.
+json_recs = []
+for i in range(220):
+    r = {"id": i, "ts": f"2026-05-{i % 28 + 1:02d}T08:{i % 60:02d}:00Z",
+         "service": f"svc-{i % 6}", "status": "ok", "latency_ms": 5 + i % 40}
+    if i == 133:
+        r = {"id": 133, "ts": "2026-05-22T08:13:00Z", "service": "billing",
+             "status": "error", "latency_ms": 9100,
+             "detail": "stripe webhook signature mismatch for account acct_9F2K"}
+    json_recs.append(r)
+cases.append(case("json-error-account",
+                  json.dumps({"results": json_recs}),
+                  "Which account had a stripe webhook signature mismatch?",
+                  "acct_9F2K"))
+
+json_recs2 = []
+for i in range(180):
+    json_recs2.append({"region": f"r{i % 8}", "requests": 1000 + i, "p99_ms": 20 + i % 30})
+json_recs2.insert(91, {"region": "eu-west-1", "requests": 1000000, "p99_ms": 4200,
+                       "alert": "p99 SLA breach", "owner": "team-payments"})
+cases.append(case("json-sla-owner",
+                  json.dumps({"metrics": json_recs2}),
+                  "Which team owns the region with the p99 SLA breach?",
+                  "team-payments"))
+
+# Mixed blob: build log, then a grep block, then a stack frame — answer in the stack.
+mixed = "\n".join(f"INFO  [{i:03d}] linking object obj_{WORDS[i % len(WORDS)]}.o" for i in range(60))
+mixed += "\n" + "\n".join(
+    f"src/{WORDS[i % len(WORDS)]}/route.rs:{20 + i}:    dispatch(req_{i});" for i in range(40))
+mixed += "\nthread 'worker-3' panicked at src/scheduler.rs:204: deadlock detected on lock `queue_mutex`"
+cases.append(case("mixed-panic-lock",
+                  mixed,
+                  "Which lock was reported as deadlocked in the panic?",
+                  "queue_mutex"))
+
+# Big multi-file diff where exactly one hunk renames a public symbol.
+bigdiff = ""
+for i in range(12):
+    bigdiff += diff_file(f"src/leaf_{WORDS[i]}.rs", f"let x = {i};", f"let x = {i} + 1;", ctx[:6])
+    bigdiff += "\n"
+bigdiff += diff_file("src/api.rs",
+                     "pub fn get_user(id: u64) -> User",
+                     "pub fn fetch_user(id: u64) -> User", ctx[:6])
+cases.append(case("diff-rename-public",
+                  bigdiff,
+                  "What is the new name of the renamed public function get_user?",
+                  "fetch_user"))
+
+# docker ps / ls style table with one container in a crash loop.
+table_rows = [f"{'a1b2c3d4e5f' + str(i):14}  svc-{i % 7:<8}  Up {i % 24}h  0.0.0.0:{8000 + i}->8080/tcp"
+              for i in range(90)]
+table_rows.insert(48, "deadbeefcafe   payments  Restarting (137) 12s ago   0.0.0.0:9090->8080/tcp")
+cases.append(case("table-crashloop",
+                  "CONTAINER ID    IMAGE     STATUS    PORTS\n" + "\n".join(table_rows),
+                  "Which image is in a Restarting (crash loop) state?",
+                  "payments"))
+
+# Long stack trace with the root cause line at the bottom.
+stack = ["Traceback (most recent call last):"]
+for i in range(40):
+    stack.append(f'  File "/app/svc/{WORDS[i % len(WORDS)]}.py", line {100 + i}, in handler_{i}')
+    stack.append(f"    return process_{i}(payload)")
+stack.append("ValueError: invalid currency code 'XZZ' in order ord-5521")
+cases.append(case("stack-root-cause",
+                  "\n".join(stack),
+                  "Which invalid currency code raised the ValueError?",
+                  "XZZ"))
+
 OUT.write_text("\n".join(json.dumps(c) for c in cases) + "\n")
 n_adv = sum(1 for c in cases if c.get("adversarial"))
 print(f"wrote {len(cases)} cases ({n_adv} adversarial) -> {OUT}")
