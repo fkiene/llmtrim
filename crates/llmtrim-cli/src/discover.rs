@@ -15,6 +15,7 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
+use llmtrim_core::cache_zone;
 use llmtrim_core::ir::{ProviderKind, Request};
 use llmtrim_core::provider::{self, Provider, Role};
 use llmtrim_core::tokenizer::{self, TokenCounter};
@@ -22,6 +23,15 @@ use serde::Serialize;
 use serde_json::Value;
 
 use crate::ui;
+
+/// Per-bucket counts from one request body: total residual plus the live-zone portion
+/// (tokens after the last `cache_control` marker, which compression may still rewrite).
+#[derive(Default)]
+struct Counts {
+    tokens: u64,
+    bytes: u64,
+    live_tokens: u64,
+}
 
 /// One residual bucket: a block kind, optionally narrowed to a tool name (tool results).
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Serialize)]
@@ -38,6 +48,10 @@ struct BucketStat {
     residual_tokens: u64,
     /// Bytes (UTF-8) surviving in the compressed requests.
     residual_bytes: u64,
+    /// Residual tokens in the LIVE zone — after the last `cache_control` marker, so the
+    /// content stages may still rewrite them. This is the addressable headroom; the rest
+    /// sits in the frozen (cached) prefix that compression deliberately never touches.
+    live_tokens: u64,
     /// Tokens in the original (`before`) requests, same bucket.
     before_tokens: u64,
     /// Number of captures that contributed at least one segment to this bucket.
@@ -57,6 +71,9 @@ struct Report {
     realized_savings_pct: f64,
     /// Total residual tokens across every bucket (the denominator for each row's share).
     total_residual_tokens: u64,
+    /// Residual tokens in the LIVE zone across every bucket — the share of the residual
+    /// that is actually addressable (the rest is in the cache-frozen prefix).
+    live_residual_tokens: u64,
     rows: Vec<ReportRow>,
 }
 
@@ -69,6 +86,11 @@ struct ReportRow {
     residual_bytes: u64,
     /// Share of the corpus-wide residual this bucket holds, percent.
     residual_share_pct: f64,
+    /// Residual tokens of this bucket that sit in the LIVE (uncached) zone — the part a
+    /// content stage could still compress. The headroom number that actually matters.
+    live_tokens: u64,
+    /// Percent of this bucket's residual that is live (the rest is cache-frozen).
+    live_pct: f64,
     /// Before→after token reduction already applied to this bucket, percent (negative
     /// would mean a stage grew it, e.g. an injected legend).
     compressed_pct: f64,
@@ -144,6 +166,7 @@ fn scan(dir: &Path, by_tool: bool, limit: Option<usize>) -> Result<Report> {
     }
 
     let total_residual: u64 = buckets.values().map(|s| s.residual_tokens).sum();
+    let live_residual: u64 = buckets.values().map(|s| s.live_tokens).sum();
     let mut rows: Vec<ReportRow> = buckets
         .into_iter()
         .map(|(k, s)| ReportRow {
@@ -152,6 +175,8 @@ fn scan(dir: &Path, by_tool: bool, limit: Option<usize>) -> Result<Report> {
             residual_tokens: s.residual_tokens,
             residual_bytes: s.residual_bytes,
             residual_share_pct: pct(s.residual_tokens, total_residual),
+            live_tokens: s.live_tokens,
+            live_pct: pct(s.live_tokens, s.residual_tokens),
             compressed_pct: ui::saved_pct(s.before_tokens as f64, s.residual_tokens as f64),
             captures: s.captures,
         })
@@ -171,6 +196,7 @@ fn scan(dir: &Path, by_tool: bool, limit: Option<usize>) -> Result<Report> {
         input_after_tokens: input_after,
         realized_savings_pct: ui::saved_pct(input_before as f64, input_after as f64),
         total_residual_tokens: total_residual,
+        live_residual_tokens: live_residual,
         rows,
     })
 }
@@ -202,18 +228,20 @@ fn accumulate(
     let counter = tokenizer::counter_for(kind, env.get("model").and_then(Value::as_str))
         .context("build token counter")?;
 
-    // Bucket the after body (residual) and the before body (delta context), then merge.
-    let after_b = bucketize(kind, &after, counter.as_ref(), by_tool);
-    let before_b = bucketize(kind, &before, counter.as_ref(), by_tool);
+    // Bucket the after body (residual, with the live/frozen split) and the before body
+    // (token totals only, for the delta), then merge.
+    let after_b = bucketize(kind, &after, counter.as_ref(), by_tool, true);
+    let before_b = bucketize(kind, &before, counter.as_ref(), by_tool, false);
 
-    for (key, (tokens, bytes)) in &after_b {
+    for (key, c) in &after_b {
         let stat = buckets.entry(key.clone()).or_default();
-        stat.residual_tokens += tokens;
-        stat.residual_bytes += bytes;
+        stat.residual_tokens += c.tokens;
+        stat.residual_bytes += c.bytes;
+        stat.live_tokens += c.live_tokens;
         stat.captures += 1;
     }
-    for (key, (tokens, _bytes)) in &before_b {
-        buckets.entry(key.clone()).or_default().before_tokens += tokens;
+    for (key, c) in &before_b {
+        buckets.entry(key.clone()).or_default().before_tokens += c.tokens;
     }
 
     let input_before = env.get("input_before").and_then(Value::as_u64).unwrap_or(0);
@@ -239,11 +267,16 @@ fn bucketize(
     body: &Value,
     counter: &dyn TokenCounter,
     by_tool: bool,
-) -> BTreeMap<BucketKey, (u64, u64)> {
+    track_live: bool,
+) -> BTreeMap<BucketKey, Counts> {
     let req = Request::from_value(kind, body.clone());
     let prov = provider::for_kind(kind);
     let id2name = tool_id_names(body);
-    let mut out: BTreeMap<BucketKey, (u64, u64)> = BTreeMap::new();
+    // Pointers inside the cache-frozen prefix — the segments compression never rewrites.
+    // Empty when the request carries no `cache_control` markers (everything is live). Only
+    // the residual (`after`) pass needs the live split; the before pass skips this work.
+    let frozen = track_live.then(|| cache_zone::frozen_pointers(&req, prov.as_ref()));
+    let mut out: BTreeMap<BucketKey, Counts> = BTreeMap::new();
 
     for ptr in prov.content_text_pointers(&req) {
         let Some(text) = req.get_str(&ptr) else {
@@ -251,22 +284,35 @@ fn bucketize(
         };
         let (kind_label, tool) = classify(&req, prov.as_ref(), &ptr, &id2name);
         let key = bucket_key(kind_label, tool, by_tool);
+        let tokens = counter.count(text) as u64;
         let slot = out.entry(key).or_default();
-        slot.0 += counter.count(text) as u64;
-        slot.1 += text.len() as u64;
+        slot.tokens += tokens;
+        slot.bytes += text.len() as u64;
+        if let Some(frozen) = &frozen
+            && !frozen.contains(&ptr)
+        {
+            slot.live_tokens += tokens;
+        }
     }
 
-    // Tool schemas: the `tools` array is resent every call and counted by the proxy.
+    // Tool schemas: the `tools` array is resent every call and counted by the proxy. It
+    // precedes every message, so it is live only when nothing is cache-frozen at all.
     if let Some(tools) = body.get("tools").filter(|t| !t.is_null()) {
         let s = tools.to_string();
+        let tokens = counter.count(&s) as u64;
         let slot = out
             .entry(BucketKey {
                 kind: "tool_schema".to_string(),
                 tool: None,
             })
             .or_default();
-        slot.0 += counter.count(&s) as u64;
-        slot.1 += s.len() as u64;
+        slot.tokens += tokens;
+        slot.bytes += s.len() as u64;
+        if let Some(frozen) = &frozen
+            && frozen.is_empty()
+        {
+            slot.live_tokens += tokens;
+        }
     }
     out
 }
@@ -312,7 +358,7 @@ fn classify(
         if segs.get(3) == Some(&"content") {
             // String content (`/messages/{i}/content`): a tool message is a tool_result.
             if segs.len() == 4 {
-                if role_label(prov, req, ptr) == "tool" {
+                if prov.role_at(req, ptr) == Some(Role::Tool) {
                     let name = raw
                         .pointer(&format!("/messages/{i}/tool_call_id"))
                         .and_then(Value::as_str)
@@ -409,13 +455,15 @@ fn render(report: &Report, by_tool: bool, color: bool) -> String {
         color,
         "discover",
         &[format!(
-            "{} captures ({} skipped)   input {} → {} tokens   realized savings {:.1}%   residual {} tokens",
+            "{} captures ({} skipped)   input {} → {} tokens   realized savings {:.1}%   residual {} tokens ({} live / {:.1}% addressable)",
             ui::commas(report.captures as i64),
             ui::commas(report.skipped as i64),
             ui::commas(report.input_before_tokens as i64),
             ui::commas(report.input_after_tokens as i64),
             report.realized_savings_pct,
             ui::commas(report.total_residual_tokens as i64),
+            ui::commas(report.live_residual_tokens as i64),
+            pct(report.live_residual_tokens, report.total_residual_tokens),
         )],
     ));
     out.push('\n');
@@ -427,6 +475,8 @@ fn render(report: &Report, by_tool: bool, color: bool) -> String {
             label,
             "residual tok",
             "share%",
+            "live tok",
+            "live%",
             "compressed%",
             "bytes",
             "captures",
@@ -441,6 +491,8 @@ fn render(report: &Report, by_tool: bool, color: bool) -> String {
             name,
             ui::commas(r.residual_tokens as i64),
             format!("{:.1}", r.residual_share_pct),
+            ui::commas(r.live_tokens as i64),
+            format!("{:.1}", r.live_pct),
             format!("{:.1}", r.compressed_pct),
             ui::human(r.residual_bytes as i64),
             ui::commas(r.captures as i64),
@@ -462,9 +514,9 @@ mod tests {
 
     #[test]
     fn skips_empty_and_malformed_captures() {
-        // The corpus has four files: two valid captures, one empty, one broken JSON.
+        // The corpus has five files: three valid captures, one empty, one broken JSON.
         let report = scan(&fixtures(), false, None).unwrap();
-        assert_eq!(report.captures, 2);
+        assert_eq!(report.captures, 3);
         assert_eq!(report.skipped, 2);
     }
 
@@ -492,6 +544,15 @@ mod tests {
             .find(|r| r.kind == "tool_result" && r.tool.as_deref() == Some("Bash"));
         assert!(bash.is_some(), "expected a tool_result:Bash bucket");
         assert!(bash.unwrap().residual_tokens > 0);
+        // The OpenAI tool message (role "tool", string content) must resolve to Bash via its
+        // tool_call_id, not fall into the `unknown` bucket.
+        assert!(
+            !report
+                .rows
+                .iter()
+                .any(|r| r.tool.as_deref() == Some("unknown")),
+            "no tool_result should be left unattributed"
+        );
     }
 
     #[test]
@@ -512,11 +573,13 @@ mod tests {
         let report = scan(&fixtures(), true, None).unwrap();
         let out = render(&report, true, false); // no color for a stable assertion
         // Header line carries the corpus totals.
-        assert!(out.contains("2 captures"), "header totals:\n{out}");
+        assert!(out.contains("3 captures"), "header totals:\n{out}");
         assert!(out.contains("realized savings"), "header savings:\n{out}");
-        // The ranked table names the per-tool bucket and the column header.
+        assert!(out.contains("addressable"), "header live split:\n{out}");
+        // The ranked table names the per-tool bucket and the live-headroom columns.
         assert!(out.contains("tool_result:Bash"), "by-tool row:\n{out}");
         assert!(out.contains("residual tok"), "table header:\n{out}");
+        assert!(out.contains("live tok"), "live column:\n{out}");
         // Rows are ranked by residual descending — the first data row holds the most.
         let first = report.rows.first().unwrap();
         assert!(
@@ -526,5 +589,37 @@ mod tests {
                 .all(|r| r.residual_tokens <= first.residual_tokens),
             "rows must be sorted by residual descending"
         );
+    }
+
+    #[test]
+    fn cache_control_freezes_residual_from_live_count() {
+        // Two of the three valid captures carry no cache_control, so all their residual is
+        // live; the third freezes its first user turn behind a cache_control marker, so its
+        // frozen text must be excluded from the live count. Net: live < total residual.
+        let report = scan(&fixtures(), false, None).unwrap();
+        assert!(
+            report.live_residual_tokens < report.total_residual_tokens,
+            "the cache_control fixture should leave some residual frozen: live {} vs total {}",
+            report.live_residual_tokens,
+            report.total_residual_tokens
+        );
+        // The frozen user turn ("FROZEN long user context…") is larger than the live one, so
+        // the user bucket's live portion is a strict subset of its residual.
+        let user = report.rows.iter().find(|r| r.kind == "user").unwrap();
+        assert!(
+            user.live_tokens < user.residual_tokens,
+            "user bucket should have frozen residual: live {} vs residual {}",
+            user.live_tokens,
+            user.residual_tokens
+        );
+    }
+
+    #[test]
+    fn no_cache_control_means_all_residual_is_live() {
+        // Limit to the first two captures (neither carries cache_control) — every residual
+        // token is in the live zone, so live == total.
+        let report = scan(&fixtures(), false, Some(2)).unwrap();
+        assert_eq!(report.captures, 2);
+        assert_eq!(report.live_residual_tokens, report.total_residual_tokens);
     }
 }

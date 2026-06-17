@@ -6,6 +6,18 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+- **`llmtrim discover` splits residual into live vs cache-frozen.** Each bucket gains `live
+  tok` / `live%` columns and the header shows a corpus-wide addressable total. Only residual
+  after the last `cache_control` marker can still be compressed; the frozen cached prefix is
+  reported separately so the ranking reflects reachable headroom.
+
+### Fixed
+- **`llmtrim discover --by-tool` now attributes OpenAI tool results to their tool.** A
+  `role: "tool"` message with string content was never matched to its `tool_call_id`, so its
+  residual landed in the `unknown` bucket instead of the tool that produced it. Anthropic
+  `tool_result` blocks were already attributed correctly.
+
 ## [0.1.13] - 2026-06-17
 
 ### Added

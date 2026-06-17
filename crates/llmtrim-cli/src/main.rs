@@ -274,9 +274,10 @@ enum Commands {
     /// Read-only over the before/after captures (written when `LLMTRIM_CAPTURE_DIR` is set).
     /// Re-buckets each request's token surface by block kind (system/user/assistant/
     /// tool_result/tool_call_args/document/tool_schema) and, with `--by-tool`, by the tool
-    /// behind each tool_result. Each row shows the residual still in the compressed request
-    /// and how much compression already removed (before→after) — so the next compression
-    /// target is picked from real traffic. `--json` for the machine-readable report.
+    /// behind each tool_result. Each row shows the residual still in the compressed request,
+    /// how much of it is in the LIVE (uncached) zone that compression can still reach, and how
+    /// much compression already removed (before→after) — so the next target is picked from
+    /// real traffic. `--json` for the machine-readable report.
     Discover {
         /// Corpus directory. Omit to use `$LLMTRIM_CAPTURE_DIR` or `~/.llmtrim/capture`.
         #[arg(long)]
