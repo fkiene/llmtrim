@@ -23,6 +23,18 @@ All notable changes to this project are documented here. The format follows
   the daemon for you if the environment is wired but the interceptor is down.
 
 ### Fixed
+- **`setup` now sets `NO_PROXY` so localhost and LAN traffic bypasses the interceptor.** The
+  managed shell-profile block (and `HKCU\Environment` on Windows) wired `HTTPS_PROXY` for the
+  whole user, which made *every* proxy-aware program — not just LLM tools — funnel its local
+  and LAN calls at `127.0.0.1:<port>`, where they failed with "couldn't connect" whenever the
+  interceptor was down or on a stale port (e.g. Plex device discovery, localhost dev servers).
+  The block now also exports `NO_PROXY`/`no_proxy` (both casings — curl and Go only read the
+  lowercase form): `localhost`, `127.0.0.1`, `::1`, `*.local`, plus the private LAN CIDR ranges.
+  The literal hosts and `*.local` are honored by nearly every client; CIDR-based LAN bypass is
+  best-effort (curl and Node/undici match only exact host or domain suffix, not CIDR). Existing
+  installs self-heal: the daemon rewrites a pre-`NO_PROXY` block in place when it starts at
+  login (reusing the wired port), so no `setup` re-run is needed. Already-running apps still
+  need a one-time restart to pick up the new environment.
 - **`tool_trim` stage now appears as `"tool_trim"` in capture `stages` lists** (was `"tools"`).
   When description trimming is active (`agent`/`aggressive` presets), the `ToolStage` stage name
   is now `"tool_trim"` instead of `"tools"`. This lets QA auditors correctly identify

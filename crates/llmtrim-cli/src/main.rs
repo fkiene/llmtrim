@@ -573,6 +573,12 @@ fn run() -> Result<()> {
                 llmtrim::autostart::hide_console_window();
             }
             if supervised {
+                // Self-heal an env block wired before the NO_PROXY bypass existed, so installs
+                // predating it stop funneling LAN/local traffic at the interceptor — without the
+                // user re-running `setup`. Gated to the supervised daemon (the at-login path):
+                // a foreground `llmtrim serve` must not rewrite the user's shell profiles.
+                // Best-effort: never let it stop the proxy coming up.
+                let _ = llmtrim::setup::heal_managed_env();
                 llmtrim::serve::run_supervised(port)?;
             } else {
                 llmtrim::serve::run(port)?;

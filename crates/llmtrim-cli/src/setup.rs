@@ -17,6 +17,23 @@ use crate::ui::{self, Tone};
 const BEGIN: &str = "# >>> llmtrim >>>";
 const END: &str = "# <<< llmtrim <<<";
 
+/// Hosts/ranges that must bypass the interceptor: loopback, link-local, and the private LAN
+/// ranges (RFC-1918 + IPv6 ULA). llmtrim only MITMs a fixed set of public LLM API hosts (the
+/// CA's domain set — see `serve::should_intercept`), so routing local or LAN traffic through the
+/// proxy can only break it: localhost dev servers, intranet, and local device discovery
+/// (Plex/DLNA, printers, NAS). Without `NO_PROXY`, *every* proxy-aware program on the machine
+/// (not just LLM tools) funnels its local and LAN calls at `127.0.0.1:<port>` and they fail with
+/// "couldn't connect" whenever the interceptor is down or on a stale port. Set alongside
+/// `HTTPS_PROXY` so the bypass travels with the proxy.
+///
+/// Portability note: the literal hosts (`localhost`, `127.0.0.1`, `::1`) and the `*.local` suffix
+/// are honored by virtually every client. The **CIDR** ranges are not universal — curl and
+/// Node/undici match only by exact host or domain suffix, not CIDR (Go and some others honor
+/// CIDR). There is no portable way to express "all of 192.168.0.0/16" in `NO_PROXY`, so LAN
+/// bypass *by raw IP* is best-effort on non-CIDR clients; loopback/`localhost`/`*.local` is the
+/// portable, high-value core. The CIDR entries are harmless where ignored.
+const NO_PROXY: &str = "localhost,127.0.0.1,::1,10.0.0.0/8,172.16.0.0/12,192.168.0.0/16,169.254.0.0/16,fd00::/8,*.local";
+
 /// Default interceptor port; the scan for a free port starts here. Chosen to be unassigned
 /// by IANA and below the OS ephemeral range (so it isn't grabbed as a transient client port),
 /// avoiding clashes with common dev servers. Single source of truth — `main.rs` references it.
@@ -180,6 +197,102 @@ pub fn configured_port() -> Option<u16> {
             .and_then(|(p, _)| std::fs::read_to_string(p).ok())
             .and_then(|t| parse_proxy_port(&t))
     }
+}
+
+/// Self-heal an existing managed env block that predates the `NO_PROXY` bypass, *in place* and
+/// without re-running `setup`. Called once when the daemon comes up at login: an install wired
+/// before the `NO_PROXY` fix has `HTTPS_PROXY` set but no bypass, so every proxy-aware app funnels
+/// its LAN/local traffic at the dead-for-LAN interceptor. We rewrite only blocks that already
+/// exist and lack the bypass — never create a block (that's `setup`'s job), never touch an install
+/// that's already current. Best-effort by design: a heal failure must never stop the proxy serving.
+///
+/// Note the OS limit this can't beat: a process inherits its env at launch, so already-running
+/// apps (Plex, open shells) keep the old, bypass-less env until they restart. This fixes what
+/// starts *after* the heal; the one-time restart of running apps is unavoidable.
+pub fn heal_managed_env() -> Result<Vec<PathBuf>> {
+    #[cfg(windows)]
+    {
+        let env = user_env_key()?;
+        // Only heal a wired install that predates the bypass: HTTPS_PROXY present, NO_PROXY absent.
+        if !has_proxy_in(&env) || env.get_value::<String, _>("NO_PROXY").is_ok() {
+            return Ok(vec![]);
+        }
+        let proxy: String = env.get_value("HTTPS_PROXY").context("read HTTPS_PROXY")?;
+        let ca: String = env.get_value("NODE_EXTRA_CA_CERTS").unwrap_or_default();
+        set_env_in(&env, &proxy, &ca)?; // re-set adds NO_PROXY alongside the existing values
+        broadcast_env_change();
+        Ok(vec![PathBuf::from("HKCU\\Environment")])
+    }
+    #[cfg(not(windows))]
+    {
+        let Ok(home) = std::env::var("HOME") else {
+            return Ok(vec![]);
+        };
+        // Reconstruct the env the block should now carry from what's already wired.
+        let Some(port) = configured_port() else {
+            return Ok(vec![]); // nothing wired → nothing to heal
+        };
+        let proxy = format!("http://127.0.0.1:{port}");
+        let ca = crate::serve::ca_cert_path()?.to_string_lossy().into_owned();
+        heal_profiles_in(std::path::Path::new(&home), &proxy, &ca)
+    }
+}
+
+/// Inner seam for [`heal_managed_env`] (POSIX), against `base` as the home dir so tests stay
+/// hermetic. Rewrites the managed block only in profiles that already contain it AND lack the
+/// `NO_PROXY` bypass; returns the paths actually rewritten.
+/// Does `s` contain a *well-formed* managed block (`BEGIN`…`END`) that lacks the `NO_PROXY`
+/// bypass? Only such a block is healable: a malformed BEGIN-without-END is skipped (rewriting it
+/// would stack a duplicate), an already-current block is skipped, and a `NO_PROXY` the user set
+/// *outside* the markers does not count (it must be inside the block we manage). Pure/testable.
+#[cfg(not(windows))]
+fn managed_block_needs_heal(s: &str) -> bool {
+    let (mut in_block, mut saw_begin, mut saw_end, mut bypass_in_block) =
+        (false, false, false, false);
+    for line in s.lines() {
+        match line.trim() {
+            BEGIN => {
+                in_block = true;
+                saw_begin = true;
+            }
+            END => {
+                if in_block {
+                    saw_end = true;
+                }
+                in_block = false;
+            }
+            l if in_block && l.contains("NO_PROXY") => bypass_in_block = true,
+            _ => {}
+        }
+    }
+    saw_begin && saw_end && !bypass_in_block
+}
+
+#[cfg(not(windows))]
+fn heal_profiles_in(base: &std::path::Path, proxy: &str, ca: &str) -> Result<Vec<PathBuf>> {
+    let block = env_block(proxy, ca, Syntax::Posix);
+    let mut healed = Vec::new();
+    for path in candidate_profiles(base) {
+        let existing = match std::fs::read_to_string(&path) {
+            Ok(s) => s,
+            Err(_) => continue, // absent or unreadable — skip
+        };
+        // Heal only a well-formed old block (markers present, bypass missing *inside the block*).
+        // Scoping the check to the block — not the whole file — means a user's own `NO_PROXY`
+        // elsewhere can't mask a stale managed block; refusing a BEGIN-without-END block avoids
+        // strip_block returning the file unchanged and us stacking a second block onto it.
+        if !managed_block_needs_heal(&existing) {
+            continue;
+        }
+        let mut base_content = strip_block(&existing);
+        if !base_content.is_empty() && !base_content.ends_with('\n') {
+            base_content.push('\n');
+        }
+        std::fs::write(&path, format!("{base_content}{block}"))
+            .with_context(|| format!("failed to write {}", path.display()))?;
+        healed.push(path);
+    }
+    Ok(healed)
 }
 
 pub fn run(requested: Option<u16>) -> Result<()> {
@@ -375,6 +488,7 @@ pub fn run(requested: Option<u16>) -> Result<()> {
         println!();
         println!("Export these in your shell yourself:");
         println!("    export HTTPS_PROXY={proxy}");
+        println!("    export NO_PROXY={NO_PROXY}");
         println!("    export NODE_EXTRA_CA_CERTS={ca}");
     }
 
@@ -752,9 +866,9 @@ pub fn uninstall(purge: bool, keep_binary: bool) -> Result<()> {
         ui::paint(
             color,
             Tone::Bold,
-            "Done. Your current shell still has HTTPS_PROXY, HTTP_PROXY, and \
+            "Done. Your current shell still has HTTPS_PROXY, HTTP_PROXY, NO_PROXY, and \
              NODE_EXTRA_CA_CERTS exported. Open a new shell to clear them, or run: \
-             unset HTTPS_PROXY HTTP_PROXY NODE_EXTRA_CA_CERTS"
+             unset HTTPS_PROXY HTTP_PROXY NO_PROXY no_proxy NODE_EXTRA_CA_CERTS"
         )
     );
     // The env is gone from disk, but processes that were already running inherited it at
@@ -899,9 +1013,14 @@ fn profile_has_block_in(base: &std::path::Path) -> bool {
 // ExecutionPolicy that would block a profile from running. Only processes started after
 // the write see it — that's why setup still says "open a new terminal".
 
-/// The three values llmtrim manages in the user environment.
+/// The values llmtrim manages in the user environment.
 #[cfg(windows)]
-const ENV_KEYS: [&str; 3] = ["HTTPS_PROXY", "HTTP_PROXY", "NODE_EXTRA_CA_CERTS"];
+const ENV_KEYS: [&str; 4] = [
+    "HTTPS_PROXY",
+    "HTTP_PROXY",
+    "NO_PROXY",
+    "NODE_EXTRA_CA_CERTS",
+];
 
 /// Open `HKCU\Environment` for read+write (created if somehow absent).
 #[cfg(windows)]
@@ -968,6 +1087,8 @@ fn set_env_in(env: &winreg::RegKey, proxy: &str, ca: &str) -> Result<()> {
         .context("failed to set HTTPS_PROXY")?;
     env.set_value("HTTP_PROXY", &proxy)
         .context("failed to set HTTP_PROXY")?;
+    env.set_value("NO_PROXY", &NO_PROXY)
+        .context("failed to set NO_PROXY")?;
     env.set_value("NODE_EXTRA_CA_CERTS", &ca)
         .context("failed to set NODE_EXTRA_CA_CERTS")?;
     Ok(())
@@ -1218,10 +1339,14 @@ fn powershell_profile() -> Option<PathBuf> {
 #[allow(dead_code)]
 fn env_block(proxy: &str, ca: &str, syntax: Syntax) -> String {
     match syntax {
+        // NO_PROXY is set in both cases (lowercase too on POSIX: curl/libcurl, Go, and others
+        // only honor `no_proxy`). Windows env vars are case-insensitive, so one suffices there.
         Syntax::Posix => format!(
             "{BEGIN}\n\
              export HTTPS_PROXY=\"{proxy}\"\n\
              export HTTP_PROXY=\"{proxy}\"\n\
+             export NO_PROXY=\"{NO_PROXY}\"\n\
+             export no_proxy=\"{NO_PROXY}\"\n\
              export NODE_EXTRA_CA_CERTS=\"{ca}\"\n\
              {END}\n"
         ),
@@ -1229,6 +1354,7 @@ fn env_block(proxy: &str, ca: &str, syntax: Syntax) -> String {
             "{BEGIN}\n\
              $env:HTTPS_PROXY = \"{proxy}\"\n\
              $env:HTTP_PROXY = \"{proxy}\"\n\
+             $env:NO_PROXY = \"{NO_PROXY}\"\n\
              $env:NODE_EXTRA_CA_CERTS = \"{ca}\"\n\
              {END}\n"
         ),
@@ -1381,6 +1507,143 @@ mod tests {
         let _ = std::fs::remove_dir_all(&tmp);
     }
 
+    #[cfg(not(windows))]
+    #[test]
+    fn heal_rewrites_old_block_adds_no_proxy_preserving_port_and_surroundings() {
+        let tmp = std::env::temp_dir().join(format!("llmtrim-heal-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).expect("mkdir");
+
+        // An old-schema block (no NO_PROXY) wired at port 43117, with user content around it.
+        let old = format!(
+            "export FOO=bar\n{BEGIN}\n\
+             export HTTPS_PROXY=\"http://127.0.0.1:43117\"\n\
+             export HTTP_PROXY=\"http://127.0.0.1:43117\"\n\
+             export NODE_EXTRA_CA_CERTS=\"/home/u/ca.pem\"\n{END}\nexport BAZ=qux\n"
+        );
+        let rc = tmp.join(".bashrc");
+        std::fs::write(&rc, &old).expect("write rc");
+
+        let healed =
+            heal_profiles_in(&tmp, "http://127.0.0.1:43117", "/home/u/ca.pem").expect("heal runs");
+        assert_eq!(healed, vec![rc.clone()], "the old block is healed");
+
+        let after = std::fs::read_to_string(&rc).expect("read back");
+        assert!(after.contains("export NO_PROXY="), "bypass added");
+        assert!(after.contains("127.0.0.1:43117"), "port preserved");
+        assert!(after.contains("export FOO=bar") && after.contains("export BAZ=qux"));
+        assert_eq!(after.matches(BEGIN).count(), 1, "block not duplicated");
+
+        // Idempotent: a second pass sees the bypass and does nothing.
+        let again = heal_profiles_in(&tmp, "http://127.0.0.1:43117", "/home/u/ca.pem")
+            .expect("second heal");
+        assert!(again.is_empty(), "already-current block is left alone");
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn managed_block_needs_heal_distinguishes_old_current_malformed_and_outside() {
+        let old = format!("{BEGIN}\nexport HTTPS_PROXY=\"x\"\n{END}\n");
+        assert!(managed_block_needs_heal(&old), "old block needs heal");
+
+        let current = format!("{BEGIN}\nexport NO_PROXY=\"y\"\n{END}\n");
+        assert!(!managed_block_needs_heal(&current), "current block skipped");
+
+        let malformed = format!("{BEGIN}\nexport HTTPS_PROXY=\"x\"\n"); // no END
+        assert!(
+            !managed_block_needs_heal(&malformed),
+            "malformed block skipped"
+        );
+
+        // A user's own NO_PROXY *outside* the markers must not mask a stale managed block.
+        let outside = format!("export NO_PROXY=mine\n{BEGIN}\nexport HTTPS_PROXY=\"x\"\n{END}\n");
+        assert!(
+            managed_block_needs_heal(&outside),
+            "NO_PROXY outside the block does not count as healed"
+        );
+
+        assert!(!managed_block_needs_heal("export FOO=bar\n"), "no block");
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn heal_skips_malformed_block_without_corrupting_it() {
+        let tmp = std::env::temp_dir().join(format!("llmtrim-heal-bad-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).expect("mkdir");
+        // BEGIN with no END (user deleted it). strip_block would no-op, so a naive heal would
+        // stack a second block; managed_block_needs_heal must reject it.
+        let bad = format!("keep\n{BEGIN}\nexport HTTPS_PROXY=\"http://127.0.0.1:43117\"\n");
+        std::fs::write(tmp.join(".bashrc"), &bad).expect("write");
+
+        let healed =
+            heal_profiles_in(&tmp, "http://127.0.0.1:43117", "/home/u/ca.pem").expect("heal");
+        assert!(healed.is_empty(), "malformed block is not healed");
+        assert_eq!(
+            std::fs::read_to_string(tmp.join(".bashrc")).expect("read"),
+            bad,
+            "malformed file left byte-for-byte untouched"
+        );
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn heal_touches_only_the_stale_profile_in_a_multi_shell_setup() {
+        let tmp = std::env::temp_dir().join(format!("llmtrim-heal-multi-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).expect("mkdir");
+        // .bashrc carries an old block; .zshrc already has the current (NO_PROXY) block.
+        let old = format!("{BEGIN}\nexport HTTPS_PROXY=\"http://127.0.0.1:43117\"\n{END}\n");
+        let current = env_block("http://127.0.0.1:43117", "/home/u/ca.pem", Syntax::Posix);
+        std::fs::write(tmp.join(".bashrc"), &old).expect("write bashrc");
+        std::fs::write(tmp.join(".zshrc"), &current).expect("write zshrc");
+
+        let healed =
+            heal_profiles_in(&tmp, "http://127.0.0.1:43117", "/home/u/ca.pem").expect("heal");
+        assert_eq!(
+            healed,
+            vec![tmp.join(".bashrc")],
+            "only the stale profile healed"
+        );
+        assert!(
+            std::fs::read_to_string(tmp.join(".bashrc"))
+                .expect("read bashrc")
+                .contains("NO_PROXY"),
+            "stale profile now carries the bypass"
+        );
+        assert_eq!(
+            std::fs::read_to_string(tmp.join(".zshrc")).expect("read zshrc"),
+            current,
+            "already-current profile left untouched"
+        );
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn heal_ignores_files_without_a_managed_block() {
+        let tmp = std::env::temp_dir().join(format!("llmtrim-heal-none-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).expect("mkdir");
+        std::fs::write(tmp.join(".zshrc"), "export FOO=bar\n").expect("write");
+
+        let healed =
+            heal_profiles_in(&tmp, "http://127.0.0.1:43117", "/home/u/ca.pem").expect("heal");
+        assert!(
+            healed.is_empty(),
+            "a file with no block is never created/touched"
+        );
+        assert_eq!(
+            std::fs::read_to_string(tmp.join(".zshrc")).expect("read"),
+            "export FOO=bar\n",
+            "content untouched"
+        );
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
     #[test]
     fn choose_port_precedence() {
         // Explicit `--port` always wins, even over a running daemon and a configured env.
@@ -1476,6 +1739,9 @@ mod tests {
         let b = env_block("http://127.0.0.1:8787", "/home/u/ca.pem", Syntax::Posix);
         assert!(b.contains("export HTTPS_PROXY=\"http://127.0.0.1:8787\""));
         assert!(b.contains("export NODE_EXTRA_CA_CERTS=\"/home/u/ca.pem\""));
+        // LAN/local bypass travels with the proxy, in both casings tools read.
+        assert!(b.contains(&format!("export NO_PROXY=\"{NO_PROXY}\"")));
+        assert!(b.contains(&format!("export no_proxy=\"{NO_PROXY}\"")));
         assert!(b.starts_with(BEGIN) && b.trim_end().ends_with(END));
     }
 
@@ -1488,6 +1754,7 @@ mod tests {
         );
         assert!(b.contains("$env:HTTPS_PROXY = \"http://127.0.0.1:8787\""));
         assert!(b.contains("$env:NODE_EXTRA_CA_CERTS = \"C:\\Users\\u\\ca.pem\""));
+        assert!(b.contains(&format!("$env:NO_PROXY = \"{NO_PROXY}\"")));
         assert!(!b.contains("export ")); // no posix syntax leaked in
     }
 
