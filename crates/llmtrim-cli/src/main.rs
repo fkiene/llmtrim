@@ -69,6 +69,7 @@ Pipes & one-shots:
 Measurement (dev):
   eval       Measure retrieval recall + token savings on a corpus
   bench      A/B benchmark: tokens saved vs quality retained, on a real model
+  discover   Scan the capture corpus for where tokens still escape compression
 
 Options:
 {options}
@@ -267,6 +268,28 @@ enum Commands {
         /// Retrieval keep_ratio to evaluate (clamped to [0,1]).
         #[arg(long, default_value_t = 0.5)]
         keep_ratio: f64,
+    },
+    /// Scan the capture corpus for where compressible tokens still escape compression
+    ///
+    /// Read-only over the before/after captures (written when `LLMTRIM_CAPTURE_DIR` is set).
+    /// Re-buckets each request's token surface by block kind (system/user/assistant/
+    /// tool_result/tool_call_args/document/tool_schema) and, with `--by-tool`, by the tool
+    /// behind each tool_result. Each row shows the residual still in the compressed request
+    /// and how much compression already removed (before→after) — so the next compression
+    /// target is picked from real traffic. `--json` for the machine-readable report.
+    Discover {
+        /// Corpus directory. Omit to use `$LLMTRIM_CAPTURE_DIR` or `~/.llmtrim/capture`.
+        #[arg(long)]
+        dir: Option<PathBuf>,
+        /// Split tool_result into per-tool rows (default collapses to one tool_result row).
+        #[arg(long)]
+        by_tool: bool,
+        /// Scan at most N captures (oldest first). Omit to scan the whole corpus.
+        #[arg(long)]
+        limit: Option<usize>,
+        /// Emit the report as JSON instead of the human table.
+        #[arg(long)]
+        json: bool,
     },
     /// Benchmark suite: quality A/B, agent economics, latency, head-to-head comparisons
     ///
@@ -788,6 +811,12 @@ fn run() -> Result<()> {
                 )
             );
         }
+        Commands::Discover {
+            dir,
+            by_tool,
+            limit,
+            json,
+        } => llmtrim::discover::run(dir, json, by_tool, limit)?,
         Commands::Bench(cmd) => match cmd {
             BenchCmd::Quality(args) => run_bench(*args)?,
             BenchCmd::Suite(args) => run_bench_suite(*args)?,
