@@ -9,6 +9,7 @@
 pub mod autostart;
 pub mod bench;
 pub mod daemon;
+pub mod discover;
 pub mod doctor;
 pub mod mcp;
 pub mod monitor;

@@ -7,6 +7,14 @@ All notable changes to this project are documented here. The format follows
 ## [Unreleased]
 
 ### Added
+- **`llmtrim discover` finds where compressible tokens still escape compression.** A
+  read-only scan over the before/after capture corpus (written when `LLMTRIM_CAPTURE_DIR`
+  is set) that re-buckets each request's token surface by block kind (system, user,
+  assistant, tool_result, tool_call_args, document, tool_schema) and, with `--by-tool`, by
+  the tool behind each tool_result. Each row reports the residual still in the compressed
+  request, its share of the corpus-wide residual, and how much compression already removed
+  (before→after) — so the next compression target is chosen from real traffic instead of
+  guesswork. `--json` for the machine-readable report, `--dir`/`--limit` to scope the scan.
 - **`llmtrim wrap <agent>` convenience launcher.** A one-command way to run a coding agent
   through the interceptor: `llmtrim wrap claude`, `llmtrim wrap codex -- --model …`, or any
   binary on PATH. It is sugar over `setup` plus a subprocess launch (no per-agent config and
