@@ -59,7 +59,7 @@ for p in meta["packages"]:
 
 pkgs.sort(key=lambda x: x[0].lower())
 
-# Refuse to write a degenerate NOTICE. The archives bundle this file to satisfy AGPL/third-party
+# Refuse to write a degenerate NOTICE. The archives bundle this file to satisfy third-party
 # attribution, so a near-empty one (broken metadata graph, cold/unextracted cache, no LICENSE
 # files harvested) is a compliance failure, not a smaller file — fail loudly instead of shipping
 # it. Floors are well below the real counts (~574 deps / ~295 texts) so normal dep churn never
@@ -73,9 +73,9 @@ if len(pkgs) < 100 or len(texts) < 50:
 
 out = []
 out.append("# Third-Party Licenses\n")
-out.append("`llmtrim` is licensed **AGPL-3.0-only**. It links the following third-party "
-           "crates, each under its own license (all permissive or AGPL-compatible "
-           "weak-copyleft). Their copyright notices and license texts are reproduced "
+out.append("`llmtrim` is licensed **MPL-2.0**. It links the following third-party "
+           "crates, each under its own license (all permissive or weak-copyleft). "
+           "Their copyright notices and license texts are reproduced "
            "below to satisfy attribution requirements.\n")
 out.append(f"Generated from `cargo metadata --all-features` — "
            f"{len(pkgs)} dependencies, {len(texts)} distinct license texts.\n")

@@ -6,6 +6,12 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Changed
+- **Relicensed from AGPL-3.0-only to MPL-2.0.** llmtrim is now under the Mozilla Public
+  License 2.0. You can use it freely, including commercially and as a network service, with
+  no source-disclosure obligation; the file-level copyleft applies only to modifications you
+  make to llmtrim's own source files. This removes the AGPL network-use trigger.
+
 ### Added
 - **`llmtrim discover` splits residual into live vs cache-frozen.** Each bucket gains `live
   tok` / `live%` columns and the header shows a corpus-wide addressable total. Only residual

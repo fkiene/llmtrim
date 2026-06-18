@@ -1,11 +1,11 @@
-# cargo-deny config — license + advisory gate for llmtrim (AGPL-3.0-only).
+# cargo-deny config — license + advisory gate for llmtrim (MPL-2.0).
 # Run: cargo deny check            (all sections)
 #      cargo deny check licenses   (license compatibility only)
 # Install: cargo install cargo-deny --locked
 #
-# Rule: every dependency must be permissive or AGPL-compatible weak-copyleft.
+# Rule: every dependency must be permissive or weak-copyleft (MPL-2.0).
 # A new dep under GPL-2.0-only / GPL-3.0 / AGPL / proprietary fails the build,
-# protecting the AGPL-3.0-only relicensing of the combined work.
+# protecting llmtrim's MPL-2.0 licensing.
 
 [graph]
 # Evaluate every target so a platform-specific dep can't smuggle in a bad license.
@@ -30,9 +30,8 @@ allow = [
     "Unicode-3.0",      # unicode-ident data
     "Unlicense",
     "CDLA-Permissive-2.0", # webpki-roots cert data
-    "MPL-2.0",          # weak copyleft, explicitly AGPL-compatible (file-level)
+    "MPL-2.0",          # weak copyleft (file-level) — our own crates + transitive deps
     "OpenSSL",          # ring/aws-lc transitive, permissive
-    "AGPL-3.0-only",    # our own crate
 ]
 # fuchsia-cprng (transitive via gaoya→random_choice→rand, fuchsia-target only) has no
 # `license` field in its manifest — only a BSD-3-Clause LICENSE file. Clarify keeps the

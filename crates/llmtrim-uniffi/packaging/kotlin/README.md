@@ -29,4 +29,4 @@ crates/llmtrim-uniffi/scripts/build-maven.sh publishToMavenLocal
 The script generates the UniFFI Kotlin glue into `src/main/kotlin/`, places the optimized
 cdylib under `src/main/resources/<os-arch>/` (where JNA resolves it on the classpath), and
 runs Gradle. A release jar bundles every platform's library. Depends on
-`net.java.dev.jna:jna`. License: AGPL-3.0-only.
+`net.java.dev.jna:jna`. License: MPL-2.0.

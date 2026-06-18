@@ -26,7 +26,7 @@
 
 <p align="center">
   <a href="https://github.com/fkiene/llmtrim/actions/workflows/ci.yml"><img src="https://github.com/fkiene/llmtrim/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
-  <a href="LICENSE"><img src="https://img.shields.io/badge/license-AGPL--3.0-blue" alt="License: AGPL v3"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-MPL--2.0-blue" alt="License: MPL 2.0"></a>
   <a href="https://crates.io/crates/llmtrim"><img src="https://img.shields.io/crates/v/llmtrim?logo=rust&cacheSeconds=3600" alt="crates.io"></a>
   <a href="https://www.npmjs.com/package/@llmtrim/cli"><img src="https://img.shields.io/npm/v/@llmtrim/cli?logo=npm&cacheSeconds=3600" alt="npm"></a>
   <a href="https://www.npmjs.com/package/@llmtrim/cli"><img src="https://img.shields.io/npm/dm/@llmtrim/cli?cacheSeconds=3600" alt="npm downloads"></a>
@@ -449,6 +449,6 @@ Run `llmtrim doctor` for an end-to-end diagnosis; each failing check names its f
 
 ---
 
-<sub>Licensed under [AGPL-3.0-only](LICENSE). Running llmtrim locally to compress your own traffic triggers no obligations; the copyleft applies only if you offer a modified llmtrim as a network service to others. Contributions via [DCO](CONTRIBUTING.md#sign-your-commits-dco) sign-off.</sub>
+<sub>Licensed under [MPL-2.0](LICENSE). Use llmtrim freely in your stack, including commercially, with no source-disclosure obligation for your own code; the file-level copyleft applies only to modifications you make to llmtrim's own source files. Contributions via [DCO](CONTRIBUTING.md#sign-your-commits-dco) sign-off.</sub>
 </content>
 </invoke>

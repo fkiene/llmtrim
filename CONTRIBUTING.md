@@ -108,4 +108,4 @@ the project license.
 
 ## License
 
-By contributing, you agree your contributions are licensed under AGPL-3.0-only.
+By contributing, you agree your contributions are licensed under MPL-2.0.

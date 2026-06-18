@@ -29,4 +29,4 @@ The script builds a release static lib per Apple target (macOS arm64/x86_64, iOS
 iOS simulator), generates the Swift API + FFI header/modulemap, and assembles
 `llmtrimFFI.xcframework`. For release distribution, attach `llmtrimFFI.xcframework.zip` to
 the GitHub release and switch `Package.swift` to the remote `binaryTarget` (url + checksum;
-see the comment in `Package.swift`). License: AGPL-3.0-only.
+see the comment in `Package.swift`). License: MPL-2.0.
