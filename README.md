@@ -318,9 +318,28 @@ Every stage is individually tunable via config flags; `preset` wins over individ
 | `dedup` | `true` | collapse duplicate lines (lossless) |
 | `quality_gate` | `true` | revert any lossy cut whose query-relevant coverage drops too far |
 
-Env: `LLMTRIM_PRESET` (preset), `LLMTRIM_CONFIG` (config-file path), `LLMTRIM_DB_PATH` (ledger location).
+Env: `LLMTRIM_PRESET` (preset), `LLMTRIM_CONFIG` (config-file path), `LLMTRIM_DB_PATH` (ledger location), `LLMTRIM_UPSTREAM_PROXY` (route egress through another proxy, see below).
 
 </details>
+
+### Chaining through an upstream proxy
+
+Set `LLMTRIM_UPSTREAM_PROXY=http://host:port` to make llmtrim send its outbound
+calls through another proxy instead of dialing the API directly. This covers two
+cases: a corporate or auth proxy that all egress must pass through, and running
+llmtrim alongside a second local tool such as [headroom](https://github.com/chopratejas/headroom)
+on a different port.
+
+The connection to the API is tunneled through the upstream with `CONNECT` and stays
+under verifying TLS, so the upstream sees only the encrypted stream. An upstream that
+points at llmtrim's own listen address (any spelling of localhost on the same port) is
+rejected, because it would loop traffic back into the daemon; a companion proxy on a
+different port is allowed. `http://user:pass@host:port` works for proxy auth, and those
+credentials are redacted from logs.
+
+Put the variable in the daemon's own launch environment (the launchd plist or systemd
+unit), not only your shell profile. Credentials written into a shell profile are stored
+there in plaintext.
 
 ## The numbers
 

@@ -6,6 +6,18 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+- **`LLMTRIM_UPSTREAM_PROXY` env var** — set this in the daemon's launch environment
+  (launchd plist / systemd unit, not `.profile`) to route the daemon's own outbound
+  requests through a corporate or gateway proxy, or a local companion proxy such as
+  headroom on a different port (e.g. `http://127.0.0.1:9999`).
+  Accepts `http://host:port` or `http://user:pass@host:port`. Only upstreams that match
+  llmtrim's own listen address (same loopback host AND same port) are rejected at startup
+  to prevent infinite recursion; a different port on the same loopback interface is
+  allowed. Credentials in the URL are plaintext in the process environment — use a
+  credential-free URL with OS-level auth where possible.
+  Requested by @gkgoat1 ([#62](https://github.com/fkiene/llmtrim/issues/62)).
+
 ## [0.2.0] - 2026-06-18
 
 ### Changed
