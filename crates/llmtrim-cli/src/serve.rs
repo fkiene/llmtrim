@@ -46,6 +46,8 @@ mod imp {
     use hudsucker::hyper::{Method, Request, Response, header};
     use hudsucker::rustls::crypto::aws_lc_rs;
     use hudsucker::{Body, HttpContext, HttpHandler, Proxy, RequestOrResponse};
+    use hyper_http_proxy::{Intercept, Proxy as UpstreamProxy, ProxyConnector};
+    use hyper_util::client::legacy::connect::HttpConnector;
 
     use crate::tracking::{Record, Tracker};
     use llmtrim_core::config::DenseConfig;
@@ -279,10 +281,11 @@ mod imp {
     /// Replay the original (uncompressed) request to the upstream — direct, all statuses
     /// relayed — and build a response for the client. `None` if the replay itself fails (in
     /// which case the caller keeps the compressed response's error).
-    fn replay_original(orig: &OriginalRequest) -> Option<Response<Body>> {
+    fn replay_original(orig: &OriginalRequest, proxy_url: Option<&str>) -> Option<Response<Body>> {
         use std::io::Read;
         let body = std::str::from_utf8(&orig.body).ok()?;
-        let mut up = crate::transport::forward_post(&orig.url, &orig.headers, body).ok()?;
+        let mut up =
+            crate::transport::forward_post(&orig.url, &orig.headers, body, proxy_url).ok()?;
         let mut buf = Vec::new();
         up.reader.read_to_end(&mut buf).ok()?;
         let mut builder = Response::builder().status(up.status);
@@ -397,6 +400,10 @@ mod imp {
         memo: Arc<Memo>,
         /// The compressed request awaiting its response (set in `handle_request`).
         pending: Option<Pending>,
+        /// Optional upstream proxy URL from `LLMTRIM_UPSTREAM_PROXY`. Used by the replay path
+        /// (`forward_post`). The primary MITM interception path honours this setting via the
+        /// `ProxyConnector` built at startup (see the `start` function in this module).
+        upstream_proxy: Option<String>,
     }
 
     impl Drop for Interceptor {
@@ -536,8 +543,13 @@ mod imp {
             let status = res.status();
             if should_replay(status.as_u16())
                 && let Some(original) = pending.original.clone()
-                && let Ok(Some(replayed)) =
-                    tokio::task::spawn_blocking(move || replay_original(&original)).await
+                && let Ok(Some(replayed)) = {
+                    let proxy = self.upstream_proxy.clone();
+                    tokio::task::spawn_blocking(move || {
+                        replay_original(&original, proxy.as_deref())
+                    })
+                    .await
+                }
             {
                 eprintln!(
                     "llmtrim: upstream {} on compressed request — replayed original (no compression this call)",
@@ -1241,17 +1253,6 @@ mod imp {
             }
         });
 
-        let handler = Interceptor {
-            config: Arc::new(DenseConfig::load_for_interceptor()),
-            ledger: tx,
-            // `ensure_ca` above just reconciled the CA + sidecar, so this is exactly what the
-            // live CA can sign for.
-            domains: Arc::new(covered_domains()),
-            // One process-wide turn-stability memo, shared across the per-request handler clones.
-            memo: Arc::new(Memo::with_capacity(llmtrim_core::memo::DEFAULT_CAPACITY)),
-            pending: None,
-        };
-
         // Loopback by default — a MITM proxy must not be reachable off-host unless asked.
         // LLMTRIM_BIND=0.0.0.0 opts in (containers: port mapping can't reach loopback).
         let bind_ip: std::net::IpAddr = match std::env::var("LLMTRIM_BIND") {
@@ -1261,6 +1262,30 @@ mod imp {
             Err(_) => std::net::IpAddr::from([127, 0, 0, 1]),
         };
         let addr = SocketAddr::from((bind_ip, port));
+
+        // Validate and read the upstream proxy setting once at startup so a bad URL is a hard
+        // error before any traffic flows, not a surprise on the first replay. Pass the bind
+        // address so the guard can distinguish "same port = recursion" from "different port =
+        // legitimate companion proxy" (e.g. headroom on 127.0.0.1:9999).
+        let upstream_proxy = crate::transport::upstream_proxy_url(Some(addr))?;
+        if let Some(ref u) = upstream_proxy {
+            eprintln!(
+                "llmtrim: upstream proxy: {}",
+                crate::transport::redact_proxy_url(u)
+            );
+        }
+
+        let handler = Interceptor {
+            config: Arc::new(DenseConfig::load_for_interceptor()),
+            ledger: tx,
+            // `ensure_ca` above just reconciled the CA + sidecar, so this is exactly what the
+            // live CA can sign for.
+            domains: Arc::new(covered_domains()),
+            // One process-wide turn-stability memo, shared across the per-request handler clones.
+            memo: Arc::new(Memo::with_capacity(llmtrim_core::memo::DEFAULT_CAPACITY)),
+            pending: None,
+            upstream_proxy: upstream_proxy.clone(),
+        };
         // Pre-flight bind: hudsucker's `Proxy::start` collapses a bind failure to a bare
         // "io error", hiding whether the port is in use or OS-reserved. Bind once ourselves
         // first so the real cause reaches the log, then drop it microseconds before hudsucker
@@ -1281,20 +1306,69 @@ mod imp {
         // the first call and skewed the latency metric). One-time, at boot, off the request path.
         warm_up(&handler.config);
 
-        let proxy = Proxy::builder()
-            .with_addr(addr)
-            .with_ca(ca)
-            .with_rustls_connector(aws_lc_rs::default_provider())
-            .with_http_handler(handler)
-            .with_graceful_shutdown(async {
-                let _ = tokio::signal::ctrl_c().await;
-            })
-            .build()
-            .map_err(|e| anyhow::anyhow!("failed to build proxy: {e}"))?;
-        proxy
-            .start()
-            .await
-            .map_err(|e| anyhow::anyhow!("proxy error: {e}"))?;
+        // When LLMTRIM_UPSTREAM_PROXY is set, wrap hudsucker's outbound connector in a
+        // hyper-http-proxy ProxyConnector that tunnels origin TLS connections via CONNECT
+        // through the upstream proxy. When the var is unset, fall back to the standard
+        // `.with_rustls_connector(...)` path — byte-identical behaviour to before this change.
+        //
+        // The two branches produce different generic Proxy<C, ...> types (rustls connector vs
+        // proxy connector), so each branch calls .start().await directly rather than binding
+        // a common variable.
+        if let Some(ref upstream_url) = upstream_proxy {
+            let upstream_uri =
+                upstream_url
+                    .parse::<hudsucker::hyper::Uri>()
+                    .with_context(|| {
+                        format!(
+                            "failed to parse upstream proxy URI `{}`",
+                            crate::transport::redact_proxy_url(upstream_url)
+                        )
+                    })?;
+            let upstream_proxy_spec = UpstreamProxy::new(Intercept::All, upstream_uri);
+            // ProxyConnector has two distinct connection roles:
+            //  - Its INNER connector dials the PROXY itself. The upstream proxy is http://,
+            //    so a plain HttpConnector is correct — no TLS to the proxy.
+            //  - Its `tls` field wraps the ORIGIN connection that is tunnelled THROUGH the
+            //    CONNECT. This must perform full verifying TLS against the real origin
+            //    (openrouter.ai etc.) so the API key is never sent over a cleartext or
+            //    unverified channel.
+            //
+            // `from_proxy` (with the `rustls-tls-native-roots` feature active) builds a
+            // tokio-rustls TlsConnector for the origin leg using native roots and full cert
+            // verification. The tokio-rustls ClientConfig uses whatever CryptoProvider is
+            // installed at process start — we call aws_lc_rs::default_provider() at startup,
+            // so origin TLS automatically uses aws-lc-rs throughout.
+            let proxy_connector =
+                ProxyConnector::from_proxy(HttpConnector::new(), upstream_proxy_spec)
+                    .map_err(|e| anyhow::anyhow!("failed to build upstream ProxyConnector: {e}"))?;
+            Proxy::builder()
+                .with_addr(addr)
+                .with_ca(ca)
+                .with_http_connector(proxy_connector)
+                .with_http_handler(handler)
+                .with_graceful_shutdown(async {
+                    let _ = tokio::signal::ctrl_c().await;
+                })
+                .build()
+                .map_err(|e| anyhow::anyhow!("failed to build proxy (upstream-proxy path): {e}"))?
+                .start()
+                .await
+                .map_err(|e| anyhow::anyhow!("proxy error: {e}"))?;
+        } else {
+            Proxy::builder()
+                .with_addr(addr)
+                .with_ca(ca)
+                .with_rustls_connector(aws_lc_rs::default_provider())
+                .with_http_handler(handler)
+                .with_graceful_shutdown(async {
+                    let _ = tokio::signal::ctrl_c().await;
+                })
+                .build()
+                .map_err(|e| anyhow::anyhow!("failed to build proxy: {e}"))?
+                .start()
+                .await
+                .map_err(|e| anyhow::anyhow!("proxy error: {e}"))?;
+        }
         Ok(())
     }
 
@@ -1948,6 +2022,7 @@ mod imp {
                 domains: Arc::new(intercept_domains().into_iter().collect()),
                 memo: Arc::new(Memo::with_capacity(llmtrim_core::memo::DEFAULT_CAPACITY)),
                 pending: None,
+                upstream_proxy: None,
             };
             (handler, rx)
         }
@@ -2665,6 +2740,51 @@ mod imp {
             assert!(
                 rx.try_recv().is_err(),
                 "exactly one ledger record for an empty body"
+            );
+        }
+
+        // --- C1 regression: origin TLS is verified through the CONNECT tunnel ---
+        //
+        // `ProxyConnector::from_proxy` (with the `rustls-tls-native-roots` feature active)
+        // sets its internal `tls` field to `Some(TlsConnector)`, which is what hyper-http-proxy
+        // uses to TLS-wrap the ORIGIN connection that is tunnelled through CONNECT.
+        //
+        // `from_proxy_unsecured` leaves `tls: None`, which means the tunnelled origin stream
+        // would be returned as a PLAINTEXT, UNVERIFIED stream — the security bug this test
+        // guards against.
+        //
+        // The Debug output from hyper-http-proxy's `ProxyConnector` encodes this distinction:
+        //   - `tls: Some(_)` → `"ProxyConnector { proxies: ... }"` (no unsecured marker)
+        //   - `tls: None`    → `"ProxyConnector (unsecured) { proxies: ... }"`
+        //
+        // Coverage boundary: this test verifies the *construction* path (TLS connector is
+        // wired in), not a live TLS handshake. A live handshake against a self-signed cert
+        // that should fail certificate verification would require a full local CONNECT+TLS
+        // harness; that is considered integration-test territory and is not included here.
+        // What the test guarantees: if someone reverts `from_proxy` to `from_proxy_unsecured`,
+        // the test catches it immediately.
+        #[test]
+        fn proxy_connector_origin_tls_is_active() {
+            // ProxyConnector::from_proxy internally builds a tokio-rustls ClientConfig.
+            // tokio-rustls requires a CryptoProvider to be installed; we use the same
+            // aws-lc-rs provider that production installs at daemon startup.
+            let _ = aws_lc_rs::default_provider().install_default();
+
+            let proxy_uri: hudsucker::hyper::Uri = "http://proxy.example.test:3128"
+                .parse()
+                .expect("test proxy URI");
+            let upstream_proxy_spec = UpstreamProxy::new(Intercept::All, proxy_uri);
+            let connector = ProxyConnector::from_proxy(HttpConnector::new(), upstream_proxy_spec)
+                .expect("ProxyConnector::from_proxy must succeed");
+
+            // hyper-http-proxy's Debug impl emits "(unsecured)" only when `tls` is None.
+            // Assert its absence to confirm the origin leg has a verifying TLS connector.
+            let debug_str = format!("{connector:?}");
+            assert!(
+                !debug_str.contains("(unsecured)"),
+                "ProxyConnector must have a TLS connector for the origin leg \
+                 (built with from_proxy, not from_proxy_unsecured). \
+                 Debug output: {debug_str}"
             );
         }
     }

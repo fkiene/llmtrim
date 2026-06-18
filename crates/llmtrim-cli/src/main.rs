@@ -533,7 +533,8 @@ fn run() -> Result<()> {
                 .transpose()?;
             let result = llmtrim_core::compress(&input, kind)?;
             let endpoint = Endpoint::from_env(result.provider)?;
-            let response = endpoint.send(&result.request_json)?;
+            let proxy_url = llmtrim::transport::upstream_proxy_url(None)?;
+            let response = endpoint.send(&result.request_json, proxy_url.as_deref())?;
 
             // Record to the savings ledger (best-effort: never block the user's output).
             if let Ok(counter) =

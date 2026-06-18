@@ -67,6 +67,17 @@ reqwest = { version = "0.13", default-features = false, optional = true }
 tokio = { version = "1.52", features = ["rt", "rt-multi-thread", "macros", "net", "io-util", "signal", "time"], optional = true }
 # The MITM interceptor (`serve`).
 hudsucker = { version = "0.24", default-features = false, features = ["rcgen-ca", "rustls-client", "http2"], optional = true }
+# Upstream-proxy connector for the MITM path — tunnels HTTPS origin connections via CONNECT.
+# `rustls-tls-native-roots` enables the `__rustls` internal feature, which causes ProxyConnector
+# to build a tokio-rustls TlsConnector for the ORIGIN leg of tunnelled connections (the part
+# that actually carries the API key). The inner connector only dials the proxy itself (http://),
+# so it needs no TLS. The tokio-rustls ClientConfig inherits whatever CryptoProvider is
+# installed at runtime; we call aws_lc_rs::default_provider() at startup, so origin TLS uses
+# aws-lc-rs throughout — no ring is pulled in as an active provider.
+hyper-http-proxy = { version = "1.1", default-features = false, features = ["rustls-tls-native-roots"], optional = true }
+# Direct dep so serve.rs can call HttpsConnectorBuilder if needed for non-proxy paths.
+hyper-rustls = { version = "0.27", default-features = false, features = ["native-tokio", "http1", "http2"], optional = true }
+hyper-util = { version = "0.1", default-features = false, features = ["client-legacy", "http2"], optional = true }
 async-trait = { version = "0.1", optional = true }
 http-body-util = { version = "0.1", optional = true }
 bytes = { version = "1", optional = true }
@@ -99,7 +110,7 @@ winreg = "0.56"
 # hudsucker/tokio stack intercept already pulls).
 default = ["intercept", "mcp"]
 live = ["dep:async-openai", "dep:reqwest", "dep:tokio"]
-intercept = ["dep:hudsucker", "dep:tokio", "dep:async-trait", "dep:http-body-util", "dep:bytes", "dep:llm_providers", "dep:time"]
+intercept = ["dep:hudsucker", "dep:tokio", "dep:async-trait", "dep:http-body-util", "dep:bytes", "dep:llm_providers", "dep:time", "dep:hyper-http-proxy", "dep:hyper-util", "dep:hyper-rustls"]
 mcp = ["dep:rmcp", "dep:schemars", "dep:tokio"]
 
 [lints]

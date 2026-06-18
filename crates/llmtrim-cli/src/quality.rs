@@ -235,7 +235,10 @@ impl HttpModel {
 
 impl Model for HttpModel {
     fn answer(&self, request_json: &str) -> Result<String> {
-        let response = self.endpoint.send(request_json)?;
+        // Pass None for bind_addr: bench runs are not daemon instances, so there is no
+        // listen port to guard against loopback recursion.
+        let proxy_url = crate::transport::upstream_proxy_url(None)?;
+        let response = self.endpoint.send(request_json, proxy_url.as_deref())?;
         let value: serde_json::Value =
             serde_json::from_str(&response).context("response is not valid JSON")?;
         self.provider
