@@ -72,6 +72,18 @@ front saves a large PR from a redesign in review. New user-facing surfaces (a CL
 MCP tool, an output channel) and any change to the published `llmtrim-core` public API need
 this step.
 
+## Reporting vs. implementing
+
+Filing an issue does not commit you to writing the code. Tell us which you mean: the
+feature-request template has a checkbox, or just say so in the issue.
+
+If you want to implement it, comment to claim it and a maintainer will assign you; an
+assigned issue is yours until it goes quiet for about two weeks. If you only want to
+report it, a maintainer or another contributor may pick it up. Either way, for a feature
+we agree the approach in the issue before a PR is opened, so a maintainer implementing
+your request will post the intended design on the issue first and give you a chance to
+respond.
+
 ## Pull requests
 
 - One logical change per PR; every changed line should trace to the stated goal.
