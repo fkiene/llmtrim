@@ -109,3 +109,9 @@ the project license.
 ## License
 
 By contributing, you agree your contributions are licensed under MPL-2.0.
+
+You also grant François Kiene, and his successors and assigns, the right to license your
+contribution under any other license, including proprietary or commercial terms, so the
+project can relicense or offer a commercial dual-license later without contacting every
+contributor. You keep the copyright to your contribution. This is separate from your DCO
+sign-off, which only certifies the origin of your work.
