@@ -24,4 +24,4 @@ x64 & arm64). No Rust toolchain needed.
 
 Docs, benchmarks (112 live A/B cases), and source: **https://github.com/fkiene/llmtrim**
 
-License: AGPL-3.0-only
+License: MPL-2.0

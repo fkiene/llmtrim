@@ -9,7 +9,7 @@ edition = "2024"
 rust-version = "1.88"
 repository = "https://github.com/fkiene/llmtrim"
 homepage = "https://github.com/fkiene/llmtrim"
-license = "AGPL-3.0-only"
+license = "MPL-2.0"
 
 # Dependencies shared by more than one member — declared once here, pulled in with
 # `<dep>.workspace = true` so a version bump is a single edit.

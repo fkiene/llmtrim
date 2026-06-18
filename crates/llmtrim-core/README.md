@@ -6,7 +6,7 @@ It takes a provider-shaped LLM request (OpenAI, Anthropic or Google JSON), strip
 
 [![crates.io](https://img.shields.io/crates/v/llmtrim-core)](https://crates.io/crates/llmtrim-core)
 [![docs.rs](https://img.shields.io/docsrs/llmtrim-core)](https://docs.rs/llmtrim-core)
-[![license](https://img.shields.io/badge/license-AGPL--3.0-blue)](https://www.gnu.org/licenses/agpl-3.0.txt)
+[![license](https://img.shields.io/badge/license-MPL--2.0-blue)](https://www.mozilla.org/MPL/2.0/)
 
 ```toml
 [dependencies]
@@ -59,4 +59,4 @@ The same engine is exposed to **Python, Ruby, Swift and Kotlin** via [UniFFI](ht
 
 ## License
 
-AGPL-3.0-only.
+MPL-2.0.

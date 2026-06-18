@@ -260,7 +260,7 @@ jobs:
               "version": "$V",
               "description": "Cut your LLM bill: drop-in proxy that compresses input, output, and cache",
               "homepage": "https://github.com/fkiene/llmtrim",
-              "license": "AGPL-3.0-only",
+              "license": "MPL-2.0",
               "architecture": {
                   "64bit": {
                       "url": "$base/llmtrim-x86_64-pc-windows-msvc.zip",

@@ -232,7 +232,7 @@ jobs:
       - name: Build + test the SwiftPM package against it
         run: swift test --package-path crates/llmtrim-uniffi/packaging/swift
 
-  # Gate the AGPL-3.0-only relicensing: fail if any dependency carries a license
+  # Gate llmtrim's MPL-2.0 licensing: fail if any dependency carries a license
   # outside deny.toml's allow-list (e.g. GPL/proprietary) or an unknown source.
   license-check:
     name: License compliance

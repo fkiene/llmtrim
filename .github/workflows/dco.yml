@@ -2,7 +2,7 @@ name: DCO
 
 # Verify every commit in a pull request carries a `Signed-off-by` line, certifying the
 # Developer Certificate of Origin (https://developercertificate.org/). CONTRIBUTING.md
-# states inbound=outbound (contributions are licensed under AGPL-3.0-only); this check
+# states inbound=outbound (contributions are licensed under MPL-2.0); this check
 # enforces that the sign-off is actually present rather than trusting the PR checkbox.
 
 on:

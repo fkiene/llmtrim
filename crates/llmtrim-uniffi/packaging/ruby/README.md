@@ -21,4 +21,4 @@ puts "#{out.input_tokens_before} -> #{out.input_tokens_after}"
 config. Raises `Llmtrim::LlmtrimError::Compress` / `UnknownPreset` on error.
 
 Built with `crates/llmtrim-uniffi/scripts/build-gem.sh` (platform-specific gem with the
-bundled native library). License: AGPL-3.0-only.
+bundled native library). License: MPL-2.0.

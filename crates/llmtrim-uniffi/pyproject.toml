@@ -7,13 +7,13 @@ name = "llmtrim"
 description = "Static, deterministic LLM prompt/payload compression that cuts input tokens 30-90% with zero extra model calls."
 readme = "README.md"
 requires-python = ">=3.9"
-license = { text = "AGPL-3.0-only" }
+license = { text = "MPL-2.0" }
 keywords = ["llm", "tokens", "compression", "openai", "anthropic"]
 classifiers = [
     "Programming Language :: Rust",
     "Programming Language :: Python :: 3",
     "Topic :: Text Processing",
-    "License :: OSI Approved :: GNU Affero General Public License v3",
+    "License :: OSI Approved :: Mozilla Public License 2.0 (MPL 2.0)",
 ]
 dynamic = ["version"]
 

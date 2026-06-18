@@ -19,7 +19,7 @@ Gem::Specification.new do |s|
                   "(no network, no extra model calls), generated via UniFFI."
   s.authors = ["François Kiene"]
   s.homepage = "https://github.com/fkiene/llmtrim"
-  s.license = "AGPL-3.0-only"
+  s.license = "MPL-2.0"
   s.required_ruby_version = ">= 3.0"
 
   s.files = Dir["lib/**/*"] + ["README.md"]

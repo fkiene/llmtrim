@@ -5,7 +5,7 @@
 It sits between your AI tools and the provider, strips the wasted tokens out of every request, and forwards it on. Same answers, smaller bill. **−31% input and −74% output tokens**, measured live across 112 A/B cases, with no change in answer quality.
 
 [![crates.io](https://img.shields.io/crates/v/llmtrim)](https://crates.io/crates/llmtrim)
-[![license](https://img.shields.io/badge/license-AGPL--3.0-blue)](https://www.gnu.org/licenses/agpl-3.0.txt)
+[![license](https://img.shields.io/badge/license-MPL--2.0-blue)](https://www.mozilla.org/MPL/2.0/)
 
 ```
   before:  your tool ───── full request ─────▶  OpenAI / Anthropic / …
@@ -52,4 +52,4 @@ The compression engine is the [`llmtrim-core`](https://crates.io/crates/llmtrim-
 
 ## License
 
-AGPL-3.0-only.
+MPL-2.0.
