@@ -63,11 +63,29 @@ All are on by default; disable them for smaller, C-toolchain-free builds (e.g. W
 | `tiktoken` | on | Drops the embedded OpenAI BPE vocabs (~8.3 MB); the estimate tokenizer is used everywhere (counts approximate, savings percentages unchanged). |
 | `multimodal` | on | Drops the `image` decoders (Stage H image downscaling); image payloads pass through unchanged. |
 
-With these off the crate builds for `wasm32-unknown-unknown`; see the crate docs for the exact build command.
+To pick a subset, turn off the defaults and re-enable only what you need:
+
+```toml
+# everything (default)
+llmtrim-core = "0.2"
+
+# text-only, no C toolchain: keep exact tokenization, drop code + image stages
+llmtrim-core = { version = "0.2", default-features = false, features = ["tiktoken"] }
+
+# smallest build (e.g. WebAssembly): estimate tokenizer, no skeleton, no image
+llmtrim-core = { version = "0.2", default-features = false }
+```
+
+With all three off the crate builds for `wasm32-unknown-unknown`; see the crate docs for the exact build command.
 
 ## Other languages
 
-The same engine is exposed to **Python, Ruby, Swift and Kotlin** via [UniFFI](https://mozilla.github.io/uniffi-rs/) (see [`llmtrim-uniffi`](../llmtrim-uniffi)). The [`llmtrim`](https://crates.io/crates/llmtrim) crate is the CLI and drop-in compressing proxy built on this engine.
+The same engine is exposed to other languages, generated from this one Rust definition:
+
+- **Python, Ruby, Swift, Kotlin** via [UniFFI](https://mozilla.github.io/uniffi-rs/) (see [`llmtrim-uniffi`](../llmtrim-uniffi)).
+- **JavaScript / TypeScript** (browser, Node, Cloudflare Worker) via WebAssembly, on npm as `@llmtrim/js` (see [`llmtrim-wasm`](../llmtrim-wasm)).
+
+The [`llmtrim`](https://crates.io/crates/llmtrim) crate is the CLI and drop-in compressing proxy built on this engine.
 
 ## License
 

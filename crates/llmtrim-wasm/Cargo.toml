@@ -1,0 +1,34 @@
+[package]
+name = "llmtrim-wasm"
+description = "WebAssembly/JS bindings for the llmtrim-core compression engine (wasm-bindgen)."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+homepage.workspace = true
+license.workspace = true
+# Published to npm via wasm-pack, not to crates.io.
+publish = false
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+# default-features = false drops the C-linking / large deps (tree-sitter, tiktoken vocab,
+# image) that don't fit a wasm32 build; the estimate tokenizer is used instead.
+llmtrim-core = { path = "../llmtrim-core", default-features = false }
+serde.workspace = true
+# tsify derives the TypeScript interfaces for the output types straight from the serde
+# structs, so the generated `.d.ts` is fully typed (no `any`); it handles the JS conversion.
+tsify-next = { version = "0.5.6", features = ["js"] }
+wasm-bindgen = "0.2.95"
+
+# The JS-backed getrandom backends are enabled by llmtrim-core's own wasm32 target deps
+# (feature unification turns them on here too). The build still needs
+# `--cfg getrandom_backend="wasm_js"` in RUSTFLAGS; see the crate docs.
+
+[dev-dependencies]
+serde_json.workspace = true
+
+[lints]
+workspace = true

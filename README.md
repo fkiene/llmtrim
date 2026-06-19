@@ -14,7 +14,7 @@
 </p>
 
 <p align="center">
-  <sub>Use it as a <b>proxy</b>, a <b>CLI</b>, an <b>MCP server</b>, or a <b>library</b> (Python · Ruby · Swift · Kotlin).</sub>
+  <sub>Use it as a <b>proxy</b>, a <b>CLI</b>, an <b>MCP server</b>, or a <b>library</b> (Python · Ruby · Swift · Kotlin · JS · TS · WASM).</sub>
 </p>
 
 <p align="center">
@@ -211,7 +211,7 @@ llmtrim uninstall   # exact inverse of setup: removes all three changes
 
 ## Use it as a CLI, MCP, or library
 
-The same compression runs with no proxy and no setup, as a one-shot CLI, an embeddable Rust crate, or native bindings for **Python, Ruby, Swift and Kotlin**. No extra model calls, no network: the deterministic engine runs in your process.
+The same compression runs with no proxy and no setup, as a one-shot CLI, an embeddable Rust crate, native bindings for **Python, Ruby, Swift and Kotlin**, or a **WebAssembly** module for JavaScript (browser, Node, Cloudflare Worker). No extra model calls, no network: the deterministic engine runs in your process.
 
 | Language | Install |
 |---|---|
@@ -252,6 +252,18 @@ print(out.input_tokens_before, "->", out.input_tokens_after)
 
 > [!NOTE]
 > Every binding returns the compressed `request_json` plus the before/after token counts, and maps errors to native exceptions. Per-language install and usage live in [`crates/llmtrim-uniffi`](crates/llmtrim-uniffi).
+
+**JavaScript / TypeScript (WebAssembly).** The same `compress(input, provider, preset)` call, compiled to WebAssembly, runs in the browser, Node, Bun, Deno, or a Cloudflare Worker with no network or filesystem access. The output type is fully typed in TypeScript:
+
+```ts
+import { compress } from "@llmtrim/js"; // @llmtrim/wasm is an alias for the same package
+
+const out = compress(requestJson, "openai", "aggressive");
+console.log(out.input_tokens_before, "->", out.input_tokens_after);
+```
+
+> [!NOTE]
+> To stay small, the WASM build uses the estimate tokenizer: the absolute token counts are approximate, but the savings percentage is unaffected. Build and usage live in [`crates/llmtrim-wasm`](crates/llmtrim-wasm).
 
 **MCP server.** `llmtrim mcp` speaks the [Model Context Protocol](https://modelcontextprotocol.io) over stdin/stdout, so any MCP client can compress payloads and read your savings without the proxy. It exposes three tools: `llmtrim_compress` (compress a full request body, honoring your `~/.llmtrim` config like the proxy), `llmtrim_compress_text` (shrink one text blob, lossless), and `llmtrim_stats` (your savings ledger). Every call records to the same ledger, so MCP traffic shows up in `llmtrim status`.
 

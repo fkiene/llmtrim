@@ -23,6 +23,12 @@ All notable changes to this project are documented here. The format follows
   builds are unchanged. A `--no-default-features` build drops them; without `tiktoken` the
   estimate tokenizer is used (token counts become approximate, savings percentages
   unchanged).
+- **WebAssembly/JS bindings, published to npm as `@llmtrim/js`.** A single
+  `compress(input, provider, preset)` call that returns the compressed body, per-stage
+  report, and token counts as a fully-typed object (TypeScript definitions are generated
+  via `tsify`, so consumers get a typed `CompressOutput`). It runs the engine in a browser,
+  Node, or a Cloudflare Worker with no network or filesystem access. (`@llmtrim/wasm` is an
+  alias for the same package.)
 
 ## [0.2.0] - 2026-06-18
 

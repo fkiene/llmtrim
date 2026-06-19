@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["crates/llmtrim-core", "crates/llmtrim-cli", "crates/llmtrim-uniffi"]
+members = ["crates/llmtrim-core", "crates/llmtrim-cli", "crates/llmtrim-uniffi", "crates/llmtrim-wasm"]
 
 # Shared package metadata — inherited by each member via `field.workspace = true`.
 [workspace.package]
