@@ -9,12 +9,12 @@
 //! because they all speak HTTPS to a known set of API hosts.
 
 #[cfg(not(feature = "intercept"))]
-pub fn run(_port: u16) -> anyhow::Result<()> {
+pub fn run(_port: u16, _force: bool) -> anyhow::Result<()> {
     anyhow::bail!("this build has no interceptor; rebuild with `--features intercept`")
 }
 
 #[cfg(not(feature = "intercept"))]
-pub fn run_supervised(_port: u16) -> anyhow::Result<()> {
+pub fn run_supervised(_port: u16, _force: bool) -> anyhow::Result<()> {
     anyhow::bail!("this build has no interceptor; rebuild with `--features intercept`")
 }
 
@@ -1159,9 +1159,84 @@ mod imp {
         }
     }
 
+    /// A port already in use. Carried as a typed error so the supervisor can recognize a
+    /// permanent bind failure (don't retry) and the dispatcher can word the hint.
+    #[derive(Debug)]
+    pub struct PortInUse {
+        port: u16,
+        /// The llmtrim daemon already holding it, if the pidfile names a live one.
+        by_llmtrim_pid: Option<u32>,
+    }
+
+    impl std::fmt::Display for PortInUse {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            match self.by_llmtrim_pid {
+                Some(pid) => write!(
+                    f,
+                    "port {} is already served by llmtrim (pid {pid}) — `llmtrim stop` first, \
+                     or rerun with --force to replace it",
+                    self.port
+                ),
+                None => write!(
+                    f,
+                    "cannot bind port {} — already in use by another process; free it or pass \
+                     a different --port",
+                    self.port
+                ),
+            }
+        }
+    }
+
+    impl std::error::Error for PortInUse {}
+
+    /// Refuse (or, with `force`, clear) a port already held before we try to bind it. Turns the
+    /// retry-looping `EADDRINUSE` crash into one actionable error, and lets `--force` take over a
+    /// stale daemon the way `start`/`stop` already manage one. A daemon whose pidfile names *our
+    /// own* pid (the supervised loop adopted it) is not a conflict — skip it.
+    fn preflight_port(port: u16, force: bool) -> Result<()> {
+        if let Some(state) = crate::daemon::running()
+            && state.port == port
+            && state.pid != std::process::id()
+        {
+            if !force {
+                return Err(PortInUse {
+                    port,
+                    by_llmtrim_pid: Some(state.pid),
+                }
+                .into());
+            }
+            eprintln!(
+                "llmtrim: --force: stopping existing daemon (pid {})",
+                state.pid
+            );
+            // `stop` waits for the process to exit; wait_free closes the lingering-socket gap so
+            // the bind below doesn't lose the race. A timeout here is its own error (the daemon
+            // didn't release the port), not the foreign-process case below, so the message stays
+            // accurate.
+            if !crate::daemon::stop_and_wait_free(port)? {
+                anyhow::bail!(
+                    "--force stopped the daemon (pid {}) but port {port} was still held after 5s",
+                    state.pid
+                );
+            }
+            return Ok(());
+        }
+        // An untracked process on the port (no llmtrim pidfile, or one naming a different port):
+        // `--force` can't safely kill a foreign process, so refuse immediately either way.
+        if crate::daemon::probe_port(port) {
+            return Err(PortInUse {
+                port,
+                by_llmtrim_pid: None,
+            }
+            .into());
+        }
+        Ok(())
+    }
+
     /// Run the interceptor on `127.0.0.1:port`, blocking until Ctrl-C. Sets up its own
     /// Tokio runtime so the rest of the CLI stays synchronous.
-    pub fn run(port: u16) -> Result<()> {
+    pub fn run(port: u16, force: bool) -> Result<()> {
+        preflight_port(port, force)?;
         let rt = tokio::runtime::Builder::new_multi_thread()
             .enable_all()
             .build()
@@ -1173,18 +1248,28 @@ mod imp {
     /// `setup` points `HTTPS_PROXY` at us, a dead proxy breaks the client's HTTPS entirely —
     /// so on an unexpected exit/panic we restart. Gives up only if it fails fast 5× in a row
     /// (a real misconfig, not a transient), so it never spins forever.
-    pub fn run_supervised(port: u16) -> Result<()> {
+    pub fn run_supervised(port: u16, force: bool) -> Result<()> {
         use std::time::{Duration, Instant};
         let mut fast_fails = 0u32;
+        // `--force` is a one-time take-over: apply it only on the first start. On a crash-restart
+        // the daemon we'd be replacing is ourselves (the pidfile now holds our own pid), so there
+        // is nothing to force, and re-forcing could stop a freshly adopted sibling.
+        let mut force = force;
         loop {
             // Adopt the pidfile if it's missing (a manually-launched supervised daemon, or
             // one whose pidfile was lost to a transient full disk). Best-effort: never let a
             // bookkeeping write stop the proxy from serving.
             let _ = crate::daemon::write_state_if_absent(std::process::id(), port);
             let started = Instant::now();
-            let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| run(port)));
+            let outcome =
+                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| run(port, force)));
+            force = false;
             match outcome {
                 Ok(Ok(())) => return Ok(()), // graceful shutdown (Ctrl-C)
+                // A bind failure is permanent (the port is taken or OS-reserved), not the
+                // transient crash the restart loop exists for — retrying just spins. Surface
+                // it once and give up so the operator sees the actionable message immediately.
+                Ok(Err(e)) if e.downcast_ref::<PortInUse>().is_some() => return Err(e),
                 Ok(Err(e)) => eprintln!("llmtrim: interceptor exited: {e}"),
                 Err(_) => eprintln!("llmtrim: interceptor panicked"),
             }
@@ -1289,10 +1374,20 @@ mod imp {
         // Pre-flight bind: hudsucker's `Proxy::start` collapses a bind failure to a bare
         // "io error", hiding whether the port is in use or OS-reserved. Bind once ourselves
         // first so the real cause reaches the log, then drop it microseconds before hudsucker
-        // rebinds the same addr.
+        // rebinds the same addr. Only an in-use port maps to PortInUse (so the supervisor fails
+        // fast on it); a permission/transient error keeps its OS cause and stays retryable.
         drop(
-            std::net::TcpListener::bind(addr)
-                .with_context(|| format!("cannot bind {addr} — port in use or reserved"))?,
+            std::net::TcpListener::bind(addr).map_err(|e| -> anyhow::Error {
+                if e.kind() == std::io::ErrorKind::AddrInUse {
+                    PortInUse {
+                        port,
+                        by_llmtrim_pid: None,
+                    }
+                    .into()
+                } else {
+                    anyhow::Error::new(e).context(format!("cannot bind {addr}"))
+                }
+            })?,
         );
         eprintln!("llmtrim: MITM interceptor on http://{addr}");
         eprintln!("  export HTTPS_PROXY=http://{addr}");
@@ -1499,6 +1594,75 @@ mod imp {
     #[cfg(test)]
     mod tests {
         use super::*;
+
+        #[test]
+        fn port_in_use_message_points_to_force_when_llmtrim_owns_it() {
+            let msg = PortInUse {
+                port: 43117,
+                by_llmtrim_pid: Some(616982),
+            }
+            .to_string();
+            assert!(msg.contains("43117"), "names the port: {msg}");
+            assert!(msg.contains("616982"), "names the pid: {msg}");
+            assert!(msg.contains("--force"), "points to --force: {msg}");
+        }
+
+        #[test]
+        fn port_in_use_message_for_foreign_process_does_not_promise_force() {
+            // --force can't kill a foreign process, so the message must not suggest it.
+            let msg = PortInUse {
+                port: 9999,
+                by_llmtrim_pid: None,
+            }
+            .to_string();
+            assert!(msg.contains("9999"), "names the port: {msg}");
+            assert!(
+                msg.contains("another process"),
+                "blames a foreign owner: {msg}"
+            );
+            assert!(!msg.contains("--force"), "must not promise --force: {msg}");
+        }
+
+        #[test]
+        fn preflight_refuses_a_busy_port_immediately() {
+            // Bind an ephemeral port so something is listening, then confirm preflight refuses
+            // it (no daemon pidfile names this port, so it reads as a foreign process). The
+            // ephemeral port avoids clashing with any real daemon's configured port.
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            let port = listener.local_addr().unwrap().port();
+
+            let start = std::time::Instant::now();
+            let err = preflight_port(port, false).expect_err("busy port must be refused");
+            assert!(
+                start.elapsed() < std::time::Duration::from_secs(2),
+                "foreign-port refusal must be fast, took {:?}",
+                start.elapsed()
+            );
+            assert!(
+                err.downcast_ref::<PortInUse>().is_some(),
+                "must surface PortInUse, got: {err}"
+            );
+            // It must be attributed to a foreign owner, not to llmtrim — otherwise the user is
+            // told to `llmtrim stop` a process llmtrim can't stop.
+            let msg = err.to_string();
+            assert!(
+                msg.contains("another process") && !msg.contains("--force"),
+                "foreign port must read as foreign, got: {msg}"
+            );
+        }
+
+        #[test]
+        fn port_in_use_survives_anyhow_wrapping_for_the_supervisor() {
+            // run_supervised fails fast only if it can downcast the error back to PortInUse.
+            // Guard the core invariant: a regression that double-wraps or renames the type would
+            // silently restore the 5× retry-spin this fix removes.
+            let e: anyhow::Error = PortInUse {
+                port: 1234,
+                by_llmtrim_pid: None,
+            }
+            .into();
+            assert!(e.downcast_ref::<PortInUse>().is_some());
+        }
 
         #[test]
         fn capture_cap_evicts_oldest_until_under_limit() {

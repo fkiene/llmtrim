@@ -6,7 +6,18 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+- **`serve --force` / `start --force` / `setup --force`** replace an llmtrim daemon that's
+  already holding the port (stops it first, waits for the port to free, then takes over)
+  instead of refusing, no-opping, or leaving a healthy same-port daemon untouched.
+
 ### Fixed
+- **`serve` fails fast when the port is taken.** A bind-in-use error no longer spins through
+  the supervised restart loop five times; it reports once, naming the daemon already on the
+  port (`llmtrim stop` first, or `--force` to replace it) or the foreign process holding it.
+- **A recycled pid no longer reads as a running daemon.** Daemon liveness now verifies the
+  pid is actually llmtrim, not just that *some* process has that pid, so a stale pidfile
+  pointing at an unrelated reused pid is cleared instead of reported as running.
 - **`@llmtrim/js` / `@llmtrim/wasm` now publish to npm.** The v0.2.1 release built the
   package but its `wasm-pack` publish step failed (`wasm-opt` rejected the post-MVP wasm
   features recent rustc emits), so the packages never landed on npm. The redundant

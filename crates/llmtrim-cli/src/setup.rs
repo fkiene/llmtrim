@@ -295,7 +295,7 @@ fn heal_profiles_in(base: &std::path::Path, proxy: &str, ca: &str) -> Result<Vec
     Ok(healed)
 }
 
-pub fn run(requested: Option<u16>) -> Result<()> {
+pub fn run(requested: Option<u16>, force: bool) -> Result<()> {
     let color = ui::color_stdout();
 
     // 0. Resolve the port *once*, here, before anything is wired. The port is a contract
@@ -450,7 +450,9 @@ pub fn run(requested: Option<u16>) -> Result<()> {
     //    changing (explicit `--port`, or self-healing a drifted state) or the daemon is gone —
     //    that also picks up a new binary after an update (the silent-stale-update trap).
     let daemon_ok = match &running {
-        Some(state) if state.port == port => {
+        // `--force` falls through to the restart arm even on a matching port (e.g. to pick up a
+        // freshly installed binary); without it a healthy same-port daemon is left untouched.
+        Some(state) if state.port == port && !force => {
             rows.push((
                 ui::OK,
                 "Interceptor".into(),
@@ -459,7 +461,16 @@ pub fn run(requested: Option<u16>) -> Result<()> {
             true
         }
         _ => {
-            let _ = crate::daemon::stop(); // clear a dead/old-port daemon + its pidfile first
+            // Clear a dead/old-port daemon (or the --force target) and wait for the port to free
+            // before respawning, so the new daemon doesn't lose the bind race. A timeout here is
+            // surfaced (not silently swallowed) so a confusing spawn failure isn't a mystery.
+            if let Ok(false) = crate::daemon::stop_and_wait_free(port) {
+                rows.push((
+                    ui::WARN,
+                    "Interceptor".into(),
+                    format!("port {port} still held 5s after stop; starting anyway"),
+                ));
+            }
             match crate::daemon::spawn_detached(port) {
                 Ok(pid) => {
                     rows.push((

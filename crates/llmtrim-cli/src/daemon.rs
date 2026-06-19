@@ -114,8 +114,21 @@ fn tasklist_reports_pid(stdout: &str, pid: u32) -> bool {
 fn pid_is_llmtrim(pid: u32) -> bool {
     #[cfg(target_os = "linux")]
     {
-        let comm = std::fs::read_to_string(format!("/proc/{pid}/comm")).unwrap_or_default();
-        comm.trim().starts_with("llmtrim")
+        // Prefer the `exe` symlink: it's the real binary filename, untruncated and immune to a
+        // process rewriting its `comm`/argv0 (the 15-char `comm` would also misjudge a longer
+        // installed name). A deleted binary shows up as "llmtrim (deleted)", still a match. Fall
+        // back to `comm`, then be permissive when neither is readable (e.g. EACCES) — better to
+        // attempt a stop on an uncertain match than to disown a real daemon.
+        if let Ok(path) = std::fs::read_link(format!("/proc/{pid}/exe")) {
+            return path
+                .file_name()
+                .map(|n| n.to_string_lossy().starts_with("llmtrim"))
+                .unwrap_or(true);
+        }
+        match std::fs::read_to_string(format!("/proc/{pid}/comm")) {
+            Ok(comm) => comm.trim().starts_with("llmtrim"),
+            Err(_) => true,
+        }
     }
     #[cfg(not(target_os = "linux"))]
     {
@@ -152,10 +165,13 @@ pub fn is_alive(pid: u32) -> bool {
     }
 }
 
-/// The running daemon, if the pidfile points at a live process. Clears a stale pidfile.
+/// The running daemon, if the pidfile points at a live llmtrim process. Clears a stale pidfile.
+/// The identity check (not just liveness) matters because the OS recycles pids: a pidfile left
+/// by a crashed daemon can name a pid the OS later handed to something unrelated. Without it,
+/// callers would treat that foreign process as our daemon — and `--force` would try to stop it.
 pub fn running() -> Option<DaemonState> {
     let state = read_state()?;
-    if is_alive(state.pid) {
+    if is_alive(state.pid) && pid_is_llmtrim(state.pid) {
         Some(state)
     } else {
         let _ = std::fs::remove_file(pidfile().ok()?);
@@ -293,6 +309,38 @@ pub fn stop() -> Result<Option<u32>> {
     Ok(Some(state.pid))
 }
 
+/// Stop the running daemon, then block until `port` is actually free. `stop` already waits for
+/// the process to exit, but the kernel can hold the listening socket a beat longer; a caller
+/// about to rebind the same port must wait for that gap to close or it loses the bind race.
+/// Returns `true` if the port freed, `false` on a 5s timeout.
+pub fn stop_and_wait_free(port: u16) -> Result<bool> {
+    stop()?;
+    Ok(wait_until_free(
+        port,
+        probe_port,
+        50,
+        std::time::Duration::from_millis(100),
+    ))
+}
+
+/// Poll until `probe` reports `port` free, up to `iters` times spaced `step` apart; `true` if it
+/// freed, `false` on timeout. `probe`/`iters`/`step` are parameters so the timeout path is
+/// unit-testable in microseconds without a real socket or a real 5s wait.
+fn wait_until_free(
+    port: u16,
+    probe: impl Fn(u16) -> bool,
+    iters: u32,
+    step: std::time::Duration,
+) -> bool {
+    for _ in 0..iters {
+        if !probe(port) {
+            return true;
+        }
+        std::thread::sleep(step);
+    }
+    false
+}
+
 /// Format a duration in seconds as `3h12m` / `5m` / `42s`.
 pub fn human_uptime(secs: i64) -> String {
     let (h, m, s) = (secs / 3600, (secs % 3600) / 60, secs % 60);
@@ -316,6 +364,36 @@ pub fn human_age(rfc3339: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn wait_until_free_returns_true_once_the_port_frees() {
+        // Busy on the first probe, free on the second.
+        let calls = std::cell::Cell::new(0);
+        assert!(wait_until_free(
+            0,
+            |_| {
+                calls.set(calls.get() + 1);
+                calls.get() < 2
+            },
+            50,
+            std::time::Duration::ZERO,
+        ));
+    }
+
+    #[test]
+    fn wait_until_free_times_out_on_a_port_that_stays_held() {
+        // A port that never frees must report timeout, not hang — the `--force stopped it but
+        // the socket lingered` path. Tiny iters/step so this runs in microseconds.
+        assert!(!wait_until_free(0, |_| true, 3, std::time::Duration::ZERO));
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn pid_one_is_not_identified_as_llmtrim() {
+        // pid 1 (init/systemd) is always alive but never llmtrim — guards the identity check
+        // that lets `running()` clear a pidfile naming a recycled foreign pid.
+        assert!(!pid_is_llmtrim(1));
+    }
 
     #[test]
     fn human_uptime_formats() {

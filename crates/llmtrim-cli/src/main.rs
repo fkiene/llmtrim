@@ -118,6 +118,10 @@ enum Commands {
         /// Port to listen on (127.0.0.1).
         #[arg(long, default_value_t = llmtrim::setup::DEFAULT_PORT)]
         port: u16,
+        /// Replace an llmtrim daemon already holding the port (stops it first) instead of
+        /// refusing to start.
+        #[arg(long)]
+        force: bool,
         /// Internal: run with crash-restart supervision (used by `start`/autostart).
         #[arg(long, hide = true)]
         supervised: bool,
@@ -137,6 +141,10 @@ enum Commands {
         /// Interceptor port. Omit to auto-select a free port starting at 43117.
         #[arg(long)]
         port: Option<u16>,
+        /// Restart the daemon even if a healthy one is already on the chosen port (e.g. to pick
+        /// up a new binary). By default setup leaves a healthy same-port daemon running.
+        #[arg(long)]
+        force: bool,
     },
     /// Undo everything `setup` did
     ///
@@ -160,6 +168,10 @@ enum Commands {
         /// Port to listen on. Omit to reuse the configured port (or 43117).
         #[arg(long)]
         port: Option<u16>,
+        /// Restart a running daemon: by default `start` is a no-op when one is already up;
+        /// `--force` stops it first and starts a fresh one.
+        #[arg(long)]
+        force: bool,
     },
     /// Run an agent, guaranteeing its traffic routes through llmtrim
     ///
@@ -568,6 +580,7 @@ fn run() -> Result<()> {
         }
         Commands::Serve {
             port,
+            force,
             supervised,
             hide_console,
         } => {
@@ -581,17 +594,35 @@ fn run() -> Result<()> {
                 // a foreground `llmtrim serve` must not rewrite the user's shell profiles.
                 // Best-effort: never let it stop the proxy coming up.
                 let _ = llmtrim::setup::heal_managed_env();
-                llmtrim::serve::run_supervised(port)?;
+                llmtrim::serve::run_supervised(port, force)?;
             } else {
-                llmtrim::serve::run(port)?;
+                llmtrim::serve::run(port, force)?;
             }
         }
-        Commands::Setup { port } => llmtrim::setup::run(port)?,
+        Commands::Setup { port, force } => llmtrim::setup::run(port, force)?,
         Commands::Uninstall { purge, keep_binary } => {
             llmtrim::setup::uninstall(purge, keep_binary)?
         }
-        Commands::Start { port } => {
+        Commands::Start { port, force } => {
             let color = ui::color_stdout();
+            if force && let Some(state) = llmtrim::daemon::running() {
+                println!(
+                    "{}",
+                    ui::ok(
+                        color,
+                        &format!("Stopping existing daemon · pid {} (--force)", state.pid)
+                    )
+                );
+                // Wait for the port to actually free before spawning, so the new daemon doesn't
+                // lose the bind race and crash on EADDRINUSE.
+                if !llmtrim::daemon::stop_and_wait_free(state.port)? {
+                    anyhow::bail!(
+                        "--force stopped pid {} but port {} was still held after 5s",
+                        state.pid,
+                        state.port
+                    );
+                }
+            }
             if let Some(state) = llmtrim::daemon::running() {
                 println!(
                     "{}",
