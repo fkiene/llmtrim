@@ -116,6 +116,11 @@ jobs:
       - name: Compile embedder core (llmtrim-core)
         if: ${{ env.RUN != 'false' }}
         run: cargo check -p llmtrim-core
+      # The optional features (skeleton/tiktoken/multimodal) must each drop cleanly: the
+      # no-default build is the one the wasm binding ships, so guard it (and run its tests).
+      - name: Compile + test core with all optional features off
+        if: ${{ env.RUN != 'false' }}
+        run: cargo test -p llmtrim-core --no-default-features
       - name: Compile CLI lib without the interceptor
         if: ${{ env.RUN != 'false' }}
         run: cargo check -p llmtrim --no-default-features --lib
@@ -154,6 +159,41 @@ jobs:
         env:
           LD_LIBRARY_PATH: ${{ github.workspace }}/target/debug
         run: ruby -I"$RUNNER_TEMP/bindings/ruby" crates/llmtrim-uniffi/tests/ruby/test_llmtrim.rb
+
+  # WASM: the host build + unit tests of llmtrim-wasm are already covered by the `test` job
+  # (it's a workspace member). This job adds the wasm32 target build and the JS boundary —
+  # generate the Node bindings and run the smoke test, which catches an FFI/typing break.
+  wasm:
+    name: WASM binding (smoke)
+    needs: changes
+    if: ${{ !cancelled() && needs.changes.outputs.code != 'false' }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@v2
+      # wasm-bindgen-cli must match the wasm-bindgen crate version in Cargo.lock exactly
+      # (the binary checks a schema version), so derive it instead of pinning a literal.
+      - name: Resolve wasm-bindgen version
+        id: wb
+        run: echo "ver=$(cargo metadata --format-version=1 | jq -r '.packages[]|select(.name=="wasm-bindgen")|.version' | head -1)" >> "$GITHUB_OUTPUT"
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: wasm-bindgen-cli@${{ steps.wb.outputs.ver }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - name: Build for wasm32 + generate Node bindings
+        env:
+          RUSTFLAGS: '--cfg getrandom_backend="wasm_js"'
+        run: |
+          cargo build -p llmtrim-wasm --release --target wasm32-unknown-unknown
+          wasm-bindgen target/wasm32-unknown-unknown/release/llmtrim_wasm.wasm \
+            --out-dir crates/llmtrim-wasm/pkg --target nodejs
+      - name: Node smoke test
+        run: node crates/llmtrim-wasm/smoke.mjs
 
   # Swift: compile the generated bindings + a smoke against the cdylib on macOS and run it.
   # This is the compile-and-load verification for the Swift target (the prerequisite to a

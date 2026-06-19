@@ -328,6 +328,84 @@ jobs:
           npm install -g "@llmtrim/cli@${TAG#v}"
           llmtrim --version | grep -F "${TAG#v}"
 
+  # npm: the WebAssembly binding, built with wasm-pack (which manages a matching wasm-bindgen
+  # internally). Published as `@llmtrim/js` (primary) plus `@llmtrim/wasm` (a thin alias that
+  # re-exports it). Independent of the crate/CLI release — a wasm publish failure must not
+  # block them — and skipped while NPM_TOKEN is absent.
+  publish-wasm:
+    needs: create-release
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+      - uses: taiki-e/install-action@v2
+        with:
+          # Pinned so the bundled wasm-bindgen stays fixed; the CI `wasm` job derives its
+          # wasm-bindgen-cli from Cargo.lock, so keep both in step when bumping either.
+          tool: wasm-pack@0.13.1
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          registry-url: "https://registry.npmjs.org"
+      - name: Build and publish @llmtrim/js (+ @llmtrim/wasm alias)
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+          TAG: ${{ github.ref_name }}
+          # The JS-backed getrandom backend needs this rustc cfg; it can't live in a repo
+          # .cargo/config.toml (that would break `cargo publish`'s verify build).
+          RUSTFLAGS: '--cfg getrandom_backend="wasm_js"'
+        run: |
+          set -euo pipefail
+          if [ -z "$NODE_AUTH_TOKEN" ]; then echo "NPM_TOKEN not set — skipping wasm npm publish"; exit 0; fi
+          VER="${TAG#v}"
+          wasm-pack build crates/llmtrim-wasm --release --target bundler --out-dir pkg
+          # Smoke the bundler artifact actually being published (the CI `wasm` job builds the
+          # nodejs target, a different codepath): the expected files exist and the wasm parses
+          # and exports `compress`.
+          node -e '
+            const fs = require("fs"), d = "crates/llmtrim-wasm/pkg/";
+            for (const f of ["llmtrim_wasm_bg.wasm", "llmtrim_wasm.js", "llmtrim_wasm.d.ts", "package.json"])
+              if (!fs.existsSync(d + f)) throw new Error("missing " + f);
+            const ex = WebAssembly.Module.exports(new WebAssembly.Module(fs.readFileSync(d + "llmtrim_wasm_bg.wasm")));
+            if (!ex.some(e => e.name.includes("compress"))) throw new Error("compress not exported by wasm");
+            console.log("bundler artifact OK");
+          '
+          # wasm-pack names the package after the crate (llmtrim-wasm); scope it to @llmtrim/js
+          # and pin the released version.
+          node -e '
+            const fs = require("fs"), p = "crates/llmtrim-wasm/pkg/package.json";
+            const j = JSON.parse(fs.readFileSync(p, "utf8"));
+            j.name = "@llmtrim/js";
+            j.version = process.env.TAG.replace(/^v/, "");
+            fs.writeFileSync(p, JSON.stringify(j, null, 2) + "\n");
+          '
+          npm publish crates/llmtrim-wasm/pkg --access public
+          # Thin alias package: @llmtrim/wasm re-exports @llmtrim/js at the same version.
+          mkdir -p alias
+          cat > alias/package.json <<JSON
+          {
+            "name": "@llmtrim/wasm",
+            "version": "$VER",
+            "description": "Alias for @llmtrim/js, the llmtrim WebAssembly binding.",
+            "license": "MPL-2.0",
+            "repository": { "type": "git", "url": "https://github.com/fkiene/llmtrim" },
+            "type": "module",
+            "main": "index.js",
+            "module": "index.js",
+            "types": "index.d.ts",
+            "dependencies": { "@llmtrim/js": "$VER" }
+          }
+          JSON
+          echo 'export * from "@llmtrim/js";' > alias/index.js
+          echo 'export * from "@llmtrim/js";' > alias/index.d.ts
+          npm publish ./alias --access public
+          # Verify both channels resolve from the registry.
+          sleep 30
+          npm view "@llmtrim/js@$VER" version
+          npm view "@llmtrim/wasm@$VER" version
+
   # Self-verify the cargo channel: install from the real crates.io index, exactly as a
   # user would. Retries because the index propagates with a small delay after publish.
   verify-crate:
