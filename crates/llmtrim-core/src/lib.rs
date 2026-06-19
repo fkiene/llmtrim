@@ -6,6 +6,29 @@
 //! functions here are the **pure transform core** — no network calls live in this
 //! crate. The `llmtrim` CLI/proxy crate wraps them.
 //!
+//! # Feature flags
+//!
+//! All are enabled by default; turn them off for smaller, C-toolchain-free builds.
+//!
+//! - **`skeleton`** — Stage C code skeletonization via tree-sitter and its grammars.
+//!   These compile C, so dropping the feature removes the C-toolchain requirement.
+//! - **`tiktoken`** — exact OpenAI tokenization via `tiktoken-rs`, which embeds ~8.3 MB
+//!   of BPE vocab. Without it the crate uses its built-in estimate tokenizer everywhere:
+//!   token counts become approximate, but reported savings percentages are unchanged.
+//! - **`multimodal`** — Stage H image downscaling via the `image` crate (png/jpeg
+//!   decoders). Without it, image payloads pass through unchanged.
+//!
+//! ## WebAssembly
+//!
+//! With these features off the crate builds for `wasm32-unknown-unknown`. The JS-backed
+//! `getrandom` backend also needs a rustc cfg in the environment (it cannot live in a repo
+//! `.cargo/config.toml`, which would break `cargo publish`):
+//!
+//! ```sh
+//! RUSTFLAGS='--cfg getrandom_backend="wasm_js"' \
+//!   cargo build -p llmtrim-core --no-default-features --target wasm32-unknown-unknown
+//! ```
+//!
 
 use anyhow::{Context, Result};
 use serde_json::Value;
@@ -77,6 +100,7 @@ fn stages_for(_provider: ProviderKind, config: &config::DenseConfig) -> Vec<Box<
         }));
     }
     // Stage C (input, lossy): skeletonize non-focus code in fenced blocks.
+    #[cfg(feature = "skeleton")]
     if config.skeletonize {
         stages.push(Box::new(stages::SkeletonStage {
             keep_full_top_k: config.skeleton_keep_full_top_k,
@@ -84,11 +108,14 @@ fn stages_for(_provider: ProviderKind, config: &config::DenseConfig) -> Vec<Box<
             drop_min_body_lines: config.skeleton_drop_min_body_lines,
         }));
     }
-    // Stage C (input, lossless): minify brace-language code (strip whitespace).
+    // Stage C (input, lossless): minify brace-language code (strip whitespace). Shares the
+    // tree-sitter-backed `skeleton` module, so it's gated on the same feature.
+    #[cfg(feature = "skeleton")]
     if config.minify_code {
         stages.push(Box::new(stages::MinifyCodeStage));
     }
     // Stage H (input, lossy): image detail tier + downscale embedded images.
+    #[cfg(feature = "multimodal")]
     if config.multimodal {
         stages.push(Box::new(stages::ImageStage {
             detail: config.image_detail.clone(),
@@ -293,6 +320,9 @@ mod tests {
         let cfg = config::DenseConfig::default();
         let result =
             compress_with_config(input, Some(ProviderKind::OpenAi), &cfg).expect("compress");
+        // Exact only when the `tiktoken` feature supplies the OpenAI BPE vocab; the rest of
+        // this test (content preserved, no injected system) is tokenizer-independent.
+        #[cfg(feature = "tiktoken")]
         assert!(result.tokenizer_exact);
         let body: Value = serde_json::from_str(&result.request_json).unwrap();
         let msgs = body.get("messages").and_then(Value::as_array).unwrap();

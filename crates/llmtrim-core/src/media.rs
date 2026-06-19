@@ -13,23 +13,30 @@
 //! - Anthropic: long edge ≤1568 and ≤~1.15 MP.
 //!   <https://docs.claude.com/en/docs/build-with-claude/vision>
 
+#[cfg(feature = "multimodal")]
 use std::io::Cursor;
 
+#[cfg(feature = "multimodal")]
 use base64::Engine;
+#[cfg(feature = "multimodal")]
 use image::ImageReader;
 
 /// Decode caps for untrusted images. A crafted ~20k×20k PNG decodes to ~1.6 GB with the
 /// library default (`Limits::default()` = 512 MiB alloc, *no* dimension cap), which can
 /// OOM-kill the always-on daemon. Bound both dimensions (≤8192px — well above every
 /// provider cap, so real images are unaffected) and the working allocation (≤64 MiB).
+#[cfg(feature = "multimodal")]
 const MAX_DECODE_EDGE: u32 = 8192;
+#[cfg(feature = "multimodal")]
 const MAX_DECODE_ALLOC: u64 = 64 * 1024 * 1024;
 
 /// JPEG re-encode quality. The default encoder quality (~75) adds visible recompression
 /// loss; 90 keeps the "quality-neutral" claim honest (the downscale, not the codec, is the
 /// only intended change).
+#[cfg(feature = "multimodal")]
 const JPEG_QUALITY: u8 = 90;
 
+#[cfg(feature = "multimodal")]
 fn decode_limits() -> image::Limits {
     let mut limits = image::Limits::default();
     limits.max_image_width = Some(MAX_DECODE_EDGE);
@@ -45,6 +52,7 @@ fn decode_limits() -> image::Limits {
 /// Minimal scan: walk JPEG markers to APP1 "Exif\0\0", parse the TIFF header (byte order
 /// then IFD0), and find tag 0x0112. Returns `None` if there's no usable orientation (treated
 /// as upright / "1" by callers). Bounds-checked throughout; never panics on crafted input.
+#[cfg(feature = "multimodal")]
 fn jpeg_exif_orientation(bytes: &[u8]) -> Option<u16> {
     // SOI
     if bytes.len() < 2 || bytes[0] != 0xFF || bytes[1] != 0xD8 {
@@ -79,6 +87,7 @@ fn jpeg_exif_orientation(bytes: &[u8]) -> Option<u16> {
 }
 
 /// Parse the orientation tag from an APP1 segment body (`Exif\0\0` + TIFF block).
+#[cfg(feature = "multimodal")]
 fn exif_orientation_from_app1(body: &[u8]) -> Option<u16> {
     if body.len() < 14 || &body[0..6] != b"Exif\0\0" {
         return None;
@@ -154,12 +163,14 @@ pub const CAP_GOOGLE: ImageCap = ImageCap {
     tile: 0,
 };
 
+#[cfg(feature = "multimodal")]
 fn b64() -> base64::engine::general_purpose::GeneralPurpose {
     base64::engine::general_purpose::STANDARD
 }
 
 /// Target dimensions to satisfy every constraint in `cap`, preserving aspect ratio.
 /// `None` if the image is already within the cap (no resize needed).
+#[cfg(feature = "multimodal")]
 fn target_dims(w: u32, h: u32, cap: ImageCap) -> Option<(u32, u32)> {
     let (wf, hf) = (f64::from(w), f64::from(h));
     let long = wf.max(hf);
@@ -186,6 +197,7 @@ fn target_dims(w: u32, h: u32, cap: ImageCap) -> Option<(u32, u32)> {
 /// Snap a dimension DOWN to a tile multiple, but only to shave a *barely-filled*
 /// partial tile (remainder < 10% of a tile, ≤~51px) — saving a whole tile's tokens
 /// (OpenAI: 170/tile) for a negligible (<10%, one-axis) downscale. Never below one tile.
+#[cfg(feature = "multimodal")]
 fn snap_tile(dim: u32, tile: u32) -> u32 {
     if tile == 0 || dim <= tile {
         return dim;
@@ -203,6 +215,7 @@ fn snap_tile(dim: u32, tile: u32) -> u32 {
 /// the format isn't supported, it's already optimal, a decode limit is exceeded (oversized
 /// untrusted image), it's a JPEG carrying a non-upright EXIF orientation, or the re-encode
 /// would be larger than the input.
+#[cfg(feature = "multimodal")]
 pub fn fit_to_cap(data: &str, cap: ImageCap) -> Option<String> {
     let bytes = b64().decode(data.trim()).ok()?;
     let format = image::guess_format(&bytes).ok()?;
@@ -241,6 +254,13 @@ pub fn fit_to_cap(data: &str, cap: ImageCap) -> Option<String> {
     Some(b64().encode(buf.get_ref()))
 }
 
+/// No-op fallback without the `multimodal` feature: the image decoders aren't compiled in,
+/// so the payload passes through unchanged.
+#[cfg(not(feature = "multimodal"))]
+pub fn fit_to_cap(_data: &str, _cap: ImageCap) -> Option<String> {
+    None
+}
+
 /// Resize the payload of a `data:<media>;base64,<data>` URI down to `cap`.
 pub fn fit_data_uri(uri: &str, cap: ImageCap) -> Option<String> {
     let (header, data) = uri.split_once(',')?;
@@ -250,7 +270,7 @@ pub fn fit_data_uri(uri: &str, cap: ImageCap) -> Option<String> {
     Some(format!("{header},{}", fit_to_cap(data, cap)?))
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "multimodal"))]
 mod tests {
     use super::*;
 

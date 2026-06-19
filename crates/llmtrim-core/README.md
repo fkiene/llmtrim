@@ -53,6 +53,18 @@ Presets: `auto` (shape-routed, default), `aggressive`, `agent`, `code`, `rag`, `
 
 Full reference on [docs.rs](https://docs.rs/llmtrim-core).
 
+## Feature flags
+
+All are on by default; disable them for smaller, C-toolchain-free builds (e.g. WebAssembly).
+
+| Feature | Default | Effect when off |
+| --- | --- | --- |
+| `skeleton` | on | Drops Stage C code skeletonization (tree-sitter + grammars, which compile C). |
+| `tiktoken` | on | Drops the embedded OpenAI BPE vocabs (~8.3 MB); the estimate tokenizer is used everywhere (counts approximate, savings percentages unchanged). |
+| `multimodal` | on | Drops the `image` decoders (Stage H image downscaling); image payloads pass through unchanged. |
+
+With these off the crate builds for `wasm32-unknown-unknown`; see the crate docs for the exact build command.
+
 ## Other languages
 
 The same engine is exposed to **Python, Ruby, Swift and Kotlin** via [UniFFI](https://mozilla.github.io/uniffi-rs/) (see [`llmtrim-uniffi`](../llmtrim-uniffi)). The [`llmtrim`](https://crates.io/crates/llmtrim) crate is the CLI and drop-in compressing proxy built on this engine.

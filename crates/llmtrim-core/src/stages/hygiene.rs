@@ -395,6 +395,10 @@ mod tests {
         assert!(!now.contains("\n  \"a\""), "pretty whitespace gone");
     }
 
+    // Requires `tiktoken`: the whitespace stripped from an inline JSON span is token-neutral
+    // under the estimate tokenizer (removed punctuation-adjacent spaces don't change its
+    // count), so the pipeline's token gate reverts the transform when tiktoken is off.
+    #[cfg(feature = "tiktoken")]
     #[test]
     fn minifies_inline_json_span_leaving_prose() {
         // An inline balanced {…} span inside a sentence: minify only the JSON.

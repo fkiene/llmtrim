@@ -11,6 +11,7 @@
 //!   and flag the counts as **approximate** (surfaced in `gain`; see plan risk #1).
 
 use anyhow::Result;
+#[cfg(feature = "tiktoken")]
 use tiktoken_rs::CoreBPE;
 
 use crate::ir::ProviderKind;
@@ -46,12 +47,14 @@ pub trait TokenCounter: Send + Sync {
 
 /// Token counter backed by tiktoken (OpenAI BPE families; also the Anthropic proxy).
 /// Holds a cached `&'static` singleton — vocabs load once, lazily.
+#[cfg(feature = "tiktoken")]
 pub struct TiktokenCounter {
     bpe: &'static CoreBPE,
     label: &'static str,
     exact: bool,
 }
 
+#[cfg(feature = "tiktoken")]
 impl TokenCounter for TiktokenCounter {
     fn count(&self, text: &str) -> usize {
         // `encode_with_special_tokens` never errors and treats the whole string as
@@ -151,12 +154,23 @@ pub fn counter_for(provider: ProviderKind, model: Option<&str>) -> Result<Box<dy
             // tiktoken is exact only when it actually knows the model. OpenAI-*shaped* hosts
             // (groq/llama, deepseek, qwen, mistral…) miss the registry → o200k_base is then a
             // proxy, not ground truth, so flag it approximate instead of mislabeling the ledger.
-            let (bpe, label, exact): (_, &'static str, bool) =
-                match model.and_then(|m| tiktoken_rs::bpe_for_model(m).ok()) {
-                    Some(bpe) => (bpe, "tiktoken", true),
-                    None => (tiktoken_rs::o200k_base_singleton(), "o200k-approx", false),
-                };
-            Ok(Box::new(TiktokenCounter { bpe, label, exact }))
+            #[cfg(feature = "tiktoken")]
+            {
+                let (bpe, label, exact): (_, &'static str, bool) =
+                    match model.and_then(|m| tiktoken_rs::bpe_for_model(m).ok()) {
+                        Some(bpe) => (bpe, "tiktoken", true),
+                        None => (tiktoken_rs::o200k_base_singleton(), "o200k-approx", false),
+                    };
+                Ok(Box::new(TiktokenCounter { bpe, label, exact }))
+            }
+            // Without the BPE vocabs, fall back to the estimate tokenizer (approximate).
+            #[cfg(not(feature = "tiktoken"))]
+            {
+                let _ = model;
+                Ok(Box::new(ApproxCounter {
+                    label: "approx(openai)",
+                }))
+            }
         }
         // No public tokenizer → the cheap BPE-shaped estimate (flagged approximate). Skips the
         // BPE pass that dominated compress latency while still tracking structural savings.
@@ -173,6 +187,7 @@ pub fn counter_for(provider: ProviderKind, model: Option<&str>) -> Result<Box<dy
 mod tests {
     use super::*;
 
+    #[cfg(feature = "tiktoken")]
     #[test]
     fn openai_counter_is_exact_and_counts() {
         let c = counter_for(ProviderKind::OpenAi, Some("gpt-4o")).unwrap();
@@ -180,6 +195,18 @@ mod tests {
         assert_eq!(c.count(""), 0);
         assert!(c.count("hello world") >= 2);
         // More text => at least as many tokens (monotonic on append).
+        assert!(c.count("hello world, this is a longer sentence") > c.count("hello world"));
+    }
+
+    // Without the `tiktoken` feature the OpenAI path has no BPE vocab and falls back to the
+    // estimate counter — counts are flagged approximate but still non-zero and monotonic.
+    #[cfg(not(feature = "tiktoken"))]
+    #[test]
+    fn openai_counter_falls_back_to_approx_without_tiktoken() {
+        let c = counter_for(ProviderKind::OpenAi, Some("gpt-4o")).unwrap();
+        assert!(!c.is_exact());
+        assert!(c.label().contains("approx"));
+        assert!(c.count("hello world") >= 1);
         assert!(c.count("hello world, this is a longer sentence") > c.count("hello world"));
     }
 
