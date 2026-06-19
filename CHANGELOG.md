@@ -18,6 +18,14 @@ All notable changes to this project are documented here. The format follows
   credential-free URL with OS-level auth where possible.
   Requested by @gkgoat1 ([#62](https://github.com/fkiene/llmtrim/issues/62)).
 
+### Fixed
+- **`json-crush` now preserves the original row count of sampled arrays** so count and
+  aggregate questions stay answerable after down-sampling. Previously a sampled array lost
+  its original length. A bare top-level array now reports it in the sample note text; a
+  nested array field leaves a `_sampled_from_<field>: N` sibling on its parent object.
+  Neither injects a sentinel row into the array nor wraps a bare array in an object, so
+  exact aggregation over the kept rows is unaffected.
+
 ## [0.2.0] - 2026-06-18
 
 ### Changed
