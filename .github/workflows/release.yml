@@ -379,6 +379,7 @@ jobs:
             const j = JSON.parse(fs.readFileSync(p, "utf8"));
             j.name = "@llmtrim/js";
             j.version = process.env.TAG.replace(/^v/, "");
+            j.keywords = ["llm", "tokens", "compression", "proxy", "openai", "anthropic", "claude", "wasm", "webassembly"];
             fs.writeFileSync(p, JSON.stringify(j, null, 2) + "\n");
           '
           npm publish crates/llmtrim-wasm/pkg --access public
@@ -389,7 +390,9 @@ jobs:
             "name": "@llmtrim/wasm",
             "version": "$VER",
             "description": "Alias for @llmtrim/js, the llmtrim WebAssembly binding.",
+            "keywords": ["llm", "tokens", "compression", "proxy", "openai", "anthropic", "claude", "wasm", "webassembly"],
             "license": "MPL-2.0",
+            "homepage": "https://github.com/fkiene/llmtrim",
             "repository": { "type": "git", "url": "https://github.com/fkiene/llmtrim" },
             "type": "module",
             "main": "index.js",
@@ -400,6 +403,21 @@ jobs:
           JSON
           echo 'export * from "@llmtrim/js";' > alias/index.js
           echo 'export * from "@llmtrim/js";' > alias/index.d.ts
+          cat > alias/README.md <<'MD'
+          # @llmtrim/wasm
+
+          Alias for [`@llmtrim/js`](https://www.npmjs.com/package/@llmtrim/js) — the
+          WebAssembly/JS binding for the [llmtrim](https://github.com/fkiene/llmtrim)
+          compression engine. Installing this package pulls in `@llmtrim/js` at the same
+          version and re-exports it, so both names resolve to the identical API.
+
+          ```js
+          import { compress } from "@llmtrim/wasm"; // same as "@llmtrim/js"
+          ```
+
+          See the [`@llmtrim/js` README](https://www.npmjs.com/package/@llmtrim/js) for the
+          full API and usage.
+          MD
           npm publish ./alias --access public
           # Verify both channels resolve from the registry.
           sleep 30
