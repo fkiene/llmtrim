@@ -1,4 +1,4 @@
-# llmtrim-wasm
+# @llmtrim/js
 
 WebAssembly/JS bindings for the [`llmtrim-core`](../llmtrim-core) compression engine, for
 running the static prompt/payload compressor in a browser, Node, Bun, Deno, or a Cloudflare
