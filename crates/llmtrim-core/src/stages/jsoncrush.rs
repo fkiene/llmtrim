@@ -67,6 +67,11 @@ impl Transform for JsonCrushStage {
             .collect();
 
         let mut sampled_any = false;
+        // Original row counts of *bare top-level* sampled arrays, in pointer order. A bare
+        // crushed array has no parent object to carry N as a sibling field, so N is surfaced
+        // in the note text (the channel the model already reads). Nested arrays instead get a
+        // `_sampled_from_<field>` sibling on their parent object and don't contribute here.
+        let mut bare_counts: Vec<usize> = Vec::new();
         for ptr in &pointers {
             let Some(s) = req.get_str(ptr).map(str::to_string) else {
                 continue;
@@ -74,42 +79,88 @@ impl Transform for JsonCrushStage {
             let Ok(mut value) = serde_json::from_str::<Value>(&s) else {
                 continue;
             };
-            if crush_value(&mut value, self.max_rows, &query) {
+            if let Some(bare_n) = crush_value(&mut value, self.max_rows, &query) {
                 req.set(ptr, Value::String(value.to_string()));
                 sampled_any = true;
+                bare_counts.extend(bare_n);
             }
         }
         if sampled_any {
-            provider.add_system_instruction(req, SAMPLE_NOTE);
+            provider.add_system_instruction(req, &sample_note(&bare_counts));
         }
         Ok(())
     }
 }
 
-/// Sample any oversized record array within `value` (the value itself, or arrays nested
-/// one level inside an object). Returns whether anything was sampled.
-fn crush_value(value: &mut Value, max_rows: usize, query: &HashSet<String>) -> bool {
-    if let Some(rows) = crush_array(value, max_rows, query) {
-        *value = Value::Array(rows);
-        return true;
+/// The one-time sample note, with the original row counts of any bare top-level sampled
+/// arrays appended so count/aggregate queries can still recover N. Empty `bare_counts`
+/// (only nested arrays were sampled, or none had a recoverable count) yields the static note
+/// unchanged.
+///
+/// One shared note serves the whole request, so it can only state the bare counts as a set,
+/// not attribute a specific N to a specific array when several bare arrays are sampled across
+/// different messages. That ambiguity is acceptable for the simple/common single-array case;
+/// nested arrays avoid it entirely via their per-field `_sampled_from_<field>` sibling.
+fn sample_note(bare_counts: &[usize]) -> String {
+    if bare_counts.is_empty() {
+        return SAMPLE_NOTE.to_string();
     }
-    // Object with big array fields (e.g. `{"results": [...]}`): sample each in place.
-    if let Value::Object(map) = value {
-        let mut any = false;
-        for field in map.values_mut() {
-            if let Some(rows) = crush_array(field, max_rows, query) {
-                *field = Value::Array(rows);
-                any = true;
-            }
-        }
-        return any;
-    }
-    false
+    let counts = bare_counts
+        .iter()
+        .map(usize::to_string)
+        .collect::<Vec<_>>()
+        .join(", ");
+    let plural = if bare_counts.len() == 1 {
+        "array's original row count was"
+    } else {
+        "arrays' original row counts were"
+    };
+    format!("{} The sampled {plural}: {counts}.", SAMPLE_NOTE.trim_end())
 }
 
-/// Sampled rows for a record array longer than `max_rows`, in original order; `None` if
-/// `v` isn't an over-cap array of objects.
-fn crush_array(v: &Value, max_rows: usize, query: &HashSet<String>) -> Option<Vec<Value>> {
+/// Sample any oversized record array within `value` (the value itself, or arrays nested
+/// one level inside an object).
+///
+/// Returns `None` if nothing was sampled. Otherwise returns `Some(bare_n)`:
+/// - `Some(Some(n))` — `value` itself was a bare top-level array of original length `n`. A
+///   bare array has no parent object, so `n` is surfaced in the note text by the caller.
+/// - `Some(None)` — only nested array fields were sampled. Each gets a `_sampled_from_<field>`
+///   sibling on its parent object here (the parent is already an object, so this adds no array
+///   element and changes no type), so the caller needs no count from this value.
+fn crush_value(
+    value: &mut Value,
+    max_rows: usize,
+    query: &HashSet<String>,
+) -> Option<Option<usize>> {
+    if let Some((n, rows)) = crush_array(value, max_rows, query) {
+        *value = Value::Array(rows);
+        return Some(Some(n));
+    }
+    // Object with big array fields (e.g. `{"results": [...]}`): sample each in place and leave
+    // a `_sampled_from_<field>: n` sibling so count/aggregate queries can still recover N.
+    if let Value::Object(map) = value {
+        let mut sampled: Vec<(String, usize)> = Vec::new();
+        for (key, field) in map.iter_mut() {
+            if let Some((n, rows)) = crush_array(field, max_rows, query) {
+                *field = Value::Array(rows);
+                sampled.push((key.clone(), n));
+            }
+        }
+        if sampled.is_empty() {
+            return None;
+        }
+        for (key, n) in sampled {
+            map.insert(format!("_sampled_from_{key}"), Value::from(n));
+        }
+        return Some(None);
+    }
+    None
+}
+
+/// Sampled rows for a record array longer than `max_rows`, paired with the array's original
+/// row count `n` (so callers can surface it for count/aggregate queries); rows are in original
+/// order. `None` if `v` isn't an over-cap array of objects, or no rows were dropped.
+fn crush_array(v: &Value, max_rows: usize, query: &HashSet<String>) -> Option<(usize, Vec<Value>)> {
     let arr = v.as_array()?;
     let n = arr.len();
     if n <= max_rows || !arr.iter().all(Value::is_object) {
@@ -160,13 +211,13 @@ fn crush_array(v: &Value, max_rows: usize, query: &HashSet<String>) -> Option<Ve
     if keep.iter().filter(|&&k| k).count() >= n {
         return None;
     }
-    Some(
-        arr.iter()
-            .zip(&keep)
-            .filter(|&(_, &k)| k)
-            .map(|(row, _)| row.clone())
-            .collect(),
-    )
+    let rows = arr
+        .iter()
+        .zip(&keep)
+        .filter(|&(_, &k)| k)
+        .map(|(row, _)| row.clone())
+        .collect();
+    Some((n, rows))
 }
 
 /// Fill the remaining `max_rows` slots in `keep` with a query-biased, diverse sample of the
@@ -329,7 +380,8 @@ mod tests {
     fn samples_big_array_and_keeps_outliers() {
         let arr = records(1000);
         let q = HashSet::new();
-        let rows = crush_array(&arr, 50, &q).expect("over-cap array is sampled");
+        let (n, rows) = crush_array(&arr, 50, &q).expect("over-cap array is sampled");
+        assert_eq!(n, 1000, "original row count reported");
         assert!(rows.len() <= 50, "down to the budget, got {}", rows.len());
         // both rare error rows survive
         let errors = rows.iter().filter(|r| r["status"] == "error").count();
@@ -349,7 +401,7 @@ mod tests {
                 .collect(),
         );
         let q = HashSet::new();
-        let rows = crush_array(&arr, 50, &q).expect("over-cap array is sampled");
+        let (_, rows) = crush_array(&arr, 50, &q).expect("over-cap array is sampled");
         assert!(
             rows.len() <= 50,
             "outliers bounded by budget, got {}",
@@ -370,7 +422,7 @@ mod tests {
                 .collect(),
         );
         let q = HashSet::new();
-        let rows = crush_array(&arr, 50, &q).expect("over-cap array is sampled");
+        let (_, rows) = crush_array(&arr, 50, &q).expect("over-cap array is sampled");
         assert!(rows.len() < n, "rows actually dropped, not all kept");
         assert!(rows.len() <= 50, "within budget");
     }
@@ -410,14 +462,125 @@ mod tests {
     fn nested_array_field_is_sampled_in_place() {
         let wrapper = json!({"results": records(1000), "total": 1000});
         let mut v = wrapper;
-        assert!(
+        assert_eq!(
             crush_value(&mut v, 50, &HashSet::new()),
-            "nested array sampled"
+            Some(None),
+            "nested array sampled (no bare count surfaced in the note)"
         );
         assert_eq!(v["total"], 1000, "sibling fields preserved");
         assert!(
             v["results"].as_array().unwrap().len() <= 50,
             "results sampled"
+        );
+    }
+
+    #[test]
+    fn nested_array_gets_sampled_from_sibling_with_count() {
+        // A nested array field leaves an `_sampled_from_<field>: N` sibling on the parent
+        // object (which is already an object, so no element is added and no type changes), so
+        // count/aggregate queries can recover the original row count.
+        let mut v = json!({"results": records(1000)});
+        assert_eq!(
+            crush_value(&mut v, 50, &HashSet::new()),
+            Some(None),
+            "nested array sampled"
+        );
+        assert_eq!(
+            v["_sampled_from_results"], 1000,
+            "sibling carries the original row count"
+        );
+        assert!(
+            v["results"].as_array().unwrap().len() <= 50,
+            "results sampled, still an array of objects"
+        );
+        assert!(v["results"].is_array(), "field stays an array");
+    }
+
+    #[test]
+    fn bare_top_level_array_surfaces_count_in_note() {
+        // A bare top-level array has no parent object to carry a sibling, so `crush_value`
+        // reports the original count for the caller to surface in the note text. The value
+        // itself stays a bare array (no wrapper object, no injected sentinel element).
+        let mut v = records(1000);
+        assert_eq!(
+            crush_value(&mut v, 50, &HashSet::new()),
+            Some(Some(1000)),
+            "bare array reports its original row count"
+        );
+        assert!(v.is_array(), "stays a bare array");
+        assert!(v.as_array().unwrap().len() <= 50, "sampled");
+
+        // The note text then carries that count.
+        let note = sample_note(&[1000]);
+        assert!(note.contains("1000"), "note surfaces N: {note}");
+    }
+
+    #[test]
+    fn sample_note_is_static_without_bare_counts() {
+        assert_eq!(
+            sample_note(&[]),
+            SAMPLE_NOTE,
+            "no bare counts → unchanged static note"
+        );
+    }
+
+    #[test]
+    fn sample_note_uses_plural_wording_for_multiple_bare_counts() {
+        // Two bare arrays in one request: the shared note can only state the counts as a set,
+        // not attribute each to its array, so it uses plural wording and comma-joins them.
+        let note = sample_note(&[100, 200]);
+        assert!(
+            note.contains("arrays' original row counts were"),
+            "plural wording: {note}"
+        );
+        assert!(
+            note.contains("100, 200"),
+            "both counts comma-joined: {note}"
+        );
+    }
+
+    #[test]
+    fn multiple_nested_array_fields_each_get_their_own_sibling() {
+        // Two over-cap array fields on one object: each gets its own `_sampled_from_<field>`
+        // sibling carrying that field's original count; neither field changes type.
+        let mut v = json!({"a": records(1000), "b": records(800)});
+        assert_eq!(
+            crush_value(&mut v, 50, &HashSet::new()),
+            Some(None),
+            "only nested fields sampled"
+        );
+        assert_eq!(v["_sampled_from_a"], 1000, "field a's original count");
+        assert_eq!(v["_sampled_from_b"], 800, "field b's original count");
+        assert!(
+            v["a"].as_array().unwrap().len() <= 50,
+            "a sampled, still array"
+        );
+        assert!(
+            v["b"].as_array().unwrap().len() <= 50,
+            "b sampled, still array"
+        );
+    }
+
+    #[test]
+    fn mixed_bare_and_nested_arrays_accumulate_independently() {
+        // A request with a bare top-level array AND an object holding a nested array: the bare
+        // one reports its count for the note, the nested one gets a sibling, and the two paths
+        // don't interfere.
+        let mut bare = records(1000);
+        let mut nested = json!({"rows": records(900)});
+        let mut bare_counts: Vec<usize> = Vec::new();
+        bare_counts.extend(crush_value(&mut bare, 50, &HashSet::new()).flatten());
+        bare_counts.extend(crush_value(&mut nested, 50, &HashSet::new()).flatten());
+
+        assert_eq!(
+            bare_counts,
+            vec![1000],
+            "only the bare array contributes a note count"
+        );
+        assert!(bare.is_array(), "bare stays a bare array");
+        assert_eq!(
+            nested["_sampled_from_rows"], 900,
+            "nested array gets its sibling"
         );
     }
 
@@ -446,7 +609,7 @@ mod tests {
         }
         let arr = Value::Array(a);
 
-        let rows = crush_array(&arr, 30, &HashSet::new()).expect("over-cap array is sampled");
+        let (_, rows) = crush_array(&arr, 30, &HashSet::new()).expect("over-cap array is sampled");
         let msgs: HashSet<&str> = rows.iter().filter_map(|r| r["msg"].as_str()).collect();
         let distinct_kept = distinct.iter().filter(|d| msgs.contains(**d)).count();
         assert!(
@@ -469,7 +632,7 @@ mod tests {
         let arr = Value::Array(a);
         let query: HashSet<String> = lex_words("kubernetes pod eviction").into_iter().collect();
 
-        let rows = crush_array(&arr, 30, &query).expect("over-cap array is sampled");
+        let (_, rows) = crush_array(&arr, 30, &query).expect("over-cap array is sampled");
         let kept_needle = rows
             .iter()
             .any(|r| r["msg"].as_str() == Some("kubernetes pod eviction quota exceeded"));
