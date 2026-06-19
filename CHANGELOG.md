@@ -6,6 +6,13 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Fixed
+- **`@llmtrim/js` / `@llmtrim/wasm` now publish to npm.** The v0.2.1 release built the
+  package but its `wasm-pack` publish step failed (`wasm-opt` rejected the post-MVP wasm
+  features recent rustc emits), so the packages never landed on npm. The redundant
+  `wasm-opt` pass is now skipped (rustc already optimizes under `--release`), so the
+  bindings publish.
+
 ## [0.2.1] - 2026-06-19
 
 ### Added

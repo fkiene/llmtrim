@@ -10,6 +10,15 @@ license.workspace = true
 # Published to npm via wasm-pack, not to crates.io.
 publish = false
 
+# wasm-pack runs a wasm-opt pass after the build, but recent rustc emits post-MVP wasm
+# features (bulk-memory, sign-extension, ...) that wasm-opt's validator rejects unless every
+# one is explicitly enabled — a moving target that depends on the toolchain and wasm-opt
+# version. rustc already optimizes the module under `--release`, so skip the redundant pass
+# instead of chasing feature flags. (The CI smoke job builds with wasm-bindgen directly and
+# never runs wasm-opt, so it didn't catch the failure; the release publish-wasm job does.)
+[package.metadata.wasm-pack.profile.release]
+wasm-opt = false
+
 [lib]
 crate-type = ["cdylib", "rlib"]
 
