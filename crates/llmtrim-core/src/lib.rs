@@ -2,7 +2,11 @@
 //!
 //! This crate is a zero-LLM-call middleware: it ingests a provider-shaped request
 //! body, compresses it with deterministic algorithms only (no auxiliary model, no
-//! embeddings), and can reverse the lossless transforms on the response. The
+//! embeddings). "Lossless" here means a stage preserves the information the model
+//! reads (a folded log run, a TOON-encoded array, an abbreviation legend the model
+//! decodes in-prompt), and the token gate reverts any input cut that doesn't pay off.
+//! It does not mean the engine transforms the response back: [`rehydrate`] is an inert
+//! passthrough today, reserved for a future output-side phase. The
 //! functions here are the **pure transform core** — no network calls live in this
 //! crate. The `llmtrim` CLI/proxy crate wraps them.
 //!

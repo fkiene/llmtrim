@@ -428,6 +428,7 @@ These are surfaced by the same A/B that proves the savings:
 - **Anthropic / Gemini token counts are approximate.** There's no public exact tokenizer, so a BPE proxy is used and flagged in `status`. OpenAI is exact.
 - **Output savings aren't measured live.** The proxy compresses input; an output *saving* needs the A/B counterfactual, which only the offline benchmark runs. `status` "saved" is input-side.
 - **The default is quality-gated, not lossless.** Lossy stages run only where the eval shows quality holds. Want a byte-faithful round-trip? Use the `safe` preset.
+- **"Lossless" is input-side, not response restoration.** A lossless stage preserves the information the model reads (a folded log run, a TOON-encoded array, an abbreviation legend the model decodes in-prompt), and the token gate reverts any input cut that doesn't pay off. The engine does not transform the model's response back to an original form.
 
 ## Acknowledgments
 
