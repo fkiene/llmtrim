@@ -6,6 +6,16 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+- **Proxy-Wasm gateway plugin: compress LLM request bodies at Kong or Higress.** A single
+  wasm module buffers the request body, runs it through llmtrim, and forwards the smaller body
+  upstream. The same artifact runs on both gateways (both are Proxy-Wasm 0.2 ABI hosts); they
+  differ only in deployment config. It is fail-open: an oversized, non-JSON, or
+  undetectable-provider body is forwarded unchanged. Configurable per route with `provider`,
+  `preset`, and `max_body_bytes`. Each release publishes the module to both channels: an OCI
+  artifact at `ghcr.io/fkiene/llmtrim-gateway-plugin` (for Higress) and a `.wasm` Release asset
+  (for Kong). See `crates/adapters/llmtrim-gateway-plugin/README.md`.
+
 ### Changed
 - **`@llmtrim/js`: calling `compress()` with no preset now compresses with `auto`
   (shape-routing) instead of the lossless-only baseline.** The npm package barely compressed

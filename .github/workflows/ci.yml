@@ -195,6 +195,36 @@ jobs:
       - name: Node smoke test
         run: node crates/llmtrim-wasm/smoke.mjs
 
+  # Gateway adapters: the `test` job builds only default-members, which excludes the adapter
+  # crates (they target wasm). So test the shared logic here (this resolves llmtrim-core with
+  # default features OFF, the set the plugin actually ships) and build the Proxy-Wasm plugin
+  # for wasm32-wasip1 so a wasm break or a features-off regression fails CI, not deployment.
+  #
+  # Target is wasm32-wasip1, not wasm32-unknown-unknown: the engine needs an entropy source
+  # (hash seeding), which on unknown-unknown only resolves to a browser JS backend a gateway
+  # cannot run. wasip1 uses the WASI random_get import, which the Envoy (Higress) and Kong wasm
+  # runtimes provide.
+  gateway-plugin:
+    name: Gateway plugin (wasm)
+    needs: changes
+    if: ${{ !cancelled() && needs.changes.outputs.code != 'false' }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+          targets: wasm32-wasip1
+      - uses: Swatinem/rust-cache@v2
+      - name: Clippy + test the shared logic (core features off)
+        run: |
+          cargo clippy -p llmtrim-gateway --all-targets -- -D warnings
+          cargo test -p llmtrim-gateway
+      - name: Build the Proxy-Wasm plugin for wasm32-wasip1
+        run: |
+          cargo clippy -p llmtrim-gateway-plugin --target wasm32-wasip1 -- -D warnings
+          cargo build -p llmtrim-gateway-plugin --release --target wasm32-wasip1
+
   # Swift: compile the generated bindings + a smoke against the cdylib on macOS and run it.
   # This is the compile-and-load verification for the Swift target (the prerequisite to a
   # SwiftPM package); full xcframework/SwiftPM packaging is a later step.
@@ -320,4 +350,8 @@ jobs:
       - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@1.88
       - uses: Swatinem/rust-cache@v2
+      # `--all-targets` covers default-members; add the adapter logic crate explicitly since it
+      # is excluded from default-members. (The wasm plugin crate is leaf host glue checked on
+      # its wasm target in the gateway-plugin job, not here.)
       - run: cargo check --all-targets
+      - run: cargo check -p llmtrim-gateway --all-targets

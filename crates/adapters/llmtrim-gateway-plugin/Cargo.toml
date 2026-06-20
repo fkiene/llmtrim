@@ -1,0 +1,25 @@
+# Proxy-Wasm plugin: one wasm module that compresses LLM request bodies via llmtrim. The same
+# artifact runs on Kong and Higress (both proxy-wasm 0.2 ABI hosts); they differ only in how
+# the deployment hands over plugin-config JSON, which `llmtrim_gateway::Config::from_json_bytes`
+# reads. All testable logic lives in llmtrim-gateway; this crate is the host glue and only
+# builds for wasm, so it is kept out of the default dev loop.
+[package]
+name = "llmtrim-gateway-plugin"
+description = "Proxy-Wasm plugin that compresses LLM API request bodies with llmtrim (Kong, Higress)."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+homepage.workspace = true
+license.workspace = true
+publish = false
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+proxy-wasm = "0.2.5"
+llmtrim-gateway = { path = "../llmtrim-gateway" }
+
+[lints]
+workspace = true

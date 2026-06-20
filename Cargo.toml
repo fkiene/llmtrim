@@ -6,6 +6,7 @@ members = [
     "crates/llmtrim-uniffi",
     "crates/llmtrim-wasm",
     "crates/adapters/llmtrim-gateway",
+    "crates/adapters/llmtrim-gateway-plugin",
 ]
 # The adapter crates (the shared gateway logic and the wasm plugins it backs) stay out of the
 # default dev loop: they target wasm and pull proxy-wasm deps that are noise for a host build.
