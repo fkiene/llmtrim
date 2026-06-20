@@ -276,13 +276,15 @@ impl DenseConfig {
         if let Some(name) = value.get("preset").and_then(toml::Value::as_str) {
             return Self::preset(name).with_context(|| format!("unknown preset '{name}'"));
         }
-        // A file with no *compression* keys (empty, or only orthogonal keys like
-        // `retention_days`) keeps the shipped `auto` shape-routing default. Otherwise adding
-        // e.g. `retention_days = 30` would silently fall through to the bare flag set
-        // (`auto = false`, everything-but-lossless off) and disable shape-routing — a
-        // surprising downgrade for a key that has nothing to do with compression.
+        // A file with no *compression* keys (empty, or only orthogonal keys like the
+        // `RuntimeConfig` runtime settings) keeps the shipped `auto` shape-routing default.
+        // Otherwise a file that sets only e.g. `capture_dir` would silently fall through to the
+        // bare flag set (`auto = false`, everything-but-lossless off) and disable shape-routing —
+        // a surprising downgrade for a key that has nothing to do with compression.
         if let Some(table) = value.as_table()
-            && !table.keys().any(|k| k != "retention_days" && k != "preset")
+            && !table
+                .keys()
+                .any(|k| !RUNTIME_ONLY_KEYS.contains(&k.as_str()) && k != "preset")
         {
             return Ok(Self::auto());
         }
@@ -454,30 +456,174 @@ fn config_path() -> Option<PathBuf> {
     Some(base.join("llmtrim").join("config.toml"))
 }
 
-/// Ledger age-retention in days, resolved **independently** of [`DenseConfig`] so selecting a
-/// preset never resets it (presets rebuild `DenseConfig` from `default()`). Resolution:
-/// `LLMTRIM_RETENTION_DAYS` (env) wins over a top-level `retention_days` key in the config
-/// file. `None` when unset or ≤ 0 — age retention off, leaving only the row cap to bound the
-/// ledger. The key is ignored by the compression config (no `deny_unknown_fields`).
-pub fn retention_days() -> Option<i64> {
-    if let Ok(v) = std::env::var("LLMTRIM_RETENTION_DAYS")
-        && let Ok(days) = v.trim().parse::<i64>()
-    {
-        return (days > 0).then_some(days);
-    }
-    let path = config_path().filter(|p| p.exists())?;
-    let text = std::fs::read_to_string(&path).ok()?;
-    let value: toml::Value = toml::from_str(&text).ok()?;
-    retention_days_from_toml(&value)
+/// Config-file keys that belong to [`RuntimeConfig`], not the compression pipeline. Listed so
+/// [`DenseConfig::from_toml_value`] treats a file that sets only these as "no compression keys"
+/// and keeps the `auto` default, instead of silently downgrading shape-routing.
+pub(crate) const RUNTIME_ONLY_KEYS: &[&str] = &[
+    "extra_hosts",
+    "upstream_proxy",
+    "capture_dir",
+    "db_path",
+    "no_update_check",
+    "bind",
+    "capture_max_mb",
+    "retention_days",
+];
+
+/// Runtime settings orthogonal to the compression pipeline ([`DenseConfig`]). Each value
+/// resolves **env-first, then a top-level key in the same config TOML, then a default** — the
+/// generalized form of the original `retention_days` rule, so every runtime knob is settable
+/// either way ("always handle both"). These keys are ignored by `DenseConfig` (it has no
+/// `deny_unknown_fields`), so they coexist in the one config file. Parsed once via
+/// [`RuntimeConfig::get`].
+///
+/// Intentionally *not* covered (env-only): `LLMTRIM_CONFIG` (points at this file — chicken/egg),
+/// `LLMTRIM_HOME` (base dir resolved before config loads), `LLMTRIM_PROFILE` (dev timing
+/// toggle), `LLMTRIM_VERSION` (internal updater handoff). None are persistable user settings.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct RuntimeConfig {
+    /// Extra exact LLM-API hosts to intercept beyond the built-in registry. Env
+    /// `LLMTRIM_EXTRA_HOSTS` (comma-separated) replaces the file `extra_hosts` array.
+    /// Normalized to lowercase plain hostnames; malformed/overbroad entries are dropped.
+    /// Each entry widens the name-constrained MITM CA, so keep them exact (`llm.acme.com`,
+    /// never a bare apex like `acme.com`).
+    pub extra_hosts: Vec<String>,
+    /// Upstream HTTP proxy URL (env `LLMTRIM_UPSTREAM_PROXY` / file `upstream_proxy`).
+    pub upstream_proxy: Option<String>,
+    /// QA capture corpus directory (env `LLMTRIM_CAPTURE_DIR` / file `capture_dir`).
+    pub capture_dir: Option<PathBuf>,
+    /// Ledger DB path (env `LLMTRIM_DB_PATH` / file `db_path`).
+    pub db_path: Option<PathBuf>,
+    /// Disable the passive update check. The env var is **presence-only**: setting
+    /// `LLMTRIM_NO_UPDATE_CHECK` to *any* value (including `0` or empty) disables the check;
+    /// leaving it unset is the only way to keep the check on. The config key `no_update_check`
+    /// is a normal bool. (Preserves the prior `var_os(...).is_some()` behavior.)
+    pub no_update_check: bool,
+    /// Listen bind address, left unparsed (env `LLMTRIM_BIND` / file `bind`); the caller
+    /// parses + validates it as an IP.
+    pub bind: Option<String>,
+    /// Capture corpus size ceiling in MB (env `LLMTRIM_CAPTURE_MAX_MB` / file
+    /// `capture_max_mb`); `Some(0)` disables the cap, `None` means use the default.
+    pub capture_max_mb: Option<u64>,
+    /// Ledger age-retention in days (env `LLMTRIM_RETENTION_DAYS` / file `retention_days`);
+    /// positive only (`None` = age retention off, row cap alone bounds the ledger).
+    pub retention_days: Option<i64>,
 }
 
-/// The `retention_days` key from a parsed config (positive only). Factored out so the
-/// file-parsing is unit-testable without touching env or the real config path.
-fn retention_days_from_toml(value: &toml::Value) -> Option<i64> {
-    value
-        .get("retention_days")
-        .and_then(toml::Value::as_integer)
-        .filter(|d| *d > 0)
+impl RuntimeConfig {
+    /// Process-wide instance, loaded once from env + the config file on first use. Env vars
+    /// don't change mid-process, so caching is safe and keeps per-request paths (the capture
+    /// cap) off the filesystem. Because it is cached for the process lifetime, **tests must use
+    /// [`resolve`](Self::resolve), never `get`** — the first caller fixes the value for the
+    /// whole test binary, so `get` can't observe a per-test environment.
+    pub fn get() -> &'static RuntimeConfig {
+        static CACHE: std::sync::OnceLock<RuntimeConfig> = std::sync::OnceLock::new();
+        CACHE.get_or_init(Self::load)
+    }
+
+    /// Load from the real environment and config file (the one parse of the TOML).
+    fn load() -> RuntimeConfig {
+        let file = config_path()
+            .filter(|p| p.exists())
+            .and_then(|p| std::fs::read_to_string(p).ok())
+            .and_then(|t| toml::from_str::<toml::Value>(&t).ok());
+        Self::resolve(|k| std::env::var(k).ok(), file.as_ref())
+    }
+
+    /// Pure resolver: `env` looks up an environment variable, `file` is the parsed config TOML
+    /// (if any). Factored out so the env-over-file precedence is unit-testable without touching
+    /// the real environment or filesystem.
+    fn resolve(env: impl Fn(&str) -> Option<String>, file: Option<&toml::Value>) -> RuntimeConfig {
+        let env_set = |k: &str| env(k).filter(|s| !s.is_empty());
+        let fstr = |key: &str| {
+            file.and_then(|v| v.get(key))
+                .and_then(toml::Value::as_str)
+                .map(str::to_string)
+        };
+        let fint = |key: &str| {
+            file.and_then(|v| v.get(key))
+                .and_then(toml::Value::as_integer)
+        };
+        let fbool = |key: &str| file.and_then(|v| v.get(key)).and_then(toml::Value::as_bool);
+        let positive = |v: Option<i64>| v.filter(|n| *n > 0);
+
+        // extra_hosts: env (comma-split) replaces the file array; both normalized + validated.
+        let raw_hosts: Vec<String> = match env_set("LLMTRIM_EXTRA_HOSTS") {
+            Some(s) => s.split(',').map(str::to_string).collect(),
+            None => file
+                .and_then(|v| v.get("extra_hosts"))
+                .and_then(toml::Value::as_array)
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|e| e.as_str().map(str::to_string))
+                        .collect()
+                })
+                .unwrap_or_default(),
+        };
+        let mut extra_hosts: Vec<String> =
+            raw_hosts.iter().filter_map(|h| normalize_host(h)).collect();
+        extra_hosts.sort();
+        extra_hosts.dedup();
+
+        RuntimeConfig {
+            extra_hosts,
+            upstream_proxy: env_set("LLMTRIM_UPSTREAM_PROXY").or_else(|| fstr("upstream_proxy")),
+            capture_dir: env_set("LLMTRIM_CAPTURE_DIR")
+                .or_else(|| fstr("capture_dir"))
+                .map(PathBuf::from),
+            db_path: env_set("LLMTRIM_DB_PATH")
+                .or_else(|| fstr("db_path"))
+                .map(PathBuf::from),
+            no_update_check: env("LLMTRIM_NO_UPDATE_CHECK").is_some()
+                || fbool("no_update_check").unwrap_or(false),
+            bind: env_set("LLMTRIM_BIND").or_else(|| fstr("bind")),
+            capture_max_mb: env_set("LLMTRIM_CAPTURE_MAX_MB")
+                .and_then(|s| s.trim().parse::<u64>().ok())
+                .or_else(|| fint("capture_max_mb").and_then(|n| u64::try_from(n).ok())),
+            retention_days: positive(
+                env_set("LLMTRIM_RETENTION_DAYS")
+                    .and_then(|s| s.trim().parse::<i64>().ok())
+                    .or_else(|| fint("retention_days")),
+            ),
+        }
+    }
+}
+
+/// Normalize + validate a user-supplied intercept host: trim a trailing dot, lowercase, and
+/// accept only a plain multi-label DNS hostname (no scheme/path/port/wildcard/whitespace, at
+/// least one dot so a bare TLD can't widen the CA, and not a numeric IP literal). Returns `None`
+/// for anything unusable, which is silently dropped — a typo'd host simply isn't intercepted
+/// (visible in captures), and the name-constrained CA is never widened by a malformed or
+/// overbroad entry.
+fn normalize_host(raw: &str) -> Option<String> {
+    let h = raw.trim().trim_end_matches('.').to_ascii_lowercase();
+    if h.is_empty()
+        || h.starts_with('.')
+        || h.starts_with('-')
+        || !h.contains('.')
+        || h.contains(['/', ':', ' ', '\t', '*', '@', '?'])
+    {
+        return None;
+    }
+    // Each dot-separated label: non-empty, ASCII alphanumeric or hyphen only.
+    if !h
+        .split('.')
+        .all(|l| !l.is_empty() && l.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-'))
+    {
+        return None;
+    }
+    // Reject IPv4 literals (all labels numeric): an IP in a DNS name-constraint is undefined
+    // across TLS stacks, so it must never reach the CA's permitted subtrees.
+    if h.split('.').all(|l| l.bytes().all(|b| b.is_ascii_digit())) {
+        return None;
+    }
+    Some(h)
+}
+
+/// Ledger age-retention in days. Thin accessor over [`RuntimeConfig`] kept for the call sites
+/// that only need this one value.
+pub fn retention_days() -> Option<i64> {
+    RuntimeConfig::get().retention_days
 }
 
 #[cfg(test)]
@@ -666,20 +812,125 @@ mod tests {
         assert_eq!(c.serialize_min_rows, 2);
     }
 
+    /// Resolve with no env set (every lookup returns `None`) against the given file TOML.
+    fn resolve_file(toml_src: &str) -> RuntimeConfig {
+        let value: toml::Value = toml::from_str(toml_src).unwrap();
+        RuntimeConfig::resolve(|_| None, Some(&value))
+    }
+
+    /// Resolve with an explicit env map and the given file TOML.
+    fn resolve_env(env: &[(&str, &str)], toml_src: &str) -> RuntimeConfig {
+        let value: toml::Value = toml::from_str(toml_src).unwrap();
+        let env: std::collections::HashMap<String, String> = env
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect();
+        RuntimeConfig::resolve(|k| env.get(k).cloned(), Some(&value))
+    }
+
     #[test]
     fn retention_days_parses_positive_only() {
-        let p: toml::Value = toml::from_str("retention_days = 30").unwrap();
-        assert_eq!(retention_days_from_toml(&p), Some(30));
-        let zero: toml::Value = toml::from_str("retention_days = 0").unwrap();
+        assert_eq!(resolve_file("retention_days = 30").retention_days, Some(30));
         assert_eq!(
-            retention_days_from_toml(&zero),
+            resolve_file("retention_days = 0").retention_days,
             None,
             "0 disables age retention"
         );
-        let neg: toml::Value = toml::from_str("retention_days = -5").unwrap();
-        assert_eq!(retention_days_from_toml(&neg), None);
-        let absent: toml::Value = toml::from_str("hygiene = true").unwrap();
-        assert_eq!(retention_days_from_toml(&absent), None);
+        assert_eq!(resolve_file("retention_days = -5").retention_days, None);
+        assert_eq!(resolve_file("hygiene = true").retention_days, None);
+    }
+
+    #[test]
+    fn env_wins_over_file_for_every_runtime_setting() {
+        let file = "\
+            upstream_proxy = \"http://file:3128\"\n\
+            capture_dir = \"/file/cap\"\n\
+            db_path = \"/file/db.sqlite\"\n\
+            no_update_check = false\n\
+            bind = \"127.0.0.1\"\n\
+            capture_max_mb = 10\n\
+            retention_days = 7\n";
+        let c = resolve_env(
+            &[
+                ("LLMTRIM_UPSTREAM_PROXY", "http://env:8080"),
+                ("LLMTRIM_CAPTURE_DIR", "/env/cap"),
+                ("LLMTRIM_DB_PATH", "/env/db.sqlite"),
+                ("LLMTRIM_NO_UPDATE_CHECK", "1"),
+                ("LLMTRIM_BIND", "0.0.0.0"),
+                ("LLMTRIM_CAPTURE_MAX_MB", "99"),
+                ("LLMTRIM_RETENTION_DAYS", "14"),
+            ],
+            file,
+        );
+        assert_eq!(c.upstream_proxy.as_deref(), Some("http://env:8080"));
+        assert_eq!(c.capture_dir, Some(PathBuf::from("/env/cap")));
+        assert_eq!(c.db_path, Some(PathBuf::from("/env/db.sqlite")));
+        assert!(c.no_update_check);
+        assert_eq!(c.bind.as_deref(), Some("0.0.0.0"));
+        assert_eq!(c.capture_max_mb, Some(99));
+        assert_eq!(c.retention_days, Some(14));
+    }
+
+    #[test]
+    fn file_used_when_env_absent() {
+        let c = resolve_file(
+            "upstream_proxy = \"http://file:3128\"\nbind = \"::1\"\ncapture_max_mb = 0\n",
+        );
+        assert_eq!(c.upstream_proxy.as_deref(), Some("http://file:3128"));
+        assert_eq!(c.bind.as_deref(), Some("::1"));
+        assert_eq!(c.capture_max_mb, Some(0), "0 from file disables the cap");
+    }
+
+    #[test]
+    fn no_update_check_true_on_env_presence_even_empty() {
+        // var_os-style presence: any value (incl. empty) means "set".
+        let c = resolve_env(
+            &[("LLMTRIM_NO_UPDATE_CHECK", "")],
+            "no_update_check = false",
+        );
+        assert!(c.no_update_check);
+    }
+
+    #[test]
+    fn extra_hosts_env_replaces_file_and_normalizes() {
+        // Env comma list wins over the file array; entries are lowercased, sorted, deduped.
+        let c = resolve_env(
+            &[(
+                "LLMTRIM_EXTRA_HOSTS",
+                "LLM.Acme.com, api.acme.com, llm.acme.com",
+            )],
+            "extra_hosts = [\"ignored.example\"]",
+        );
+        assert_eq!(c.extra_hosts, vec!["api.acme.com", "llm.acme.com"]);
+    }
+
+    #[test]
+    fn extra_hosts_from_file_when_env_absent() {
+        let c = resolve_file("extra_hosts = [\"llm.acme.com\", \"gw.example.net\"]");
+        assert_eq!(c.extra_hosts, vec!["gw.example.net", "llm.acme.com"]);
+    }
+
+    #[test]
+    fn extra_hosts_drops_malformed_and_overbroad() {
+        // No dot (bare TLD), scheme/path/port, wildcard, leading dot/hyphen, whitespace → dropped.
+        for bad in [
+            "com",
+            "https://llm.acme.com",
+            "llm.acme.com/v1",
+            "llm.acme.com:443",
+            "*.acme.com",
+            ".acme.com",
+            "-acme.com",
+            "ac me.com",
+            "1.2.3.4",   // IPv4 literal: undefined as a DNS name-constraint
+            "127.0.0.1", // loopback IPv4
+        ] {
+            let c = resolve_env(&[("LLMTRIM_EXTRA_HOSTS", bad)], "");
+            assert!(c.extra_hosts.is_empty(), "expected `{bad}` to be dropped");
+        }
+        // A trailing dot (FQDN form) is normalized away, not rejected.
+        let c = resolve_env(&[("LLMTRIM_EXTRA_HOSTS", "llm.acme.com.")], "");
+        assert_eq!(c.extra_hosts, vec!["llm.acme.com"]);
     }
 
     #[test]
@@ -691,6 +942,32 @@ mod tests {
         assert!(
             c.hygiene && c.serialize,
             "retention_days is ignored by DenseConfig"
+        );
+    }
+
+    #[test]
+    fn runtime_only_keys_keep_auto_shape_routing() {
+        // A config that sets only RuntimeConfig keys (no compression keys) must keep the `auto`
+        // shape-routing default, not silently fall through to the bare `auto = false` flag set.
+        for src in [
+            "capture_dir = \"/tmp/cap\"",
+            "bind = \"0.0.0.0\"",
+            "upstream_proxy = \"http://p:3128\"",
+            "extra_hosts = [\"llm.acme.com\"]",
+            "no_update_check = true",
+            "db_path = \"/tmp/db\"\ncapture_max_mb = 100\nretention_days = 7",
+        ] {
+            let c = DenseConfig::from_toml_value(toml::from_str(src).unwrap()).unwrap();
+            assert!(c.auto, "runtime-only config `{src}` must keep auto routing");
+        }
+        // A compression key alongside a runtime key still selects explicit flags (auto off).
+        let c = DenseConfig::from_toml_value(
+            toml::from_str("capture_dir = \"/tmp/cap\"\nhygiene = false").unwrap(),
+        )
+        .unwrap();
+        assert!(
+            !c.auto && !c.hygiene,
+            "a compression key opts into explicit flags"
         );
     }
 }

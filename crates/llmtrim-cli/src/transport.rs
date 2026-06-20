@@ -63,9 +63,11 @@ pub fn redact_proxy_url(url: &str) -> String {
 /// `None` when the daemon bind address is unknown (e.g. the CLI `send` subcommand, which
 /// does not run a proxy server).
 pub fn upstream_proxy_url(bind_addr: Option<std::net::SocketAddr>) -> Result<Option<String>> {
-    let url = match std::env::var("LLMTRIM_UPSTREAM_PROXY") {
-        Ok(v) if !v.is_empty() => v,
-        _ => return Ok(None),
+    let Some(url) = llmtrim_core::config::RuntimeConfig::get()
+        .upstream_proxy
+        .clone()
+    else {
+        return Ok(None);
     };
     validate_proxy_url(&url, bind_addr)?;
     Ok(Some(url))

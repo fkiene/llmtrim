@@ -10,6 +10,15 @@ All notable changes to this project are documented here. The format follows
 - **`serve --force` / `start --force` / `setup --force`** replace an llmtrim daemon that's
   already holding the port (stops it first, waits for the port to free, then takes over)
   instead of refusing, no-opping, or leaving a healthy same-port daemon untouched.
+- **Custom intercept hosts.** Point llmtrim at a self-hosted or gateway OpenAI-compatible
+  endpoint with `LLMTRIM_EXTRA_HOSTS=host1,host2` (or an `extra_hosts` array in the config
+  file). The name-constrained CA regenerates automatically to cover them. Entries must be
+  exact hostnames; malformed or overly broad ones are dropped.
+- **Every runtime setting is now settable in the config file, not just via env.** The
+  proxy knobs (`upstream_proxy`, `db_path`, `capture_dir`, `capture_max_mb`, `bind`,
+  `no_update_check`) each now resolve env-first then from a top-level key in `config.toml`,
+  matching the existing `preset`/`retention_days` behavior. The matching `LLMTRIM_*` env vars
+  are unchanged and still win when set.
 
 ### Fixed
 - **`serve` fails fast when the port is taken.** A bind-in-use error no longer spins through

@@ -108,7 +108,7 @@ fn write_cache(latest: &str) {
 /// opt out with `LLMTRIM_NO_UPDATE_CHECK`; silent on any failure. Used for the passive
 /// `monitor` banner — `force` bypasses the cache (used by the `update` command).
 pub fn check(force: bool) -> Option<String> {
-    if std::env::var_os("LLMTRIM_NO_UPDATE_CHECK").is_some() {
+    if llmtrim_core::config::RuntimeConfig::get().no_update_check {
         return None;
     }
     if !force
