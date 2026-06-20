@@ -1113,19 +1113,21 @@ fn run_bench_latency(args: LatencyArgs) -> Result<()> {
 }
 
 fn run_bench_compare(args: CompareArgs) -> Result<()> {
-    let script = match args.tool.as_str() {
-        "headroom" => "bench/scripts/vs_headroom.py",
-        "caveman" => "bench/scripts/caveman_ab.py",
+    match args.tool.as_str() {
+        "headroom" | "caveman" => {}
         other => anyhow::bail!("unknown comparator '{other}' (expected: headroom|caveman)"),
-    };
+    }
+    // One entry point for every competitor: `bench.py <competitor>`. Adding a comparator is a
+    // new file under bench/scripts/benchkit/competitors/, no change here beyond the match above.
+    let script = "bench/scripts/bench.py";
     if !std::path::Path::new(script).exists() {
         anyhow::bail!(
-            "{script} not found — run `llmtrim bench compare` from the repo root (it dispatches \
+            "{script} not found - run `llmtrim bench compare` from the repo root (it dispatches \
              the Python comparator, which needs its own deps; see bench/README.md)"
         );
     }
     let mut cmd = std::process::Command::new("python3");
-    cmd.arg(script);
+    cmd.arg(script).arg(&args.tool);
     if args.live {
         cmd.arg("--live");
     }
@@ -1409,8 +1411,8 @@ fn run_offline(
             "tokens_in_after": r.input_tokens_after.0,
         }));
     }
-    // FROZEN wording: bench/scripts/vs_headroom.py regex-parses this exact line
-    // (`input (\d+) -> (\d+) tok \(([\d.]+)% saved\)`). Restyle only in lockstep with it.
+    // Human-facing summary line. The benchkit harness measures via the Python binding, not
+    // by parsing this stdout, so it is no longer a machine contract; keep it readable.
     println!(
         "offline: {} cases  input {before} -> {after} tok ({:.1}% saved)  preset={}",
         cases.len(),
