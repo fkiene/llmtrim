@@ -8,7 +8,7 @@ import glob
 import json
 import os
 
-HERE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))  # bench/ root (this script lives in bench/scripts/)
+HERE = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))  # bench/ root (this script lives in bench/scripts/benchkit/tools/)
 
 # corpus -> (shape, scorer description, what it stresses)
 META = {
@@ -62,11 +62,11 @@ def main():
     lines.append(
         "Two axes, measured live: **tokens saved** (real tokenizer, at compress time) and "
         "**quality retained** (the A/B delta between the model's answer on the *original* vs the "
-        "*compressed* request). A preset is only honest if quality holds at its token saving — the "
+        "*compressed* request). A preset is only honest if quality holds at its token saving - the "
         "frontier of (saved, retained) is the benchmark, not the saving alone.\n"
     )
     lines.append(
-        f"- **Model:** `{model}` via OpenRouter, pinned to the **Groq** upstream (async-openai byot — "
+        f"- **Model:** `{model}` via OpenRouter, pinned to the **Groq** upstream (async-openai byot - "
         "the exact compressed body is sent, injected fields intact).\n"
         "- **Scoring:** ground-truth where possible (numeric-exact for math, pass@1 that *runs the unit "
         "tests* for code), token-F1 for extractive QA, tool-call match for agents, an LLM judge only for "
@@ -77,7 +77,7 @@ def main():
         "(`usage.prompt_tokens_details.cached_tokens`).\n"
     )
 
-    # Bottom line — aggregate token + cost ledger across every case.
+    # Bottom line - aggregate token + cost ledger across every case.
     def s(field):
         return sum(c.get(field, 0) for r in results.values() for c in r.get("cases", []))
 
@@ -95,9 +95,9 @@ def main():
         f"| output tokens | {oo:,} | {oc:,} | **{drop(oo,oc):.0f}%** |\n"
         f"| **total tokens** | **{io+oo:,}** | **{ic+oc:,}** | **{drop(io+oo,ic+oc):.0f}%** |\n"
         f"| **round-trip cost** | **${co:.4f}** | **${cc:.4f}** | **{drop(co,cc):.0f}%** |\n\n"
-        f"**~{drop(co,cc):.0f}% cost cut, quality mostly held or improved.** Output is where it pays off — "
+        f"**~{drop(co,cc):.0f}% cost cut, quality mostly held or improved.** Output is where it pays off - "
         f"output tokens drop {drop(oo,oc):.0f}% via output-control, and real workloads are output-heavy. "
-        f"(An earlier input-heavy/short-output mix saved only ~9% — the lever was real but had nothing to "
+        f"(An earlier input-heavy/short-output mix saved only ~9% - the lever was real but had nothing to "
         f"cut; representative corpora surface the true savings.)\n"
     )
 
@@ -149,7 +149,7 @@ def main():
         "[snapshots/named-benchmarks/README.md](snapshots/named-benchmarks/README.md).\n"
     )
 
-    # Key findings — auto-classified, CI-AWARE: a delta is only "real" if its
+    # Key findings - auto-classified, CI-AWARE: a delta is only "real" if its
     # magnitude exceeds the 95% CI half-width (interval clear of zero). Everything else
     # is noise at this n and must not be reported as a win or a regression.
     wins, confirmed_reg, noisy = [], [], []
@@ -160,7 +160,7 @@ def main():
         ret = r.get("retention_pp", 0)
         ci = r.get("retention_ci95_pp", 0)
         cost = r.get("cost_saved_pct", 0)
-        # "Confirmed" only if the interval clears zero by a ≥3pp margin — at small n the
+        # "Confirmed" only if the interval clears zero by a ≥3pp margin - at small n the
         # CIs are wide, so a delta whose CI merely grazes zero is not a real effect.
         significant = (abs(ret) - ci) > 3.0
         if ret < 0 and significant:
@@ -189,16 +189,16 @@ def main():
             f"`{n}` ({r['retention_pp']:+.0f}±{ci:.0f}pp)" for n, r, ci in noisy
         )
         lines.append(
-            f"\n**Within noise at this n** (negative but CI crosses zero — *not* confirmed regressions): "
+            f"\n**Within noise at this n** (negative but CI crosses zero - *not* confirmed regressions): "
             f"{labels}. Scale n to resolve."
         )
     lines.append(
-        "\n**The headline:** the per-stage **token gate guarantees fewer tokens, not preserved quality** — "
+        "\n**The headline:** the per-stage **token gate guarantees fewer tokens, not preserved quality** - "
         "only this A/B quality axis catches the difference. The two regressions we confirmed and fixed were "
         "measured on **gpt-oss-20b** (a stronger model with tighter intervals): `code`'s compact-code output "
         "**−21.6±14.5pp** at n=37 → dropped from the preset; and `aggressive`+n-gram on `adult` **−100pp** "
         "(deterministic) → `ngram` now skips JSON records (recovers to 100%). On a weaker/noisier model the "
-        "same levers mostly land inside their CIs — measure per model, and reserve lossy stages for inputs "
+        "same levers mostly land inside their CIs - measure per model, and reserve lossy stages for inputs "
         "whose exact surface form the task doesn't depend on.\n"
     )
 
@@ -211,40 +211,40 @@ def main():
         shape, scorer, stress = META[name]
         src = manifest.get(name, {}).get("dataset", "synthetic" if name == "cache" else "?")
         lines.append(
-            f"- **`{name}`** ({shape}, preset `{r.get('preset')}`, scorer `{scorer}`) — stresses {stress}. "
+            f"- **`{name}`** ({shape}, preset `{r.get('preset')}`, scorer `{scorer}`) - stresses {stress}. "
             f"Source: `{src}`."
         )
 
     # Caveats.
     max_cache = max((r.get("cache_used_pct", 0) for r in results.values()), default=0)
     cache_caveat = (
-        "- **Cache used % is 0 across the board here — the provider does not cache this model.** Verified by "
+        "- **Cache used % is 0 across the board here - the provider does not cache this model.** Verified by "
         "probe: a repeated 1.3k-token prefix returns `cached_tokens: 0` (and `cache_write_tokens: 0`) for this provider×model, despite OpenRouter listing a `cache_read` price. The cache mechanism + "
         "measurement are validated on **caching** providers (Groq hit ~95% on the same `cache` corpus); cache "
         "value is provider×model-dependent, so pick a caching upstream for fixed-prefix workloads.\n"
         if max_cache < 5
         else "- **Cache used % is ~0 for one-shot diverse prompts** (nothing to cache-hit across distinct "
-        "requests) and high only when a long prefix repeats — see `cache` (fixed system dossier + varying "
+        "requests) and high only when a long prefix repeats - see `cache` (fixed system dossier + varying "
         "queries), the canonical agent/RAG-over-fixed-context shape.\n"
     )
     lines.append("\n## Reading the numbers honestly\n")
     lines.append(
-        "- **No single compression %** — it is input-shape dependent. Long/structured inputs (RAG, "
+        "- **No single compression %** - it is input-shape dependent. Long/structured inputs (RAG, "
         "record arrays, long docs) win on *input* tokens; short prompts (math, code stubs) can go *negative* "
         "on input because `output_control` injects a fixed instruction whose payoff is **output-side** "
         "(shorter answers), invisible in the input measure. Read **cost saved**, which captures both.\n"
         + cache_caveat
-        + "- **Small n** — these runs use modest n for cost; CIs are reported in the JSON. Scale n for tighter "
+        + "- **Small n** - these runs use modest n for cost; CIs are reported in the JSON. Scale n for tighter "
         "intervals; several deltas here sit inside their CI (noise).\n"
-        "- **pass@1 actually executes** the model's code against the unit tests — the strongest signal here "
+        "- **pass@1 actually executes** the model's code against the unit tests - the strongest signal here "
         "(no judge noise).\n"
     )
 
     lines.append("\n## Reproduce\n")
     lines.append("```bash")
-    lines.append("python3 bench/scripts/download.py 40       # pull + normalize corpora (pinned in data/manifest.json)")
-    lines.append("cargo run -q --features live -- bench suite   # live A/B across all corpora (needs OPENROUTER_API_KEY)")
-    lines.append("python3 bench/scripts/synth_readme.py      # regenerate this file")
+    lines.append("make -C crates/llmtrim-cli/bench data          # pull + normalize corpora (pinned in data/manifest.json)")
+    lines.append("cargo run -q --features live -- bench suite     # live A/B across all corpora (needs OPENROUTER_API_KEY)")
+    lines.append("cd crates/llmtrim-cli/bench/scripts && PYTHONPATH=. python3 -m benchkit.tools.synth_readme   # regenerate this file")
     lines.append("```")
     lines.append(
         "\nPer-stage ablation (offline, free): "
@@ -262,8 +262,8 @@ def main():
     lines.append("crates/llmtrim-uniffi/scripts/build-wheel.sh --release   # build the llmtrim wheel")
     lines.append("pip install --user target/wheels/llmtrim-*.whl")
     lines.append("pip install --user -r bench/scripts/requirements-vs-headroom.txt")
-    lines.append("python3 bench/scripts/vs_headroom.py                     # deterministic axes (offline)")
-    lines.append("python3 bench/scripts/vs_headroom.py --live --live-n 12  # output A/B (needs OPENROUTER_API_KEY)")
+    lines.append("python3 bench/scripts/bench.py headroom                       # deterministic axes (offline)")
+    lines.append("python3 bench/scripts/bench.py headroom --live --live-n 12    # output A/B (needs OPENROUTER_API_KEY)")
     lines.append("```")
 
     readme = os.path.join(HERE, "README.md")

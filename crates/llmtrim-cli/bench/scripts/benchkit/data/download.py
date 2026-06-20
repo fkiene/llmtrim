@@ -7,7 +7,7 @@ Real public datasets via the HF datasets-server (no auth). Pins dataset id/confi
 + a sha256 of every output file in bench/data/manifest.json, so a run is reproducible
 and a silent upstream change is detectable.
 
-Usage:  python3 bench/download.py [N_per_corpus]   (default 40)
+Usage:  PYTHONPATH=scripts python3 -m benchkit.data.download [N_per_corpus]   (default 40)
 """
 import datetime
 import hashlib
@@ -23,7 +23,7 @@ N = int(sys.argv[1]) if len(sys.argv) > 1 else 40
 # Optional comma-list of corpus names to (re)fetch; the rest are left untouched and their
 # manifest entries are preserved. Omit to rebuild every corpus.
 ONLY = set(filter(None, (sys.argv[2].split(",") if len(sys.argv) > 2 else []))) or None
-HERE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))  # bench/ root (this script lives in bench/scripts/)
+HERE = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))  # bench/ root (this script lives in bench/scripts/benchkit/data/)
 DATA = os.path.join(HERE, "data")
 os.makedirs(DATA, exist_ok=True)
 BASE = "https://datasets-server.huggingface.co/rows"
@@ -134,7 +134,7 @@ def norm_truthfulqa(rows):
     """TruthfulQA MC1: one true answer among distractors. Each case is a lettered
     constrained choice; gold = the letter of the true option. Choices are shuffled with a
     per-row deterministic seed so the correct answer isn't always position A. Scored by
-    `choice` (the selected letter), the standard MC1 metric — deterministic, no judge."""
+    `choice` (the selected letter), the standard MC1 metric - deterministic, no judge."""
     out = []
     for i, r in enumerate(rows):
         mc1 = r.get("mc1_targets") or {}
@@ -304,7 +304,7 @@ def fetch_bfcl(n):
 
 def norm_adult(rows):
     """Bundle real census rows into uniform JSON record arrays + a deterministic
-    aggregate question — exercises Stage D serialization (TOON/CSV) losslessly."""
+    aggregate question - exercises Stage D serialization (TOON/CSV) losslessly."""
     cols = ["age", "education", "occupation", "hours_worked_per_week", "marital_status"]
     out, K = [], 12
     for b in range(0, len(rows) - K, K):
@@ -369,7 +369,7 @@ def norm_cache(rows):
     the cache preset leaves quality intact while allowing providers to bill at
     the cached-input rate.
     """
-    # A ~1280-token (≈5120-char) shared system prompt — representative of real
+    # A ~1280-token (≈5120-char) shared system prompt - representative of real
     # agent/RAG deployments where a long context is amortised across many turns.
     SYSTEM = (
         "You are a knowledgeable AI assistant. You provide accurate, helpful, "
@@ -435,8 +435,43 @@ def norm_chat(rows):
     return out
 
 
+def norm_longbench(rows):
+    """LongBench (THUDM/LongBench): long-context QA + summarization with ground-truth
+    answers. Each row carries `input` (question, empty for pure summarization), the long
+    `context`, and `answers` (list; gold = first). f1-scored - for the summarization configs
+    token-F1 against the reference is a deterministic stand-in for ROUGE. The long context
+    is exactly where compression has the most to remove, so this is the high-value group."""
+    out = []
+    for i, r in enumerate(rows):
+        answers = r.get("answers") or []
+        gold = (answers[0] if answers else "") or ""
+        ctx = r.get("context") or ""
+        if not gold.strip() or not ctx.strip():
+            continue
+        q = (r.get("input") or "").strip()
+        sub = r.get("dataset") or "lb"
+        out.append({
+            "name": f"{sub}-{i}",
+            "context": ctx,
+            "question": (q + "\nAnswer concisely.") if q else "Summarize the document above.",
+            "gold": gold,
+            "scorer": "f1",
+        })
+    return out
+
+
 CORPORA = [
     ("gsm8k", "openai/gsm8k", "main", "test", norm_gsm8k),
+    # LongBench long-context subsets (decision: include). QA: qasper, multifieldqa_en,
+    # 2wikimqa. Summarization: gov_report, multi_news. MIT licensed. The canonical
+    # THUDM/LongBench (renamed zai-org/LongBench) ships a load script the HF
+    # datasets-server can't run; bzantium/LongBench is a served parquet mirror of the
+    # same v1 subsets (identical input/context/answers schema).
+    ("lb_qasper", "bzantium/LongBench", "qasper", "test", norm_longbench),
+    ("lb_multifieldqa", "bzantium/LongBench", "multifieldqa_en", "test", norm_longbench),
+    ("lb_2wikimqa", "bzantium/LongBench", "2wikimqa", "test", norm_longbench),
+    ("lb_gov_report", "bzantium/LongBench", "gov_report", "test", norm_longbench),
+    ("lb_multinews", "bzantium/LongBench", "multi_news", "test", norm_longbench),
     ("humaneval", "openai/openai_humaneval", "openai_humaneval", "test", norm_humaneval),
     ("dolly", "databricks/databricks-dolly-15k", "default", "train", norm_dolly),
     ("hotpotqa", "hotpotqa/hotpot_qa", "distractor", "validation", norm_hotpot),

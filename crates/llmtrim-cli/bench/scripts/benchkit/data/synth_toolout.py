@@ -5,14 +5,14 @@ Each case puts a realistic log / diff / grep blob in `context` (assembled into a
 message by the bench loader) and asks a question whose answer lives in a line the
 toolout stage *keeps* (an error, a changed/`+`/`-` line, or a query-relevant match).
 A faithful compressor should let the model answer from the windowed output just as well
-as from the full blob — that's the quality axis; the token delta is the savings axis.
+as from the full blob - that's the quality axis; the token delta is the savings axis.
 
 Writes bench/data/toolout.jsonl. Deterministic (no randomness), so re-running is a no-op.
 """
 import json
 from pathlib import Path
 
-OUT = Path(__file__).resolve().parents[1] / "data" / "toolout.jsonl"
+OUT = Path(__file__).resolve().parents[3] / "data" / "toolout.jsonl"
 
 # A pool of distinct words so "noise" lines vary lexically (exercise windowing, not just
 # template collapse).
@@ -33,7 +33,7 @@ def case(name, context, question, gold, adversarial=False):
          "scorer": "contains"}
     if adversarial:
         # Tag (ignored by the loader) so a reader can see these are the windowing-stress cases
-        # whose gold sits in DROPPED lines — retention SHOULD fall if windowing is too greedy.
+        # whose gold sits in DROPPED lines - retention SHOULD fall if windowing is too greedy.
         c["adversarial"] = True
     return c
 
@@ -146,7 +146,7 @@ cases.append(case("grep-const-decl",
                   "config/secrets.rs"))
 
 # ====================================================================================
-# ADVERSARIAL cases — the gold sits in a line the toolout stage DROPS by construction
+# ADVERSARIAL cases - the gold sits in a line the toolout stage DROPS by construction
 # (a noise/INFO line, a diff CONTEXT line, a middle grep match, or a global aggregate that
 # needs lines the windowing elides). The non-adversarial cases above can't catch
 # over-aggressive windowing because their answer is always in a force-kept line; these can.
@@ -221,7 +221,7 @@ cases.append(case("adv-aggregate-count",
                   adversarial=True))
 
 # ====================================================================================
-# Broader non-adversarial cases — raise n and vary the content shape (large JSON,
+# Broader non-adversarial cases - raise n and vary the content shape (large JSON,
 # mixed log+grep, big multi-file diff, structured table, stack trace). Each gold sits
 # in a line a faithful compressor keeps, so all three tools (original / llmtrim /
 # Headroom) get a fair shot at the answer; these widen the corpus so a couple of fat
@@ -253,7 +253,7 @@ cases.append(case("json-sla-owner",
                   "Which team owns the region with the p99 SLA breach?",
                   "team-payments"))
 
-# Mixed blob: build log, then a grep block, then a stack frame — answer in the stack.
+# Mixed blob: build log, then a grep block, then a stack frame - answer in the stack.
 mixed = "\n".join(f"INFO  [{i:03d}] linking object obj_{WORDS[i % len(WORDS)]}.o" for i in range(60))
 mixed += "\n" + "\n".join(
     f"src/{WORDS[i % len(WORDS)]}/route.rs:{20 + i}:    dispatch(req_{i});" for i in range(40))

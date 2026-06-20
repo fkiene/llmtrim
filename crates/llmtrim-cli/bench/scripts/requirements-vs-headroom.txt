@@ -1,12 +1,13 @@
-# Dependencies for bench/scripts/vs_headroom.py (the llmtrim-vs-Headroom head-to-head).
+# Dependencies for bench/scripts/bench.py (the benchkit harness).
 # The llmtrim wheel itself is built locally and installed separately:
 #   crates/llmtrim-uniffi/scripts/build-wheel.sh
 #   pip install --user target/wheels/llmtrim-*.whl
-tiktoken==0.8.0      # the shared o200k_base encoder (fair denominator for both tools)
-headroom-ai==0.25.0  # Headroom's Python library (pulls litellm + a ModernBERT model)
-# Headroom's ML Kompress (ModernBERT) path — the [ml] extra. Without these the run falls
+tiktoken==0.13.0      # the shared o200k_base encoder (fair denominator for both tools)
+headroom-ai==0.26.0  # Headroom's Python library (pinned latest release; pulls litellm + ModernBERT)
+# Headroom's ML Kompress (ModernBERT) path - the [ml] extra. Without these the run falls
 # back to Headroom's deterministic compressors and meta.headroom_ml_fired is false. See the
 # snapshot README "Enabling Headroom's ML path" for the headroom._core build step.
 torch==2.12.0        # exact version used for the committed snapshot run
 transformers==5.10.1 # exact version used for the committed snapshot run
 openai==2.41.1       # only used by --live (OpenRouter is OpenAI-compatible)
+rouge-score==0.1.2   # ROUGE-L for summarization corpora (cnn, gov_report, multi_news)

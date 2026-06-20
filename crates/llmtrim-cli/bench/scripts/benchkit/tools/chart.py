@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Render the README hero — bench/frontier-dark.svg + bench/frontier-light.svg.
+"""Render the README hero - bench/frontier-dark.svg + bench/frontier-light.svg.
 
 "Whole round-trip" framing: a before/after cost bar where llmtrim's bill stops short and the
 dashed "ghost" of the original is annotated as what you don't pay. One supporting line (the
@@ -10,14 +10,14 @@ Two themes matched to GitHub's own surfaces (canvas + success-green + text/borde
 blends into the README in either color scheme; the README swaps them via `<picture>` +
 `prefers-color-scheme`. Static SVG (GitHub renders as <img>: no JS/web-fonts; system fonts; the
 only theme adaptation is the two-file swap). Pooled from the shape-matched live A/B (same data as
-bench/README), priced with the pinned models.dev snapshot. Run: `python3 bench/scripts/chart.py`.
+bench/README), priced with the pinned models.dev snapshot. Run: `PYTHONPATH=scripts python3 -m benchkit.tools.chart`.
 """
 import glob
 import html
 import json
 import os
 
-HERE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))  # bench/ root (this script lives in bench/scripts/)
+HERE = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))  # bench/ root (this script lives in bench/scripts/benchkit/tools/)
 SANS = "ui-sans-serif,-apple-system,Segoe UI,Helvetica,Arial,sans-serif"
 MONO = "ui-monospace,SFMono-Regular,Menlo,monospace"
 
@@ -50,7 +50,7 @@ def unwrap(doc):
 
 
 def pooled():
-    """Sum tokens + cost across the shape-matched run (results/<corpus>.json) — the same data
+    """Sum tokens + cost across the shape-matched run (results/<corpus>.json) - the same data
     bench/README pools; variant files (`__safe`/`__aggressive`/`__tuned`) excluded."""
     tin_b = tin_a = tout_b = tout_a = n = 0
     cost_b = cost_a = 0.0
@@ -141,7 +141,7 @@ def render(T, d):
         # panel matched to the GitHub surface: canvas fill + 1px border, like a native card
         f'<rect width="{W}" height="{H}" fill="{T["bg"]}"/>',
         f'<rect x="1" y="1" width="{W - 2}" height="{H - 2}" rx="12" fill="none" stroke="{T["border"]}" stroke-width="1"/>',
-        # header — the value prop: ink (not muted) + bold so it reads, but sized below the
+        # header - the value prop: ink (not muted) + bold so it reads, but sized below the
         # −46% and kept all-ink so the one green number stays the sole focal point
         f'<text x="44" y="52" font-family="{SANS}"><tspan font-size="19" font-weight="800" letter-spacing="0.2" fill="{T["ink"]}">llmtrim</tspan><tspan font-size="18" font-weight="700" fill="{T["ink"]}"> cuts the whole LLM bill, </tspan><tspan font-size="18" font-weight="800" fill="{T["ink"]}">both ends</tspan></text>',
         # the comparison (the hero)
@@ -155,7 +155,7 @@ def render(T, d):
         seg(x0 + comp * fi_a / 2, y_l, f"−{in_pct:.0f}%", T["seg_in"]),
         seg(x0 + comp * fi_a + comp * (1 - fi_a) / 2, y_l, f"−{out_pct:.0f}%", T["seg_out"]),
         # savings ghost: open on the LEFT (flush with the solid bar), rounded outer right, so
-        # the llmtrim row reads as ONE full-width bar — solid paid → dashed saved.
+        # the llmtrim row reads as ONE full-width bar - solid paid → dashed saved.
         f'<path d="M{x0 + comp:.1f},{y_l} H{end - 6:.1f} A6,6 0 0 1 {end:.1f},{y_l + 6} V{y_l + bh - 6:.1f} A6,6 0 0 1 {end - 6:.1f},{y_l + bh} H{x0 + comp:.1f}" fill="{T["green"]}" fill-opacity="{T["ghost"]}" stroke="{T["green"]}" stroke-opacity="0.55" stroke-width="1.4" stroke-dasharray="5 4"/>',
         txt(end - 16, y_l + bh / 2 + 12, 34, T["green"], f"−{cost_pct:.0f}%", weight=800,
             anchor="end", ls=-1, extra=' filter="url(#win)"'),
@@ -183,7 +183,7 @@ def main():
     print(f"wrote frontier-dark.svg + frontier-light.svg "
           f"(cost −{d[6]:.0f}% · output −{d[7]:.0f}% · input −{d[8]:.0f}% · n={n})")
     # Projection: the SAME measured token deltas, re-priced at frontier-model rates from
-    # the pinned snapshot. No new measurement — frontier models weight output (the −75%
+    # the pinned snapshot. No new measurement - frontier models weight output (the −75%
     # side) far more heavily than gpt-oss-20b does, so the cost % rises. Labeled as a
     # projection wherever published; the hero number stays the measured one.
     for fid in ("openai/gpt-4o", "anthropic/claude-sonnet-4.5"):

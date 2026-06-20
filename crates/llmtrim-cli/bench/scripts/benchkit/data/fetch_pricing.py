@@ -3,8 +3,8 @@
 
 Pulls the registry, keeps the providers the bench actually prices against (OpenRouter
 ids are slashed, native provider ids are bare), and flattens each model's cost block
-to {cache_read, input, output} in USD per 1M tokens — the shape `bench::load_pricing`
-parses. Run: `python3 bench/scripts/fetch_pricing.py`.
+to {cache_read, input, output} in USD per 1M tokens - the shape `bench::load_pricing`
+parses. Run: `PYTHONPATH=scripts python3 -m benchkit.data.fetch_pricing`.
 """
 
 import datetime
@@ -17,7 +17,7 @@ API = "https://models.dev/api.json"
 # slashed ids the live A/B bench sends. Same id never appears in two providers today;
 # if that changes, later providers in this sorted order win.
 PROVIDERS = ["anthropic", "deepseek", "google", "mistral", "openai", "openrouter"]
-OUT = os.path.join(os.path.dirname(__file__), "..", "pricing.json")
+OUT = os.path.join(os.path.dirname(__file__), "..", "..", "..", "pricing.json")
 
 
 def main() -> None:

@@ -1,17 +1,31 @@
 #!/usr/bin/env python3
-"""
-A/B benchmark: baseline vs caveman vs llmtrim
-Uses OpenRouter model openai/gpt-oss-20b, temperature 0, max_tokens 2048.
-"""
+"""Caveman adapter (self-contained).
 
+Caveman is NOT a `compress(messages)` library, so it does not fit the corpora x grid engine
+the Competitor interface drives. It compares three SYSTEM-PROMPT strategies live - baseline
+(no system prompt), caveman (its full SKILL.md as a system prompt), and llmtrim (a 19-token
+terse instruction) - and measures OUTPUT-token reduction over a fixed prompt set. There is no
+deterministic token-reduction sweep, no per-config grid, and no corpora here.
+
+Forcing this into config_grid()/compress() would either misrepresent caveman or silently
+change its behavior, so per the refactor brief this module stays self-contained: it keeps its
+own snapshot folder (snapshots/vs-caveman) and exposes `run(argv)` that the CLI dispatches to.
+The logic below is the former `caveman_ab.py` verbatim, only restructured into `run()`.
+
+A no-op `CavemanCompetitor` is registered so `bench.py caveman` resolves and so the registry
+lists it; the CLI routes "caveman" to `run()` before the generic engine, never to the engine.
+"""
 import json
 import os
 import ssl
 import sys
 import time
-import urllib.request
 import urllib.error
+import urllib.request
 from pathlib import Path
+
+from . import register
+from .base import Competitor
 
 # Allow self-signed / missing CA chains (common on dev Linux boxes)
 _SSL_CTX = ssl.create_default_context()
@@ -19,10 +33,11 @@ _SSL_CTX.check_hostname = False
 _SSL_CTX.verify_mode = ssl.CERT_NONE
 
 # ── Paths ────────────────────────────────────────────────────────────────────
-REPO_ROOT = Path(__file__).resolve().parents[2]
+# This file is scripts/benchkit/competitors/caveman.py, so parents[4] is crates/llmtrim-cli -
+# the same absolute path the former scripts/caveman_ab.py resolved as REPO_ROOT (parents[2]).
+REPO_ROOT = Path(__file__).resolve().parents[4]
 CAVEMAN_ROOT = REPO_ROOT.parent / "caveman"
 RESULTS_DIR = REPO_ROOT / "bench" / "snapshots" / "vs-caveman"
-RESULTS_DIR.mkdir(parents=True, exist_ok=True)
 
 PROMPTS_FILE = CAVEMAN_ROOT / "benchmarks" / "prompts.json"
 SKILL_FILE = CAVEMAN_ROOT / "skills" / "caveman" / "SKILL.md"
@@ -32,6 +47,28 @@ TERSE_FILE = REPO_ROOT / "prompts" / "output_terse.txt"
 MODEL = "openai/gpt-oss-20b"
 TEMPERATURE = 0
 MAX_TOKENS = 2048
+
+
+@register
+class CavemanCompetitor(Competitor):
+    """Registry stub: caveman is dispatched to run() by the CLI, not to the engine. The
+    Competitor methods raise to make a wrong dispatch loud rather than silently fabricate a
+    grid/compress() that caveman does not have."""
+    name = "caveman"
+    display = "caveman"
+
+    def compress(self, messages, cfg, repeats):
+        raise NotImplementedError("caveman is self-contained; the CLI dispatches to run()")
+
+    def config_grid(self):
+        raise NotImplementedError("caveman is self-contained; the CLI dispatches to run()")
+
+    def ml_fired(self, transforms):
+        return False
+
+    def notes(self):
+        return {}
+
 
 # Load API key from env or .env file
 def load_api_key():
@@ -47,11 +84,13 @@ def load_api_key():
                     return val
     return None
 
+
 # ── Load fixtures ─────────────────────────────────────────────────────────────
 def load_prompts():
     with open(PROMPTS_FILE) as f:
         data = json.load(f)
     return data["prompts"]
+
 
 def load_caveman_system():
     """Strip YAML front-matter from SKILL.md and return the body."""
@@ -62,8 +101,10 @@ def load_caveman_system():
             return parts[2].strip()
     return text.strip()
 
+
 def load_terse_instruction():
     return TERSE_FILE.read_text().strip()
+
 
 # ── API call ──────────────────────────────────────────────────────────────────
 def call_openrouter(api_key, messages):
@@ -88,6 +129,7 @@ def call_openrouter(api_key, messages):
     with urllib.request.urlopen(req, timeout=60, context=_SSL_CTX) as resp:
         return json.loads(resp.read())
 
+
 def call_with_retry(api_key, messages, label):
     for attempt in range(2):
         try:
@@ -98,6 +140,7 @@ def call_with_retry(api_key, messages, label):
             if attempt == 0:
                 time.sleep(5)
     return None
+
 
 # ── Build messages per arm ────────────────────────────────────────────────────
 def make_messages(arm, prompt_text, caveman_system, terse_instruction):
@@ -116,6 +159,7 @@ def make_messages(arm, prompt_text, caveman_system, terse_instruction):
     else:
         raise ValueError(f"Unknown arm: {arm}")
 
+
 # ── Extract usage ─────────────────────────────────────────────────────────────
 def extract_record(prompt_id, arm, resp):
     usage = resp.get("usage", {})
@@ -131,8 +175,10 @@ def extract_record(prompt_id, arm, resp):
         "response": text,
     }
 
+
 # ── Main ──────────────────────────────────────────────────────────────────────
 def main():
+    RESULTS_DIR.mkdir(parents=True, exist_ok=True)
     api_key = load_api_key()
     if not api_key:
         print("ERROR: OPENROUTER_API_KEY not found in environment or .env", file=sys.stderr)
@@ -187,6 +233,7 @@ def main():
 
     # Compute summary
     write_summary(all_records, failed_prompts, caveman_system, terse_instruction)
+
 
 def write_summary(records, failed_prompts, caveman_system, terse_instruction):
     from collections import defaultdict
@@ -249,7 +296,7 @@ Prompts: {n} valid (of 10) | {len(failed_prompts)} failed: {failed_prompts if fa
 
 | Arm       | Total prompt tokens | Total completion tokens | Output reduction vs baseline | Instr. overhead/req |
 |-----------|---------------------|------------------------|------------------------------|----------------------|
-| baseline  | {totals['baseline']['prompt_tokens']:>19} | {totals['baseline']['completion_tokens']:>22} | —                            | 0 tokens             |
+| baseline  | {totals['baseline']['prompt_tokens']:>19} | {totals['baseline']['completion_tokens']:>22} | -                            | 0 tokens             |
 | caveman   | {totals['caveman']['prompt_tokens']:>19} | {totals['caveman']['completion_tokens']:>22} | {pct_reduction(cav_comp, base_comp):>28} | ~949 tokens (SKILL.md)|
 | llmtrim   | {totals['llmtrim']['prompt_tokens']:>19} | {totals['llmtrim']['completion_tokens']:>22} | {pct_reduction(ltrim_comp, base_comp):>28} | 19 tokens (terse.txt)|
 
@@ -263,8 +310,8 @@ Quality = compressed answer retains ≥50% of key technical terms from baseline.
 |-----------------------|-----------------|-----------------|
 """
     for pid, notes in per_prompt_notes:
-        cav_note = next((n for n in notes if n.startswith("caveman")), "—")
-        ltrim_note = next((n for n in notes if n.startswith("llmtrim")), "—")
+        cav_note = next((n for n in notes if n.startswith("caveman")), "-")
+        ltrim_note = next((n for n in notes if n.startswith("llmtrim")), "-")
         readme += f"| {pid:<21} | {cav_note:<15} | {ltrim_note:<15} |\n"
 
     readme += f"""
@@ -294,6 +341,7 @@ Net efficiency = output savings minus instruction overhead amortized over sessio
     print()
     print(readme)
 
+
 def summarize_only():
     """Re-generate README from existing results.json without calling the API."""
     caveman_system = load_caveman_system()
@@ -303,8 +351,11 @@ def summarize_only():
         records = json.load(f)
     write_summary(records, [], caveman_system, terse_instruction)
 
-if __name__ == "__main__":
-    if "--summarize" in sys.argv:
+
+def run(argv):
+    """Entry point the CLI dispatches to for `bench.py caveman [--summarize]`."""
+    if "--summarize" in argv:
         summarize_only()
     else:
         main()
+    return 0
