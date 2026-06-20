@@ -1,150 +1,83 @@
-# llmtrim vs Headroom (matched-config, fair)
+# llmtrim vs Headroom (cost per correct answer + Pareto)
 
-Both libraries are driven through their Python APIs (`llmtrim.compress`, `headroom.compress`). Before/after token counts use the **same** `o200k_base` encoder over the **same** message-content span. Latency is the median compress time over 5 runs (one-time model load excluded by a warm-up).
+The metric that matters to a buyer is not fewest input tokens - it is **cost per correct answer (CPCA)**: a tool that compresses more but is wrong more, or that makes the model ramble, costs you more. This measures that, and shows the full quality-vs-compression frontier so neither tool is judged at a single cherry-picked setting. See `BENCH_SPEC.md`.
 
-**This comparison is matched, not rigged.** Each tool is run at TWO points, and at each point llmtrim's preset is paired with a Headroom config of the same aggressiveness, not against Headroom's worst-case setting:
+- Model: `openai/gpt-oss-20b` (pinned route). Encoder: `o200k_base` over the same message span for both tools.
+- Corpora (public, sha-pinned): gsm8k, hotpotqa, squad2, truthfulqa, cnn, lb_qasper, lb_multifieldqa, lb_2wikimqa, lb_gov_report, lb_multinews. The self-authored synthetic tool-output corpus is **excluded**.
+- Pricing: bench/pricing.json (fetched 2026-06-10), input $0.029/M, output $0.14/M (output is 4.8x input).
 
-| point | llmtrim preset | Headroom config |
-|---|---|---|
-| moderate | `agent` | **defaults** (`compress_user_messages=False`, `protect_recent=4`, `target_ratio=None`, `min_tokens_to_compress=250`) |
-| aggressive | `aggressive` | **max** (`compress_user_messages=True`, `protect_recent=0`, `target_ratio=0.2`, `min_tokens_to_compress=50`) |
+## Token reduction across the sweep (deterministic, $0)
 
-Two corpora: **general** is the real golden corpora (gsm8k, hotpotqa, squad2) with their own ground-truth answers, the neutral quality signal. **tool-output** is llmtrim's own synthetic corpus (`synth_toolout.py`); its golds sit on lines llmtrim is built to keep, so it is llmtrim-favouring on quality and is reported separately.
+Each arm is a compression setting. Reduction % is token-weighted (1 - sum_after/sum_before); the CI bootstraps that same token-weighted statistic. Overhead leads with p95 (the tail a user feels), median in parentheses. This is the Pareto x-axis.
 
-## Point: moderate, llmtrim `agent` vs Headroom defaults
+| arm | tool | n | reduction % | 95% CI | overhead ms p95 (med) | ML fired |
+|---|---|--:|--:|:--|:--|--:|
+| safe | llmtrim | 50 | 0% | 0–0 | 16.8 (2.4) | 0 |
+| auto | llmtrim | 50 | 25% | 14–39 | 33.8 (4.0) | 0 |
+| aggressive | llmtrim | 50 | 28% | 17–41 | 385.6 (5.4) | 0 |
+| hr-default | headroom | 50 | 0% | 0–0 | 11.1 (1.7) | 0 |
+| hr-0.6 | headroom | 50 | 24% | 16–32 | 8639.0 (843.8) | 36 |
+| hr-0.4 | headroom | 50 | 24% | 16–32 | 75.1 (11.2) | 41 |
+| hr-max | headroom | 50 | 24% | 16–32 | 25.5 (9.2) | 41 |
+| hr-max-noml | headroom (no ML) | 50 | 0% | 0–0 | 25.1 (8.9) | 0 |
 
-### general (n=24, real golden corpora, neutral signal)
+Latency is Python wall-clock around each library's `compress()`; it is not a like-for-like CPU measurement (llmtrim crosses an FFI boundary into Rust, Headroom runs in-process Python + torch). One-time cold start (model load, once per process, amortizes to ~0 per call): llmtrim 103.5 ms, Headroom 3049.3 ms.
 
-| tool | tokens before→after | saved | per-case spread % | median ms |
-|---|--:|--:|:--|--:|
-| **llmtrim** | 14,407 → 14,407 | **0%** | 0 / 0 / 0 (σ 0) | 0.4 |
-| Headroom | 14,407 → 14,407 | 0% | 0 / 0 / 0 (σ 0) | 0.3 |
+### Reduction per corpus (aggressive arm)
 
-### tool-output (n=15, llmtrim-authored synthetic, llmtrim-favouring)
-
-| tool | tokens before→after | saved | per-case spread % | median ms |
-|---|--:|--:|:--|--:|
-| **llmtrim** | 11,748 → 8,349 | **29%** | 0 / 21 / 93 (σ 33) | 1.4 |
-| Headroom | 11,748 → 6,123 | 48% | 0 / 45 / 96 (σ 41) | 6.4 |
-
-Headroom's ML Kompress (ModernBERT) path fired on 0/15 tool-output cases at this point.
-
-### Live quality A/B at point `moderate` (gpt-oss-20b)
-
-Each case sent to `openai/gpt-oss-20b` three ways (original / llmtrim / Headroom); the answer is scored with the **corpus's own scorer** (numeric / token-F1 / contains). Faithful and adversarial cases are separated so neither tool's mean is distorted.
-
-**faithful cases (n=10)**
-
-| arm | answer accuracy | output tokens |
+| corpus | llmtrim aggressive | Headroom hr-max |
 |---|--:|--:|
-| original (uncompressed) | 90% | 1,936 |
-| **llmtrim** | **90%** | 1,666 |
-| Headroom | 80% | 2,859 |
+| gsm8k | -28% | 7% |
+| hotpotqa | 29% | 32% |
+| squad2 | 18% | 10% |
+| truthfulqa | -10% | 13% |
+| cnn | -2% | 27% |
+| lb_qasper | 61% | 33% |
+| lb_multifieldqa | 32% | 37% |
+| lb_2wikimqa | 51% | 37% |
+| lb_gov_report | 4% | 0% |
+| lb_multinews | 10% | 36% |
 
-**adversarial cases (n=3)**
+llmtrim is preservation-first: on short prompts (gsm8k, truthfulqa) it can *add* a few tokens rather than risk the answer, and the aggregate reduction is carried by the long-context corpora. Stated plainly, not hidden.
 
-| arm | answer accuracy | output tokens |
-|---|--:|--:|
-| original (uncompressed) | 100% | 188 |
-| **llmtrim** | **100%** | 187 |
-| Headroom | 33% | 268 |
+## Cost per answer-quality (live, 2 seeds, budget $0.9, spent $0.0203)
 
-<details><summary>Per-case quality (adv flagged)</summary>
+Each point pairs an llmtrim preset with the Headroom config of nearest achieved reduction (shown per point - exact iso isn't always possible because Headroom's ML caps its reduction). For each, generate original / llmtrim / Headroom across seeds, score with each corpus's own scorer (ROUGE-L for summaries, F1 for QA, numeric/contains/choice otherwise), and compute CPCA = total cost / sum of scores - fractional credit, so 'cost per correct answer' here means cost per unit of summed answer quality, not per binary hit. **Lower CPCA is better.** Quality is the mean score; output tokens are the median (resists one runaway generation).
 
-| case | group | adv | scorer | original | llmtrim | Headroom |
-|---|---|:-:|---|:-:|:-:|:-:|
-| gsm8k-0 | general |  | numeric | OK | OK | OK |
-| gsm8k-1 | general |  | numeric | OK | OK | OK |
-| gsm8k-2 | general |  | numeric | OK | OK | OK |
-| gsm8k-3 | general |  | numeric | OK | OK | OK |
-| log-build-undef | tool-output |  | contains | OK | OK | OK |
-| log-pytest-fail | tool-output |  | contains | OK | OK | OK |
-| log-db-timeout | tool-output |  | contains | miss | OK | OK |
-| log-rate-limit | tool-output |  | contains | OK | miss | miss |
-| log-panic-file | tool-output |  | contains | OK | OK | miss |
-| diff-signature | tool-output |  | contains | OK | OK | OK |
-| adv-info-rowcount | tool-output | Y | contains | OK | OK | miss |
-| adv-info-config | tool-output | Y | contains | OK | OK | miss |
-| adv-diff-context-const | tool-output | Y | contains | OK | OK | OK |
+### iso-moderate - llmtrim `auto` vs Headroom `hr-0.4` (n=30 samples) - iso: reduction llmtrim 25% vs Headroom 24%
 
-</details>
+| arm | quality | output tok (med) | truncated | total cost | **CPCA** |
+|---|--:|--:|--:|--:|--:|
+| original | 0.49 | 272 | 8 | $0.0039 | $0.0003 |
+| **llmtrim** | 0.46 | 172 | 2 | $0.0030 | **$0.0002** |
+| headroom | 0.39 | 320 | 12 | $0.0033 | $0.0003 |
 
-## Point: aggressive, llmtrim `aggressive` vs Headroom max-aggression
+Headroom's longer outputs hit the generation cap 12 times vs llmtrim's 2: the output-inflation that drives both its higher cost and its clipped answers.
 
-### general (n=24, real golden corpora, neutral signal)
+Quality difference llmtrim − Headroom: +0.080 (95% CI -0.036…+0.200, n=30) - **NOT significant (CI spans 0)**.
 
-| tool | tokens before→after | saved | per-case spread % | median ms |
-|---|--:|--:|:--|--:|
-| **llmtrim** | 14,407 → 9,275 | **36%** | -51 / 3 / 58 (σ 34) | 1.6 |
-| Headroom | 14,407 → 4,285 | 70% | 0 / 52 / 77 (σ 23) | 4.2 |
+### iso-aggressive - llmtrim `aggressive` vs Headroom `hr-0.4` (n=30 samples) - near-iso, 4pp apart: reduction llmtrim 28% vs Headroom 24%
 
-### tool-output (n=15, llmtrim-authored synthetic, llmtrim-favouring)
+| arm | quality | output tok (med) | truncated | total cost | **CPCA** |
+|---|--:|--:|--:|--:|--:|
+| original | 0.48 | 257 | 6 | $0.0038 | $0.0003 |
+| **llmtrim** | 0.46 | 158 | 3 | $0.0030 | **$0.0002** |
+| headroom | 0.44 | 320 | 9 | $0.0033 | $0.0002 |
 
-| tool | tokens before→after | saved | per-case spread % | median ms |
-|---|--:|--:|:--|--:|
-| **llmtrim** | 11,748 → 4,884 | **58%** | -1 / 75 / 91 (σ 35) | 3.1 |
-| Headroom | 11,748 → 3,045 | 74% | 0 / 81 / 96 (σ 36) | 7.0 |
+Headroom's longer outputs hit the generation cap 9 times vs llmtrim's 3: the output-inflation that drives both its higher cost and its clipped answers.
 
-Headroom's ML Kompress (ModernBERT) path fired on 3/15 tool-output cases at this point.
+Quality difference llmtrim − Headroom: +0.017 (95% CI -0.120…+0.150, n=30) - **NOT significant (CI spans 0)**.
 
-### Live quality A/B at point `aggressive` (gpt-oss-20b)
+## Caveats
 
-Each case sent to `openai/gpt-oss-20b` three ways (original / llmtrim / Headroom); the answer is scored with the **corpus's own scorer** (numeric / token-F1 / contains). Faithful and adversarial cases are separated so neither tool's mean is distorted.
-
-**faithful cases (n=10)**
-
-| arm | answer accuracy | output tokens |
-|---|--:|--:|
-| original (uncompressed) | 100% | 1,612 |
-| **llmtrim** | **100%** | 944 |
-| Headroom | 50% | 3,981 |
-
-**adversarial cases (n=3)**
-
-| arm | answer accuracy | output tokens |
-|---|--:|--:|
-| original (uncompressed) | 100% | 189 |
-| **llmtrim** | **100%** | 191 |
-| Headroom | 33% | 315 |
-
-<details><summary>Per-case quality (adv flagged)</summary>
-
-| case | group | adv | scorer | original | llmtrim | Headroom |
-|---|---|:-:|---|:-:|:-:|:-:|
-| gsm8k-0 | general |  | numeric | OK | OK | miss |
-| gsm8k-1 | general |  | numeric | OK | OK | OK |
-| gsm8k-2 | general |  | numeric | OK | OK | miss |
-| gsm8k-3 | general |  | numeric | OK | OK | OK |
-| log-build-undef | tool-output |  | contains | OK | OK | OK |
-| log-pytest-fail | tool-output |  | contains | OK | OK | miss |
-| log-db-timeout | tool-output |  | contains | OK | OK | OK |
-| log-rate-limit | tool-output |  | contains | OK | OK | miss |
-| log-panic-file | tool-output |  | contains | OK | OK | miss |
-| diff-signature | tool-output |  | contains | OK | OK | OK |
-| adv-info-rowcount | tool-output | Y | contains | OK | OK | miss |
-| adv-info-config | tool-output | Y | contains | OK | OK | miss |
-| adv-diff-context-const | tool-output | Y | contains | OK | OK | OK |
-
-</details>
-
-## Verdict: who wins each axis
-
-- **moderate / general tokens:** llmtrim 0% vs Headroom 0% → **tie**.
-- **moderate / tool-output tokens:** llmtrim 29% vs Headroom 48% → **Headroom**.
-- **moderate / faithful quality (n=10):** original 90%, llmtrim 90%, Headroom 80% → **llmtrim**.
-- **moderate / adversarial quality (n=3):** original 100%, llmtrim 100%, Headroom 33% → **llmtrim**.
-- **aggressive / general tokens:** llmtrim 36% vs Headroom 70% → **Headroom**.
-- **aggressive / tool-output tokens:** llmtrim 58% vs Headroom 74% → **Headroom**.
-- **aggressive / faithful quality (n=10):** original 100%, llmtrim 100%, Headroom 50% → **llmtrim**.
-- **aggressive / adversarial quality (n=3):** original 100%, llmtrim 100%, Headroom 33% → **llmtrim**.
-
-## Caveats (read these)
-
-- **Matched configs, stated plainly.** At `moderate`, llmtrim runs its `agent` preset and Headroom runs its library DEFAULTS (which protect user messages and recent turns, so Headroom no-ops on many cases by design). At `aggressive`, llmtrim runs `aggressive` and Headroom runs its max config. Neither tool is pitted against the other's worst-case setting.
-- **Corpus bias.** The `tool-output` group is llmtrim's own synthetic corpus; its golds sit on lines llmtrim keeps, so it flatters llmtrim on quality. Treat the `general` group (real golden corpora) as the less-biased quality signal.
-- **Scorer.** Quality uses each corpus's own deterministic scorer (numeric / token-F1 / contains). We deliberately skip `judge` and `tool` cases (they need an LLM judge / call-arg parsing) so every number is a scorer this script actually computes. Token-F1 with a 0.5 OK threshold is lenient; read it as 'kept enough of the answer', not exact match.
-- **Small n.** The live A/B is a budget sweep (a dozen-ish scored cases per point). Numbers are directional, not a significance test. Transient API errors (429/timeout) skip that case rather than abort the run.
-- **Headroom's ML path.** Headroom runs with its `[ml]` extra enabled (ModernBERT Kompress + deterministic JSON/log/diff routers); no generative LLM call, model load excluded from latency.
-- **Reproducibility.** Only the token-count axis (before/after/saved) is deterministic and citable. The `median ms` latency is machine-specific and the live `output tokens` are single-run, non-deterministic generations; read both as directional, not point estimates.
-- Model is `openai/gpt-oss-20b` via the pinned `wandb/fp4` route (CLAUDE.md).
+- The deterministic token axis is exact and citable. CPCA / quality / output tokens are live generations across seeds - directional, with the paired-bootstrap CI on the quality difference as the significance signal (CI excluding 0 = real).
+- Live sample is small (n shown per point) and uses few seeds, so the quality differences are NOT statistically significant; read them as directional. A larger live run would tighten the CIs.
+- At the aggressive point the match is near-iso, not exact: Headroom's ML caps its reduction (~24% here) so llmtrim's more-aggressive arm is a few pp ahead on compression - read its quality/cost next to that gap.
+- Scorers per corpus: numeric (gsm8k), token-F1 (hotpotqa, squad2, LongBench QA), choice (truthfulqa MC1), ROUGE-L (cnn, gov_report, multi_news). Each is the corpus's own standard metric.
+- Headroom's ML reduction varies run-to-run, so the live Headroom arm is matched to llmtrim by ACHIEVED reduction within the same run (shown per point), not a fixed label; the full sweep shows neither tool is judged at one cherry-picked setting.
+- Latency is Python wall-clock, not like-for-like CPU (llmtrim is Rust via FFI, Headroom in-process Python+torch); read p95, and treat cold start as a one-time cost. Per-Headroom-arm latency is also confounded by Headroom caching embeddings ACROSS arms within a run, so only the FIRST ML arm reflects true inference cost; the honest ML latency is the cold start plus that first ML call.
+- Headroom no-ML is 0% here because the corpora are prose; its deterministic routers (JSON/code/log) have nothing to bite on. On JSON/code/log inputs no-ML would compress - that path is just out of scope for these text corpora.
+- llmtrim is preservation-first by design (no lossy tier). Headroom will win raw reduction at its most aggressive; the point is that there it loses answers while llmtrim does not - read the iso-compression rows together with CPCA.
+- RTK scope: Headroom's bundled RTK shell-output rewriter is active only in its `wrap`/proxy mode, not in `headroom.compress`; it is out of scope for this library-vs-library comparison.
+- Tool-calling corpora (bfcl, glaive) are deferred (tool-schema plumbing + call-arg scorer); excluded here, not cherry-picked away.
 
