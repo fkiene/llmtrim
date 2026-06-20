@@ -1,4 +1,9 @@
-# Datasets are license-bound and rebuilt on demand via scripts/download.py
-data/
+# Datasets are license-bound and rebuilt on demand via `make data`. Anchored to bench/data
+# so it does not also swallow the package's benchkit/data/ module dir.
+/data/
 # Scratch results dir for ad-hoc runs; canonical snapshots are committed explicitly
-results/
+/results/
+snapshots/vs-headroom/live-runs/
+__pycache__/
+*.pyc
+scripts/proxy_net*

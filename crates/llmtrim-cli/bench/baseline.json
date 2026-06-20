@@ -1,0 +1,11 @@
+{
+  "limit": 5,
+  "tolerance_pp": 3,
+  "generated": "2026-06-19",
+  "llmtrim": {
+    "safe": 0.1,
+    "auto": 25.4,
+    "aggressive": 27.7
+  },
+  "note": "The CI gate (bench.py headroom --check) asserts llmtrim's deterministic reduction stays within tolerance_pp of these. Regenerate intentionally with `make baseline` when an engine change moves the numbers."
+}

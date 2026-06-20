@@ -1,0 +1,57 @@
+name: Bench gate (advisory)
+
+# ADVISORY gate on the llmtrim-vs-Headroom benchmark - it proves the harness still runs and
+# that llmtrim's DETERMINISTIC token-reduction numbers haven't drifted from bench/baseline.json.
+# It downloads the public corpora fresh (like any researcher), builds the llmtrim wheel, and
+# runs `--check` (llmtrim arms only; no Headroom/torch, no API, $0). It never gates on
+# Headroom (whose ML reduction is non-deterministic).
+#
+# This is ADVISORY: do NOT add "Bench gate" to branch protection's required checks. The
+# `paths:` filter below means the workflow is skipped on unrelated PRs, and a skipped REQUIRED
+# check sticks "Pending" forever and blocks the PR (see ci.yml's header). As an advisory check
+# that is harmless - it just shows a red/green mark a reviewer can read.
+#
+# To intentionally move the numbers, run `make -C crates/llmtrim-cli/bench baseline` and
+# commit the new baseline.json in the same PR, so the change is a reviewed line in the diff.
+
+on:
+  pull_request:
+    paths:
+      - 'crates/llmtrim-cli/bench/**'
+      - 'crates/llmtrim-core/src/**'
+      - 'crates/llmtrim-uniffi/**'
+      - '.github/workflows/bench-gate.yml'
+
+concurrency:
+  group: bench-gate-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  gate:
+    name: Deterministic bench gate ($0, advisory)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.x'
+      # llmtrim (the thing under test) + the shared encoder only. NOT headroom-ai/torch -
+      # --check runs llmtrim arms alone and skips Headroom when it is not importable.
+      - run: pip install maturin wheel tiktoken==0.13.0
+      - name: Build + install the llmtrim wheel
+        run: |
+          crates/llmtrim-uniffi/scripts/build-wheel.sh
+          pip install target/wheels/llmtrim-*.whl
+      # Corpora are not vendored (license + size); fetch them fresh, like any reproduction.
+      # On an HF outage this step fails and the advisory goes red - it never blocks a PR.
+      - name: Download corpora (only the gated set, small N; the gate reads the first 5/corpus)
+        working-directory: crates/llmtrim-cli/bench
+        run: PYTHONPATH=scripts python3 -m benchkit.data.download 10 gsm8k,hotpotqa,squad2,truthfulqa,cnn,lb_qasper,lb_multifieldqa,lb_2wikimqa,lb_gov_report,lb_multinews
+      - name: Bench check (invariants + reduction vs baseline)
+        working-directory: crates/llmtrim-cli/bench
+        run: make check
