@@ -1,0 +1,50 @@
+{
+  "input": {
+    "model": "claude-3-5-sonnet-20241022",
+    "system": [
+      {
+        "type": "text",
+        "text": "You are a careful assistant. Follow the rules exactly.",
+        "cache_control": {
+          "type": "ephemeral"
+        }
+      }
+    ],
+    "messages": [
+      {
+        "role": "user",
+        "content": "summarize the build log: warning warning warning warning warning warning warning warning warning warning warning warning"
+      }
+    ],
+    "max_tokens": 256
+  },
+  "provider": "anthropic",
+  "preset": "auto",
+  "expect": {
+    "provider": "anthropic",
+    "output_shaped": true,
+    "request_json": {
+      "model": "claude-3-5-sonnet-20241022",
+      "system": [
+        {
+          "type": "text",
+          "text": "You are a careful assistant. Follow the rules exactly.",
+          "cache_control": {
+            "type": "ephemeral"
+          }
+        },
+        {
+          "type": "text",
+          "text": "Be concise: no preamble, no restating the question, no filler. Answer directly."
+        }
+      ],
+      "messages": [
+        {
+          "role": "user",
+          "content": "summarize the build log: warning warning warning warning warning warning warning warning warning warning warning warning"
+        }
+      ],
+      "max_tokens": 256
+    }
+  }
+}

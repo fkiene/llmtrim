@@ -297,6 +297,35 @@ pub fn compress_with_config(
     })
 }
 
+/// Stable entrypoint for integration adapters (Kong, Higress, Vercel AI SDK, OpenCode,
+/// Continue, Genkit, LiteLLM, LangChain).
+///
+/// An adapter hands over the host's provider-shaped request body verbatim and gets back a
+/// compressed body to forward. `preset` defaults to `auto` (per-request structural routing:
+/// tools → agent, code → code, long-context → rag, else aggressive) so a gateway seeing mixed
+/// traffic behaves correctly without a fixed profile. Unlike [`compress`], this never reads
+/// the environment or a config file, so the result is reproducible across every binding
+/// (native, WASM, UniFFI): the divergence that `preset: None` carries in the raw bindings
+/// cannot reach an adapter that goes through here.
+///
+/// `preset` accepts (case-insensitively) any name [`config::DenseConfig::preset`] knows:
+/// `auto`, `aggressive`, `agent`, `code`, `rag`, `safe`/`lossless`. An unrecognized name is
+/// an error rather than a silent fallback.
+///
+/// The signature is the frozen adapter contract: pass the body through untouched (never re-key
+/// messages or strip `cache_control`, which would break the cache-zone freeze), call this,
+/// forward [`CompressResult::request_json`].
+pub fn rewrite_request(
+    input: &str,
+    provider: Option<ProviderKind>,
+    preset: Option<&str>,
+) -> Result<CompressResult> {
+    let name = preset.unwrap_or("auto");
+    let config =
+        config::DenseConfig::preset(name).with_context(|| format!("unknown preset: {name}"))?;
+    compress_with_config(input, provider, &config)
+}
+
 /// Reverse the lossless output transforms recorded in a rehydration plan. Internal: no
 /// output-side transform ships today (Stage D is input-only; DSS was removed), so this is an
 /// inert passthrough — a JSON response is normalized, plain text returned unchanged. Kept

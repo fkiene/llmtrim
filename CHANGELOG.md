@@ -16,6 +16,12 @@ All notable changes to this project are documented here. The format follows
   Key Usage (serverAuth). The local CA is unchanged, so no re-trust is needed.
 
 ### Added
+- **`llmtrim_core::rewrite_request(input, provider, preset)`**: a stable entrypoint for
+  integration adapters. It defaults the preset to `auto` (per-request structural routing) and
+  never reads the environment or a config file, so the same request compresses identically
+  across the native, WASM, and UniFFI bindings. A cross-binding conformance suite
+  (`crates/llmtrim-core/tests/conformance/`) pins its output so a core change cannot silently
+  alter what an adapter forwards.
 - **`serve --force` / `start --force` / `setup --force`** replace an llmtrim daemon that's
   already holding the port (stops it first, waits for the port to free, then takes over)
   instead of refusing, no-opping, or leaving a healthy same-port daemon untouched.

@@ -1,0 +1,71 @@
+{
+  "input": {
+    "model": "claude-3-5-sonnet-20241022",
+    "tools": [
+      {
+        "name": "run",
+        "description": "run a shell command",
+        "input_schema": {
+          "type": "object",
+          "properties": {
+            "cmd": {
+              "type": "string"
+            }
+          }
+        }
+      }
+    ],
+    "messages": [
+      {
+        "role": "user",
+        "content": [
+          {
+            "type": "tool_result",
+            "tool_use_id": "t1",
+            "content": "ERROR boom\nERROR boom\nERROR boom\nERROR boom\nERROR boom\nERROR boom\nERROR boom\nERROR boom\nERROR boom\nERROR boom\n"
+          }
+        ]
+      }
+    ],
+    "max_tokens": 1024
+  },
+  "provider": "anthropic",
+  "preset": "agent",
+  "expect": {
+    "provider": "anthropic",
+    "output_shaped": false,
+    "request_json": {
+      "model": "claude-3-5-sonnet-20241022",
+      "tools": [
+        {
+          "description": "run a shell command",
+          "input_schema": {
+            "properties": {
+              "cmd": {
+                "type": "string"
+              }
+            },
+            "type": "object"
+          },
+          "name": "run",
+          "cache_control": {
+            "type": "ephemeral"
+          }
+        }
+      ],
+      "messages": [
+        {
+          "role": "user",
+          "content": [
+            {
+              "type": "tool_result",
+              "tool_use_id": "t1",
+              "content": "ERROR boom [×10]"
+            }
+          ]
+        }
+      ],
+      "max_tokens": 1024
+    }
+  }
+}

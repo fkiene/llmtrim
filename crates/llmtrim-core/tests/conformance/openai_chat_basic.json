@@ -1,0 +1,34 @@
+{
+  "_note": "The golden's prompt_cache_key is a hash of the injected terse-output instruction. If that instruction text changes, the hash rotates and this fixture must be reblessed; that is expected, not an adapter regression.",
+  "input": {
+    "model": "gpt-4o",
+    "messages": [
+      {
+        "role": "user",
+        "content": "hi"
+      }
+    ],
+    "max_tokens": 5
+  },
+  "provider": "openai",
+  "preset": null,
+  "expect": {
+    "provider": "openai",
+    "output_shaped": true,
+    "request_json": {
+      "model": "gpt-4o",
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be concise: no preamble, no restating the question, no filler. Answer directly."
+        },
+        {
+          "role": "user",
+          "content": "hi"
+        }
+      ],
+      "max_tokens": 5,
+      "prompt_cache_key": "f2e91a8ec143f0dc"
+    }
+  }
+}
