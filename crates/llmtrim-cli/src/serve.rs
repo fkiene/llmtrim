@@ -1623,10 +1623,12 @@ mod imp {
 
     /// MITM leaf-certificate authority: a drop-in for hudsucker's `RcgenAuthority` that adds the
     /// X.509 extensions strict TLS stacks require on a leaf but hudsucker 0.24 omits. Without the
-    /// Authority Key Identifier, OpenSSL 3.x rejects the cert with "Missing Authority Key
-    /// Identifier", which breaks every httpx / OpenAI-SDK Python client behind the proxy (curl
-    /// and Node TLS are lenient, so this went unnoticed). We also set Key Usage + Extended Key
-    /// Usage (serverAuth). Otherwise identical to `RcgenAuthority`: a per-host leaf signed by our
+    /// Authority Key Identifier, OpenSSL's strict verification (`VERIFY_X509_STRICT`, which Python
+    /// 3.13 enables by default in `ssl.create_default_context()`) rejects the cert with "Missing
+    /// Authority Key Identifier", which breaks every httpx / OpenAI-SDK Python client behind the
+    /// proxy (curl and Node TLS skip the strict checks, so this went unnoticed). We also set Key
+    /// Usage + Extended Key Usage (serverAuth). Otherwise identical to `RcgenAuthority`: a
+    /// per-host leaf signed by our
     /// CA, cached in memory. `RcgenAuthority::new` exposes no hook for these extensions and 0.24
     /// is the latest published version, and llmtrim publishes to crates.io (so a git-patched
     /// hudsucker is not an option), hence the small in-tree copy.
