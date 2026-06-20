@@ -119,10 +119,11 @@ fn resolve_dir(dir: Option<PathBuf>) -> Result<PathBuf> {
     if let Some(d) = dir {
         return Ok(d);
     }
-    if let Ok(d) = std::env::var("LLMTRIM_CAPTURE_DIR")
-        && !d.is_empty()
+    if let Some(d) = llmtrim_core::config::RuntimeConfig::get()
+        .capture_dir
+        .clone()
     {
-        return Ok(PathBuf::from(d));
+        return Ok(d);
     }
     Ok(crate::daemon::home_dir()?.join("capture"))
 }

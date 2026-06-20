@@ -50,7 +50,7 @@ mod imp {
     use hyper_util::client::legacy::connect::HttpConnector;
 
     use crate::tracking::{Record, Tracker};
-    use llmtrim_core::config::DenseConfig;
+    use llmtrim_core::config::{DenseConfig, RuntimeConfig};
     use llmtrim_core::ir::ProviderKind;
     use llmtrim_core::memo::Memo;
 
@@ -104,21 +104,52 @@ mod imp {
         "ai-gateway.vercel.sh",
     ];
 
-    /// True if `host` is one of `EXTRA_HOSTS` (exact, or a subdomain of one).
+    /// User-configured extra hosts (env `LLMTRIM_EXTRA_HOSTS` / file `extra_hosts`), already
+    /// normalized + validated by [`RuntimeConfig`]. Beyond the curated `EXTRA_HOSTS`, so a
+    /// self-hosted or gateway OpenAI-compatible endpoint can be intercepted without a code
+    /// change. Each widens the name-constrained CA, exactly like `EXTRA_HOSTS`.
+    ///
+    /// Note one asymmetry: a user host `llm.acme.com` enters the CA's permitted subtrees as
+    /// `DnsName("llm.acme.com")`, which by RFC 5280 also lets the CA sign for its *subdomains*
+    /// (`api.llm.acme.com`). Interception is narrower — [`extra_host_match`] matches user hosts
+    /// *exactly*, never their subdomains — so the proxy never MITMs a host it wasn't told to.
+    /// The wider CA scope is unused and low-risk (the CA is local-only and regenerated when the
+    /// host set changes), but list exact hosts, not bare apexes, to keep the CA narrow.
+    fn user_extra_hosts() -> &'static [String] {
+        &RuntimeConfig::get().extra_hosts
+    }
+
+    /// True if `host` is a curated `EXTRA_HOSTS` entry or a user-configured extra host.
     fn is_extra_host(host: &str) -> bool {
+        extra_host_match(host, user_extra_hosts())
+    }
+
+    /// Pure host-match used by [`is_extra_host`]: a curated `EXTRA_HOSTS` entry matches exactly
+    /// or as a parent of `host` (subdomain), but a user-configured host matches **exactly only**
+    /// — never its subdomains. So a mistakenly broad user entry (e.g. an apex) can't silently
+    /// widen what gets intercepted beyond the exact host named.
+    fn extra_host_match(host: &str, user_hosts: &[String]) -> bool {
         EXTRA_HOSTS
             .iter()
             .any(|s| host == *s || host.ends_with(&format!(".{s}")))
+            || user_hosts.iter().any(|s| host == s)
     }
 
     /// Every name-constraint domain the CA should permit: the registry parent domains plus the
     /// curated extra hosts, sorted + deduped. The single source of truth for what we intend to
     /// intercept; compared byte-for-byte against the CA's sidecar to decide whether to regenerate.
     fn intercept_domains() -> Vec<String> {
+        intercept_domains_with(user_extra_hosts())
+    }
+
+    /// Pure body of [`intercept_domains`]: the registry parents + curated extras + the given
+    /// user hosts, sorted + deduped. Split out so the user-host → CA-sidecar flow is testable.
+    fn intercept_domains_with(user_hosts: &[String]) -> Vec<String> {
         let mut v: Vec<String> = LLM_DOMAINS
             .iter()
             .cloned()
             .chain(EXTRA_HOSTS.iter().map(|h| (*h).to_string()))
+            .chain(user_hosts.iter().cloned())
             .collect();
         v.sort();
         v.dedup();
@@ -690,9 +721,9 @@ mod imp {
         Some((result.request_json, pending))
     }
 
-    /// Opt-in QA capture: when `LLMTRIM_CAPTURE_DIR` is set, write the before/after request
-    /// bodies of each compressed request as one JSON file so an external reviewer can audit
-    /// compression quality. Off (zero work beyond one env read) unless the var is set; any
+    /// Opt-in QA capture: when a capture dir is set (`LLMTRIM_CAPTURE_DIR` env or `capture_dir`
+    /// in the config file), write the before/after request bodies of each compressed request as
+    /// one JSON file so an external reviewer can audit compression quality. Off unless set; any
     /// write failure is logged and swallowed — capture must never break proxying.
     fn capture_pair(
         before: &str,
@@ -700,12 +731,9 @@ mod imp {
         pending: &Pending,
         stages: &[llmtrim_core::pipeline::StageReport],
     ) {
-        let Ok(dir) = std::env::var("LLMTRIM_CAPTURE_DIR") else {
+        let Some(dir_path) = RuntimeConfig::get().capture_dir.clone() else {
             return;
         };
-        if dir.is_empty() {
-            return;
-        }
         // The names of the stages that actually rewrote this request — what an external auditor
         // needs to tell a lossless run that dropped content (a bug) from a lossy stage doing its
         // job. `plan` below is the output-rehydration plan (reversible response-side transforms),
@@ -732,10 +760,9 @@ mod imp {
             chrono::Utc::now().timestamp_micros(),
             std::process::id()
         );
-        let dir_path = std::path::Path::new(&dir);
         let path = dir_path.join(name);
-        if let Err(e) =
-            std::fs::create_dir_all(&dir).and_then(|_| std::fs::write(&path, record.to_string()))
+        if let Err(e) = std::fs::create_dir_all(&dir_path)
+            .and_then(|_| std::fs::write(&path, record.to_string()))
         {
             eprintln!("llmtrim: capture failed ({}): {e}", path.display());
         }
@@ -751,9 +778,8 @@ mod imp {
             .fetch_add(1, Ordering::Relaxed)
             .is_multiple_of(CHECK_EVERY)
         {
-            let max_bytes = std::env::var("LLMTRIM_CAPTURE_MAX_MB")
-                .ok()
-                .and_then(|s| s.trim().parse::<u64>().ok())
+            let max_bytes = RuntimeConfig::get()
+                .capture_max_mb
                 .unwrap_or(1024)
                 .saturating_mul(1024 * 1024);
             if max_bytes > 0 {
@@ -1340,11 +1366,11 @@ mod imp {
 
         // Loopback by default — a MITM proxy must not be reachable off-host unless asked.
         // LLMTRIM_BIND=0.0.0.0 opts in (containers: port mapping can't reach loopback).
-        let bind_ip: std::net::IpAddr = match std::env::var("LLMTRIM_BIND") {
-            Ok(s) => s
+        let bind_ip: std::net::IpAddr = match RuntimeConfig::get().bind.clone() {
+            Some(s) => s
                 .parse()
-                .with_context(|| format!("LLMTRIM_BIND is not a valid IP address: {s}"))?,
-            Err(_) => std::net::IpAddr::from([127, 0, 0, 1]),
+                .with_context(|| format!("bind address is not a valid IP: {s}"))?,
+            None => std::net::IpAddr::from([127, 0, 0, 1]),
         };
         let addr = SocketAddr::from((bind_ip, port));
 
@@ -1968,6 +1994,42 @@ mod imp {
                 d.windows(2).all(|w| w[0] <= w[1]),
                 "must be sorted for sidecar compare"
             );
+        }
+
+        #[test]
+        fn user_extra_hosts_flow_into_intercept_domains() {
+            // A user-configured host must reach the CA sidecar set so it is actually intercepted.
+            let user = vec!["llm.acme.com".to_string()];
+            let d = intercept_domains_with(&user);
+            assert!(d.contains(&"llm.acme.com".to_string()));
+            assert!(
+                d.contains(&"api.openai.com".to_string()),
+                "registry still present"
+            );
+            assert!(
+                d.windows(2).all(|w| w[0] <= w[1]),
+                "stays sorted for sidecar compare"
+            );
+        }
+
+        #[test]
+        fn user_extra_hosts_match_exactly_not_by_subdomain() {
+            // Curated EXTRA_HOSTS match a host and its subdomains; user hosts match ONLY the exact
+            // host named, so a typo'd apex can't widen interception to its siblings/subdomains.
+            let user = vec!["llm.acme.com".to_string()];
+            assert!(
+                extra_host_match("llm.acme.com", &user),
+                "exact user host matches"
+            );
+            assert!(
+                !extra_host_match("api.llm.acme.com", &user),
+                "a subdomain of a user host is NOT intercepted"
+            );
+            assert!(!extra_host_match("acme.com", &user));
+            assert!(!extra_host_match("notllm.acme.com", &user));
+            // Curated extras keep subdomain matching.
+            assert!(extra_host_match("api.groq.com", &[]));
+            assert!(extra_host_match("foo.api.groq.com", &[]));
         }
 
         #[test]

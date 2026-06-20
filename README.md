@@ -330,7 +330,27 @@ Every stage is individually tunable via config flags; `preset` wins over individ
 | `dedup` | `true` | collapse duplicate lines (lossless) |
 | `quality_gate` | `true` | revert any lossy cut whose query-relevant coverage drops too far |
 
-Env: `LLMTRIM_PRESET` (preset), `LLMTRIM_CONFIG` (config-file path), `LLMTRIM_DB_PATH` (ledger location), `LLMTRIM_UPSTREAM_PROXY` (route egress through another proxy, see below).
+Env: `LLMTRIM_PRESET` (preset), `LLMTRIM_CONFIG` (config-file path).
+
+</details>
+
+<details>
+<summary><b>Runtime settings (env or config file)</b></summary>
+
+These knobs are orthogonal to compression. Each resolves env-first, then from the config file, so set whichever fits. The env var wins when both are present.
+
+| env var | config key | meaning |
+| --- | --- | --- |
+| `LLMTRIM_EXTRA_HOSTS` | `extra_hosts` | extra exact LLM-API hosts to intercept (comma-separated env / array in file), e.g. a self-hosted OpenAI-compatible endpoint |
+| `LLMTRIM_UPSTREAM_PROXY` | `upstream_proxy` | route egress through another proxy (see below) |
+| `LLMTRIM_DB_PATH` | `db_path` | ledger location |
+| `LLMTRIM_CAPTURE_DIR` | `capture_dir` | before/after QA capture directory |
+| `LLMTRIM_CAPTURE_MAX_MB` | `capture_max_mb` | capture corpus size ceiling (`0` disables) |
+| `LLMTRIM_BIND` | `bind` | listen IP (default loopback; `0.0.0.0` for containers) |
+| `LLMTRIM_RETENTION_DAYS` | `retention_days` | ledger age-retention in days |
+| `LLMTRIM_NO_UPDATE_CHECK` | `no_update_check` | disable the passive update check |
+
+`extra_hosts` entries must be exact hostnames (`llm.acme.com`, never a bare `acme.com`): each one widens the name-constrained MITM CA, which regenerates automatically on the next launch to cover them.
 
 </details>
 

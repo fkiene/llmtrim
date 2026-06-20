@@ -593,8 +593,8 @@ pub fn db_path() -> Result<PathBuf> {
 }
 
 fn default_db_path() -> Result<PathBuf> {
-    if let Ok(p) = std::env::var("LLMTRIM_DB_PATH") {
-        return Ok(PathBuf::from(p));
+    if let Some(p) = llmtrim_core::config::RuntimeConfig::get().db_path.clone() {
+        return Ok(p);
     }
     let base = if let Ok(xdg) = std::env::var("XDG_DATA_HOME") {
         PathBuf::from(xdg)

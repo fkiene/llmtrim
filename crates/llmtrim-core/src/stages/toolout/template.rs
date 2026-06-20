@@ -387,12 +387,14 @@ fn render_ts(epoch: i64, sep: char, suffix: &str) -> String {
 
 // ── Missed-fold telemetry (shape-registry stage 1) ──────────────────────────────────
 
-/// Capture directory for QA telemetry — the same opt-in `LLMTRIM_CAPTURE_DIR` the proxy's
-/// before/after capture uses. Read once; `None` (the default) costs nothing per fold.
+/// Capture directory for QA telemetry — the same opt-in capture dir the proxy's before/after
+/// capture uses (`LLMTRIM_CAPTURE_DIR` env or `capture_dir` in the config file). Read once;
+/// `None` (the default) costs nothing per fold.
 static CAPTURE_DIR: Lazy<Option<String>> = Lazy::new(|| {
-    std::env::var("LLMTRIM_CAPTURE_DIR")
-        .ok()
-        .filter(|d| !d.is_empty())
+    crate::config::RuntimeConfig::get()
+        .capture_dir
+        .as_ref()
+        .map(|p| p.to_string_lossy().into_owned())
 });
 
 /// Loosely datetime-shaped: a `H:M`-style time, an ISO `YYYY-MM` date prefix, or a
