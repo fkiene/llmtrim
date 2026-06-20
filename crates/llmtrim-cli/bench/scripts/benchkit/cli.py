@@ -22,7 +22,7 @@ from .report import render
 from .sweep import deterministic_sweep
 
 # Competitors that do not fit the corpora x grid engine and own their own run(argv).
-SELF_CONTAINED = {"caveman", "rtk"}
+SELF_CONTAINED = {"caveman", "rtk", "snip"}
 
 
 def main(argv=None):
@@ -51,8 +51,8 @@ def main(argv=None):
     # the leftover argv so they keep their own flags (e.g. caveman's --summarize).
     name = argv[0] if argv and not argv[0].startswith("-") else None
     if name in SELF_CONTAINED:
-        from .competitors import caveman, rtk
-        dispatch = {"caveman": caveman.run, "rtk": rtk.run}
+        from .competitors import caveman, rtk, snip
+        dispatch = {"caveman": caveman.run, "rtk": rtk.run, "snip": snip.run}
         return dispatch[name](argv[1:])
 
     args = ap.parse_args(argv)

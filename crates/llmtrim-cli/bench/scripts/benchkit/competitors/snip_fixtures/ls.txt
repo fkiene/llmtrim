@@ -1,0 +1,34 @@
+/home/user/.claude:
+total 2292
+drwxr-xr-x 1 jspelletier Domain Users       0 Apr 16 14:28 .
+drwxr-xr-x 1 jspelletier Domain Users       0 Apr 16 14:42 ..
+drwxr-xr-x 1 jspelletier Domain Users       0 Apr 14 09:50 .git
+-rw-r--r-- 1 jspelletier Domain Users     457 Mar 26 09:16 .gitignore
+-rw-r--r-- 1 jspelletier Domain Users    1830 Apr 15 11:18 CLAUDE.md
+-rw-r--r-- 1 jspelletier Domain Users    5120 Apr 10 08:42 config.toml
+-rw-r--r-- 1 jspelletier Domain Users   12288 Jan  5 2025 archive.tar.gz
+
+/home/user/.claude/projects:
+total 128
+drwxr-xr-x 1 jspelletier Domain Users       0 Apr 16 14:28 .
+drwxr-xr-x 1 jspelletier Domain Users       0 Apr 16 14:42 ..
+-rw-r--r-- 1 jspelletier Domain Users       0 Apr 16 13:03 aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee-agent-aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee.json
+-rw-r--r-- 1 jspelletier Domain Users       0 Apr 16 14:47 bbbbbbbb-1111-2222-3333-ffffffffffff-agent-bbbbbbbb-1111-2222-3333-ffffffffffff.json
+-rw-r--r-- 1 jspelletier Domain Users       0 Apr 16 16:56 cccccccc-aaaa-bbbb-cccc-dddddddddddd-agent-cccccccc-aaaa-bbbb-cccc-dddddddddddd.json
+-rw-r--r-- 1 jspelletier Domain Users    2048 Apr 15 09:30 session-metadata.jsonl
+-rw-r--r-- 1 jspelletier Domain Users     512 Mar 28 15:22 preferences.json
+
+/home/user/.claude/todos:
+total 64
+drwxr-xr-x 1 jspelletier Domain Users       0 Apr 16 14:28 .
+drwxr-xr-x 1 jspelletier Domain Users       0 Apr 16 14:42 ..
+-rw-r--r-- 1 user staff     128 Apr 12 10:15 todo-2024-04.md
+-rw-r--r-- 1 user staff      64 Apr  8 16:30 todo-2024-03.md
+-rw-r--r-- 1 user staff    4096 Apr 15 14:00 README.md
+
+/Users/edouard/.claude/agents:
+total 128
+-rw-------@    1 edouard  staff  18275  1 avr.  10:39 golang-expert.md
+-rw-------@    1 edouard  staff   6691 11 déc.  21:59 hf-jobs-trainer.md
+-rw-------@    1 edouard  staff  22845 10 mars  10:05 mistral-api-expert.md
+-rw-------@    1 edouard  staff  15722 13 févr. 14:32 svelte-expert.md
