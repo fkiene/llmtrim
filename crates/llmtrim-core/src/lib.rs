@@ -232,7 +232,7 @@ pub fn route(req: &Request, provider: &dyn provider::Provider) -> &'static str {
 /// environment/default path. `provider` may be `None` to auto-detect from shape.
 pub fn compress(input: &str, provider: Option<ProviderKind>) -> Result<CompressResult> {
     let config = config::DenseConfig::load().unwrap_or_else(|e| {
-        eprintln!("llmtrim: {e}; using defaults");
+        eprintln!("llmtrim: {e}; using the auto default");
         config::DenseConfig::default()
     });
     compress_with_config(input, provider, &config)
@@ -267,7 +267,11 @@ pub fn compress_with_config(
     // `auto` resolves the preset from the request shape (structural, zero-model).
     let routed;
     let config = if config.auto {
-        routed = config::DenseConfig::preset(route(&req, adapter.as_ref())).unwrap_or_default();
+        // Explicit lossless fallback: `route` only returns known preset names today, but a
+        // future label without a matching preset must degrade to the safe baseline, not to
+        // `auto` (which `unwrap_or_default` would now give after the default flip).
+        routed = config::DenseConfig::preset(route(&req, adapter.as_ref()))
+            .unwrap_or_else(config::DenseConfig::lossless);
         &routed
     } else {
         config
@@ -347,10 +351,10 @@ mod tests {
     use super::*;
 
     #[test]
-    fn compress_default_is_behavior_preserving() {
+    fn compress_lossless_is_behavior_preserving() {
         let input =
             r#"{"model":"gpt-4o","messages":[{"role":"user","content":"hi"}],"max_tokens":5}"#;
-        let cfg = config::DenseConfig::default();
+        let cfg = config::DenseConfig::lossless();
         let result =
             compress_with_config(input, Some(ProviderKind::OpenAi), &cfg).expect("compress");
         // Exact only when the `tiktoken` feature supplies the OpenAI BPE vocab; the rest of
@@ -359,7 +363,7 @@ mod tests {
         assert!(result.tokenizer_exact);
         let body: Value = serde_json::from_str(&result.request_json).unwrap();
         let msgs = body.get("messages").and_then(Value::as_array).unwrap();
-        // Default = lossless input only: content intact, no injected system
+        // Lossless = input only: content intact, no injected system
         // instruction (the model's output behavior is unchanged).
         assert_eq!(msgs.len(), 1);
         assert_eq!(msgs[0].get("content").and_then(Value::as_str), Some("hi"));
@@ -367,7 +371,7 @@ mod tests {
             !msgs
                 .iter()
                 .any(|m| m.get("role").and_then(Value::as_str) == Some("system")),
-            "default must not change the model's output behavior"
+            "lossless must not change the model's output behavior"
         );
     }
 
@@ -413,8 +417,12 @@ mod tests {
             "auto routed to agent and trimmed the tool description"
         );
         assert!(
-            !config::DenseConfig::default().auto,
-            "plain default is not auto"
+            config::DenseConfig::default().auto,
+            "the shipped default is auto (shape-routing)"
+        );
+        assert!(
+            !config::DenseConfig::lossless().auto,
+            "the lossless baseline is not auto"
         );
     }
 
@@ -426,7 +434,7 @@ mod tests {
             hygiene: false,
             serialize: false,
             output_control: false,
-            ..config::DenseConfig::default()
+            ..config::DenseConfig::lossless()
         };
         let result =
             compress_with_config(input, Some(ProviderKind::OpenAi), &cfg).expect("compress");

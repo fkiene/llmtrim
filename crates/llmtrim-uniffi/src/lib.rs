@@ -129,6 +129,10 @@ fn project(r: llmtrim_core::CompressResult) -> CompressOutput {
 /// - `preset`: a named workload preset (`aggressive`, `agent`, `code`, `rag`, `safe`, …)
 ///   to compress with. `None` uses the configuration from the environment / config file
 ///   (the same defaults the `llmtrim` CLI uses).
+///
+/// Cross-binding note: with no preset, this binding reads the host's environment/config,
+/// while the WASM binding applies `auto`. For output that matches every binding regardless
+/// of host, pass an explicit preset.
 #[uniffi::export]
 pub fn compress(
     input: String,

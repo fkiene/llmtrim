@@ -1358,7 +1358,7 @@ mod tests {
         use llmtrim_core::tokenizer::counter_for;
         use serde_json::json;
         let counter = counter_for(ProviderKind::OpenAi, Some("gpt-4o")).unwrap();
-        let cfg = DenseConfig::default();
+        let cfg = DenseConfig::lossless();
         let model = StubModel("The answer is 42.".to_string());
         let cases = vec![BenchCase {
             name: "a".into(),
@@ -1388,7 +1388,7 @@ mod tests {
         assert_eq!(run.skipped, 0);
         assert!(
             run.cache_busted,
-            "default preset has cache off → busting on"
+            "lossless baseline has cache off → busting on"
         );
         let o = &run.outcomes[0];
         assert_eq!(o.quality_orig, 1.0);
@@ -1453,7 +1453,7 @@ mod tests {
         };
         let run = run_ab(
             &one_case(),
-            &DenseConfig::default(),
+            &DenseConfig::lossless(),
             &model,
             counter.as_ref(),
             &scorer,
@@ -1493,7 +1493,7 @@ mod tests {
         };
         let run = run_ab(
             &one_case(),
-            &DenseConfig::default(),
+            &DenseConfig::lossless(),
             &model,
             counter.as_ref(),
             &scorer,
@@ -1975,7 +1975,7 @@ mod tests {
             cache: true,
             serialize_flatten: true,
             serialize_buckets: true,
-            ..DenseConfig::default()
+            ..DenseConfig::lossless()
         };
         let labels: Vec<String> = ablation_configs(&cfg).into_iter().map(|(l, _)| l).collect();
         for stage in [

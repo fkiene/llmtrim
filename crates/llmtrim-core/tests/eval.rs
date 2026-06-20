@@ -66,7 +66,7 @@ fn input_side_savings_report() {
 
 #[test]
 fn robustness_never_panics_on_edge_inputs() {
-    let cfg = DenseConfig::default();
+    let cfg = DenseConfig::lossless();
     for body in [
         r#"{}"#,
         r#"{"messages":[]}"#,

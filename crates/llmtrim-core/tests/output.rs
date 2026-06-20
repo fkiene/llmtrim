@@ -28,11 +28,11 @@ use common::user_chat;
 const PROSE: &str = include_str!("fixtures/openai_prose.json");
 
 /// Output shaping on, input stages at their defaults (so only the terse instruction
-/// distinguishes it from `DenseConfig::default()`, which ships output shaping off).
+/// distinguishes it from `DenseConfig::lossless()`, which ships output shaping off).
 fn output_on() -> DenseConfig {
     DenseConfig {
         output_control: true,
-        ..DenseConfig::default()
+        ..DenseConfig::lossless()
     }
 }
 
@@ -100,7 +100,7 @@ fn output_instruction_input_overhead_is_small() {
     let off = llmtrim_core::compress_with_config(
         PROSE,
         Some(ProviderKind::OpenAi),
-        &DenseConfig::default(),
+        &DenseConfig::lossless(),
     )
     .unwrap();
     let on = llmtrim_core::compress_with_config(PROSE, Some(ProviderKind::OpenAi), &output_on())
@@ -147,7 +147,7 @@ fn terse_injected_provider_agnostic() {
             "{provider:?}: terse instruction injected end-to-end"
         );
 
-        let off = request_json(&body, provider, &DenseConfig::default());
+        let off = request_json(&body, provider, &DenseConfig::lossless());
         assert!(
             !injected_text(&off).contains(TERSE_INSTRUCTION),
             "{provider:?}: no instruction when output shaping off"
@@ -167,7 +167,7 @@ fn config_knobs_flow_through_to_request() {
         &DenseConfig {
             output_control: true,
             output_level: "draft".to_string(),
-            ..DenseConfig::default()
+            ..DenseConfig::lossless()
         },
     );
     assert!(
@@ -181,7 +181,7 @@ fn config_knobs_flow_through_to_request() {
         &DenseConfig {
             output_control: true,
             output_token_budget: Some(120),
-            ..DenseConfig::default()
+            ..DenseConfig::lossless()
         },
     );
     assert!(
@@ -195,7 +195,7 @@ fn config_knobs_flow_through_to_request() {
         ProviderKind::OpenAi,
         &DenseConfig {
             output_compact_code: true,
-            ..DenseConfig::default()
+            ..DenseConfig::lossless()
         },
     );
     assert!(
@@ -211,7 +211,7 @@ fn hard_cap_imposed_only_when_absent() {
     let capped = DenseConfig {
         output_control: true,
         output_max_tokens: Some(256),
-        ..DenseConfig::default()
+        ..DenseConfig::lossless()
     };
 
     let uncapped = user_chat("gpt-4o", &["hi"]);

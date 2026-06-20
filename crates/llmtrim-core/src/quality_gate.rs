@@ -847,7 +847,7 @@ mod pipeline_tests {
     }
 
     /// `quality_gate = true` is the shipped default in `DenseConfig`, and it is not
-    /// touched by any preset (presets rebuild from `default()`).
+    /// touched by any preset (presets rebuild from `lossless()`).
     #[test]
     fn quality_gate_default_is_on() {
         assert!(DenseConfig::default().quality_gate, "default ON");

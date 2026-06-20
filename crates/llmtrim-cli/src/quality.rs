@@ -420,7 +420,7 @@ mod tests {
             provider: ProviderKind::OpenAi,
             expected: "ALPHA7".to_string(),
         }];
-        let rate = run_task_success(&cases, &DenseConfig::default(), &EchoModel).unwrap();
+        let rate = run_task_success(&cases, &DenseConfig::lossless(), &EchoModel).unwrap();
         assert_eq!(
             rate, 1.0,
             "echoed compressed request still contains the answer"
