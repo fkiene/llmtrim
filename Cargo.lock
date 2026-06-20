@@ -2068,6 +2068,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "llmtrim-gateway"
+version = "0.2.2-dev"
+dependencies = [
+ "llmtrim-core",
+ "serde_json",
+]
+
+[[package]]
 name = "llmtrim-uniffi"
 version = "0.2.2-dev"
 dependencies = [
