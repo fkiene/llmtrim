@@ -468,7 +468,7 @@ mod imp {
 
         #[test]
         fn compress_maps_result_to_payload() {
-            let result = llmtrim_core::compress_with_config(&req(), None, &DenseConfig::default())
+            let result = llmtrim_core::compress_with_config(&req(), None, &DenseConfig::lossless())
                 .expect("compress should succeed on a valid request");
             let payload = compress_payload(&result);
 
@@ -479,7 +479,7 @@ mod imp {
             assert!(payload["tokenizer_label"].is_string());
             assert!(payload["tokenizer_exact"].as_bool().unwrap());
             assert!(payload["frozen_input_tokens"].as_u64().is_some());
-            assert_eq!(payload["output_shaped"], false); // default config shapes nothing
+            assert_eq!(payload["output_shaped"], false); // lossless config shapes nothing
             let before = payload["input_tokens_before"].as_u64().unwrap();
             let after = payload["input_tokens_after"].as_u64().unwrap();
             assert!(before > 0);
@@ -506,7 +506,7 @@ mod imp {
                     .to_string();
             let shaped = DenseConfig {
                 output_control: true,
-                ..DenseConfig::default()
+                ..DenseConfig::lossless()
             };
             let result =
                 llmtrim_core::compress_with_config(&tiny, Some(ProviderKind::OpenAi), &shaped)
@@ -523,7 +523,7 @@ mod imp {
         #[test]
         fn ledger_records_match_the_proxy_schema() {
             // Full-request record carries the model and the result's token counts.
-            let result = llmtrim_core::compress_with_config(&req(), None, &DenseConfig::default())
+            let result = llmtrim_core::compress_with_config(&req(), None, &DenseConfig::lossless())
                 .expect("compress should succeed");
             let rec = ledger_record(&result);
             assert_eq!(rec.provider, "openai");

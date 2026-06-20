@@ -6,6 +6,14 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Changed
+- **`@llmtrim/js`: calling `compress()` with no preset now compresses with `auto`
+  (shape-routing) instead of the lossless-only baseline.** The npm package barely compressed
+  out of the box before, because the no-preset path fell back to lossless; it now matches the
+  native CLI and the live proxy. This changes the body forwarded to your provider when you call
+  `compress(body, provider)` with no third argument. To keep the previous lossless-only
+  behavior, pass `"safe"` as the preset.
+
 ### Fixed
 - **Strict-TLS clients can now use the proxy.** The MITM leaf certificates llmtrim minted
   lacked the Authority Key Identifier (and Key Usage / Extended Key Usage) extensions. Python

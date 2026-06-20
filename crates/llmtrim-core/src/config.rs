@@ -14,15 +14,19 @@ use serde::{Deserialize, Serialize};
 /// Validated non-empty by `build.rs`.
 pub const FORMAT_LEGEND: &str = include_str!("../prompts/toon_legend.txt");
 
-/// Per-stage enable flags and knobs. `DenseConfig::default()` (= the `safe` preset) is the
-/// **lossless** baseline: only quality-neutral lossless input compression runs (`hygiene`,
-/// `serialize`, exact-duplicate `dedup`). The **shipped default is `auto`** (shape-routing),
-/// which also turns on the lossy stages the eval shows quality-safe — output control on every
+/// Per-stage enable flags and knobs. `DenseConfig::default()` is **`auto`** (shape-routing) —
+/// the shipped default, matching `load()` and the live interceptor. The **lossless** baseline
+/// (only quality-neutral lossless input compression: `hygiene`, `serialize`, exact-duplicate
+/// `dedup`) is [`DenseConfig::lossless`] (= the `safe` preset). `auto` also turns on the lossy
+/// stages the eval shows quality-safe — output control on every
 /// shape, image downscale (quality-neutral by construction), and retrieve / skeleton / dedup /
 /// tools per shape. The bar is cost-at-no-measured-quality-loss, **not** losslessness; a stage
 /// is gated to opt-in only when it is *unmeasured* or *shown to regress*, not for being lossy.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(default)]
+// Explicit per-stage flags in a config file layer over the lossless baseline (auto off), not
+// over the `auto` default — a file that sets only `hygiene = false` must not silently enable
+// shape-routing. (The runtime default when there is *no* file is still `auto`; see `load`.)
+#[serde(default = "DenseConfig::lossless")]
 pub struct DenseConfig {
     /// Stage D — lossless data hygiene (minify, numeric trim, base64/data-URI strip).
     pub hygiene: bool,
@@ -185,7 +189,19 @@ pub struct DenseConfig {
 }
 
 impl Default for DenseConfig {
+    /// The shipped default is `auto` (shape-routing), matching `load()` and the live
+    /// interceptor. For the lossless-only baseline use [`DenseConfig::lossless`] (or the
+    /// `safe` preset).
     fn default() -> Self {
+        Self::auto()
+    }
+}
+
+impl DenseConfig {
+    /// The lossless-only baseline that every preset and `auto()` layer their flags over:
+    /// only quality-neutral lossless input compression (`hygiene`, `serialize`, exact-duplicate
+    /// `dedup`). This is the `safe` preset.
+    pub fn lossless() -> Self {
         Self {
             hygiene: true,
             serialize: true,
@@ -239,9 +255,7 @@ impl Default for DenseConfig {
             quality_gate: true,
         }
     }
-}
 
-impl DenseConfig {
     /// Load config. Resolution order:
     /// 1. `LLMTRIM_PRESET=<name>` env → that named profile.
     /// 2. A config file (`LLMTRIM_CONFIG` or the platform config dir) with a `preset = "<name>"`
@@ -310,14 +324,14 @@ impl DenseConfig {
     pub fn auto() -> Self {
         Self {
             auto: true,
-            ..Self::default()
+            ..Self::lossless()
         }
     }
 
-    /// A named bundle of stage flags layered over the defaults, so callers opt into
+    /// A named bundle of stage flags layered over the lossless baseline, so callers opt into
     /// a workload profile without setting ~20 flags. `None` for an unknown name.
     pub fn preset(name: &str) -> Option<Self> {
-        let mut c = Self::default();
+        let mut c = Self::lossless();
         match name.to_ascii_lowercase().as_str() {
             // Defaults already = lossless input only (hygiene + serialize + exact dedup).
             "safe" | "lossless" => {}
@@ -637,8 +651,12 @@ mod tests {
     }
 
     #[test]
-    fn defaults_enable_mvp_stages() {
-        let c = DenseConfig::default();
+    fn lossless_baseline_enables_mvp_stages() {
+        let c = DenseConfig::lossless();
+        assert!(
+            !c.auto,
+            "lossless()/`safe` is the bare baseline, not shape-routing"
+        );
         assert!(
             c.hygiene && c.serialize,
             "lossless input compression on by default"
@@ -649,7 +667,7 @@ mod tests {
         );
         assert!(
             !c.output_control,
-            "default()/`safe` is the lossless baseline — output shaping is on in the shipped `auto` default (via presets), not in this bare base"
+            "lossless()/`safe` is the lossless baseline — output shaping is on in the shipped `auto` default (via presets), not in this bare base"
         );
         assert!(
             !c.retrieve,
@@ -733,8 +751,9 @@ mod tests {
                 "preset `{p}` does not minify tool schemas"
             );
         }
-        // Default (= `safe`) is off.
+        // The `auto` default and the lossless baseline both leave it off.
         assert!(!DenseConfig::default().tool_minify_schema);
+        assert!(!DenseConfig::lossless().tool_minify_schema);
     }
 
     #[test]
@@ -810,6 +829,10 @@ mod tests {
         assert!(!c.serialize);
         assert!(c.hygiene, "unset fields take the default");
         assert_eq!(c.serialize_min_rows, 2);
+        assert!(
+            !c.auto,
+            "partial config deserialization fills from the lossless baseline, not auto"
+        );
     }
 
     /// Resolve with no env set (every lookup returns `None`) against the given file TOML.

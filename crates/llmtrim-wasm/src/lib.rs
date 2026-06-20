@@ -88,9 +88,15 @@ fn project(r: llmtrim_core::CompressResult) -> CompressOutput {
 /// - `provider`: `"openai"`, `"anthropic"`, or `"google"`; omit (`null`/`undefined`) to
 ///   auto-detect from the body shape.
 /// - `preset`: a named workload preset (`aggressive`, `agent`, `code`, `rag`, `safe`, …);
-///   omit to use the built-in defaults. Unlike the native crate, this binding never reads
-///   the environment or a config file (there is none in a Worker), so the configuration
-///   comes only from the preset or the defaults.
+///   omit to use the shipped default (`auto` shape-routing), matching the native CLI.
+///   Unlike the native crate, this binding never reads the environment or a config file
+///   (there is none in a Worker), so the configuration comes only from the preset or the
+///   `auto` default. Pass `"safe"` to restore the lossless-only behavior this binding had
+///   before `auto` became the no-preset default.
+///
+/// Cross-binding note: with no preset, this binding applies `auto`, while the UniFFI binding
+/// reads the host's environment/config. For output that matches every binding regardless of
+/// host, pass an explicit preset.
 ///
 /// Returns the [`CompressOutput`] as a typed JS object (TypeScript types are generated for
 /// it), or throws on invalid JSON, an undetectable provider, or an unknown preset/provider
@@ -149,13 +155,32 @@ mod tests {
     }
 
     #[test]
+    fn no_preset_compresses_a_real_body_via_auto_default() {
+        // The point of the `auto` no-preset default: a compressible body actually shrinks
+        // when called with `None`, not just when an explicit preset is passed.
+        let input = serde_json::json!({
+            "model": "claude-3-5-sonnet-20241022",
+            "messages": [{"role":"user","content":[{"type":"tool_result","tool_use_id":"t1",
+                "content": "ERROR boom\n".repeat(60)}]}],
+            "max_tokens": 1024,
+        })
+        .to_string();
+        let out = run(&input, Some("anthropic"), None);
+        assert_eq!(out.provider, "anthropic");
+        assert!(
+            out.input_tokens_after < out.input_tokens_before,
+            "auto default must compress a tool-heavy body with no preset"
+        );
+    }
+
+    #[test]
     fn default_preset_preserves_a_basic_request() {
         let input =
             r#"{"model":"gpt-4o","messages":[{"role":"user","content":"hi"}],"max_tokens":5}"#;
         let out = run(input, Some("openai"), None);
         assert_eq!(out.provider, "openai");
         assert_eq!(out.model.as_deref(), Some("gpt-4o"));
-        // Default (lossless-only) preserves the message content.
+        // The `auto` default preserves a trivial message (nothing to shape away).
         assert!(out.request_json.contains("\"hi\""));
         // The real wasm build has no tiktoken, so counts are approximate; but a host
         // workspace build unifies `tiktoken` on from other crates, so the exactness flag

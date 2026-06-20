@@ -16,7 +16,7 @@ use serde_json::{Value, json};
 pub fn input_only() -> DenseConfig {
     DenseConfig {
         output_control: false,
-        ..DenseConfig::default()
+        ..DenseConfig::lossless()
     }
 }
 
