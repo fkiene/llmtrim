@@ -293,6 +293,7 @@ Any tool that honors `HTTPS_PROXY` and an env-provided CA, which is essentially 
 | Gemini CLI | ✅ | |
 | Cursor / VS Code extensions | ✅ | Node-based: picks up `NODE_EXTRA_CA_CERTS` |
 | Aider, OpenCode, any `HTTPS_PROXY`-aware CLI | ✅ | |
+| Hermes Agent | ✅ | route its upstream through llmtrim; add a `custom:` host via `extra_hosts` ([guide](HERMES.md)) |
 | Your own app / SDK | ✅ | or call the [CLI / library](#use-it-as-a-cli-mcp-or-library) directly |
 | GitHub Copilot | ❌ | certificate pinning blocks interception |
 
