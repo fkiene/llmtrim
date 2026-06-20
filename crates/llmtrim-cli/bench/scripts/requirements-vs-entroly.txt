@@ -1,0 +1,10 @@
+# Extra dependencies for `bench.py entroly` (on top of requirements-vs-headroom.txt, which
+# already pins the shared encoder, torch, transformers, openai, and rouge-score).
+#
+# Entroly's compress_messages path is local and deterministic (zero LLM calls, zero network),
+# so the leg stays $0 with no API key. The only optional ML in the package is an NLI
+# cross-encoder used by its verification layer, which needs sentence-transformers. That
+# verifier is not on the compress_messages path, so the NLI extra is deliberately omitted
+# here: with it absent, Entroly runs its deterministic local path and the measured body
+# compression is identical.
+entroly==1.0.24

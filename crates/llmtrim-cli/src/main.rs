@@ -474,7 +474,8 @@ struct LatencyArgs {
 
 #[derive(clap::Args)]
 struct CompareArgs {
-    /// Comparator to run: `headroom` or `caveman` (drives the matching Python script).
+    /// Comparator to run: `headroom`, `caveman`, `leanctx`, `entroly`, `rtk`,
+    /// or `snip` (drives the matching Python script).
     tool: String,
     /// Call the real model (passed through to the comparator). Off = token-only/dry.
     #[arg(long)]
@@ -1114,8 +1115,11 @@ fn run_bench_latency(args: LatencyArgs) -> Result<()> {
 
 fn run_bench_compare(args: CompareArgs) -> Result<()> {
     match args.tool.as_str() {
-        "headroom" | "caveman" => {}
-        other => anyhow::bail!("unknown comparator '{other}' (expected: headroom|caveman)"),
+        "headroom" | "caveman" | "leanctx" | "entroly" | "rtk" | "snip" => {}
+        other => anyhow::bail!(
+            "unknown comparator '{other}' (expected: \
+             headroom|caveman|leanctx|entroly|rtk|snip)"
+        ),
     }
     // One entry point for every competitor: `bench.py <competitor>`. Adding a comparator is a
     // new file under bench/scripts/benchkit/competitors/, no change here beyond the match above.

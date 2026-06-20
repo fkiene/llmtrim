@@ -18,7 +18,11 @@ competitor to benchmark llmtrim against. Flags: `--limit`, `--repeats`, `--live`
 python3 scripts/bench.py headroom --check --limit 5     # CI gate ($0)
 python3 scripts/bench.py headroom --limit 40            # deterministic sweep ($0)
 OPENROUTER_API_KEY=... python3 scripts/bench.py headroom --live --budget 0.90   # + CPCA
+python3 scripts/bench.py leanctx --limit 8              # on-grid local-ML sweep ($0)
+python3 scripts/bench.py entroly --limit 8             # on-grid deterministic sweep ($0)
 python3 scripts/bench.py caveman                        # self-contained system-prompt A/B
+python3 scripts/bench.py rtk                            # self-contained tool-output filters ($0)
+python3 scripts/bench.py snip                           # self-contained tool-output filters ($0)
 ```
 
 ## Package layout
@@ -38,8 +42,12 @@ benchkit/
   competitors/
     base.py         the Competitor interface
     __init__.py     the registry + get(name)
-    headroom.py     Headroom adapter (config grid, compress, ml_fired, disable_ml, notes)
+    headroom.py     Headroom adapter (on-grid: config grid, compress, ml_fired, disable_ml, notes)
+    leanctx.py      leanctx / LLMLingua-2 adapter (on-grid, local ML, $0)
+    entroly.py      entroly adapter (on-grid, deterministic local path, $0)
     caveman.py      caveman adapter (self-contained; see below)
+    rtk.py          RTK tool-output adapter (self-contained; rtk_fixtures/)
+    snip.py         snip tool-output adapter (self-contained; snip_fixtures/)
   data/             download.py, fetch_pricing.py, synth_toolout.py
   tools/            chart.py, synth_readme.py
 ```
@@ -59,11 +67,17 @@ stats, CPCA, significance) are shared.
 2. Import it in `benchkit/competitors/__init__.py` so the registry sees it.
 3. Run `python3 scripts/bench.py <name> --limit 5`.
 
+That is the **on-grid** shape: `headroom`, `leanctx`, and `entroly` all use
+it. They compress the same message arrays over the same prose corpora, so they ride the shared
+engine.
+
 If a competitor's comparison shape does not fit the corpora x grid model, keep it
-self-contained: give it a `run(argv)` it owns and list its name in `cli.SELF_CONTAINED`, so
-the CLI dispatches to `run()` instead of the engine. `caveman` is the example: it compares
-system-prompt strategies on output tokens (no corpora, no config grid), keeps its own
-`snapshots/vs-caveman` folder, and is dispatched to its `run()`.
+**self-contained**: give it a `run(argv)` it owns and list its name in `cli.SELF_CONTAINED`, so
+the CLI dispatches to `run()` instead of the engine. `caveman`, `rtk`, and `snip` use this
+shape. `caveman` compares system-prompt strategies on output tokens (no corpora, no config
+grid). `rtk` and `snip` rewrite tool OUTPUT (shell-command text), not message arrays, so they
+run on their own real-output fixtures (`rtk_fixtures/`, `snip_fixtures/`) and write a runtime
+`snapshots/vs-rtk` / `vs-snip` folder that is not committed.
 
 ## Data and pricing
 
@@ -82,6 +96,9 @@ system-prompt strategies on output tokens (no corpora, no config grid), keeps it
 
 ## Dependencies
 
-`requirements-vs-headroom.txt` pins the Python deps (`headroom-ai`, `tiktoken`,
-`rouge-score`). `make deps` installs them. The llmtrim wheel is built and installed
+`requirements-vs-headroom.txt` pins the shared Python deps (`headroom-ai`, `tiktoken`,
+`rouge-score`, plus `torch`/`transformers` for the ML competitors). `make deps` installs them.
+Each on-grid competitor adds its own pin on top: `requirements-vs-leanctx.txt`,
+`requirements-vs-entroly.txt`. `rtk` and `snip` shell
+out to their own CLIs (no extra Python deps). The llmtrim wheel is built and installed
 separately by `make install`.

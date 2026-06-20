@@ -66,6 +66,28 @@ is conservative against llmtrim, not for it.
 - **Headroom no-ML:** `hr-max` with the ML model disabled, to show what the torch+ModernBERT
   dependency buys (on prose: nothing - its deterministic routers no-op).
 
+## Other competitors
+
+The harness runs more than Headroom. Each competitor is one file under
+`scripts/benchkit/competitors/` and takes one of two shapes:
+
+- **On-grid (the `Competitor` interface):** the adapter exposes a config grid and a
+  `compress(messages, cfg, repeats)` that the generic engine sweeps over the same prose
+  corpora and o200k span as llmtrim. These ride the deterministic sweep ($0) and the optional
+  live CPCA leg.
+  - `leanctx` - LLMLingua-2 (Microsoft) via the `leanctx` package, run in its local Lingua
+    mode. ML compression on the local machine, no network, $0.
+  - `entroly` - the `entroly` package's `compress_messages`, a deterministic local path (no
+    LLM call). Its budget/preserve/distill knobs drive the sweep; high reduction is lossy.
+- **Self-contained (`run(argv)` + `SELF_CONTAINED`):** the comparison does not fit the
+  corpora x grid engine, so the adapter owns its own `run()` and the CLI dispatches to it
+  before the generic engine parses flags. These compress tool OUTPUT (shell-command text), not
+  message arrays, and run on their own real-output fixtures.
+  - `rtk` - the RTK CLI's native per-tool filters, scored on `rtk_fixtures/*.txt`. Lossy.
+  - `snip` - the snip CLI's per-tool filters, scored on `snip_fixtures/*.txt`. Lossy.
+  - `caveman` - measures OUTPUT tokens from a paid live call against a system-prompt strategy,
+    a different axis again (not token-for-token parity with rtk/snip).
+
 ## Iso-compression matching
 
 Headroom's ML reduction varies run-to-run and caps on prose, so the live Headroom arm is
