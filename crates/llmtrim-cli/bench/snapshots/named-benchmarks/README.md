@@ -36,13 +36,13 @@ not reproduce byte-for-byte.
   the conservative row is the honest one.
 
 No dataset text is committed: the corpora are license-bound and rebuilt deterministically
-via `bench/scripts/download.py 40 truthfulqa,squad2,bfcl` (pins live in
-`bench/data/manifest.json`).
+via `PYTHONPATH=scripts python3 -m benchkit.data.download 40 truthfulqa,squad2,bfcl` (run from
+`bench/`; pins live in `bench/data/manifest.json`).
 
 ## Rerun
 
 ```bash
-python3 bench/scripts/download.py 40 truthfulqa,squad2,bfcl
+(cd bench && PYTHONPATH=scripts python3 -m benchkit.data.download 40 truthfulqa,squad2,bfcl)
 cargo run -q --features live -- bench quality \
   --corpus bench/data/squad2.jsonl --preset rag \
   --model qwen/qwen3-next-80b-a3b-instruct --route "" --n 20

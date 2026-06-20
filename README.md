@@ -14,6 +14,10 @@
 </p>
 
 <p align="center">
+  <sub>One static binary. <b>~5 ms per call</b>, no model to load.</sub>
+</p>
+
+<p align="center">
   <sub>Use it as a <b>proxy</b>, a <b>CLI</b>, an <b>MCP server</b>, or a <b>library</b> (Python · Ruby · Swift · Kotlin · JS · TS · WASM).</sub>
 </p>
 
@@ -304,14 +308,28 @@ Providers come from the [`llm_providers`](https://crates.io/crates/llm_providers
 
 **Zero config needed.** The default (`auto`) inspects each request and picks the right compressors for its shape: tool-heavy → `agent`, code → `code`, long context with a question → `rag`, otherwise → `aggressive`.
 
-If you want to force a mode, set one line: `LLMTRIM_PRESET=<name>` or `preset = "<name>"` in `$XDG_CONFIG_HOME/llmtrim/config.toml`:
+Three tiers cover almost everyone. To force one, set `LLMTRIM_PRESET=<name>` or `preset = "<name>"` in `$XDG_CONFIG_HOME/llmtrim/config.toml`:
 
 | preset | for |
 | --- | --- |
-| **`auto`** *(default)* | routes each request to the right compressors automatically; right for almost everyone |
-| **`safe`** | lossless only: byte-faithful round-trip, no lossy stages |
-| `reasoning` | math / step-by-step workloads |
+| **`auto`** *(default)* | routes each request to the right compressors; right for almost everyone |
+| **`safe`** | lossless input only: byte-faithful round-trip, no lossy stages |
+| **`aggressive`** | squeeze everything, accept lossy cuts (quality-gated) |
+
+<details>
+<summary><b>Advanced presets</b></summary>
+
+`auto` composes these per request shape, so most users never set them directly. Pick one when you know your traffic and want to skip shape detection:
+
+| preset | for |
+| --- | --- |
+| `agent` | tool-calling loops: prunes the tool block first-turn-only so the prompt cache stays warm |
+| `code` | coding turns: skeletonize and minify code, compress pasted logs and diffs |
+| `rag` | long context with a question: sentence-level retrieval |
 | `cache` | a fixed prefix reused across many calls |
+| `reasoning` | math and step-by-step workloads |
+
+</details>
 
 <details>
 <summary><b>Per-flag overrides (power users)</b></summary>
@@ -422,12 +440,12 @@ Three neighbors each compress one layer of the problem; llmtrim does the whole r
 | Can't increase your bill (auto-revert) | ✅ | ❌ | ✅ | ❌ |
 | Live A/B: savings *and* quality | ✅ | offline | ❌ | tokens only |
 | Install: one static binary | ✅ | Python + GB models | ✅ | ✅ |
-| Overhead added / request | **<10 ms** | 52 ms median | <10 ms | n/a |
+| Overhead added / request | **<10 ms** | ~0.9 s/call on fresh input + 2.7 s one-time load | <10 ms | n/a |
 | Prompt overhead injected | **19 tokens** | n/a | n/a | 949 tokens |
 
-Headroom is the closest comparison, so we measured it head to head at matched aggressiveness on the same `o200k_base` tokenizer. **Headroom compresses harder.** It removed more tokens than llmtrim at every matched setting we tried, for example 74% vs 58% on aggressive tool output.
+Headroom is the closest comparison, so we measured it head to head against its latest release (`headroom-ai==0.26.0`) on the same `o200k_base` tokenizer, over public corpora (gsm8k, hotpotqa, squad2, truthfulqa, cnn, LongBench), scored with each corpus's own metric. At matched compression llmtrim is even or ahead: its `auto` default cuts about as much as Headroom's most aggressive setting (25% vs 24%), and `aggressive` cuts more (28% vs 24%, because Headroom's ML caps near 24% on prose).
 
-The two tools optimize for different things. Headroom maximizes raw input compression. llmtrim is quality-gated: it reverts any cut that drops answer-relevant content, and it also compresses output and leaves the cached prefix alone, which Headroom doesn't do. In our small answer-survival runs llmtrim held the answer better, but those cases lean on llmtrim's own tool-output corpus, so we don't lead with a quality number. The per-group tables, the caveats, and the repro are in the [artifact](crates/llmtrim-cli/bench/snapshots/vs-headroom/README.md); reproduce with `bench/scripts/vs_headroom.py`.
+Answer quality is a statistical tie at this sample size (n=30, the paired-bootstrap CI spans zero), but llmtrim is not behind on any axis: it produces about half the output tokens, costs less per unit of answer quality, and adds about 5 ms per call against Headroom's ~0.9 s per call on fresh input plus a one-time ~2.7 s model load (Headroom caches embeddings, so a repeated prefix is faster, but each new tool output pays the full inference). Headroom also cannot compress prose at all with its ML model disabled (its deterministic routers no-op there). The full tables, the near-iso caveat, and the repro are in the [artifact](crates/llmtrim-cli/bench/snapshots/vs-headroom/README.md); reproduce with `make -C crates/llmtrim-cli/bench bench`.
 
 They also stack: RTK shrinks the CLI output, then llmtrim compresses the tool schemas Claude Code resends on top of it. Detailed head-to-heads with [RTK](https://github.com/rtk-ai/rtk), [Headroom](https://github.com/chopratejas/headroom), and [caveman](https://github.com/JuliusBrussee/caveman) are in [crates/llmtrim-cli/bench/README.md](crates/llmtrim-cli/bench/README.md).
 

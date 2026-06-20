@@ -98,9 +98,9 @@ The benchmark is actionable, not just descriptive; each row below is a code chan
 ## Reproduce
 
 ```bash
-python3 bench/scripts/download.py 40       # pull + normalize corpora (pinned in data/manifest.json)
-cargo run -q --features live -- bench suite   # live A/B across all corpora (needs OPENROUTER_API_KEY)
-python3 bench/scripts/synth_readme.py      # regenerate this file
+make -C crates/llmtrim-cli/bench data          # pull + normalize corpora (pinned in data/manifest.json)
+cargo run -q --features live -- bench suite     # live A/B across all corpora (needs OPENROUTER_API_KEY)
+cd crates/llmtrim-cli/bench/scripts && PYTHONPATH=. python3 -m benchkit.tools.synth_readme   # regenerate this file
 ```
 
 `bench suite` runs the full corpus matrix in one process and writes one enveloped result
@@ -118,17 +118,24 @@ llmtrim bench compare headroom             # head-to-head vs Headroom (dispatche
 
 ## Head-to-head: Headroom
 
-Both libraries run through their Python APIs on the same inputs and the same `o200k_base` denominator. Full tables (input saved, per-stage attribution, latency, and the live gpt-oss-20b output A/B) are in [snapshots/vs-headroom/README.md](snapshots/vs-headroom/README.md).
+Both libraries run through their Python APIs on the same inputs and the same `o200k_base`
+denominator, against Headroom's pinned latest release (`headroom-ai==0.26.0`) over public
+corpora. The metric is cost per unit of answer quality, plus the full token, latency, and
+no-ML breakdown. Method and limitations are in [BENCH_SPEC.md](BENCH_SPEC.md); the generated
+tables are in [snapshots/vs-headroom/README.md](snapshots/vs-headroom/README.md).
+
+`make bench` and `llmtrim bench compare headroom` run the same harness; `make` is the
+from-a-source-checkout path (it builds the wheel, installs the pinned deps, and fetches the
+corpora), while the CLI is the front door once llmtrim and the Python deps are installed.
+Both dispatch `bench/scripts/bench.py headroom` under the hood.
 
 ```bash
-crates/llmtrim-uniffi/scripts/build-wheel.sh --release   # build the llmtrim wheel
-pip install --user target/wheels/llmtrim-*.whl
-pip install --user -r bench/scripts/requirements-vs-headroom.txt
-llmtrim bench compare headroom                           # deterministic axes (offline)
-llmtrim bench compare headroom --live -- --live-n 12     # output A/B (needs OPENROUTER_API_KEY)
+make -C crates/llmtrim-cli/bench setup        # build+install the wheel, pinned deps, corpora
+make -C crates/llmtrim-cli/bench bench         # deterministic axes ($0, offline)
+make -C crates/llmtrim-cli/bench bench LIVE=1  # + live cost A/B (needs OPENROUTER_API_KEY)
 ```
 
-`bench compare` is a thin dispatcher over the Python comparator (`vs_headroom.py` /
-`caveman_ab.py`); it measures the real SDK path, so it still needs the wheel and the deps
-above. Arguments after `--` pass straight through to the script.
+Headroom is imported from the pinned PyPI build, not a local checkout, so the numbers
+reproduce. `make bench NOML=1` runs Headroom with its ML model disabled; `make check` is the
+CI gate that asserts llmtrim's deterministic reduction against `baseline.json`.
 
