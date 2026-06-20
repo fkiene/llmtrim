@@ -42,9 +42,13 @@ mod imp {
     use anyhow::{Context, Result};
     use bytes::Bytes;
     use http_body_util::{BodyExt, BodyStream, Full};
-    use hudsucker::certificate_authority::RcgenAuthority;
+    use hudsucker::certificate_authority::CertificateAuthority;
+    use hudsucker::hyper::http::uri::Authority as HttpAuthority;
     use hudsucker::hyper::{Method, Request, Response, header};
+    use hudsucker::rustls::ServerConfig;
+    use hudsucker::rustls::crypto::CryptoProvider;
     use hudsucker::rustls::crypto::aws_lc_rs;
+    use hudsucker::rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
     use hudsucker::{Body, HttpContext, HttpHandler, Proxy, RequestOrResponse};
     use hyper_http_proxy::{Intercept, Proxy as UpstreamProxy, ProxyConnector};
     use hyper_util::client::legacy::connect::HttpConnector;
@@ -1341,7 +1345,7 @@ mod imp {
             .map_err(|e| anyhow::anyhow!("failed to parse CA key: {e}"))?;
         let issuer = hudsucker::rcgen::Issuer::from_ca_cert_pem(&cert_pem, key)
             .map_err(|e| anyhow::anyhow!("failed to parse CA cert: {e}"))?;
-        let ca = RcgenAuthority::new(issuer, 1_000, aws_lc_rs::default_provider());
+        let ca = LeafCertAuthority::new(issuer, aws_lc_rs::default_provider());
 
         // Ledger writes go to a dedicated thread (rusqlite isn't async); the handler just
         // sends Records over the channel.
@@ -1615,6 +1619,125 @@ mod imp {
             .self_signed(&key)
             .map_err(|e| anyhow::anyhow!("CA self-sign failed: {e}"))?;
         Ok((cert.pem(), key.serialize_pem()))
+    }
+
+    /// MITM leaf-certificate authority: a drop-in for hudsucker's `RcgenAuthority` that adds the
+    /// X.509 extensions strict TLS stacks require on a leaf but hudsucker 0.24 omits. Without the
+    /// Authority Key Identifier, OpenSSL 3.x rejects the cert with "Missing Authority Key
+    /// Identifier", which breaks every httpx / OpenAI-SDK Python client behind the proxy (curl
+    /// and Node TLS are lenient, so this went unnoticed). We also set Key Usage + Extended Key
+    /// Usage (serverAuth). Otherwise identical to `RcgenAuthority`: a per-host leaf signed by our
+    /// CA, cached in memory. `RcgenAuthority::new` exposes no hook for these extensions and 0.24
+    /// is the latest published version, and llmtrim publishes to crates.io (so a git-patched
+    /// hudsucker is not an option), hence the small in-tree copy.
+    ///
+    /// TODO: drop this and go back to `RcgenAuthority` once hudsucker mints leaves with an
+    /// Authority Key Identifier (or exposes a hook to set leaf extensions). Tracking upstream at
+    /// <https://github.com/omjadas/hudsucker/issues>.
+    struct LeafCertAuthority {
+        issuer: hudsucker::rcgen::Issuer<'static, hudsucker::rcgen::KeyPair>,
+        private_key: PrivateKeyDer<'static>,
+        provider: Arc<CryptoProvider>,
+        /// Per-host leaf `ServerConfig`s. Intentionally unbounded and non-evicting: it is reached
+        /// only after interception is decided, so it is keyed by the fixed `intercept_domains()`
+        /// allowlist (a handful of LLM hosts), not arbitrary SNI, and the leaves are valid 365
+        /// days. (hudsucker's `RcgenAuthority` used a moka TTL cache; that eviction is moot here.)
+        cache: Mutex<std::collections::HashMap<String, Arc<ServerConfig>>>,
+    }
+
+    impl LeafCertAuthority {
+        fn new(
+            issuer: hudsucker::rcgen::Issuer<'static, hudsucker::rcgen::KeyPair>,
+            provider: CryptoProvider,
+        ) -> Self {
+            let private_key =
+                PrivateKeyDer::from(PrivatePkcs8KeyDer::from(issuer.key().serialize_der()));
+            Self {
+                issuer,
+                private_key,
+                provider: Arc::new(provider),
+                cache: Mutex::new(std::collections::HashMap::new()),
+            }
+        }
+
+        /// Mint a leaf cert for `host`, signed by our CA, carrying the extensions strict OpenSSL
+        /// requires (the `RcgenAuthority::gen_cert` shape plus AKI / Key Usage / EKU).
+        fn gen_cert(&self, host: &str) -> CertificateDer<'static> {
+            use hudsucker::rcgen::string::Ia5String;
+            use hudsucker::rcgen::{
+                CertificateParams, DistinguishedName, DnType, ExtendedKeyUsagePurpose, IsCa,
+                KeyUsagePurpose, SanType,
+            };
+            use time::{Duration, OffsetDateTime};
+
+            let mut params = CertificateParams::default();
+            // Unique serial without a `rand` dependency: a process counter mixed with the wall
+            // clock. Uniqueness (not unpredictability) is all a leaf serial needs here.
+            static SERIAL: AtomicU64 = AtomicU64::new(0);
+            let serial = SERIAL.fetch_add(1, Ordering::Relaxed)
+                ^ (OffsetDateTime::now_utc().unix_timestamp_nanos() as u64);
+            params.serial_number = Some(serial.into());
+
+            let not_before = OffsetDateTime::now_utc() - Duration::seconds(60);
+            params.not_before = not_before;
+            params.not_after = not_before + Duration::days(365);
+
+            let mut dn = DistinguishedName::new();
+            dn.push(DnType::CommonName, host);
+            params.distinguished_name = dn;
+            params.subject_alt_names.push(SanType::DnsName(
+                Ia5String::try_from(host.to_string()).expect("host is a valid DNS name"),
+            ));
+
+            // The fix: extensions hudsucker 0.24 omits but strict OpenSSL 3.x requires on a leaf.
+            params.use_authority_key_identifier_extension = true;
+            params.key_usages = vec![
+                KeyUsagePurpose::DigitalSignature,
+                KeyUsagePurpose::KeyEncipherment,
+            ];
+            params.extended_key_usages = vec![ExtendedKeyUsagePurpose::ServerAuth];
+            // Emit `BasicConstraints: CA:FALSE` explicitly (rcgen's default omits the extension
+            // entirely). RFC 5280 §4.2.1.9 says it SHOULD appear on an end-entity cert, and some
+            // stricter stacks (LibreSSL, corporate TLS inspectors) want it.
+            params.is_ca = IsCa::ExplicitNoCa;
+
+            params
+                .signed_by(self.issuer.key(), &self.issuer)
+                .expect("failed to sign leaf certificate")
+                .into()
+        }
+    }
+
+    impl CertificateAuthority for LeafCertAuthority {
+        async fn gen_server_config(&self, authority: &HttpAuthority) -> Arc<ServerConfig> {
+            let host = authority.host().to_string();
+            // Recover from a poisoned lock rather than panicking the proxy hot path: the only
+            // code run under the lock is a HashMap get/insert (can't panic), so the guarded data
+            // is always consistent even if some other thread panicked elsewhere.
+            if let Some(cfg) = self
+                .cache
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .get(&host)
+                .cloned()
+            {
+                return cfg;
+            }
+            let certs = vec![self.gen_cert(&host)];
+            let mut cfg = ServerConfig::builder_with_provider(Arc::clone(&self.provider))
+                .with_safe_default_protocol_versions()
+                .expect("rustls protocol versions")
+                .with_no_client_auth()
+                .with_single_cert(certs, self.private_key.clone_key())
+                .expect("rustls ServerConfig from leaf cert");
+            cfg.alpn_protocols = vec![b"h2".to_vec(), b"http/1.1".to_vec()];
+            let cfg = Arc::new(cfg);
+            self.cache
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .insert(host, Arc::clone(&cfg));
+            cfg
+        }
     }
 
     #[cfg(test)]
@@ -1983,6 +2106,34 @@ mod imp {
             // Round-trips through the same parser hudsucker uses.
             let key = hudsucker::rcgen::KeyPair::from_pem(&key_pem).unwrap();
             assert!(hudsucker::rcgen::Issuer::from_ca_cert_pem(&cert_pem, key).is_ok());
+        }
+
+        #[test]
+        fn minted_leaf_carries_aki_keyusage_and_eku() {
+            // Regression: hudsucker 0.24's RcgenAuthority mints a leaf with only a SAN, which
+            // strict OpenSSL 3.x rejects ("Missing Authority Key Identifier"), breaking every
+            // httpx / OpenAI-SDK (Python) client behind the proxy. LeafCertAuthority must add
+            // the Authority Key Identifier plus Key Usage and Extended Key Usage.
+            let (cert_pem, key_pem) = generate_ca(&intercept_domains()).unwrap();
+            let key = hudsucker::rcgen::KeyPair::from_pem(&key_pem).unwrap();
+            let issuer = hudsucker::rcgen::Issuer::from_ca_cert_pem(&cert_pem, key).unwrap();
+            let ca = LeafCertAuthority::new(issuer, aws_lc_rs::default_provider());
+            let der = ca.gen_cert("example.com");
+            let bytes: &[u8] = der.as_ref();
+            let has = |oid: &[u8]| bytes.windows(oid.len()).any(|w| w == oid);
+            // X.509 extension OIDs, DER-encoded as `06 03 55 1D xx`.
+            assert!(
+                has(&[0x06, 0x03, 0x55, 0x1D, 0x23]),
+                "leaf must carry the Authority Key Identifier (2.5.29.35)"
+            );
+            assert!(
+                has(&[0x06, 0x03, 0x55, 0x1D, 0x0F]),
+                "leaf must carry Key Usage (2.5.29.15)"
+            );
+            assert!(
+                has(&[0x06, 0x03, 0x55, 0x1D, 0x25]),
+                "leaf must carry Extended Key Usage (2.5.29.37)"
+            );
         }
 
         #[test]

@@ -6,6 +6,15 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Fixed
+- **Strict-TLS (OpenSSL 3.x) clients can now use the proxy.** The MITM leaf certificates
+  llmtrim minted lacked the Authority Key Identifier (and Key Usage / Extended Key Usage)
+  extensions, so OpenSSL 3.x rejected them with "Missing Authority Key Identifier", breaking
+  every Python `httpx` / OpenAI-SDK client
+  behind the proxy (e.g. Hermes Agent, litellm). `curl` and Node TLS are lenient, so this went
+  unnoticed. Minted leaves now include the Authority Key Identifier plus Key Usage and Extended
+  Key Usage (serverAuth). The local CA is unchanged, so no re-trust is needed.
+
 ### Added
 - **`serve --force` / `start --force` / `setup --force`** replace an llmtrim daemon that's
   already holding the port (stops it first, waits for the port to free, then takes over)
