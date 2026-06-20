@@ -21,5 +21,6 @@ def get(name):
 # Import the built-in adapters so importing this package populates the registry.
 from . import headroom  # noqa: E402,F401
 from . import caveman  # noqa: E402,F401
+from . import leanctx  # noqa: E402,F401
 
 __all__ = ["Competitor", "REGISTRY", "register", "get"]

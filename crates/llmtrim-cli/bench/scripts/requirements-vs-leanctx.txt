@@ -1,0 +1,11 @@
+# Extra dependencies for `bench.py leanctx` (on top of requirements-vs-headroom.txt, which
+# already pins the shared encoder, torch, transformers, openai, and rouge-score).
+#
+# leanctx's BEST local mode is Lingua, which wraps Microsoft LLMLingua-2. The model runs on
+# the machine and no request leaves it, so the leg stays $0 (no API key). The `[lingua]`
+# extra pulls the llmlingua package; the ~1.2 GB model weights download from the HF Hub on
+# first use and are cached locally. leanctx's other compressor, SelfLLM, calls a hosted LLM
+# and is deliberately not wired into the adapter, so its anthropic/openai/gemini extras are
+# not needed here.
+leanctx==0.3.1
+llmlingua==0.2.2      # the LLMLingua-2 backend for leanctx.Lingua (the `leanctx[lingua]` extra)
