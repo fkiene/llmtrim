@@ -1,0 +1,22 @@
+........................................FF.                              [100%]
+=================================== FAILURES ===================================
+______________________________ test_fail_keyerror ______________________________
+
+    def test_fail_keyerror():
+        cfg = {}
+>       assert cfg["timeout"] == 30
+               ^^^^^^^^^^^^^^
+E       KeyError: 'timeout'
+
+tests/test_mod.py:9: KeyError
+_______________________________ test_fail_assert _______________________________
+
+    def test_fail_assert():
+>       assert (2 + 2) == 5
+E       assert (2 + 2) == 5
+
+tests/test_mod.py:12: AssertionError
+=========================== short test summary info ============================
+FAILED tests/test_mod.py::test_fail_keyerror - KeyError: 'timeout'
+FAILED tests/test_mod.py::test_fail_assert - assert (2 + 2) == 5
+2 failed, 41 passed in 0.14s

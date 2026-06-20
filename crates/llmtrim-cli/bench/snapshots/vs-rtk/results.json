@@ -1,0 +1,43 @@
+{
+  "meta": {
+    "tool": "rtk",
+    "version": "0.42.4",
+    "binary": "/home/innolabs/.local/bin/rtk",
+    "encoder": "o200k_base",
+    "mode": "BEST (native filter per tool-output type)",
+    "fixtures": "competitors/rtk_fixtures/*.txt (real command output, same o200k span)",
+    "scope": "self-contained: RTK rewrites tool output, not message arrays, so it does not run on the prose corpora the generic engine uses",
+    "limit": 0
+  },
+  "records": [
+    {
+      "filter": "pytest",
+      "in_tokens": 181,
+      "out_tokens": 141,
+      "reduction_pct": 22.1
+    },
+    {
+      "filter": "grep",
+      "in_tokens": 640,
+      "out_tokens": 159,
+      "reduction_pct": 75.2
+    },
+    {
+      "filter": "git-log",
+      "in_tokens": 185,
+      "out_tokens": 73,
+      "reduction_pct": 60.5
+    },
+    {
+      "filter": "git-diff",
+      "in_tokens": 831,
+      "out_tokens": 852,
+      "reduction_pct": -2.5
+    }
+  ],
+  "totals": {
+    "in_tokens": 1837,
+    "out_tokens": 1225,
+    "reduction_pct": 33.3
+  }
+}
