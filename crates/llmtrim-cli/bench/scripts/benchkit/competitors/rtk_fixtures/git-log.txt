@@ -1,0 +1,18 @@
+commit 4c00335838435742eaf1dbf34b7636a60e8f26be
+Author: t <t@t.t>
+Date:   Sat Jun 20 14:33:20 2026 +0200
+
+    fix: bump default timeout to 60
+
+ src/config.py | 40 ++++++++++++++++++++--------------------
+ 1 file changed, 20 insertions(+), 20 deletions(-)
+
+commit 2cf784848fda9491aa680478cd0f38202a59f753
+Author: t <t@t.t>
+Date:   Sat Jun 20 14:33:20 2026 +0200
+
+    init: config and tests
+
+ src/config.py     | 80 +++++++++++++++++++++++++++++++++++++++++++++++++++++++
+ tests/test_mod.py | 15 +++++++++++
+ 2 files changed, 95 insertions(+)

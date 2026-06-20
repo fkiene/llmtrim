@@ -23,5 +23,6 @@ from . import headroom  # noqa: E402,F401
 from . import caveman  # noqa: E402,F401
 from . import leanctx  # noqa: E402,F401
 from . import entroly  # noqa: E402,F401
+from . import rtk  # noqa: E402,F401
 
 __all__ = ["Competitor", "REGISTRY", "register", "get"]
