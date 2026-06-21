@@ -16,6 +16,12 @@ All notable changes to this project are documented here. The format follows
   artifact at `ghcr.io/fkiene/llmtrim-gateway-plugin` (for Higress) and a `.wasm` Release asset
   (for Kong). See `crates/adapters/llmtrim-gateway-plugin/README.md`.
 
+### Performance
+- **Lower per-request compression cost on tool-heavy (agent) prompts.** The pipeline now
+  re-serializes and re-tokenizes the tools array only when a stage actually changed it, instead
+  of after every content-rewriting stage. Per-language stopword sets are built once and reused
+  (behind a read-mostly lock) rather than rebuilt per segment. Output is unchanged.
+
 ### Changed
 - **`@llmtrim/js`: calling `compress()` with no preset now compresses with `auto`
   (shape-routing) instead of the lossless-only baseline.** The npm package barely compressed

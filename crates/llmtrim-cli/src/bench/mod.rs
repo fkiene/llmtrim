@@ -25,6 +25,7 @@ use regex::Regex;
 use serde_json::{Value, json};
 use statrs::distribution::{ContinuousCDF, StudentsT};
 use statrs::statistics::Statistics;
+use std::collections::HashMap;
 use std::time::Duration;
 use wait_timeout::ChildExt;
 
@@ -166,18 +167,21 @@ fn token_f1(answer: &str, gold: &str) -> f64 {
             0.0
         };
     }
-    // Common tokens = sum of min(count_answer, count_gold) per distinct token.
-    let mut common = 0usize;
-    let mut seen: Vec<&str> = Vec::new();
-    for tok in &gt {
-        if seen.contains(tok) {
-            continue;
-        }
-        seen.push(tok);
-        let in_a = at.iter().filter(|t| *t == tok).count();
-        let in_g = gt.iter().filter(|t| *t == tok).count();
-        common += in_a.min(in_g);
+    // Common tokens = sum of min(count_answer, count_gold) per distinct token. Build a
+    // count map of the answer once, then fold the gold over it — O(|at| + |gt|) instead of
+    // the quadratic per-token rescans (P3).
+    let mut answer_counts: HashMap<&str, usize> = HashMap::with_capacity(at.len());
+    for tok in &at {
+        *answer_counts.entry(*tok).or_insert(0) += 1;
     }
+    let mut gold_counts: HashMap<&str, usize> = HashMap::with_capacity(gt.len());
+    for tok in &gt {
+        *gold_counts.entry(*tok).or_insert(0) += 1;
+    }
+    let common: usize = gold_counts
+        .iter()
+        .map(|(tok, &in_g)| in_g.min(answer_counts.get(tok).copied().unwrap_or(0)))
+        .sum();
     if common == 0 {
         return 0.0;
     }

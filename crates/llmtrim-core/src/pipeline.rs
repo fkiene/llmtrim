@@ -12,6 +12,14 @@ use crate::provider::Provider;
 use crate::quality_gate::{self, COVERAGE_THRESHOLD};
 use crate::tokenizer::{TokenCounter, Tokens};
 
+/// True if the stage left the `/tools` subtree byte-identical to `snapshot`, so the cached
+/// tools count is still valid and the array need not be re-serialized + re-tokenized (P1).
+/// Compares the actual subtree (not the stage's declared [`Scope`], which only promises
+/// "content text unchanged", not "only `/tools` mutated").
+fn tools_unchanged(req: &Request, snapshot: &Request) -> bool {
+    req.raw().get("tools") == snapshot.raw().get("tools")
+}
+
 /// Stage names that drop/window query-relevant *content* and are therefore subject to
 /// the quality gate as well as the token gate. The token gate can't tell these apart
 /// from a beneficial cut — both reduce tokens — so coverage decides if the cut hurt.
@@ -161,6 +169,7 @@ pub fn run_gated(
         .sum();
 
     for stage in stages {
+        let scope = stage.scope();
         let before = content + tools;
         let snapshot = req.clone();
         let plan_mark = plan.len();
@@ -182,17 +191,24 @@ pub fn run_gated(
                 let (new_content, new_tools) = if req.raw() == snapshot.raw() {
                     (content, tools)
                 } else {
-                    match stage.scope() {
-                        Scope::Content => (
-                            count_content_cached(req, provider, counter, &mut seg_cache),
-                            tools,
-                        ),
-                        Scope::Tools => (content, count_tools(req, counter)),
-                        Scope::Both => (
-                            count_content_cached(req, provider, counter, &mut seg_cache),
-                            count_tools(req, counter),
-                        ),
-                    }
+                    let new_content = match scope {
+                        Scope::Tools => content,
+                        Scope::Content | Scope::Both => {
+                            count_content_cached(req, provider, counter, &mut seg_cache)
+                        }
+                    };
+                    // Tools count is re-serialized + re-tokenized only when the `/tools`
+                    // subtree actually changed (P1): a stage that rewrites only content keeps
+                    // the cached tools count instead of paying a full tools BPE pass. Verified
+                    // against the actual subtree regardless of the stage's declared scope —
+                    // `Scope` only promises "content text unchanged", not "only /tools moved"
+                    // (CacheStage declares `Tools` yet writes into `/system` and `/messages`).
+                    let new_tools = if tools_unchanged(req, &snapshot) {
+                        tools
+                    } else {
+                        count_tools(req, counter)
+                    };
+                    (new_content, new_tools)
                 };
                 let after = new_content + new_tools;
                 if stage.gate_kind() == GateKind::InputTokens && after >= before {
@@ -203,7 +219,7 @@ pub fn run_gated(
                 } else if quality_gate
                     && !query.is_empty()
                     && stage.gate_kind() == GateKind::InputTokens
-                    && stage.scope() != Scope::Tools
+                    && scope != Scope::Tools
                     && (stage.quality_gated() || quality_gated_by_name(stage.name()))
                     && {
                         // Coverage of query-relevant source content surviving this cut. The
@@ -405,5 +421,73 @@ mod tests {
         assert!(!out.stages[0].applied);
         assert!(out.stages[0].note.as_deref().unwrap().contains("error"));
         assert_eq!(req.get_str("/messages/0/content"), Some(original.as_str()));
+    }
+
+    /// Test transform (`Scope::Tools`): replace the whole `/tools` array with a smaller one.
+    struct ShrinkTools;
+    impl Transform for ShrinkTools {
+        fn name(&self) -> &str {
+            "shrink-tools"
+        }
+        fn gate_kind(&self) -> GateKind {
+            GateKind::InputTokens
+        }
+        fn scope(&self) -> Scope {
+            Scope::Tools
+        }
+        fn apply(
+            &self,
+            req: &mut Request,
+            _provider: &dyn Provider,
+            _plan: &mut Vec<PlanEntry>,
+        ) -> anyhow::Result<()> {
+            req.set("/tools", serde_json::json!([{"name": "f"}]));
+            Ok(())
+        }
+    }
+
+    fn fresh_with_tools() -> (Request, Box<dyn TokenCounter>) {
+        let req = Request::parse(
+            ProviderKind::OpenAi,
+            r#"{"messages":[{"role":"user","content":"this is a fairly long original message about widgets and gadgets"}],"tools":[{"type":"function","function":{"name":"search_documents","description":"search a large corpus for relevant passages","parameters":{"q":"string"}}}]}"#,
+        )
+        .unwrap();
+        (
+            req,
+            counter_for(ProviderKind::OpenAi, Some("gpt-4o")).unwrap(),
+        )
+    }
+
+    /// P1: a content-only (Both-scope) stage keeps the cached tools count, and the reported
+    /// total must still equal a full independent recount that includes the tools tokens.
+    #[test]
+    fn content_stage_preserves_tools_token_count() {
+        let (mut req, counter) = fresh_with_tools();
+        let stages: Vec<Box<dyn Transform>> = vec![Box::new(SetContent {
+            name: "shrink".into(),
+            text: "hi".into(),
+        })];
+        let out = run(&mut req, &OpenAiProvider, counter.as_ref(), &stages);
+        assert!(out.stages[0].applied);
+        // The cached-tools path (P1) must produce the same number as a fresh full count.
+        let independent = content_tokens(&req, &OpenAiProvider, counter.as_ref());
+        assert_eq!(out.input_tokens_after.0, independent);
+        // And the tools tokens are genuinely part of that total (non-trivial tools block).
+        assert!(out.input_tokens_after.0 > count_content(&req, &OpenAiProvider, counter.as_ref()));
+    }
+
+    /// P1: a stage that actually mutates `/tools` triggers the recount, and the new total
+    /// reflects the smaller tools array.
+    #[test]
+    fn tools_stage_recounts_when_tools_change() {
+        let (mut req, counter) = fresh_with_tools();
+        let stages: Vec<Box<dyn Transform>> = vec![Box::new(ShrinkTools)];
+        let out = run(&mut req, &OpenAiProvider, counter.as_ref(), &stages);
+        assert!(out.stages[0].applied);
+        assert!(out.input_tokens_after < out.input_tokens_before);
+        assert_eq!(
+            out.input_tokens_after.0,
+            content_tokens(&req, &OpenAiProvider, counter.as_ref())
+        );
     }
 }

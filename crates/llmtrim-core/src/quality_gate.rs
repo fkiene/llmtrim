@@ -190,7 +190,7 @@ pub fn coverage(source: &str, compressed: &str, query_terms: &[String]) -> f64 {
     let kept = rel_uni.iter().filter(|w| comp_uni.contains(*w)).count()
         + rel_bi
             .iter()
-            .filter(|(a, b)| comp_bi.contains(&((*a).to_string(), (*b).to_string())))
+            .filter(|(a, b)| comp_bi.contains(&(*a, *b)))
             .count();
     kept as f64 / total as f64
 }
@@ -210,15 +210,17 @@ fn bigram_coverage(src: &[String], comp: &[String]) -> f64 {
     }
     let comp_bi = bigram_set(comp);
     let src_bi = bigram_set(src);
-    let kept = src_bi.iter().filter(|b| comp_bi.contains(*b)).count();
+    let kept = src_bi.iter().filter(|b| comp_bi.contains(b)).count();
     kept as f64 / src_bi.len() as f64
 }
 
-/// Set of distinct adjacent token pairs (bigram types) of `words`.
-fn bigram_set(words: &[String]) -> std::collections::HashSet<(String, String)> {
+/// Set of distinct adjacent token pairs (bigram types) of `words`, borrowing the token
+/// slices instead of cloning each into an owned `String` (P5) — the `words` `Vec` owns the
+/// tokens for the duration of the coverage check.
+fn bigram_set(words: &[String]) -> std::collections::HashSet<(&str, &str)> {
     words
         .windows(2)
-        .map(|p| (p[0].clone(), p[1].clone()))
+        .map(|p| (p[0].as_str(), p[1].as_str()))
         .collect()
 }
 
