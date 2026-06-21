@@ -6,6 +6,15 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Fixed
+- **`status` dashboard: a stale daemon now offers a working restart, not a broken command.**
+  When the running daemon was an older build than the installed binary (after an update), the
+  dashboard treated it as a fault: a Repair button and a suggested `llmtrim restart`, which is
+  not a real command. It now shows a `u  Update` action that restarts the daemon
+  (`llmtrim start --force`, the supported "pick up a new binary after an update" path) to load
+  the new build. A newer release still takes precedence over a restart, and a failed restart
+  surfaces its exit code instead of exiting cleanly.
+
 ### Removed
 - **The Proxy-Wasm gateway plugin (Kong / Higress) has been removed.** Shipped in v0.3.0, it is
   dropped along with its crates (`llmtrim-gateway`, `llmtrim-gateway-plugin`) and its release
