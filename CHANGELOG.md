@@ -7,6 +7,13 @@ All notable changes to this project are documented here. The format follows
 ## [Unreleased]
 
 ### Added
+- **Interactive cost dashboard on `llmtrim status`.** On a terminal, `status` now opens a
+  tabbed TUI (Overview / Sessions / Detail): what you saved, what you paid, the daily trend,
+  per-model and per-session breakdowns, and where each session's tokens went. Piped or
+  redirected output keeps the plain text, so scripts are unaffected. `t` switches theme
+  (Catppuccin Mocha / Macchiato / Frappé / Latte, persisted), `q` quits.
+- **`net_spend_usd` in `status --json`.** The JSON now also carries the cache-discounted
+  bill, so the machine-readable output matches the dashboard's "you paid" figure.
 - **Proxy-Wasm gateway plugin: compress LLM request bodies at Kong or Higress.** A single
   wasm module buffers the request body, runs it through llmtrim, and forwards the smaller body
   upstream. The same artifact runs on both gateways (both are Proxy-Wasm 0.2 ABI hosts); they
@@ -56,9 +63,9 @@ All notable changes to this project are documented here. The format follows
   exact hostnames; malformed or overly broad ones are dropped.
 - **Every runtime setting is now settable in the config file, not just via env.** The
   proxy knobs (`upstream_proxy`, `db_path`, `capture_dir`, `capture_max_mb`, `bind`,
-  `no_update_check`) each now resolve env-first then from a top-level key in `config.toml`,
-  matching the existing `preset`/`retention_days` behavior. The matching `LLMTRIM_*` env vars
-  are unchanged and still win when set.
+  `breakdown_window`, `no_update_check`) each now resolve env-first then from a top-level key
+  in `config.toml`, matching the existing `preset`/`retention_days` behavior. The matching
+  `LLMTRIM_*` env vars are unchanged and still win when set.
 
 ### Fixed
 - **`serve` fails fast when the port is taken.** A bind-in-use error no longer spins through
