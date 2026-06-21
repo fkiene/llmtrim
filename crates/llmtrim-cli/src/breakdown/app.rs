@@ -418,13 +418,13 @@ impl App {
                 return true;
             }
             KeyCode::Char('u') => {
-                // On a stale daemon `u` restarts to apply the installed update; otherwise it
-                // runs the updater for a newer release.
-                self.action = if self
-                    .overview
-                    .as_ref()
-                    .is_some_and(|o| o.status.kind == StatusKind::Stale)
-                {
+                // A newer release wins: download it first (so a restart lands on the newest
+                // binary, not one that's itself outdated). Only when there's no newer release
+                // but the running daemon is stale does `u` just restart onto the installed binary.
+                let ov = self.overview.as_ref();
+                self.action = if ov.is_some_and(|o| o.update_available.is_some()) {
+                    PostAction::Update
+                } else if ov.is_some_and(|o| o.status.kind == StatusKind::Stale) {
                     PostAction::Restart
                 } else {
                     PostAction::Update
@@ -710,6 +710,9 @@ impl App {
         match ov.status.kind {
             // When the proxy is down, the alarm is the hero and savings demote to an aside.
             StatusKind::Off | StatusKind::Degraded => render_overview_alert(f, inner, ov),
+            // A stale daemon always shows the dashboard (and its `u  Update` nudge), even before
+            // the first request — otherwise the empty-state card would hide the restart prompt.
+            StatusKind::Stale => render_overview_main(f, inner, ov),
             _ if !ov.has_traffic => render_overview_empty(f, inner, ov),
             _ => render_overview_main(f, inner, ov),
         }
@@ -967,9 +970,12 @@ fn weekday_labels(n: usize) -> Vec<&'static str> {
         .collect()
 }
 
-/// Band B — the status banner: a ✓ health icon + the spoken health line and a quip, with a
-/// right-aligned `d  Repair` button. Full width, rounded border.
+/// Band B — the status banner: a ✓ health icon + the spoken health line and a quip, with an
+/// optional right-aligned `u  Update` button (a newer release, or a stale daemon to restart).
+/// Full width, rounded border.
 fn render_status_banner(f: &mut Frame, area: Rect, ov: &OverviewData) {
+    // Stale shares Degraded's warn dot; harmless because they never both reach this banner
+    // (Degraded routes to the Repair alert instead).
     let dot = match ov.status.kind {
         StatusKind::Working => palette::green(),
         StatusKind::Ready => palette::blue(),
@@ -1536,8 +1542,9 @@ fn render_overview_alert(f: &mut Frame, inner: Rect, ov: &OverviewData) {
         palette::warn()
     };
     let dim = Style::default().fg(palette::muted_gray());
-    // Degraded is the mild "needs a restart" case — a woozy sheep fits and keeps it light.
-    // Off is the dangerous "can't reach the API" case, which stays mascot-free and serious.
+    // Degraded is a real fault (e.g. not set up) — a woozy sheep keeps it light. Off is the
+    // dangerous "can't reach the API" case, mascot-free and serious. (Stale isn't a fault and
+    // never reaches this alert; it shows the normal dashboard with a `u  Update` nudge.)
     let secs = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs())
@@ -2184,6 +2191,19 @@ mod tests {
         let mut app = App::new(None, Duration::from_secs(2));
         let mut ov = sample_overview();
         ov.status.kind = StatusKind::Working;
+        app.overview = Some(ov);
+        app.handle_key(KeyCode::Char('u'));
+        assert_eq!(app.action, PostAction::Update);
+    }
+
+    #[test]
+    fn u_key_downloads_when_stale_and_a_release_is_available() {
+        // Both: daemon is stale AND a newer release exists. Download wins (restarting onto an
+        // already-outdated binary would be pointless); the next `u` then restarts.
+        let mut app = App::new(None, Duration::from_secs(2));
+        let mut ov = sample_overview();
+        ov.status.kind = StatusKind::Stale;
+        ov.update_available = Some("0.3.0".into());
         app.overview = Some(ov);
         app.handle_key(KeyCode::Char('u'));
         assert_eq!(app.action, PostAction::Update);
