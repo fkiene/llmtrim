@@ -134,6 +134,11 @@ pub struct Cost {
     pub saved: f64,
     /// Compressed bill at list rates: input_after + measured output.
     pub spend: f64,
+    /// The REAL compressed bill actually paid — the cache-discounted input bill (fresh 1× +
+    /// cache-write 1.25× + cache-read ~0.1×, per provider) plus measured output. Unlike
+    /// `spend` (list), this is what the user really paid, so the receipt reconciles:
+    /// `net_spend + net_saved` == the would-have-paid counterfactual.
+    pub net_spend: f64,
     /// The output-token portion of `spend` ($).
     pub out_spend: f64,
     /// The same measured saving priced against the provider-reported usage split (cache
@@ -190,6 +195,49 @@ pub struct ModelView {
     /// frozen-zone meter's per-model %. `None` until the model has metered rows; the
     /// table then falls back to `saved_pct` (the all-input figure).
     pub new_pct: Option<f64>,
+}
+
+/// One render-ready BY MODEL row for the breakdown TUI's native table. `is_header` rows are
+/// the cached / un-cached group separators (their value columns are blank).
+pub struct ModelLine {
+    pub label: String,
+    pub requests: String,
+    pub saved: String,
+    pub cost: String,
+    pub is_header: bool,
+}
+
+/// Build the grouped BY MODEL rows for native rendering — same grouping as the text table:
+/// "fresh context" models first, then "reused context" (cache-served), with the group-header
+/// rows only when both kinds are present.
+pub fn model_lines(models: &[ModelView]) -> Vec<ModelLine> {
+    let grouped = models.iter().any(|m| m.cached) && models.iter().any(|m| !m.cached);
+    let mut out = Vec::new();
+    for (cached, header) in [(false, "fresh context"), (true, "reused context")] {
+        let rows: Vec<&ModelView> = models.iter().filter(|m| m.cached == cached).collect();
+        if rows.is_empty() {
+            continue;
+        }
+        if grouped {
+            out.push(ModelLine {
+                label: header.to_string(),
+                requests: String::new(),
+                saved: String::new(),
+                cost: String::new(),
+                is_header: true,
+            });
+        }
+        for m in rows {
+            out.push(ModelLine {
+                label: m.name.clone(),
+                requests: ui::commas(m.events),
+                saved: format!("{:.0}%", m.saved_pct),
+                cost: m.cost_saved.map(|c| format!("${c:.2}")).unwrap_or_default(),
+                is_header: false,
+            });
+        }
+    }
+    out
 }
 
 // ── rendering helpers ───────────────────────────────────────────────────────────
@@ -395,6 +443,7 @@ fn render_header(color: bool, d: &DaemonView) -> String {
 /// requests), per-axis bars, and a per-model table. Returned as a string so the watch
 /// loop can repaint it atomically. `today_saved_usd` is the priced saving for today (UTC),
 /// shown next to the all-time hero when it is non-trivial.
+#[allow(clippy::too_many_arguments)]
 pub fn snapshot(
     color: bool,
     daemon: Option<&DaemonView>,
@@ -403,6 +452,15 @@ pub fn snapshot(
     cost: Option<&Cost>,
     today_saved_usd: Option<f64>,
     trend: &[i64],
+    // When true, the input SAVINGS axis is measured over ALL input (the frozen cached prefix
+    // included in the denominator) — the cache-diluted view. When false (default), it's
+    // measured over the compressible surface only (cache excluded), the honest "what we can
+    // touch" figure. The breakdown TUI flips this with the `c` key.
+    cache_included: bool,
+    // When true, a SOH (`\u{1}`) sentinel is emitted just before the BY MODEL section so the
+    // breakdown TUI can split the dashboard into a left column (health/hero/savings/trend)
+    // and a right column (the model table). Always false for the plain/pipe output.
+    split_marker: bool,
 ) -> String {
     let mut o = String::new();
 
@@ -500,7 +558,13 @@ pub fn snapshot(
     // with no metered traffic yet fall back to the all-input axis.
     let new_before = s.metered_input_before - s.frozen_input_tokens;
     let new_after = s.metered_input_after - s.frozen_input_tokens;
-    if s.frozen_input_tokens > 0 && new_before > 0 {
+    if cache_included {
+        // Cache-included: trim measured against the whole prompt, frozen cached prefix and
+        // all — the diluted denominator. Tagged so it can't be confused with the default.
+        o.push_str(&axis(color, "input", s.input_before, s.input_after));
+        o.push_str(&ui::paint(color, Tone::Dim, "   (all input · cache)"));
+        o.push('\n');
+    } else if s.frozen_input_tokens > 0 && new_before > 0 {
         o.push_str(&axis(color, "input", new_before, new_after));
         o.push_str(&ui::paint(color, Tone::Dim, "   (cache excluded)"));
         o.push('\n');
@@ -531,7 +595,7 @@ pub fn snapshot(
                     format!("~{:+.0}%", -BENCH_OUTPUT_REDUCTION * 100.0)
                 ),
             ),
-            ui::paint(color, Tone::Dim, "(est · if output shaped)"),
+            ui::paint(color, Tone::Dim, "(estimate)"),
         ));
     }
     // (No cache line: cache-safety is a property, not a per-run number. A token count here
@@ -575,15 +639,18 @@ pub fn snapshot(
     // cached $ is list value (the real bill is already cache-discounted) — the honesty split
     // is structural instead of an asterisk per row.
     if !models.is_empty() {
+        if split_marker {
+            o.push('\u{1}'); // split point: everything after goes to the TUI's right column
+        }
         o.push_str(&ui::paint(color, Tone::Dim, "\n BY MODEL\n"));
         let mut t = ui::table(color, &["model", "requests", "saved", "$ saved"]);
         let grouped = models.iter().any(|m| m.cached) && models.iter().any(|m| !m.cached);
         let add_rows = |t: &mut comfy_table::Table, cached: bool| {
             if grouped {
                 let label = if cached {
-                    "cached · $ at list value"
+                    "reused context"
                 } else {
-                    "un-cached · $ off the bill"
+                    "fresh context"
                 };
                 t.add_row(vec![comfy_table::Cell::new(ui::paint(
                     color,
@@ -628,6 +695,9 @@ pub fn snapshot(
         for line in t.to_string().lines() {
             let light = line.replace('╞', "├").replace('╡', "┤").replace('═', "─");
             o.push_str(&format!(" {light}\n"));
+        }
+        if split_marker {
+            o.push('\u{1}'); // close the model block; the TUI rejoins the text around it
         }
     }
 
@@ -795,9 +865,14 @@ pub fn monitor_cost(tracker: &Tracker) -> Option<Cost> {
 /// Per-model rows for the breakdown, top 8 by request volume, priced where the registry
 /// knows the model.
 pub fn model_views(tracker: &Tracker) -> Result<Vec<ModelView>> {
-    let mut models: Vec<ModelView> = tracker
-        .by_model()?
-        .into_iter()
+    Ok(model_views_from(&tracker.by_model()?))
+}
+
+/// Same as [`model_views`] but from already-fetched rows, so a caller that also needs the
+/// cost estimate can run `by_model()` once and feed both (the query is the heaviest per refresh).
+pub fn model_views_from(rows: &[ModelRow]) -> Vec<ModelView> {
+    let mut models: Vec<ModelView> = rows
+        .iter()
         .filter(|m| m.events > 0)
         .map(|m| {
             // Per-model USD figures where the registry prices the model — used to project the
@@ -822,6 +897,7 @@ pub fn model_views(tracker: &Tracker) -> Result<Vec<ModelView>> {
             ModelView {
                 name: m
                     .model
+                    .clone()
                     .unwrap_or_else(|| format!("{} · unknown model", m.provider)),
                 events: m.events,
                 saved_pct: ui::saved_pct(m.input_before as f64, m.input_after as f64),
@@ -835,7 +911,7 @@ pub fn model_views(tracker: &Tracker) -> Result<Vec<ModelView>> {
         .collect();
     models.sort_unstable_by_key(|b| std::cmp::Reverse(b.events));
     models.truncate(8);
-    Ok(models)
+    models
 }
 
 /// Today's priced saving (UTC), for the hero's recency anchor. `None` when nothing
@@ -843,6 +919,33 @@ pub fn model_views(tracker: &Tracker) -> Result<Vec<ModelView>> {
 pub fn today_saved_usd(tracker: &Tracker) -> Option<f64> {
     let models = tracker.by_model_today().ok()?;
     cost_estimate(&models).map(|c| c.saved)
+}
+
+/// Per-1M-token rates for one turn, frozen into the breakdown ledger so a historical session
+/// always prices at what it actually cost. `cache_read`/`cache_write` apply the provider's
+/// cache multipliers to the input rate (matching [`cost_estimate`]'s net-bill math).
+/// Only the interceptor records turns, so this is gated with its sole caller (`serve`).
+#[cfg(feature = "intercept")]
+#[derive(Debug, Clone, Copy, Default)]
+pub(crate) struct BreakdownRates {
+    pub input: f64,
+    pub output: f64,
+    pub cache_read: f64,
+    pub cache_write: f64,
+}
+
+/// Resolve the frozen rates for a (provider, model) pair. Unknown models price at 0
+/// (the TUI then shows a blank cost cell rather than a misleading $0.00).
+#[cfg(feature = "intercept")]
+pub(crate) fn rates_for(provider: &str, model: Option<&str>) -> BreakdownRates {
+    let (input, output) = model.and_then(llm_prices).unwrap_or((0.0, 0.0));
+    let (read_mult, write_mult) = cache_multipliers(provider);
+    BreakdownRates {
+        input,
+        output,
+        cache_read: input * read_mult,
+        cache_write: input * write_mult,
+    }
 }
 
 fn cache_multipliers(provider: &str) -> (f64, f64) {
@@ -868,10 +971,11 @@ fn cache_multipliers(provider: &str) -> (f64, f64) {
 ///   degrades exactly to the list-rate figure.
 /// - `out_spend_shaped` is the output spend from requests that actually carried the
 ///   output-shaping instruction — the only spend the benchmark factor may be projected on.
-fn cost_estimate(models: &[ModelRow]) -> Option<Cost> {
+pub fn cost_estimate(models: &[ModelRow]) -> Option<Cost> {
     let mut cost = Cost {
         saved: 0.0,
         spend: 0.0,
+        net_spend: 0.0,
         out_spend: 0.0,
         net_saved: 0.0,
         out_spend_shaped: 0.0,
@@ -896,6 +1000,10 @@ fn cost_estimate(models: &[ModelRow]) -> Option<Cost> {
                 + m.cache_read as f64 * read_mult)
                 / 1_000_000.0
                 * input_price;
+            // What was really paid for this model: cache-discounted input + measured output.
+            cost.net_spend += net_bill + out;
+            // The .min(0.95) clamp is load-bearing: it bounds the `1 - pct` denominator below
+            // away from zero (>= 0.05), so a 100%-compressed model can't produce Infinity here.
             let pct = if m.input_before > 0 {
                 (delta / m.input_before as f64).min(0.95)
             } else {
@@ -918,6 +1026,104 @@ fn cost_estimate(models: &[ModelRow]) -> Option<Cost> {
         }
     }
     matched.then_some(cost)
+}
+
+/// Assemble the breakdown TUI's Overview view-model from the ledger. The `status` closure builds
+/// the health line from the single summary scan plus whether there's traffic, so the binary can
+/// supply the live daemon-derived status and the SVG exporter a forced-healthy one — without
+/// either re-deriving the (subtle) numeric fields. The ledger is scanned once for the summary
+/// and once for `by_model`. `sessions` is filled later by the caller's single `sessions()` scan.
+#[cfg(feature = "breakdown")]
+pub fn overview_data(
+    tracker: &Tracker,
+    status: impl FnOnce(&crate::tracking::Summary, bool) -> crate::breakdown::app::StatusLine,
+) -> crate::breakdown::app::OverviewData {
+    use crate::breakdown::app::OverviewData;
+    use crate::tracking::Period;
+
+    let summary = tracker.summary().unwrap_or_default();
+    let has_traffic = summary.events > 0;
+    let model_rows = tracker.by_model().unwrap_or_default();
+    let models = model_views_from(&model_rows);
+    let cost = cost_estimate(&model_rows);
+    let status = status(&summary, has_traffic);
+
+    // One honest basis: cache-discounted bill and the real saving off it, so
+    // would_have − paid == saved and the savers reconcile to it.
+    let paid_usd = cost.as_ref().map(|c| c.net_spend);
+    let saved_usd = cost.as_ref().map(|c| c.net_saved);
+    let would_have_usd = match (paid_usd, saved_usd) {
+        (Some(p), Some(s)) => Some(p + s),
+        _ => None,
+    };
+
+    // Savings fraction over the compressible (non-frozen) surface — the honest basis.
+    let new_before = summary.metered_input_before - summary.frozen_input_tokens;
+    let new_after = summary.metered_input_after - summary.frozen_input_tokens;
+    let pct_less = if summary.frozen_input_tokens > 0 && new_before > 0 {
+        (new_before - new_after).max(0) as f64 / new_before as f64
+    } else if summary.input_before > 0 {
+        summary.saved() as f64 / summary.input_before as f64
+    } else {
+        0.0
+    };
+
+    // Daily $ trend: scale the daily token-savings series by the blended $/token rate.
+    let blend = match cost.as_ref() {
+        Some(c) if summary.saved() > 0 => c.net_saved / summary.saved() as f64,
+        _ => 0.0,
+    };
+    let trend_daily_usd: Vec<f64> = tracker
+        .by_period(Period::Day)
+        .unwrap_or_default()
+        .iter()
+        .rev()
+        .take(7)
+        .rev()
+        .map(|r| (r.input_before - r.input_after).max(0) as f64 * blend)
+        .collect();
+
+    // Biggest savers: priced models by $ saved, scaled to the net-of-cache basis.
+    let net_ratio = cost
+        .as_ref()
+        .map(|c| {
+            if c.saved > 0.0 {
+                c.net_saved / c.saved
+            } else {
+                0.0
+            }
+        })
+        .unwrap_or(0.0);
+    let mut savers: Vec<(String, f64)> = models
+        .iter()
+        .filter_map(|m| m.cost_saved.map(|s| (m.name.clone(), s * net_ratio)))
+        .filter(|(_, s)| *s > 0.0)
+        .collect();
+    savers.sort_by(|a, b| b.1.total_cmp(&a.1));
+    savers.truncate(8);
+
+    OverviewData {
+        status,
+        paid_usd,
+        would_have_usd,
+        saved_usd,
+        saved_today_usd: today_saved_usd(tracker).filter(|t| *t >= 0.005),
+        pct_less,
+        added_ms: summary.avg_compress_micros.map(|us| us / 1000.0),
+        requests: summary.events,
+        trend_daily_usd,
+        savers,
+        input_before: summary.input_before,
+        input_after: summary.input_after,
+        output_billed: summary.output_after,
+        // The A/B-benchmark output-reduction factor; shown only in the expert strip, labeled "(est)".
+        output_est_pct: BENCH_OUTPUT_REDUCTION * 100.0,
+        has_traffic,
+        approximate: summary.any_approximate,
+        // Filled by App::reload from the single sessions() scan it already runs.
+        sessions: 0,
+        update_available: crate::update::check(false),
+    }
 }
 
 /// Per-1M-token `(input, output)` price for a model: the `llm_providers` registry first,
@@ -978,6 +1184,7 @@ mod tests {
         Cost {
             saved: 10.0,
             spend: 10.0,
+            net_spend: 0.0,
             out_spend: 0.0,
             net_saved: 10.0,
             live_saved: 10.0,
@@ -986,10 +1193,69 @@ mod tests {
     }
 
     #[test]
+    fn model_lines_group_cached_and_uncached() {
+        let mv = |name: &str, cached: bool| ModelView {
+            name: name.into(),
+            events: 10,
+            saved_pct: 50.0,
+            cost_saved: Some(1.0),
+            spend: None,
+            out_spend: None,
+            cached,
+            new_pct: None,
+        };
+        // Both kinds present → a header row per group, un-cached first.
+        let lines = model_lines(&[mv("a", false), mv("b", true)]);
+        assert!(
+            lines
+                .iter()
+                .any(|l| l.is_header && l.label == "fresh context")
+        );
+        assert!(
+            lines
+                .iter()
+                .any(|l| l.is_header && l.label == "reused context")
+        );
+        assert_eq!(lines.iter().filter(|l| !l.is_header).count(), 2);
+        // One kind only → no group headers.
+        assert!(model_lines(&[mv("a", false)]).iter().all(|l| !l.is_header));
+    }
+
+    #[test]
+    fn cache_toggle_switches_input_axis_basis() {
+        // 1M input, 900k of it a frozen cached prefix; 67k trimmed off the 100k compressible
+        // surface. Cache-excluded reads 67% (of what we can touch); cache-included dilutes it
+        // to 7% (of the whole prompt).
+        let mut s = summ();
+        s.input_before = 1_000_000;
+        s.input_after = 933_000;
+        s.frozen_input_tokens = 900_000;
+        s.metered_input_before = 1_000_000;
+        s.metered_input_after = 933_000;
+        let c = priced();
+        let excluded = snapshot(false, None, &s, &[], Some(&c), None, &[], false, false);
+        assert!(excluded.contains("(cache excluded)"));
+        assert!(excluded.contains("-67%"), "cache-excluded axis: {excluded}");
+        let included = snapshot(false, None, &s, &[], Some(&c), None, &[], true, false);
+        assert!(included.contains("(all input · cache)"));
+        assert!(included.contains("-7%"), "cache-included axis: {included}");
+    }
+
+    #[test]
     fn trend_section_renders_sparkline_and_direction() {
         let c = priced();
         // Rising series → ▲ up, sparkline scaled to the series max (0 → ▁, max → █).
-        let up = snapshot(false, None, &summ(), &[], Some(&c), None, &[0, 20, 80]);
+        let up = snapshot(
+            false,
+            None,
+            &summ(),
+            &[],
+            Some(&c),
+            None,
+            &[0, 20, 80],
+            false,
+            false,
+        );
         assert!(up.contains("7-DAY TREND"));
         assert!(
             up.contains('▁') && up.contains('█'),
@@ -998,13 +1264,33 @@ mod tests {
         assert!(up.contains("peak 80") && up.contains("last 80"));
         assert!(up.contains('▲') && up.contains("up"), "rising → up: {up}");
         // Falling series → ▼ down.
-        let down = snapshot(false, None, &summ(), &[], Some(&c), None, &[80, 10]);
+        let down = snapshot(
+            false,
+            None,
+            &summ(),
+            &[],
+            Some(&c),
+            None,
+            &[80, 10],
+            false,
+            false,
+        );
         assert!(
             down.contains('▼') && down.contains("down"),
             "falling → down: {down}"
         );
         // Fewer than two buckets → the whole section is hidden.
-        let one = snapshot(false, None, &summ(), &[], Some(&c), None, &[5]);
+        let one = snapshot(
+            false,
+            None,
+            &summ(),
+            &[],
+            Some(&c),
+            None,
+            &[5],
+            false,
+            false,
+        );
         assert!(
             !one.contains("7-DAY TREND"),
             "single bucket hides trend: {one}"
@@ -1023,7 +1309,17 @@ mod tests {
             cached: false,
             new_pct: None,
         }];
-        let out = snapshot(false, None, &summ(), &models, Some(&priced()), None, &[]);
+        let out = snapshot(
+            false,
+            None,
+            &summ(),
+            &models,
+            Some(&priced()),
+            None,
+            &[],
+            false,
+            false,
+        );
         assert!(
             out.contains("mystery-model") && out.contains('—'),
             "unpriced $ saved shows a dash: {out}"
@@ -1044,6 +1340,7 @@ mod tests {
         let cost = Cost {
             saved: 12.47,
             spend: 9.0,
+            net_spend: 0.0,
             out_spend: 3.0,
             net_saved: 12.47, // no cache discount → net line hidden
             live_saved: 12.47,
@@ -1059,7 +1356,17 @@ mod tests {
             cached: false,
             new_pct: None,
         }];
-        let out = snapshot(false, None, &summ(), &models, Some(&cost), None, &[]);
+        let out = snapshot(
+            false,
+            None,
+            &summ(),
+            &models,
+            Some(&cost),
+            None,
+            &[],
+            false,
+            false,
+        );
         // Headline shows the MEASURED figures (tokens trimmed + real-bill $), not a
         // projection that assumes shaping.
         assert!(
@@ -1079,7 +1386,7 @@ mod tests {
         // The output projection is surfaced separately and labeled as an estimate, never
         // baked into the headline dollar number.
         assert!(
-            out.contains("if output is shaped") || out.contains("if output shaped"),
+            out.contains("(estimate)"),
             "output projection clearly labeled as estimate"
         );
         assert!(out.contains("ms/req"), "added-latency line");
@@ -1093,12 +1400,23 @@ mod tests {
         let cost = Cost {
             saved: 10.0,
             spend: 10.0,
+            net_spend: 0.0,
             out_spend: 5.0,
             net_saved: 10.0,
             live_saved: 10.0,
             out_spend_shaped: 5.0,
         };
-        let out = snapshot(false, None, &summ(), &[], Some(&cost), None, &[]);
+        let out = snapshot(
+            false,
+            None,
+            &summ(),
+            &[],
+            Some(&cost),
+            None,
+            &[],
+            false,
+            false,
+        );
         assert!(
             out.contains("$10.00 off your real bill"),
             "headline = measured net saving"
@@ -1119,6 +1437,7 @@ mod tests {
         let c = Cost {
             saved: 1.0,
             spend: 1.0,
+            net_spend: 0.0,
             out_spend: 0.27,
             net_saved: 1.0,
             live_saved: 1.0,
@@ -1136,13 +1455,14 @@ mod tests {
         let c = Cost {
             saved: 10.0,
             spend: 10.0,
+            net_spend: 0.0,
             out_spend: 5.0,
             net_saved: 10.0,
             live_saved: 10.0,
             out_spend_shaped: 0.0,
         };
         assert!((c.projected_saved() - c.saved).abs() < 1e-9);
-        let out = snapshot(false, None, &summ(), &[], Some(&c), None, &[]);
+        let out = snapshot(false, None, &summ(), &[], Some(&c), None, &[], false, false);
         // No footnote either way: the output axis' "(est · if output shaped)" tag carries
         // the caveat; a dedicated line only appears when the projection is ≥ $1.
         assert!(!out.contains("more saved by output shaping"));
@@ -1156,12 +1476,13 @@ mod tests {
         let c = Cost {
             saved: 100.0,
             spend: 50.0,
+            net_spend: 0.0,
             out_spend: 5.0,
             net_saved: 25.0,
             live_saved: 130.0,
             out_spend_shaped: 0.0,
         };
-        let out = snapshot(false, None, &summ(), &[], Some(&c), None, &[]);
+        let out = snapshot(false, None, &summ(), &[], Some(&c), None, &[], false, false);
         assert!(
             out.contains("$25.00 off your real bill"),
             "hero is the measured real-bill figure: {out}"
@@ -1183,12 +1504,13 @@ mod tests {
         let c = Cost {
             saved: 100.0,
             spend: 50.0,
+            net_spend: 0.0,
             out_spend: 5.0,
             net_saved: 25.0,
             out_spend_shaped: 0.0,
             live_saved: 130.0,
         };
-        let out = snapshot(false, None, &s, &[], Some(&c), None, &[]);
+        let out = snapshot(false, None, &s, &[], Some(&c), None, &[], false, false);
         assert!(
             out.contains("$25.00 off your real bill"),
             "hero is the measured real-bill figure: {out}"
@@ -1207,14 +1529,24 @@ mod tests {
         );
 
         // No metered rows → fall back to the all-input axis (pre-meter ledgers unchanged).
-        let out = snapshot(false, None, &summ(), &[], Some(&c), None, &[]);
+        let out = snapshot(false, None, &summ(), &[], Some(&c), None, &[], false, false);
         assert!(!out.contains("cache excluded"));
         assert!(out.contains("2.1M ─✂─▶ 1.2M"), "fallback axis: {out}");
     }
 
     #[test]
     fn snapshot_empty_ledger_guides_user() {
-        let out = snapshot(false, None, &Summary::default(), &[], None, None, &[]);
+        let out = snapshot(
+            false,
+            None,
+            &Summary::default(),
+            &[],
+            None,
+            None,
+            &[],
+            false,
+            false,
+        );
         assert!(out.contains("no activity yet"));
     }
 
@@ -1480,6 +1812,8 @@ mod tests {
             None,
             None,
             &[],
+            false,
+            false,
         );
         assert!(out.contains("nothing routes through it"));
 
@@ -1492,6 +1826,8 @@ mod tests {
             None,
             None,
             &[],
+            false,
+            false,
         );
         assert!(out.contains("waiting for the first request"));
 
@@ -1501,7 +1837,17 @@ mod tests {
             env_port: None,
             ..dv()
         };
-        let out = snapshot(false, Some(&off), &Summary::default(), &[], None, None, &[]);
+        let out = snapshot(
+            false,
+            Some(&off),
+            &Summary::default(),
+            &[],
+            None,
+            None,
+            &[],
+            false,
+            false,
+        );
         assert!(out.contains("no activity yet"));
     }
 
@@ -1510,17 +1856,48 @@ mod tests {
         let cost = Cost {
             saved: 100.0,
             spend: 50.0,
+            net_spend: 0.0,
             out_spend: 0.0,
             net_saved: 100.0,
             live_saved: 100.0,
             out_spend_shaped: 0.0,
         };
-        let out = snapshot(false, None, &summ(), &[], Some(&cost), Some(1.84), &[]);
+        let out = snapshot(
+            false,
+            None,
+            &summ(),
+            &[],
+            Some(&cost),
+            Some(1.84),
+            &[],
+            false,
+            false,
+        );
         assert!(out.contains("$1.84 saved today"));
         // A ~zero today figure is hidden — an idle proxy must not print a "today" delta.
-        let out = snapshot(false, None, &summ(), &[], Some(&cost), Some(0.0), &[]);
+        let out = snapshot(
+            false,
+            None,
+            &summ(),
+            &[],
+            Some(&cost),
+            Some(0.0),
+            &[],
+            false,
+            false,
+        );
         assert!(!out.contains("saved today"));
-        let out = snapshot(false, None, &summ(), &[], Some(&cost), None, &[]);
+        let out = snapshot(
+            false,
+            None,
+            &summ(),
+            &[],
+            Some(&cost),
+            None,
+            &[],
+            false,
+            false,
+        );
         assert!(!out.contains("saved today"));
     }
 
