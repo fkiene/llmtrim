@@ -1716,7 +1716,12 @@ fn daemon_view(summary: &llmtrim::tracking::Summary) -> monitor::DaemonView {
     }
 }
 
-fn render_snapshot(tracker: &Tracker, color: bool) -> Result<(String, monitor::Health)> {
+fn render_snapshot(
+    tracker: &Tracker,
+    color: bool,
+    cache_included: bool,
+    split_marker: bool,
+) -> Result<(String, monitor::Health)> {
     let summary = tracker.summary()?;
     let models = monitor::model_views(tracker)?;
     let cost = monitor::monitor_cost(tracker);
@@ -1740,6 +1745,8 @@ fn render_snapshot(tracker: &Tracker, color: bool) -> Result<(String, monitor::H
         cost.as_ref(),
         monitor::today_saved_usd(tracker),
         &trend,
+        cache_included,
+        split_marker,
     );
     // Passive, cached (≤24h), opt-out update notice (LLMTRIM_NO_UPDATE_CHECK to disable).
     if let Some(v) = llmtrim::update::check(false) {
@@ -1749,6 +1756,62 @@ fn render_snapshot(tracker: &Tracker, color: bool) -> Result<(String, monitor::H
         ));
     }
     Ok((out, health))
+}
+
+/// Build the structured data the breakdown TUI's native Overview renders. Re-uses the same
+/// ledger view-models as `render_snapshot`, mapped into plain-language fields.
+#[cfg(feature = "breakdown")]
+fn overview_data(tracker: &Tracker) -> llmtrim::breakdown::app::OverviewData {
+    use llmtrim::breakdown::app::{StatusKind, StatusLine};
+    // The numeric derivation lives in monitor::overview_data (shared with the SVG exporter so the
+    // two can't drift); here we only supply the live, daemon-derived health line.
+    monitor::overview_data(tracker, |summary, has_traffic| {
+        let daemon = daemon_view(summary);
+        // Spoken health: only the dangerous / actionable states reveal a fix command.
+        let version_stale = daemon
+            .version
+            .as_deref()
+            .is_some_and(|v| v != daemon.binary_version);
+        if daemon.running && version_stale {
+            StatusLine {
+                kind: StatusKind::Degraded,
+                text: "llmtrim needs a quick restart to update".into(),
+                fix: Some("llmtrim restart".into()),
+                uninstall: None,
+            }
+        } else if daemon.running {
+            let text = match daemon.last_request {
+                Some(ago) => format!("llmtrim is on and working · last request {ago}"),
+                None => "llmtrim is on and ready · waiting for your first request".into(),
+            };
+            StatusLine {
+                kind: if has_traffic {
+                    StatusKind::Working
+                } else {
+                    StatusKind::Ready
+                },
+                text,
+                fix: None,
+                uninstall: None,
+            }
+        } else if daemon.env_port.is_some() {
+            StatusLine {
+                kind: StatusKind::Off,
+                text: "llmtrim is OFF — your AI tools can't reach the API right now".into(),
+                fix: Some("llmtrim start".into()),
+                uninstall: Some("llmtrim uninstall".into()),
+            }
+        } else {
+            // Not running and not wired: never set up (or cleanly removed) — `start` alone won't
+            // route traffic without the env, so point at `setup`.
+            StatusLine {
+                kind: StatusKind::Degraded,
+                text: "llmtrim is not set up — your AI traffic isn't routed through it".into(),
+                fix: Some("llmtrim setup".into()),
+                uninstall: None,
+            }
+        }
+    })
 }
 
 /// Restores the normal screen buffer when the watch loop unwinds (error/broken pipe).
@@ -1795,7 +1858,7 @@ fn run_watch(tracker: &Tracker, interval: u64) -> Result<()> {
     let mut frame_n: usize = 0;
     loop {
         let summary = tracker.summary()?;
-        let mut body = render_snapshot(tracker, color)?.0;
+        let mut body = render_snapshot(tracker, color, false, false)?.0;
         // Live throughput this interval, folded into the status bar below — only when traffic
         // actually flowed (a perpetual "+0/s" on an idle proxy reads like fake data), and
         // humanised to match the rest of the dashboard.
@@ -1874,6 +1937,51 @@ fn run_watch(tracker: &Tracker, interval: u64) -> Result<()> {
     }
 }
 
+/// Merge the per-source breakdown (every session + corpus-wide per-source cost) into a
+/// `status --json` string. No-op when the breakdown feature is off or no data exists yet,
+/// so the JSON shape is a superset of the prior one (additive `breakdown` key).
+fn merge_breakdown_json(s: String) -> String {
+    #[cfg(feature = "breakdown")]
+    if let Some(bd) = llmtrim::breakdown::export::breakdown_json() {
+        // A parse failure here means a regression upstream in the status JSON — surface it
+        // rather than silently dropping the breakdown section.
+        let mut v: serde_json::Value = match serde_json::from_str(&s) {
+            Ok(v) => v,
+            Err(e) => {
+                eprintln!("llmtrim: could not parse status json for breakdown merge: {e}");
+                return s;
+            }
+        };
+        if let Some(obj) = v.as_object_mut() {
+            obj.insert("breakdown".to_string(), bd);
+            match serde_json::to_string_pretty(&v) {
+                Ok(out) => return out,
+                Err(e) => eprintln!("llmtrim: could not merge breakdown into json: {e}"),
+            }
+        } else {
+            eprintln!("llmtrim: status json is not an object; skipped breakdown merge");
+        }
+    }
+    s
+}
+
+/// Append the per-session breakdown table after the time-series CSV (feature-gated).
+fn print_sessions_csv() {
+    #[cfg(feature = "breakdown")]
+    if let Some(sc) = llmtrim::breakdown::export::sessions_csv() {
+        println!();
+        print!("{sc}");
+    }
+}
+
+/// Append the "top sources by cost" block after a text period report (feature-gated).
+fn print_top_sources() {
+    #[cfg(feature = "breakdown")]
+    if let Ok(block) = llmtrim::breakdown::export::top_sources_report(ui::color_stdout(), 10) {
+        print!("{block}");
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn run_monitor(
     watch: bool,
@@ -1902,25 +2010,25 @@ fn run_monitor(
         let rows = tracker.by_period(period)?;
         if csv {
             print!("{}", monitor::export_csv(&rows));
+            print_sessions_csv();
         } else if json {
             let s = tracker.summary()?;
             let models = monitor::model_views(&tracker)?;
             let daemon = daemon_view(&s);
-            println!(
-                "{}",
-                monitor::export_json(
-                    &s,
-                    &models,
-                    monitor::monitor_cost(&tracker).as_ref(),
-                    &rows,
-                    Some(&daemon)
-                )
+            let out = monitor::export_json(
+                &s,
+                &models,
+                monitor::monitor_cost(&tracker).as_ref(),
+                &rows,
+                Some(&daemon),
             );
+            println!("{}", merge_breakdown_json(out));
         } else {
             print!(
                 "{}",
                 monitor::period_report(ui::color_stdout(), period.label(), &rows)
             );
+            print_top_sources();
         }
         return Ok(());
     }
@@ -1930,17 +2038,62 @@ fn run_monitor(
         if csv {
             let rows = tracker.by_period(Period::Day)?;
             print!("{}", monitor::export_csv(&rows));
+            print_sessions_csv();
         } else {
             let daemon = daemon_view(&tracker.summary()?);
-            println!("{}", monitor::stats_json(&tracker, Some(&daemon))?);
+            println!(
+                "{}",
+                merge_breakdown_json(monitor::stats_json(&tracker, Some(&daemon))?)
+            );
         }
         return Ok(());
+    }
+
+    // On a TTY, the interactive view (watch or default) opens the cost-breakdown TUI:
+    // a tabbed Overview / Sessions / Detail explorer. Piped output and the export modes
+    // above keep the plain snapshot, so scripts and `| less` are unaffected.
+    #[cfg(feature = "breakdown")]
+    {
+        use std::io::IsTerminal as _;
+        if std::io::stdout().is_terminal() {
+            // The TUI uses its own read-only connections (below); release the outer read-write
+            // handle so we don't hold an idle writer open for the whole interactive session.
+            drop(tracker);
+            // Open the ledger ONCE and reuse it every refresh (WAL lets these long-lived
+            // readers see the daemon's writes). The snapshot closure runs on a background
+            // thread, so it owns its own connections and the UI never touches SQLite on a timer.
+            let tracker = llmtrim::tracking::db_path()
+                .ok()
+                .as_deref()
+                .and_then(|p| Tracker::open_reader_at(p).ok());
+            let sessions_db = llmtrim::breakdown::db::BreakdownDb::open().ok();
+            let snapshot = move || {
+                let ov = tracker.as_ref().map(overview_data).unwrap_or_default();
+                let rows = sessions_db
+                    .as_ref()
+                    .and_then(|d| d.sessions().ok())
+                    .unwrap_or_default();
+                (ov, rows)
+            };
+            // The TUI may queue a follow-up command (d = doctor/repair, u = update); run it on
+            // the normal screen after the alt-screen tears down.
+            use llmtrim::breakdown::app::PostAction;
+            match llmtrim::breakdown::app::run(interval.max(2), snapshot)? {
+                PostAction::Doctor => {
+                    let report = llmtrim::doctor::gather();
+                    print!("{}", llmtrim::doctor::render(ui::color_stdout(), &report));
+                }
+                PostAction::Update => llmtrim::update::run()?,
+                PostAction::None => {}
+            }
+            return Ok(());
+        }
     }
 
     if watch {
         run_watch(&tracker, interval.max(1))
     } else {
-        let (out, health) = render_snapshot(&tracker, ui::color_stdout())?;
+        let (out, health) = render_snapshot(&tracker, ui::color_stdout(), false, false)?;
         print!("{out}");
         // Propagate health as the exit code (0 healthy / 1 stopped / 2 degraded) so
         // `llmtrim status && …` means "llmtrim is actually working".
