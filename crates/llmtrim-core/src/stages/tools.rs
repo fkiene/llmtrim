@@ -12,9 +12,11 @@
 //! from the `stop-words` crate, for the language `whatlang` detects in the request —
 //! not a hardcoded English list.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
+use std::sync::RwLock;
 
 use anyhow::Result;
+use once_cell::sync::Lazy;
 use serde_json::Value;
 use unicode_segmentation::UnicodeSegmentation;
 
@@ -129,7 +131,7 @@ pub(crate) fn detect_lang(sample: &str) -> Option<whatlang::Lang> {
 /// `stop-words` crate), falling back to English when detection is unreliable or the
 /// language isn't in our supported map. The map is enum→enum glue; the word lists
 /// themselves come from the crate. Shared with Stage B sentence pruning.
-pub(crate) fn stopword_set(sample: &str) -> HashSet<&'static str> {
+pub(crate) fn stopword_set(sample: &str) -> &'static HashSet<&'static str> {
     use stop_words::LANGUAGE as L;
     use whatlang::Lang;
     // Detect on a leading slice of a large segment (see LANG_DETECT_MAX_BYTES): matches
@@ -172,7 +174,31 @@ pub(crate) fn stopword_set(sample: &str) -> HashSet<&'static str> {
         // Any other (or undetected) language falls back to English (graceful, never panics).
         _ => L::English,
     };
-    stop_words::get(language).iter().copied().collect()
+    intern_stopwords(stop_words::get(language))
+}
+
+/// Memoize the per-language `HashSet` so it is built once, not rebuilt on every segment
+/// and stage (P4). `whatlang` detection stays per call (input-dependent), but the set is
+/// keyed by the address of the crate's `&'static` word slice — stable per language — and
+/// the bounded set of results (one per supported language, ~25 max) is leaked for the
+/// process lifetime. After warmup every language is a cache hit, so the lock is a read in
+/// the common case: an `RwLock` keeps concurrent proxy requests from serializing on it.
+fn intern_stopwords(words: &'static [&'static str]) -> &'static HashSet<&'static str> {
+    static CACHE: Lazy<RwLock<HashMap<usize, &'static HashSet<&'static str>>>> =
+        Lazy::new(|| RwLock::new(HashMap::new()));
+    let key = words.as_ptr() as usize;
+    if let Some(&set) = CACHE
+        .read()
+        .expect("stopword cache lock poisoned")
+        .get(&key)
+    {
+        return set;
+    }
+    CACHE
+        .write()
+        .expect("stopword cache lock poisoned")
+        .entry(key)
+        .or_insert_with(|| Box::leak(Box::new(words.iter().copied().collect())))
 }
 
 /// Lowercased lexical tokens via the Unicode word segmenter (UAX#29) — works across
@@ -285,21 +311,21 @@ fn select_tools(req: &mut Request, provider: &dyn Provider) {
     }
     let sample_end = lower.len().min(LANG_SAMPLE_BYTES);
     let stop = stopword_set(lower.get(..sample_end).unwrap_or(&lower));
-    let query = content_words(&lower, &stop);
+    let query = content_words(&lower, stop);
     if query.is_empty() {
         return;
     }
 
     // Per-tool fielded documents (aligned to `descriptors` / the tools array order). Property
     // names come from the raw schema; provider-agnostic, like `tools_used_in_history`.
-    let param_fields = tool_param_words(req, &stop);
+    let param_fields = tool_param_words(req, stop);
     let docs: Vec<ToolDoc> = descriptors
         .iter()
         .enumerate()
         .map(|(i, (name, desc))| ToolDoc {
-            name: bag(&content_words(&name.to_lowercase(), &stop)),
+            name: bag(&content_words(&name.to_lowercase(), stop)),
             params: param_fields.get(i).cloned().unwrap_or_default(),
-            desc: bag(&content_words(&desc.to_lowercase(), &stop)),
+            desc: bag(&content_words(&desc.to_lowercase(), stop)),
         })
         .collect();
     let scores = bm25f_scores(&docs, &query);

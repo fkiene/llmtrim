@@ -218,7 +218,7 @@ fn rebuild_sentence(text: &str, query: &[String], keep_ratio: f64) -> Option<Str
     }
     // Stopwords for the context's own language (whatlang-detected).
     let stops = stopword_set(text);
-    let kept = prune_sentences(&chunks, query, &stops, keep_ratio);
+    let kept = prune_sentences(&chunks, query, stops, keep_ratio);
     if kept.len() >= chunks.len() {
         return None; // nothing dropped
     }
@@ -1501,7 +1501,7 @@ mod tests {
         let query = vec!["vault".to_string(), "code".to_string()];
         let stops = stopword_set("the vault is here and the code is there for a test");
         // Loose cap: keep relevant + neighbours, drop only the zero-overlap filler (#2).
-        let kept = prune_sentences(&chunks, &query, &stops, 0.9);
+        let kept = prune_sentences(&chunks, &query, stops, 0.9);
         assert!(
             kept.contains(&0) && kept.contains(&4),
             "relevant sentences kept"
@@ -1512,7 +1512,7 @@ mod tests {
         assert_eq!(kept, sorted, "kept in original order");
 
         // Aggressive cap: drop the neighbours too, but never the answer (#0/#4).
-        let tight = prune_sentences(&chunks, &query, &stops, 0.4);
+        let tight = prune_sentences(&chunks, &query, stops, 0.4);
         assert!(
             tight.contains(&0) && tight.contains(&4),
             "answer + boundaries protected under aggressive cap"
@@ -1875,7 +1875,7 @@ mod tests {
         let chunks: Vec<String> = tap_log().lines().map(String::from).collect();
         let query = lex_words("run the tests");
         let stops = stopword_set(&tap_log());
-        let kept = prune_sentences(&chunks, &query, &stops, 0.1);
+        let kept = prune_sentences(&chunks, &query, stops, 0.1);
         let joined: String = kept.iter().map(|&i| chunks[i].as_str()).collect();
         assert!(
             joined.contains("not ok 19"),
