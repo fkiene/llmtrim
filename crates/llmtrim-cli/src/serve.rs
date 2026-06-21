@@ -283,6 +283,9 @@ mod imp {
         /// Frozen (cache-controlled) prefix tokens the stages skipped — the new-content
         /// meter for the ledger.
         frozen_input_tokens: Option<i64>,
+        /// Per-source attribution of the forwarded request (breakdown view). `None` on bodies we
+        /// couldn't attribute; never affects proxying.
+        breakdown: Option<BreakdownPending>,
     }
 
     /// A verbatim copy of the client's request, for replay-on-error.
@@ -365,6 +368,188 @@ mod imp {
         }
     }
 
+    /// Per-source attribution attached to a `Pending` for the breakdown view: the parsed
+    /// content blocks of the forwarded request, the inferred identity, and the model's
+    /// context window. `None` on bodies we couldn't attribute (still proxied normally).
+    #[derive(Clone)]
+    struct BreakdownPending {
+        blocks: Vec<llmtrim_core::attribution::BlockAttribution>,
+        identity: llmtrim_core::attribution::RequestIdentity,
+        window: i64,
+    }
+
+    /// A completed breakdown turn (identity + frozen pricing) plus its reconciled source blocks,
+    /// sent to the ledger thread on its own channel.
+    struct BreakdownPayload {
+        turn: crate::tracking::BreakdownTurn,
+        blocks: Vec<crate::tracking::BreakdownBlock>,
+    }
+
+    /// Context window for a model id, for occupancy %:
+    /// 1M for the long-context / gpt-5 / codex tiers, 200k for the Claude family, 128k
+    /// default. `LLMTRIM_BREAKDOWN_WINDOW` overrides for unusual deployments.
+    fn window_for(model: Option<&str>) -> i64 {
+        if let Some(n) = RuntimeConfig::get().breakdown_window {
+            return n;
+        }
+        let m = model.unwrap_or("").to_ascii_lowercase();
+        if m.contains("[1m]") || m.contains("gpt-5") || m.contains("codex") {
+            1_000_000
+        } else if m.contains("claude") || m.contains("opus") || m.contains("sonnet") {
+            200_000
+        } else {
+            128_000
+        }
+    }
+
+    /// Parse a forwarded request body into its breakdown attribution (blocks + identity + window).
+    /// Best-effort: returns `None` on a non-JSON body or when no blocks were found.
+    fn attribute_for_breakdown(
+        json: &str,
+        kind: ProviderKind,
+        model: Option<&str>,
+    ) -> Option<BreakdownPending> {
+        let body: serde_json::Value = serde_json::from_str(json).ok()?;
+        let counter = llmtrim_core::tokenizer::counter_for(kind, model).ok()?;
+        let blocks = llmtrim_core::attribution::attribute(&body, kind, counter.as_ref());
+        if blocks.is_empty() {
+            return None;
+        }
+        let identity = llmtrim_core::attribution::extract_identity(&body, kind);
+        Some(BreakdownPending {
+            blocks,
+            identity,
+            window: window_for(model),
+        })
+    }
+
+    /// Reconcile the provider's real usage onto the attributed blocks and build the breakdown
+    /// payload. Returns `None` when the request carried no attribution.
+    ///
+    /// Input billing is distributed by **calibration + prefix tape**: block token counts are
+    /// scaled to the provider's real input total, then walked in wire order assigning the
+    /// cached-read prefix first, the cache-write portion next, and the fresh tail last — the
+    /// cache boundary is positional, so this is more faithful than a flat proportion. Output
+    /// usage becomes a single synthetic `Output` block (responses aren't parsed per block).
+    fn build_breakdown(p: &Pending, usage: &ResponseUsage) -> Option<BreakdownPayload> {
+        let xp = p.breakdown.as_ref()?;
+        let provider = p.provider.as_str();
+        let rates = crate::monitor::rates_for(provider, p.model.as_deref());
+
+        let fresh = usage.fresh_input.unwrap_or(0).max(0) as f64;
+        let cache_read = usage.cache_read.unwrap_or(0).max(0) as f64;
+        let cache_write = usage.cache_write.unwrap_or(0).max(0) as f64;
+        let output = usage.output_after.unwrap_or(0).max(0) as f64;
+        let total_in = fresh + cache_read + cache_write;
+
+        let raw_sum: f64 = xp.blocks.iter().map(|b| b.tokens as f64).sum();
+        let scale = if raw_sum > 0.0 && total_in > 0.0 {
+            total_in / raw_sum
+        } else {
+            // No usage (e.g. streaming with no usage frame): keep raw counts, zero dollars.
+            1.0
+        };
+
+        let mut remaining_read = cache_read;
+        let mut remaining_write = cache_write;
+        let mut out_blocks = Vec::with_capacity(xp.blocks.len() + 1);
+        for b in &xp.blocks {
+            let cal = b.tokens as f64 * scale;
+            let mut amt = cal;
+            let r = amt.min(remaining_read);
+            remaining_read -= r;
+            amt -= r;
+            let w = amt.min(remaining_write);
+            remaining_write -= w;
+            amt -= w;
+            let f = amt; // remainder is fresh input
+            let (group, label) = b.category();
+            out_blocks.push(crate::tracking::BreakdownBlock {
+                zone: b.zone.as_str().to_string(),
+                section: b.section.as_str().to_string(),
+                bucket: b.bucket.as_str().to_string(),
+                group_label: group.to_string(),
+                label: label.to_string(),
+                mcp_server: b.mcp_server.clone(),
+                tool_name: b.tool_name.clone(),
+                role: b.role.map(|r| r.as_str().to_string()),
+                msg_index: b.msg_index.map(|i| i as i64),
+                raw_tokens: b.tokens as i64,
+                fresh_tok: f,
+                cache_read_tok: r,
+                cache_write_tok: w,
+                output_tok: 0.0,
+            });
+        }
+        // Floating-point dust: the tape consumes cache_read/cache_write exactly when the
+        // calibrated block sum equals total_in, but rounding can leave a token or two
+        // unassigned. Fold any remainder into the last input block so the block splits sum
+        // back to the provider's reported usage. `out_blocks` is non-empty here (attribution
+        // only attaches when it found ≥1 block), and the output block isn't pushed yet, so
+        // `last` is always an input block.
+        if (remaining_read.abs() > f64::EPSILON || remaining_write.abs() > f64::EPSILON)
+            && let Some(last) = out_blocks.last_mut()
+        {
+            debug_assert!(
+                last.fresh_tok + 1.0 >= remaining_read + remaining_write,
+                "prefix-tape remainder exceeds last block's fresh tokens — splits would under-count"
+            );
+            last.cache_read_tok += remaining_read;
+            last.cache_write_tok += remaining_write;
+            last.fresh_tok = (last.fresh_tok - remaining_read - remaining_write).max(0.0);
+        }
+        if output > 0.0 {
+            out_blocks.push(crate::tracking::BreakdownBlock {
+                zone: "output".to_string(),
+                section: "messages".to_string(),
+                bucket: "text".to_string(),
+                group_label: "Output".to_string(),
+                label: "output".to_string(),
+                raw_tokens: output as i64,
+                output_tok: output,
+                ..Default::default()
+            });
+        }
+
+        let bill_micros = (fresh * rates.input
+            + cache_read * rates.cache_read
+            + cache_write * rates.cache_write
+            + output * rates.output)
+            .round() as i64;
+
+        let id = &xp.identity;
+        let turn = crate::tracking::BreakdownTurn {
+            session_id: id
+                .session_id
+                .clone()
+                .unwrap_or_else(|| "unknown".to_string()),
+            agent: id.agent.clone().unwrap_or_else(|| "unknown".to_string()),
+            project: id.project.clone(),
+            session_name: None,
+            provider: provider.to_string(),
+            model: p.model.clone(),
+            // The window heuristic (`window_for`) can under-shoot — it can't tell a 1M-context
+            // beta from the model id — which would make occupancy exceed 100%. The window must
+            // be at least the prompt actually sent, so clamp it to the real input size.
+            window: xp.window.max(total_in as i64).max(raw_sum as i64),
+            fresh_input: fresh as i64,
+            cache_read: cache_read as i64,
+            cache_write: cache_write as i64,
+            output_tok: output as i64,
+            input_rate: rates.input,
+            output_rate: rates.output,
+            cache_read_rate: rates.cache_read,
+            cache_write_rate: rates.cache_write,
+            bill_micros,
+            input_before: p.input_before,
+            input_after: p.input_after,
+        };
+        Some(BreakdownPayload {
+            turn,
+            blocks: out_blocks,
+        })
+    }
+
     /// Expand the model's shorthand answer back to normal output using the request's plan,
     /// rewrite it into the response JSON, and record the (shorthand-billed) output tokens.
     /// Returns the rewritten body, or the original on any parse failure.
@@ -425,6 +610,9 @@ mod imp {
     struct Interceptor {
         config: Arc<DenseConfig>,
         ledger: Sender<Record>,
+        /// Companion channel for breakdown per-source attribution payloads, drained by the same
+        /// ledger thread. Separate from `ledger` so the `compressions` write path is untouched.
+        breakdown_ledger: Sender<BreakdownPayload>,
         /// Domains the live CA covers (its sidecar set). We intercept only hosts under these, so
         /// a stale CA — one generated before a host was added — blind-tunnels the new host rather
         /// than forging a cert its own name-constraints reject. Degrade safely, never break.
@@ -446,6 +634,9 @@ mod imp {
             // A compressed request whose response we never saw (connection dropped): still
             // record the input savings, with output unknown.
             if let Some(p) = self.pending.take() {
+                if let Some(x) = build_breakdown(&p, &ResponseUsage::default()) {
+                    let _ = self.breakdown_ledger.send(x);
+                }
                 let _ = self.ledger.send(record_from(p, ResponseUsage::default()));
             }
         }
@@ -626,6 +817,7 @@ mod imp {
                 acc: acc.clone(),
                 pending: Some(pending),
                 ledger: self.ledger.clone(),
+                breakdown_ledger: self.breakdown_ledger.clone(),
             };
             use hudsucker::futures::StreamExt;
             let stream = BodyStream::new(body).filter_map(move |frame| {
@@ -696,6 +888,8 @@ mod imp {
                 // The forwarded original carries no shaping instruction.
                 output_shaped: false,
                 frozen_input_tokens: Some(result.frozen_input_tokens.0 as i64),
+                // Passthrough forwards the original verbatim — attribute that body.
+                breakdown: attribute_for_breakdown(text, kind, result.model.as_deref()),
             };
             return Some((text.to_string(), pending));
         }
@@ -720,6 +914,9 @@ mod imp {
             original: None,
             output_shaped: result.output_shaped,
             frozen_input_tokens: Some(result.frozen_input_tokens.0 as i64),
+            // Attribute the compressed body we actually forward — its tokens are what the
+            // provider bills, so it matches the usage we reconcile against.
+            breakdown: attribute_for_breakdown(&result.request_json, kind, result.model.as_deref()),
         };
         capture_pair(text, &result.request_json, &pending, &result.stages);
         Some((result.request_json, pending))
@@ -903,6 +1100,7 @@ mod imp {
         acc: Arc<Mutex<Vec<u8>>>,
         pending: Option<Pending>,
         ledger: Sender<Record>,
+        breakdown_ledger: Sender<BreakdownPayload>,
     }
 
     impl Drop for Finalize {
@@ -931,15 +1129,16 @@ mod imp {
             // Full-rate + cache-write input tokens — with `cache_read` these reconstruct the
             // request's real input bill, which the dashboard's net-$ figures are priced from.
             let (fresh_input, cache_write) = extract_input_usage(p.provider, &buf);
-            let _ = self.ledger.send(record_from(
-                p,
-                ResponseUsage {
-                    output_after,
-                    cache_read,
-                    fresh_input,
-                    cache_write,
-                },
-            ));
+            let usage = ResponseUsage {
+                output_after,
+                cache_read,
+                fresh_input,
+                cache_write,
+            };
+            if let Some(x) = build_breakdown(&p, &usage) {
+                let _ = self.breakdown_ledger.send(x);
+            }
+            let _ = self.ledger.send(record_from(p, usage));
         }
     }
 
@@ -1350,6 +1549,7 @@ mod imp {
         // Ledger writes go to a dedicated thread (rusqlite isn't async); the handler just
         // sends Records over the channel.
         let (tx, rx) = std::sync::mpsc::channel::<Record>();
+        let (breakdown_tx, breakdown_rx) = std::sync::mpsc::channel::<BreakdownPayload>();
         std::thread::spawn(move || {
             if let Ok(tracker) = Tracker::open() {
                 // The daemon opens the ledger once, so the open-time prune never re-runs on
@@ -1363,6 +1563,22 @@ mod imp {
                     if since_prune >= PRUNE_EVERY {
                         since_prune = 0;
                         let _ = tracker.prune_default();
+                    }
+                }
+            }
+        });
+        // breakdown attribution writes go to their own thread + ledger handle, so a burst of
+        // per-source rows can't stall the primary `compressions` writer.
+        std::thread::spawn(move || {
+            if let Ok(tracker) = Tracker::open() {
+                const PRUNE_EVERY: u64 = 1_000;
+                let mut since_prune: u64 = 0;
+                for payload in breakdown_rx {
+                    let _ = tracker.record_breakdown(&payload.turn, &payload.blocks);
+                    since_prune += 1;
+                    if since_prune >= PRUNE_EVERY {
+                        since_prune = 0;
+                        let _ = tracker.prune_breakdown(crate::tracking::DEFAULT_MAX_ROWS);
                     }
                 }
             }
@@ -1393,6 +1609,7 @@ mod imp {
         let handler = Interceptor {
             config: Arc::new(DenseConfig::load_for_interceptor()),
             ledger: tx,
+            breakdown_ledger: breakdown_tx,
             // `ensure_ca` above just reconciled the CA + sidecar, so this is exactly what the
             // live CA can sign for.
             domains: Arc::new(covered_domains()),
@@ -2395,15 +2612,85 @@ mod imp {
             std::sync::mpsc::Receiver<crate::tracking::Record>,
         ) {
             let (tx, rx) = std::sync::mpsc::channel();
+            // The breakdown ledger is drained into a channel the tests ignore.
+            let (breakdown_tx, _breakdown_rx) = std::sync::mpsc::channel();
             let handler = Interceptor {
                 config: Arc::new(llmtrim_core::config::DenseConfig::default()),
                 ledger: tx,
+                breakdown_ledger: breakdown_tx,
                 domains: Arc::new(intercept_domains().into_iter().collect()),
                 memo: Arc::new(Memo::with_capacity(llmtrim_core::memo::DEFAULT_CAPACITY)),
                 pending: None,
                 upstream_proxy: None,
             };
             (handler, rx)
+        }
+
+        #[test]
+        fn build_breakdown_reconciles_usage_with_prefix_tape() {
+            use llmtrim_core::attribution::{
+                BlockAttribution, Bucket, RequestIdentity, Section, Zone,
+            };
+            // Three input blocks (system 100, schema 50, user text 50) → 200 raw tokens.
+            let block = |bucket: Bucket, section: Section, tok: usize| BlockAttribution {
+                zone: Zone::Input,
+                section,
+                bucket,
+                mcp_server: None,
+                tool_name: None,
+                role: None,
+                msg_index: None,
+                tokens: tok,
+            };
+            let pending = Pending {
+                provider: ProviderKind::Anthropic,
+                model: Some("claude-sonnet-4".to_string()),
+                tokenizer: "t".to_string(),
+                exact: true,
+                input_before: 200,
+                input_after: 200,
+                compress_micros: 0,
+                plan: String::new(),
+                original: None,
+                output_shaped: false,
+                frozen_input_tokens: None,
+                breakdown: Some(BreakdownPending {
+                    blocks: vec![
+                        block(Bucket::System, Section::Static, 100),
+                        block(Bucket::Schema, Section::Static, 50),
+                        block(Bucket::Text, Section::Messages, 50),
+                    ],
+                    identity: RequestIdentity {
+                        session_id: Some("s1".to_string()),
+                        agent: Some("claude-code".to_string()),
+                        project: None,
+                    },
+                    window: 200_000,
+                }),
+            };
+            // Provider billed: 120 cached read, 30 cache write, 50 fresh (sum 200), 40 output.
+            let usage = ResponseUsage {
+                output_after: Some(40),
+                cache_read: Some(120),
+                fresh_input: Some(50),
+                cache_write: Some(30),
+            };
+            let payload = build_breakdown(&pending, &usage).expect("breakdown built");
+            // One synthetic output block is appended to the three input blocks.
+            assert_eq!(payload.blocks.len(), 4);
+            // Per-split sums match the provider usage exactly (calibration is lossless here).
+            let sum = |f: fn(&crate::tracking::BreakdownBlock) -> f64| -> f64 {
+                payload.blocks.iter().map(f).sum()
+            };
+            assert!((sum(|b| b.cache_read_tok) - 120.0).abs() < 1e-6);
+            assert!((sum(|b| b.cache_write_tok) - 30.0).abs() < 1e-6);
+            assert!((sum(|b| b.fresh_tok) - 50.0).abs() < 1e-6);
+            assert!((sum(|b| b.output_tok) - 40.0).abs() < 1e-6);
+            // Prefix tape: the 100-token system block is wholly within the 120 cached prefix.
+            let sys = &payload.blocks[0];
+            assert_eq!(sys.label, "System prompt");
+            assert!((sys.cache_read_tok - 100.0).abs() < 1e-6);
+            assert_eq!(payload.turn.session_id, "s1");
         }
 
         /// Build a POST `Request<Body>` with a JSON body directed at `uri`.
@@ -2603,6 +2890,7 @@ mod imp {
                 }),
                 output_shaped: false,
                 frozen_input_tokens: None,
+                breakdown: None,
             });
 
             let bad_resp = Response::builder()
@@ -2658,6 +2946,7 @@ mod imp {
                 original: None,
                 output_shaped: false,
                 frozen_input_tokens: None,
+                breakdown: None,
             });
 
             let bad_resp = Response::builder()
@@ -2706,6 +2995,7 @@ mod imp {
                 }),
                 output_shaped: false,
                 frozen_input_tokens: None,
+                breakdown: None,
             });
 
             let unprocessable = Response::builder()
@@ -2755,6 +3045,7 @@ mod imp {
                     }),
                     output_shaped: false,
                     frozen_input_tokens: None,
+                    breakdown: None,
                 });
 
                 let resp = Response::builder()
@@ -2808,6 +3099,7 @@ mod imp {
                 original: None,
                 output_shaped: false,
                 frozen_input_tokens: None,
+                breakdown: None,
             });
 
             let sse_chunks = concat!(
@@ -2902,6 +3194,7 @@ mod imp {
                 original: None,
                 output_shaped: false,
                 frozen_input_tokens: None,
+                breakdown: None,
             });
 
             // The complete SSE payload.
@@ -3003,6 +3296,7 @@ mod imp {
                 original: None,
                 output_shaped: false,
                 frozen_input_tokens: None,
+                breakdown: None,
             });
 
             // Three chunks; the client will consume only the first then drop the body.
@@ -3077,6 +3371,7 @@ mod imp {
                 original: None,
                 output_shaped: false,
                 frozen_input_tokens: None,
+                breakdown: None,
             });
 
             // Zero-chunk stream: body ends immediately.

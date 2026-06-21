@@ -46,6 +46,60 @@ pub struct Record {
     pub frozen_input_tokens: Option<i64>,
 }
 
+/// One attributed proxy turn for the breakdown view: identity + provider-reported usage +
+/// the pricing snapshot frozen at the time of the request. Per-source dollars are
+/// derived at render from the blocks' token splits times these frozen rates, so a
+/// historical session always shows what it actually cost even after price tables move.
+#[derive(Debug, Clone, Default)]
+pub struct BreakdownTurn {
+    pub session_id: String,
+    pub agent: String,
+    pub project: Option<String>,
+    pub session_name: Option<String>,
+    pub provider: String,
+    pub model: Option<String>,
+    /// Context window of the model, for occupancy %.
+    pub window: i64,
+    pub fresh_input: i64,
+    pub cache_read: i64,
+    pub cache_write: i64,
+    pub output_tok: i64,
+    /// Frozen rates, USD per 1M tokens.
+    pub input_rate: f64,
+    pub output_rate: f64,
+    pub cache_read_rate: f64,
+    pub cache_write_rate: f64,
+    /// Frozen total bill of this turn in micro-USD (integer, drift-free for sums).
+    pub bill_micros: i64,
+    /// Input tokens before / after llmtrim's compression — the per-turn savings, summed per
+    /// session to show "how much we trimmed" alongside the spend.
+    pub input_before: i64,
+    pub input_after: i64,
+}
+
+/// One attributed source block of a turn, with the provider usage reconciled onto it.
+#[derive(Debug, Clone, Default)]
+pub struct BreakdownBlock {
+    pub zone: String,
+    pub section: String,
+    pub bucket: String,
+    /// Source group: `Static` / `Messages` / `Output`.
+    pub group_label: String,
+    /// Source category label within the group (e.g. "System prompt", "MCP tools").
+    pub label: String,
+    pub mcp_server: Option<String>,
+    pub tool_name: Option<String>,
+    pub role: Option<String>,
+    pub msg_index: Option<i64>,
+    /// Attributed block token count (pre-reconcile measure).
+    pub raw_tokens: i64,
+    /// Provider usage reconciled onto this block (sum across blocks == turn usage).
+    pub fresh_tok: f64,
+    pub cache_read_tok: f64,
+    pub cache_write_tok: f64,
+    pub output_tok: f64,
+}
+
 /// Per-provider aggregate row.
 #[derive(Debug, Clone)]
 pub struct ProviderRow {
@@ -212,6 +266,46 @@ impl Tracker {
         Ok(tracker)
     }
 
+    /// Open the ledger for a **read-only** consumer (the breakdown TUI): migrate the schema if
+    /// needed, but do NOT prune (the daemon owns retention — a reader writing a `DELETE` on the
+    /// shared WAL is pure waste), and tune the connection for repeated SELECT-only aggregate
+    /// scans. `query_only` is set after `migrate()` (which may itself write schema on a fresh or
+    /// stale DB), so it guarantees no *query-time* writes — not that the open is write-free.
+    #[cfg(any(test, feature = "breakdown"))]
+    pub fn open_reader() -> Result<Self> {
+        let path = default_db_path()?;
+        Self::open_reader_at(&path)
+    }
+
+    /// [`open_reader`] at an explicit path.
+    #[cfg(any(test, feature = "breakdown"))]
+    pub fn open_reader_at(path: &Path) -> Result<Self> {
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)
+                .with_context(|| format!("failed to create {}", parent.display()))?;
+        }
+        let conn = Connection::open(path)
+            .with_context(|| format!("failed to open ledger at {}", path.display()))?;
+        let tracker = Self { conn };
+        tracker.migrate()?;
+        // Read-side tuning; all best-effort (a missing pragma must not break the TUI).
+        let _ = tracker.conn.pragma_update(None, "temp_store", "MEMORY");
+        let _ = tracker.conn.pragma_update(None, "cache_size", -8000_i64);
+        let _ = tracker
+            .conn
+            .pragma_update(None, "mmap_size", 268_435_456_i64);
+        // Set last: from here the connection refuses query-time writes (the daemon keeps pruning).
+        let _ = tracker.conn.pragma_update(None, "query_only", "ON");
+        Ok(tracker)
+    }
+
+    /// Consume the tracker and return its raw connection. Used by the breakdown query
+    /// layer's tests to read back an in-memory ledger through one connection.
+    #[cfg(any(test, feature = "breakdown"))]
+    pub fn into_connection(self) -> Connection {
+        self.conn
+    }
+
     /// In-memory ledger (tests).
     pub fn open_in_memory() -> Result<Self> {
         let conn = Connection::open_in_memory().context("failed to open in-memory ledger")?;
@@ -248,7 +342,54 @@ impl Tracker {
                     cache_write_tokens INTEGER,
                     output_shaped INTEGER,
                     frozen_input_tokens INTEGER
-                );",
+                );
+                CREATE TABLE IF NOT EXISTS breakdown_turns (
+                    id            INTEGER PRIMARY KEY,
+                    ts            TEXT NOT NULL,
+                    session_id    TEXT NOT NULL,
+                    agent         TEXT NOT NULL,
+                    project       TEXT,
+                    session_name  TEXT,
+                    provider      TEXT NOT NULL,
+                    model         TEXT,
+                    window        INTEGER NOT NULL,
+                    fresh_input   INTEGER NOT NULL,
+                    cache_read    INTEGER NOT NULL,
+                    cache_write   INTEGER NOT NULL,
+                    output_tok    INTEGER NOT NULL,
+                    input_rate       REAL NOT NULL,
+                    output_rate      REAL NOT NULL,
+                    cache_read_rate  REAL NOT NULL,
+                    cache_write_rate REAL NOT NULL,
+                    bill_micros   INTEGER NOT NULL,
+                    input_before  INTEGER,
+                    input_after   INTEGER
+                );
+                CREATE TABLE IF NOT EXISTS breakdown_blocks (
+                    id            INTEGER PRIMARY KEY,
+                    turn_id       INTEGER NOT NULL REFERENCES breakdown_turns(id),
+                    zone          TEXT NOT NULL,
+                    section       TEXT NOT NULL,
+                    bucket        TEXT NOT NULL,
+                    group_label   TEXT NOT NULL,
+                    label         TEXT NOT NULL,
+                    mcp_server    TEXT,
+                    tool_name     TEXT,
+                    role          TEXT,
+                    msg_index     INTEGER,
+                    raw_tokens    INTEGER NOT NULL,
+                    fresh_tok        REAL NOT NULL,
+                    cache_read_tok   REAL NOT NULL,
+                    cache_write_tok  REAL NOT NULL,
+                    output_tok       REAL NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS idx_breakdown_turns_session ON breakdown_turns(session_id);
+                CREATE INDEX IF NOT EXISTS idx_breakdown_turns_agent ON breakdown_turns(agent);
+                CREATE INDEX IF NOT EXISTS idx_breakdown_blocks_turn ON breakdown_blocks(turn_id);
+                -- Serves sessions()'s GROUP BY + per-session ROW_NUMBER ordering and latest_turn().
+                CREATE INDEX IF NOT EXISTS idx_breakdown_turns_group ON breakdown_turns(session_id, agent, project, id);
+                -- Lets the day-scoped aggregate (by_model_today) range-seek instead of scanning.
+                CREATE INDEX IF NOT EXISTS idx_compressions_ts ON compressions(ts);",
             )
             .context("failed to migrate ledger schema")?;
         // Additive columns for ledgers created before these fields existed — each ALTER errors
@@ -269,6 +410,16 @@ impl Tracker {
             ) && !is_duplicate_column(&e)
             {
                 return Err(e).with_context(|| format!("failed to add ledger column {col}"));
+            }
+        }
+        // Additive columns for breakdown_turns ledgers created before these fields existed.
+        for col in ["input_before", "input_after"] {
+            if let Err(e) = self.conn.execute(
+                &format!("ALTER TABLE breakdown_turns ADD COLUMN {col} INTEGER"),
+                [],
+            ) && !is_duplicate_column(&e)
+            {
+                return Err(e).with_context(|| format!("failed to add breakdown column {col}"));
             }
         }
         Ok(())
@@ -343,6 +494,102 @@ impl Tracker {
             )
             .context("failed to record compression")?;
         Ok(())
+    }
+
+    /// Insert one breakdown turn and its attributed blocks in a single transaction. Returns the
+    /// turn's rowid. Best-effort at the call site: the proxy swallows any error so a failed
+    /// attribution write never blocks proxying or the main `compressions` ledger.
+    pub fn record_breakdown(&self, turn: &BreakdownTurn, blocks: &[BreakdownBlock]) -> Result<i64> {
+        let ts = chrono::Utc::now().to_rfc3339();
+        self.conn
+            .execute(
+                "INSERT INTO breakdown_turns
+                    (ts, session_id, agent, project, session_name, provider, model, window,
+                     fresh_input, cache_read, cache_write, output_tok,
+                     input_rate, output_rate, cache_read_rate, cache_write_rate, bill_micros,
+                     input_before, input_after)
+                 VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19)",
+                params![
+                    ts,
+                    turn.session_id,
+                    turn.agent,
+                    turn.project,
+                    turn.session_name,
+                    turn.provider,
+                    turn.model,
+                    turn.window,
+                    turn.fresh_input,
+                    turn.cache_read,
+                    turn.cache_write,
+                    turn.output_tok,
+                    turn.input_rate,
+                    turn.output_rate,
+                    turn.cache_read_rate,
+                    turn.cache_write_rate,
+                    turn.bill_micros,
+                    turn.input_before,
+                    turn.input_after,
+                ],
+            )
+            .context("failed to record breakdown turn")?;
+        let turn_id = self.conn.last_insert_rowid();
+        let mut stmt = self
+            .conn
+            .prepare_cached(
+                "INSERT INTO breakdown_blocks
+                    (turn_id, zone, section, bucket, group_label, label, mcp_server, tool_name,
+                     role, msg_index, raw_tokens, fresh_tok, cache_read_tok, cache_write_tok, output_tok)
+                 VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15)",
+            )
+            .context("failed to prepare breakdown block insert")?;
+        for b in blocks {
+            stmt.execute(params![
+                turn_id,
+                b.zone,
+                b.section,
+                b.bucket,
+                b.group_label,
+                b.label,
+                b.mcp_server,
+                b.tool_name,
+                b.role,
+                b.msg_index,
+                b.raw_tokens,
+                b.fresh_tok,
+                b.cache_read_tok,
+                b.cache_write_tok,
+                b.output_tok,
+            ])
+            .context("failed to record breakdown block")?;
+        }
+        Ok(turn_id)
+    }
+
+    /// Cap the breakdown tables to the most recent `max_turns` turns, deleting the blocks of any
+    /// dropped turn. Mirrors the `compressions` row cap so the always-on daemon stays bounded.
+    pub fn prune_breakdown(&self, max_turns: i64) -> Result<u64> {
+        let n: i64 = self
+            .conn
+            .query_row("SELECT COUNT(*) FROM breakdown_turns", [], |row| row.get(0))
+            .context("failed to count breakdown turns")?;
+        if n <= max_turns {
+            return Ok(0);
+        }
+        self.conn
+            .execute(
+                "DELETE FROM breakdown_blocks WHERE turn_id <= \
+                 (SELECT MAX(id) - ?1 FROM breakdown_turns)",
+                params![max_turns],
+            )
+            .context("failed to cap-prune breakdown blocks")?;
+        let deleted = self
+            .conn
+            .execute(
+                "DELETE FROM breakdown_turns WHERE id <= (SELECT MAX(id) - ?1 FROM breakdown_turns)",
+                params![max_turns],
+            )
+            .context("failed to cap-prune breakdown turns")? as u64;
+        Ok(deleted)
     }
 
     /// Test-only: insert a record stamped with an explicit `ts`, to exercise age retention
@@ -497,7 +744,11 @@ impl Tracker {
     /// "today" figure. Same day bucketing as `by_period(Day)`: `ts` is rfc3339 UTC, so its
     /// first 10 chars are the UTC date.
     pub fn by_model_today(&self) -> Result<Vec<ModelRow>> {
-        self.by_model_where("WHERE substr(ts, 1, 10) = date('now')")
+        // Sargable range (ts is rfc3339 UTC with a `+00:00` offset, written by `record()`, so a
+        // lexical compare == chronological) lets the idx_compressions_ts index seek today's slice
+        // rather than scan. Recent SQLite (>= 3.38) uses the index here; older versions scan, but
+        // correctness holds either way.
+        self.by_model_where("WHERE ts >= date('now') || 'T00:00:00+00:00'")
     }
 
     /// Shared query for [`by_model`]/[`by_model_today`]. `where_clause` is a static SQL
@@ -628,6 +879,99 @@ mod tests {
             output_shaped: None,
             frozen_input_tokens: None,
         }
+    }
+
+    fn breakdown_turn(session: &str) -> BreakdownTurn {
+        BreakdownTurn {
+            session_id: session.to_string(),
+            agent: "claude-code".to_string(),
+            project: Some("/proj".to_string()),
+            session_name: None,
+            provider: "anthropic".to_string(),
+            model: Some("claude-sonnet-4".to_string()),
+            window: 200_000,
+            fresh_input: 1000,
+            cache_read: 500,
+            cache_write: 100,
+            output_tok: 200,
+            input_rate: 3.0,
+            output_rate: 15.0,
+            cache_read_rate: 0.3,
+            cache_write_rate: 3.75,
+            bill_micros: 6_750,
+            input_before: 2000,
+            input_after: 1600,
+        }
+    }
+
+    fn breakdown_block(label: &str, raw: i64) -> BreakdownBlock {
+        BreakdownBlock {
+            zone: "input".to_string(),
+            section: "static".to_string(),
+            bucket: "system".to_string(),
+            group_label: "Static".to_string(),
+            label: label.to_string(),
+            mcp_server: None,
+            tool_name: None,
+            role: None,
+            msg_index: None,
+            raw_tokens: raw,
+            fresh_tok: raw as f64,
+            cache_read_tok: 0.0,
+            cache_write_tok: 0.0,
+            output_tok: 0.0,
+        }
+    }
+
+    #[test]
+    fn record_breakdown_round_trips() {
+        let t = Tracker::open_in_memory().unwrap();
+        let id = t
+            .record_breakdown(
+                &breakdown_turn("sess-a"),
+                &[
+                    breakdown_block("System prompt", 800),
+                    breakdown_block("MCP tools", 200),
+                ],
+            )
+            .expect("record breakdown");
+        assert!(id > 0);
+        let turns: i64 = t
+            .conn
+            .query_row("SELECT COUNT(*) FROM breakdown_turns", [], |r| r.get(0))
+            .unwrap();
+        let blocks: i64 = t
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM breakdown_blocks WHERE turn_id = ?1",
+                [id],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!((turns, blocks), (1, 2));
+    }
+
+    #[test]
+    fn prune_breakdown_caps_turns_and_orphan_blocks() {
+        let t = Tracker::open_in_memory().unwrap();
+        for i in 0..5 {
+            t.record_breakdown(
+                &breakdown_turn(&format!("s{i}")),
+                &[breakdown_block("System prompt", 10)],
+            )
+            .unwrap();
+        }
+        let deleted = t.prune_breakdown(2).unwrap();
+        assert_eq!(deleted, 3);
+        let turns: i64 = t
+            .conn
+            .query_row("SELECT COUNT(*) FROM breakdown_turns", [], |r| r.get(0))
+            .unwrap();
+        let blocks: i64 = t
+            .conn
+            .query_row("SELECT COUNT(*) FROM breakdown_blocks", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!((turns, blocks), (2, 2));
     }
 
     #[test]
