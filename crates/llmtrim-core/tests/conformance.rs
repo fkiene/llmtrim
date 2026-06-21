@@ -1,10 +1,10 @@
 //! Cross-binding conformance suite for the adapter contract.
 //!
-//! Every integration adapter (Kong, Higress, Vercel AI SDK, OpenCode, Continue, Genkit,
-//! LiteLLM, LangChain) calls [`llmtrim_core::rewrite_request`] through its binding. These
-//! fixtures pin that entrypoint's behavior so a core change cannot silently alter what an
-//! adapter forwards. The JS (vitest) and Python (pytest) harnesses load the SAME JSON files
-//! and assert the same invariants, so all three surfaces stay in lockstep.
+//! Every integration adapter (e.g. Continue.dev, LangChain, OpenCode) calls
+//! [`llmtrim_core::rewrite_request`] through its binding. These fixtures pin that entrypoint's
+//! behavior so a core change cannot silently alter what an adapter forwards. The JS (vitest)
+//! and Python (pytest) harnesses load the SAME JSON files and assert the same invariants, so
+//! all three surfaces stay in lockstep.
 //!
 //! Each fixture is `tests/conformance/<name>.json`:
 //!

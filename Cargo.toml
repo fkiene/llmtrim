@@ -5,18 +5,6 @@ members = [
     "crates/llmtrim-cli",
     "crates/llmtrim-uniffi",
     "crates/llmtrim-wasm",
-    "crates/adapters/llmtrim-gateway",
-    "crates/adapters/llmtrim-gateway-plugin",
-]
-# The adapter crates (the shared gateway logic and the wasm plugins it backs) stay out of the
-# default dev loop: they target wasm and pull proxy-wasm deps that are noise for a host build.
-# The fast check loop (`cargo … --features intercept`) keeps hitting only these four; test the
-# adapters explicitly with `-p llmtrim-gateway` (and the wasm plugins on their wasm target).
-default-members = [
-    "crates/llmtrim-core",
-    "crates/llmtrim-cli",
-    "crates/llmtrim-uniffi",
-    "crates/llmtrim-wasm",
 ]
 
 # Shared package metadata — inherited by each member via `field.workspace = true`.

@@ -6,11 +6,11 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
-### Fixed
-- **The gateway plugin's GitHub Release asset is now named `llmtrim-gateway-plugin.wasm`.** In
-  v0.3.0 it published as `plugin.wasm` (the `file#label` upload syntax sets a display label, not
-  the filename), which did not match the name the README points Kong users at. The release
-  publish job now uploads it under the correct name and its post-publish verify passes.
+### Removed
+- **The Proxy-Wasm gateway plugin (Kong / Higress) has been removed.** Shipped in v0.3.0, it is
+  dropped along with its crates (`llmtrim-gateway`, `llmtrim-gateway-plugin`) and its release
+  publishing. The v0.3.0 OCI image and release asset stay where they are; no new versions
+  publish. Gateway-side integration may return later through a different surface.
 
 ## [0.3.0] - 2026-06-21
 

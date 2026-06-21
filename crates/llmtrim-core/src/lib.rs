@@ -302,8 +302,7 @@ pub fn compress_with_config(
     })
 }
 
-/// Stable entrypoint for integration adapters (Kong, Higress, Vercel AI SDK, OpenCode,
-/// Continue, Genkit, LiteLLM, LangChain).
+/// Stable entrypoint for integration adapters (e.g. Continue.dev, LangChain, OpenCode).
 ///
 /// An adapter hands over the host's provider-shaped request body verbatim and gets back a
 /// compressed body to forward. `preset` defaults to `auto` (per-request structural routing:
