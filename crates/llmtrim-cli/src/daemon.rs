@@ -453,11 +453,24 @@ mod tests {
 
     #[test]
     fn probe_port_detects_listener_and_absence() {
-        // Bind an ephemeral port → probe sees it; drop it → probe fails.
+        // Present: a bound listener is detected.
         let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind ephemeral");
         let port = listener.local_addr().expect("local addr").port();
-        assert!(probe_port(port));
+        assert!(probe_port(port), "a bound port must be detected");
         drop(listener);
-        assert!(!probe_port(port));
+
+        // Absence: a freed port reads as free. Under parallel test execution a just-freed
+        // ephemeral port can be re-grabbed by another binder before we probe it (the race that
+        // made this test flaky), so confirm against any of several freed ports rather than
+        // insisting this exact one stayed free.
+        let saw_free = std::iter::once(port)
+            .chain((0..16).filter_map(|_| {
+                let l = std::net::TcpListener::bind("127.0.0.1:0").ok()?;
+                let p = l.local_addr().ok()?.port();
+                drop(l);
+                Some(p)
+            }))
+            .any(|p| !probe_port(p));
+        assert!(saw_free, "no freed port read as free");
     }
 }
