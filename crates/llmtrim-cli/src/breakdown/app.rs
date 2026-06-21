@@ -114,6 +114,16 @@ struct Detail {
     occupancy: TreeTable<()>,
     cost: TreeTable<()>,
     focus: Pane,
+    /// True until the detail worker's queries return for this session — the panes show a
+    /// "Loading…" placeholder meanwhile (SQLite never runs on the UI thread).
+    loading: bool,
+}
+
+/// A Detail drill-down computed off the UI thread, tagged with the session it was built for so
+/// the UI can drop a stale result when the user drilled a different session in the meantime.
+struct DetailSnapshot {
+    session_id: String,
+    data: DetailData,
 }
 
 /// Restores the terminal (raw mode + main screen) on drop, even on panic/error.
@@ -145,7 +155,9 @@ pub fn run(
     {
         palette::set(f);
     }
-    let db = BreakdownDb::open().context("failed to open breakdown ledger")?;
+    // The Detail panes' SQLite connection. It is moved into the detail worker thread below, so
+    // the UI thread never runs a query for Detail.
+    let detail_db = BreakdownDb::open().context("failed to open breakdown ledger")?;
     enable_raw_mode().context("failed to enter raw mode")?;
     let _guard = TerminalGuard;
     let mut stdout = std::io::stdout();
@@ -180,7 +192,39 @@ pub fn run(
         })
     };
 
-    let mut app = App::new(db, refresh);
+    // Detail worker: owns the Detail SQLite connection and waits for drill requests on a
+    // channel. For each session id it runs the three queries off-thread and publishes a
+    // `DetailSnapshot`. It blocks on the channel with a timeout so the `stop` flag stays
+    // responsive (the channel-disconnect arm also exits on teardown when the sender is dropped).
+    let detail_latest: Arc<Mutex<Option<DetailSnapshot>>> = Arc::new(Mutex::new(None));
+    let (detail_tx, detail_rx) = std::sync::mpsc::channel::<String>();
+    let detail_worker = {
+        let detail_latest = Arc::clone(&detail_latest);
+        let stop = Arc::clone(&stop);
+        std::thread::spawn(move || {
+            use std::sync::mpsc::RecvTimeoutError;
+            while !stop.load(Ordering::Relaxed) {
+                match detail_rx.recv_timeout(Duration::from_millis(100)) {
+                    Ok(mut session_id) => {
+                        // Coalesce rapid drills: if more requests queued while we waited, only
+                        // the most recent session matters — skip the superseded queries.
+                        while let Ok(newer) = detail_rx.try_recv() {
+                            session_id = newer;
+                        }
+                        let data = compute_detail(&detail_db, &session_id);
+                        if let Ok(mut g) = detail_latest.lock() {
+                            *g = Some(DetailSnapshot { session_id, data });
+                        }
+                    }
+                    Err(RecvTimeoutError::Timeout) => {}
+                    Err(RecvTimeoutError::Disconnected) => break,
+                }
+            }
+        })
+    };
+
+    let mut app = App::new(None, refresh);
+    app.detail_req = Some(detail_tx);
 
     // Redraw only when something changed — a key, a fresh snapshot, or the once-a-second
     // animation tick (clock/mascot/quip). Idle repaints ~1×/s instead of the ~4×/s the 250ms
@@ -188,14 +232,31 @@ pub fn run(
     let mut dirty = true;
     let mut last_sec = u64::MAX;
     loop {
-        // If the refresh worker died (e.g. a SQLite error panicked it), don't sit on a frozen,
-        // silently-stale dashboard — quit so the join below surfaces the cause.
-        if worker.is_finished() {
+        // If either worker thread died, don't sit on a frozen, silently-stale view — quit so the
+        // join after the loop surfaces the panic. Query errors don't reach here (both workers
+        // degrade to empty data, never panic), so this only fires on an unexpected panic.
+        if worker.is_finished() || detail_worker.is_finished() {
             break;
         }
-        // Pick up the latest background snapshot, if any (non-blocking).
-        if let Some(snap) = latest.lock().ok().and_then(|mut g| g.take()) {
+        // Pick up the latest background snapshot, if any (non-blocking). Recover a poisoned lock
+        // (a worker panic while publishing) rather than dropping every future result.
+        let snapshot = {
+            let mut g = latest.lock().unwrap_or_else(|p| p.into_inner());
+            g.take()
+        };
+        if let Some(snap) = snapshot {
             app.apply(snap.0, snap.1);
+            dirty = true;
+        }
+        // Pick up a ready Detail result (non-blocking); install it only if it still matches the
+        // drilled session (guards against a stale result after the user drilled elsewhere).
+        let detail_snap = {
+            let mut g = detail_latest.lock().unwrap_or_else(|p| p.into_inner());
+            g.take()
+        };
+        if let Some(snap) = detail_snap
+            && app.apply_detail(snap)
+        {
             dirty = true;
         }
         if dirty {
@@ -234,8 +295,13 @@ pub fn run(
         }
     }
     stop.store(true, Ordering::Relaxed);
+    // Drop the sender so the detail worker's channel disconnects and it exits promptly.
+    app.detail_req = None;
     if let Err(e) = worker.join() {
         eprintln!("llmtrim: breakdown refresh thread panicked: {e:?}");
+    }
+    if let Err(e) = detail_worker.join() {
+        eprintln!("llmtrim: breakdown detail thread panicked: {e:?}");
     }
     Ok(app.action)
 }
@@ -252,7 +318,11 @@ pub enum PostAction {
 }
 
 struct App {
-    db: BreakdownDb,
+    /// Only the SVG export test builds Detail panes synchronously from this connection. The
+    /// live TUI moves its Detail `BreakdownDb` into the detail worker, so the UI thread holds
+    /// no connection and runs zero SQLite for Detail — this stays `None` there.
+    #[cfg_attr(not(test), allow(dead_code))]
+    db: Option<BreakdownDb>,
     /// The data-refresh period — shown in the meta bar (`↻ Ns`); the actual refresh runs on a
     /// background thread now, not on this timer.
     refresh: Duration,
@@ -262,13 +332,17 @@ struct App {
     show_help: bool,
     sessions: TreeTable<Node>,
     detail: Option<Detail>,
+    /// Drill requests to the detail worker: the selected session id is sent here, the worker
+    /// runs the SQLite queries off-thread and publishes a `DetailSnapshot`. `None` in tests,
+    /// which build the Detail synchronously instead.
+    detail_req: Option<std::sync::mpsc::Sender<String>>,
     /// Set by `d`/`u` to a command to run after the TUI tears down (so it runs on the normal
     /// screen, not inside the alt-screen).
     action: PostAction,
 }
 
 impl App {
-    fn new(db: BreakdownDb, refresh: Duration) -> Self {
+    fn new(db: Option<BreakdownDb>, refresh: Duration) -> Self {
         App {
             db,
             refresh,
@@ -282,6 +356,7 @@ impl App {
             )
             .empty_hint("no sessions yet — run llmtrim and use your agent"),
             detail: None,
+            detail_req: None,
             action: PostAction::None,
         }
     }
@@ -412,7 +487,16 @@ impl App {
             _ => None,
         };
         if let Some((session_id, title)) = target {
-            let mut d = Detail {
+            // Ask the detail worker to query this session off-thread; show a loading pane until
+            // it answers. No SQLite runs on the UI thread here. If the send fails the worker has
+            // exited (the loop's is_finished guard will quit) — don't show a pane that can never
+            // resolve.
+            if let Some(tx) = &self.detail_req
+                && tx.send(session_id.clone()).is_err()
+            {
+                return;
+            }
+            let d = Detail {
                 session_id,
                 title,
                 occupancy: TreeTable::new(
@@ -422,10 +506,23 @@ impl App {
                 ),
                 cost: TreeTable::new("cost · cumulative", cost_columns(), palette::frame()),
                 focus: Pane::Occupancy,
+                loading: true,
             };
-            rebuild_detail(&self.db, &mut d);
             self.detail = Some(d);
             self.tab = Tab::Detail;
+        }
+    }
+
+    /// Install a Detail result from the worker, but only if it matches the session the user is
+    /// currently drilled into — a stale result (the user drilled elsewhere before this query
+    /// returned) is dropped. Returns true if it was installed (the frame needs a repaint).
+    fn apply_detail(&mut self, snap: DetailSnapshot) -> bool {
+        match &mut self.detail {
+            Some(d) if d.session_id == snap.session_id => {
+                install_detail(d, snap.data);
+                true
+            }
+            _ => false,
         }
     }
 
@@ -624,6 +721,20 @@ impl App {
             f.render_widget(p, area);
             return;
         };
+        // The worker's queries haven't returned yet — show a placeholder instead of empty panes.
+        if d.loading {
+            let p = Paragraph::new(Line::from(format!("Loading {}…", d.title)).centered())
+                .style(Style::default().add_modifier(Modifier::DIM))
+                .block(
+                    Block::default()
+                        .borders(Borders::ALL)
+                        .border_type(BorderType::Rounded)
+                        .border_style(Style::default().fg(palette::frame()))
+                        .title(" detail "),
+                );
+            f.render_widget(p, area);
+            return;
+        }
         // Too short for two stacked bordered panes — show the occupancy pane alone.
         if area.height < 10 {
             d.occupancy.title = format!("context · {}", d.title);
@@ -1659,24 +1770,41 @@ fn rel_time(ts: &str) -> String {
     }
 }
 
-/// Re-query and rebuild a Detail's two panes from the ledger.
-fn rebuild_detail(db: &BreakdownDb, d: &mut Detail) {
-    if let Ok(Some((turn_id, window))) = db.latest_turn(&d.session_id)
+/// The built Detail panes (tree roots + footers), computed off the UI thread. Holds only
+/// plain owned data (`Send`), so the detail worker can build it from its own SQLite
+/// connection and ship it to the UI through a channel.
+struct DetailData {
+    occupancy_roots: Vec<TreeNode<()>>,
+    occupancy_footer: Option<Vec<String>>,
+    cost_roots: Vec<TreeNode<()>>,
+    cost_footer: Option<Vec<String>>,
+}
+
+/// Query the ledger and build a session's two Detail panes. Runs the SQLite work, so it must
+/// stay off the UI thread (the detail worker calls it); the UI only installs the result.
+fn compute_detail(db: &BreakdownDb, session_id: &str) -> DetailData {
+    let mut data = DetailData {
+        occupancy_roots: Vec::new(),
+        occupancy_footer: None,
+        cost_roots: Vec::new(),
+        cost_footer: None,
+    };
+    if let Ok(Some((turn_id, window))) = db.latest_turn(session_id)
         && let Ok(rows) = db.occupancy(turn_id)
     {
-        d.occupancy.set_roots(build_occupancy_tree(&rows, window));
+        data.occupancy_roots = build_occupancy_tree(&rows, window);
         let total: i64 = rows.iter().map(|r| r.tokens).sum();
-        d.occupancy.footer = Some(vec![
+        data.occupancy_footer = Some(vec![
             "total".into(),
             pct(total as f64, window as f64),
             bar(total, window, 14),
             crate::ui::human(total),
         ]);
     }
-    if let Ok(rows) = db.cost(&d.session_id) {
+    if let Ok(rows) = db.cost(session_id) {
         let bill: f64 = rows.iter().map(|r| r.usd).sum();
-        d.cost.set_roots(build_cost_tree(&rows, bill));
-        d.cost.footer = Some(vec![
+        data.cost_roots = build_cost_tree(&rows, bill);
+        data.cost_footer = Some(vec![
             "bill".into(),
             format!("${bill:.2}"),
             format!("${:.2}", rows.iter().map(|r| r.read_usd).sum::<f64>()),
@@ -1685,6 +1813,25 @@ fn rebuild_detail(db: &BreakdownDb, d: &mut Detail) {
             "—".into(),
         ]);
     }
+    data
+}
+
+/// Install already-built pane data into a Detail and clear its loading flag. Pure in-memory
+/// work — safe on the UI thread.
+fn install_detail(d: &mut Detail, data: DetailData) {
+    d.occupancy.set_roots(data.occupancy_roots);
+    d.occupancy.footer = data.occupancy_footer;
+    d.cost.set_roots(data.cost_roots);
+    d.cost.footer = data.cost_footer;
+    d.loading = false;
+}
+
+/// Re-query and rebuild a Detail's two panes from the ledger (synchronous; used by the SVG
+/// export test, which has no worker thread).
+#[cfg(test)]
+fn rebuild_detail(db: &BreakdownDb, d: &mut Detail) {
+    let data = compute_detail(db, &d.session_id);
+    install_detail(d, data);
 }
 
 /// The grouping key shared by both Detail panes: (group, category, MCP server, tool).
@@ -2693,7 +2840,7 @@ mod tests {
             })
             .unwrap_or_else(|| ("s1".into(), "session".into()));
 
-        let mut app = App::new(db, Duration::from_secs(12));
+        let mut app = App::new(Some(db), Duration::from_secs(12));
         app.apply(ov, rows);
         let mut d = Detail {
             session_id: detail_sid,
@@ -2701,8 +2848,12 @@ mod tests {
             occupancy: TreeTable::new("context · this turn", occupancy_columns(), palette::frame()),
             cost: TreeTable::new("cost · cumulative", cost_columns(), palette::frame()),
             focus: Pane::Occupancy,
+            // The export builds Detail synchronously below, so it's never in the loading state.
+            loading: false,
         };
-        rebuild_detail(&app.db, &mut d);
+        if let Some(db) = &app.db {
+            rebuild_detail(db, &mut d);
+        }
         app.detail = Some(d);
 
         let gx0 = PAD;
