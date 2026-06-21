@@ -37,6 +37,7 @@
 use anyhow::{Context, Result};
 use serde_json::Value;
 
+pub mod attribution;
 pub mod cache_zone;
 pub mod config;
 pub mod gate;

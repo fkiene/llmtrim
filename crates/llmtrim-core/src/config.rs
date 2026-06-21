@@ -481,7 +481,9 @@ pub(crate) const RUNTIME_ONLY_KEYS: &[&str] = &[
     "no_update_check",
     "bind",
     "capture_max_mb",
+    "breakdown_window",
     "retention_days",
+    "theme",
 ];
 
 /// Runtime settings orthogonal to the compression pipeline ([`DenseConfig`]). Each value
@@ -519,9 +521,16 @@ pub struct RuntimeConfig {
     /// Capture corpus size ceiling in MB (env `LLMTRIM_CAPTURE_MAX_MB` / file
     /// `capture_max_mb`); `Some(0)` disables the cap, `None` means use the default.
     pub capture_max_mb: Option<u64>,
+    /// Context-window override for the cost breakdown (env `LLMTRIM_BREAKDOWN_WINDOW` / file
+    /// `breakdown_window`); positive only.
+    pub breakdown_window: Option<i64>,
     /// Ledger age-retention in days (env `LLMTRIM_RETENTION_DAYS` / file `retention_days`);
     /// positive only (`None` = age retention off, row cap alone bounds the ledger).
     pub retention_days: Option<i64>,
+    /// Breakdown-TUI color theme (env `LLMTRIM_THEME` / file `theme`); a Catppuccin flavor
+    /// name (`mocha`/`macchiato`/`frappe`/`latte`). The `t` key persists the user's choice
+    /// here via [`save_theme`]. The TUI validates the name and falls back to its default.
+    pub theme: Option<String>,
 }
 
 impl RuntimeConfig {
@@ -594,13 +603,57 @@ impl RuntimeConfig {
             capture_max_mb: env_set("LLMTRIM_CAPTURE_MAX_MB")
                 .and_then(|s| s.trim().parse::<u64>().ok())
                 .or_else(|| fint("capture_max_mb").and_then(|n| u64::try_from(n).ok())),
+            breakdown_window: positive(
+                env_set("LLMTRIM_BREAKDOWN_WINDOW")
+                    .and_then(|s| s.trim().parse::<i64>().ok())
+                    .or_else(|| fint("breakdown_window")),
+            ),
             retention_days: positive(
                 env_set("LLMTRIM_RETENTION_DAYS")
                     .and_then(|s| s.trim().parse::<i64>().ok())
                     .or_else(|| fint("retention_days")),
             ),
+            theme: env_set("LLMTRIM_THEME").or_else(|| fstr("theme")),
         }
     }
+}
+
+/// Persist the breakdown-TUI `theme` choice to the config file's top-level `theme` key,
+/// preserving every other line (a surgical line edit, not a TOML re-serialize, so user
+/// comments and key order survive). Creates the file (and its directory) if absent.
+/// Best-effort by the caller: a failure to write should never crash the TUI.
+pub fn save_theme(name: &str) -> Result<()> {
+    let path = config_path().ok_or_else(|| anyhow::anyhow!("no config path (HOME/XDG unset)"))?;
+    save_theme_at(&path, name)
+}
+
+/// Path-taking core of [`save_theme`], factored out so the surgical line edit is unit-testable
+/// without touching the real config location.
+fn save_theme_at(path: &std::path::Path, name: &str) -> Result<()> {
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir)
+            .with_context(|| format!("failed to create {}", dir.display()))?;
+    }
+    let existing = std::fs::read_to_string(path).unwrap_or_default();
+    let line = format!("theme = \"{name}\"");
+    let mut replaced = false;
+    let mut out: Vec<String> = existing
+        .lines()
+        .map(|l| {
+            if l.split('=').next().is_some_and(|k| k.trim() == "theme") {
+                replaced = true;
+                line.clone()
+            } else {
+                l.to_string()
+            }
+        })
+        .collect();
+    if !replaced {
+        out.push(line);
+    }
+    let mut text = out.join("\n");
+    text.push('\n');
+    std::fs::write(path, text).with_context(|| format!("failed to write {}", path.display()))
 }
 
 /// Normalize + validate a user-supplied intercept host: trim a trailing dot, lowercase, and

@@ -366,6 +366,7 @@ These knobs are orthogonal to compression. Each resolves env-first, then from th
 | `LLMTRIM_CAPTURE_DIR` | `capture_dir` | before/after QA capture directory |
 | `LLMTRIM_CAPTURE_MAX_MB` | `capture_max_mb` | capture corpus size ceiling (`0` disables) |
 | `LLMTRIM_BIND` | `bind` | listen IP (default loopback; `0.0.0.0` for containers) |
+| `LLMTRIM_BREAKDOWN_WINDOW` | `breakdown_window` | context-window override for the cost breakdown |
 | `LLMTRIM_RETENTION_DAYS` | `retention_days` | ledger age-retention in days |
 | `LLMTRIM_NO_UPDATE_CHECK` | `no_update_check` | disable the passive update check |
 
