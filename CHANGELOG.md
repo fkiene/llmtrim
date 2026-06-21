@@ -23,31 +23,6 @@ All notable changes to this project are documented here. The format follows
   artifact at `ghcr.io/fkiene/llmtrim-gateway-plugin` (for Higress) and a `.wasm` Release asset
   (for Kong). See `crates/adapters/llmtrim-gateway-plugin/README.md`.
 
-### Performance
-- **Lower per-request compression cost on tool-heavy (agent) prompts.** The pipeline now
-  re-serializes and re-tokenizes the tools array only when a stage actually changed it, instead
-  of after every content-rewriting stage. Per-language stopword sets are built once and reused
-  (behind a read-mostly lock) rather than rebuilt per segment. Output is unchanged.
-
-### Changed
-- **`@llmtrim/js`: calling `compress()` with no preset now compresses with `auto`
-  (shape-routing) instead of the lossless-only baseline.** The npm package barely compressed
-  out of the box before, because the no-preset path fell back to lossless; it now matches the
-  native CLI and the live proxy. This changes the body forwarded to your provider when you call
-  `compress(body, provider)` with no third argument. To keep the previous lossless-only
-  behavior, pass `"safe"` as the preset.
-
-### Fixed
-- **Strict-TLS clients can now use the proxy.** The MITM leaf certificates llmtrim minted
-  lacked the Authority Key Identifier (and Key Usage / Extended Key Usage) extensions. Python
-  3.13 turns on OpenSSL's `VERIFY_X509_STRICT` mode by default, which enforces RFC 5280 and
-  rejects such a leaf with "Missing Authority Key Identifier", breaking every Python `httpx` /
-  OpenAI-SDK client behind the proxy (e.g. Hermes Agent, litellm). `curl` and Node TLS don't run
-  the strict checks, so this went unnoticed. Minted leaves now include the Authority Key
-  Identifier plus Key Usage and Extended Key Usage (serverAuth). The local CA is unchanged, so
-  no re-trust is needed.
-
-### Added
 - **`llmtrim_core::rewrite_request(input, provider, preset)`**: a stable entrypoint for
   integration adapters. It defaults the preset to `auto` (per-request structural routing) and
   never reads the environment or a config file, so the same request compresses identically
@@ -67,7 +42,29 @@ All notable changes to this project are documented here. The format follows
   in `config.toml`, matching the existing `preset`/`retention_days` behavior. The matching
   `LLMTRIM_*` env vars are unchanged and still win when set.
 
+### Changed
+- **`@llmtrim/js`: calling `compress()` with no preset now compresses with `auto`
+  (shape-routing) instead of the lossless-only baseline.** The npm package barely compressed
+  out of the box before, because the no-preset path fell back to lossless; it now matches the
+  native CLI and the live proxy. This changes the body forwarded to your provider when you call
+  `compress(body, provider)` with no third argument. To keep the previous lossless-only
+  behavior, pass `"safe"` as the preset.
+
+### Performance
+- **Lower per-request compression cost on tool-heavy (agent) prompts.** The pipeline now
+  re-serializes and re-tokenizes the tools array only when a stage actually changed it, instead
+  of after every content-rewriting stage. Per-language stopword sets are built once and reused
+  (behind a read-mostly lock) rather than rebuilt per segment. Output is unchanged.
+
 ### Fixed
+- **Strict-TLS clients can now use the proxy.** The MITM leaf certificates llmtrim minted
+  lacked the Authority Key Identifier (and Key Usage / Extended Key Usage) extensions. Python
+  3.13 turns on OpenSSL's `VERIFY_X509_STRICT` mode by default, which enforces RFC 5280 and
+  rejects such a leaf with "Missing Authority Key Identifier", breaking every Python `httpx` /
+  OpenAI-SDK client behind the proxy (e.g. Hermes Agent, litellm). `curl` and Node TLS don't run
+  the strict checks, so this went unnoticed. Minted leaves now include the Authority Key
+  Identifier plus Key Usage and Extended Key Usage (serverAuth). The local CA is unchanged, so
+  no re-trust is needed.
 - **`serve` fails fast when the port is taken.** A bind-in-use error no longer spins through
   the supervised restart loop five times; it reports once, naming the daemon already on the
   port (`llmtrim stop` first, or `--force` to replace it) or the foreign process holding it.
