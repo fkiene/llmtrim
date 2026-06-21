@@ -157,9 +157,9 @@ def render(results, competitor):
           "- The deterministic token axis is exact and citable. CPCA / quality / output "
           "tokens are live generations across seeds - directional, with the paired-bootstrap "
           "CI on the quality difference as the significance signal (CI excluding 0 = real).",
-          "- Live sample is small (n shown per point) and uses few seeds, so the quality "
-          "differences are NOT statistically significant; read them as directional. A larger "
-          "live run would tighten the CIs."]
+          "- Live sample is small (n shown per point) and uses few seeds; read each point with "
+          "its own paired-bootstrap CI above (CI excluding 0 = significant). A larger live run "
+          "would tighten the CIs."]
     if notes.get("ml_cap"):
         L.append("- " + notes["ml_cap"])
     L += ["- Scorers per corpus: numeric (gsm8k), token-F1 (hotpotqa, squad2, LongBench QA), "

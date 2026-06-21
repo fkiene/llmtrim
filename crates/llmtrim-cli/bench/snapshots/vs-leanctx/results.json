@@ -1,0 +1,4215 @@
+{
+  "meta": {
+    "model": "openai/gpt-oss-20b",
+    "encoder": "o200k_base",
+    "corpora": [
+      "gsm8k",
+      "hotpotqa",
+      "squad2",
+      "truthfulqa",
+      "cnn",
+      "lb_qasper",
+      "lb_multifieldqa",
+      "lb_2wikimqa",
+      "lb_gov_report",
+      "lb_multinews"
+    ],
+    "llmtrim_presets": [
+      "safe",
+      "auto",
+      "aggressive"
+    ],
+    "headroom_grid": [
+      "lc-keep1.00",
+      "lc-keep0.75",
+      "lc-keep0.50",
+      "lc-keep0.33",
+      "lc-keep0.20"
+    ],
+    "matched": {
+      "iso-moderate": "auto",
+      "iso-aggressive": "aggressive"
+    },
+    "pricing": {
+      "input": 0.029,
+      "output": 0.14,
+      "cache_read": 0.0,
+      "fetched": "2026-06-10"
+    },
+    "headroom_installed": true,
+    "limit": 4,
+    "repeats": 1,
+    "cold_start_ms": {
+      "llmtrim": 132.3,
+      "leanctx": 4461.1
+    },
+    "provenance": {
+      "python": "3.12.3",
+      "platform": "Linux-6.8.0-85-generic-x86_64-with-glibc2.39",
+      "tiktoken": "0.13.0",
+      "llmtrim": "0.1.14.dev0",
+      "headroom_version": "0.26.0",
+      "headroom_commit": null,
+      "headroom_installed": true,
+      "data_manifest_fetched": "2026-06-19"
+    }
+  },
+  "deterministic": {
+    "safe": {
+      "tool": "llmtrim",
+      "n": 40,
+      "tokens_before": 139170,
+      "tokens_after": 139055,
+      "reduction_pct": 0.08263275131135117,
+      "reduction_ci": [
+        0.021012148842425304,
+        0.17705753061437735
+      ],
+      "per_case": [
+        {
+          "corpus": "gsm8k",
+          "name": "gsm8k-0",
+          "before": 74,
+          "after": 74,
+          "saved_pct": 0.0
+        },
+        {
+          "corpus": "gsm8k",
+          "name": "gsm8k-1",
+          "before": 37,
+          "after": 37,
+          "saved_pct": 0.0
+        },
+        {
+          "corpus": "gsm8k",
+          "name": "gsm8k-2",
+          "before": 60,
+          "after": 60,
+          "saved_pct": 0.0
+        },
+        {
+          "corpus": "gsm8k",
+          "name": "gsm8k-3",
+          "before": 45,
+          "after": 45,
+          "saved_pct": 0.0
+        },
+        {
+          "corpus": "hotpotqa",
+          "name": "hotpot-0",
+          "before": 1126,
+          "after": 1126,
+          "saved_pct": 0.0
+        },
+        {
+          "corpus": "hotpotqa",
+          "name": "hotpot-1",
+          "before": 1233,
+          "after": 1233,
+          "saved_pct": 0.0
+        },
+        {
+          "corpus": "hotpotqa",
+          "name": "hotpot-2",
+          "before": 1484,
+          "after": 1484,
+          "saved_pct": 0.0
+        },
+        {
+          "corpus": "hotpotqa",
+          "name": "hotpot-3",
+          "before": 962,
+          "after": 962,
+          "saved_pct": 0.0
+        },
+        {
+          "corpus": "squad2",
+          "name": "squad-0",
+          "before": 194,
+          "after": 194,
+          "saved_pct": 0.0
+        },
+        {
+          "corpus": "squad2",
+          "name": "squad-1",
+          "before": 195,
+          "after": 195,
+          "saved_pct": 0.0
+        },
+        {
+          "corpus": "squad2",
+          "name": "squad-2",
+          "before": 196,
+          "after": 196,
+          "saved_pct": 0.0
+        },
+        {
+          "corpus": "squad2",
+          "name": "squad-3",
+          "before": 194,
+          "after": 194,
+          "saved_pct": 0.0
+        },
+        {
+          "corpus": "truthfulqa",
+          "name": "truthfulqa-0",
+          "before": 113,
+          "after": 113,
+          "saved_pct": 0.0
+        },
+        {
+          "corpus": "truthfulqa",
+          "name": "truthfulqa-1",
+          "before": 78,
+          "after": 78,
+          "saved_pct": 0.0
+        },
+        {
+          "corpus": "truthfulqa",
+          "name": "truthfulqa-2",
+          "before": 68,
+          "after": 68,
+          "saved_pct": 0.0
+        },
+        {
+          "corpus": "truthfulqa",
+          "name": "truthfulqa-3",
+          "before": 59,
+          "after": 59,
+          "saved_pct": 0.0
+        },
+        {
+          "corpus": "cnn",
+          "name": "cnn-0",
+          "before": 921,
+          "after": 921,
+          "saved_pct": 0.0
+        },
+        {
+          "corpus": "cnn",
+          "name": "cnn-1",
+          "before": 1604,
+          "after": 1604,
+          "saved_pct": 0.0
+        },
+        {
+          "corpus": "cnn",
+          "name": "cnn-2",
+          "before": 541,
+          "after": 541,
+          "saved_pct": 0.0
+        },
+        {
+          "corpus": "cnn",
+          "name": "cnn-3",
+          "before": 443,
+          "after": 443,
+          "saved_pct": 0.0
+        },
+        {
+          "corpus": "lb_qasper",
+          "name": "qasper-0",
+          "before": 3829,
+          "after": 3829,
+          "saved_pct": 0.0
+        },
+        {
+          "corpus": "lb_qasper",
+          "name": "qasper-1",
+          "before": 3187,
+          "after": 3187,
+          "saved_pct": 0.0
+        },
+        {
+          "corpus": "lb_qasper",
+          "name": "qasper-2",
+          "before": 4215,
+          "after": 4215,
+          "saved_pct": 0.0
+        },
+        {
+          "corpus": "lb_qasper",
+          "name": "qasper-3",
+          "before": 2815,
+          "after": 2815,
+          "saved_pct": 0.0
+        },
+        {
+          "corpus": "lb_multifieldqa",
+          "name": "multifieldqa_en-0",
+          "before": 1458,
+          "after": 1452,
+          "saved_pct": 0.41
+        },
+        {
+          "corpus": "lb_multifieldqa",
+          "name": "multifieldqa_en-1",
+          "before": 10930,
+          "after": 10912,
+          "saved_pct": 0.16
+        },
+        {
+          "corpus": "lb_multifieldqa",
+          "name": "multifieldqa_en-2",
+          "before": 8064,
+          "after": 8007,
+          "saved_pct": 0.71
+        },
+        {
+          "corpus": "lb_multifieldqa",
+          "name": "multifieldqa_en-3",
+          "before": 11771,
+          "after": 11771,
+          "saved_pct": 0.0
+        },
+        {
+          "corpus": "lb_2wikimqa",
+          "name": "2wikimqa-0",
+          "before": 6881,
+          "after": 6871,
+          "saved_pct": 0.15
+        },
+        {
+          "corpus": "lb_2wikimqa",
+          "name": "2wikimqa-1",
+          "before": 6732,
+          "after": 6726,
+          "saved_pct": 0.09
+        },
+        {
+          "corpus": "lb_2wikimqa",
+          "name": "2wikimqa-2",
+          "before": 6188,
+          "after": 6181,
+          "saved_pct": 0.11
+        },
+        {
+          "corpus": "lb_2wikimqa",
+          "name": "2wikimqa-3",
+          "before": 10890,
+          "after": 10879,
+          "saved_pct": 0.1
+        },
+        {
+          "corpus": "lb_gov_report",
+          "name": "gov_report-0",
+          "before": 10770,
+          "after": 10770,
+          "saved_pct": 0.0
+        },
+        {
+          "corpus": "lb_gov_report",
+          "name": "gov_report-1",
+          "before": 16059,
+          "after": 16059,
+          "saved_pct": 0.0
+        },
+        {
+          "corpus": "lb_gov_report",
+          "name": "gov_report-2",
+          "before": 9574,
+          "after": 9574,
+          "saved_pct": 0.0
+        },
+        {
+          "corpus": "lb_gov_report",
+          "name": "gov_report-3",
+          "before": 8582,
+          "after": 8582,
+          "saved_pct": 0.0
+        },
+        {
+          "corpus": "lb_multinews",
+          "name": "multi_news-0",
+          "before": 2661,
+          "after": 2661,
+          "saved_pct": 0.0
+        },
+        {
+          "corpus": "lb_multinews",
+          "name": "multi_news-1",
+          "before": 1632,
+          "after": 1632,
+          "saved_pct": 0.0
+        },
+        {
+          "corpus": "lb_multinews",
+          "name": "multi_news-2",
+          "before": 1600,
+          "after": 1600,
+          "saved_pct": 0.0
+        },
+        {
+          "corpus": "lb_multinews",
+          "name": "multi_news-3",
+          "before": 1705,
+          "after": 1705,
+          "saved_pct": 0.0
+        }
+      ],
+      "input_cost_before_usd": 0.00403593,
+      "input_cost_after_usd": 0.004032595000000001,
+      "overhead_ms_median": 3.189908340573311,
+      "overhead_ms_p95": 24.178614560514685,
+      "ml_fired": 0,
+      "per_corpus": {
+        "gsm8k": {
+          "reduction_pct": 0.0,
+          "tokens_before": 216,
+          "tokens_after": 216
+        },
+        "hotpotqa": {
+          "reduction_pct": 0.0,
+          "tokens_before": 4805,
+          "tokens_after": 4805
+        },
+        "squad2": {
+          "reduction_pct": 0.0,
+          "tokens_before": 779,
+          "tokens_after": 779
+        },
+        "truthfulqa": {
+          "reduction_pct": 0.0,
+          "tokens_before": 318,
+          "tokens_after": 318
+        },
+        "cnn": {
+          "reduction_pct": 0.0,
+          "tokens_before": 3509,
+          "tokens_after": 3509
+        },
+        "lb_qasper": {
+          "reduction_pct": 0.0,
+          "tokens_before": 14046,
+          "tokens_after": 14046
+        },
+        "lb_multifieldqa": {
+          "reduction_pct": 0.2513732427148363,
+          "tokens_before": 32223,
+          "tokens_after": 32142
+        },
+        "lb_2wikimqa": {
+          "reduction_pct": 0.11078166237659115,
+          "tokens_before": 30691,
+          "tokens_after": 30657
+        },
+        "lb_gov_report": {
+          "reduction_pct": 0.0,
+          "tokens_before": 44985,
+          "tokens_after": 44985
+        },
+        "lb_multinews": {
+          "reduction_pct": 0.0,
+          "tokens_before": 7598,
+          "tokens_after": 7598
+        }
+      }
+    },
+    "auto": {
+      "tool": "llmtrim",
+      "n": 40,
+      "tokens_before": 139170,
+      "tokens_after": 103839,
+      "reduction_pct": 25.38693683983617,
+      "reduction_ci": [
+        13.039657461249366,
+        39.84027588710409
+      ],
+      "per_case": [
+        {
+          "corpus": "gsm8k",
+          "name": "gsm8k-0",
+          "before": 74,
+          "after": 93,
+          "saved_pct": -25.68
+        },
+        {
+          "corpus": "gsm8k",
+          "name": "gsm8k-1",
+          "before": 37,
+          "after": 56,
+          "saved_pct": -51.35
+        },
+        {
+          "corpus": "gsm8k",
+          "name": "gsm8k-2",
+          "before": 60,
+          "after": 79,
+          "saved_pct": -31.67
+        },
+        {
+          "corpus": "gsm8k",
+          "name": "gsm8k-3",
+          "before": 45,
+          "after": 64,
+          "saved_pct": -42.22
+        },
+        {
+          "corpus": "hotpotqa",
+          "name": "hotpot-0",
+          "before": 1126,
+          "after": 1145,
+          "saved_pct": -1.69
+        },
+        {
+          "corpus": "hotpotqa",
+          "name": "hotpot-1",
+          "before": 1233,
+          "after": 1252,
+          "saved_pct": -1.54
+        },
+        {
+          "corpus": "hotpotqa",
+          "name": "hotpot-2",
+          "before": 1484,
+          "after": 754,
+          "saved_pct": 49.19
+        },
+        {
+          "corpus": "hotpotqa",
+          "name": "hotpot-3",
+          "before": 962,
+          "after": 482,
+          "saved_pct": 49.9
+        },
+        {
+          "corpus": "squad2",
+          "name": "squad-0",
+          "before": 194,
+          "after": 140,
+          "saved_pct": 27.84
+        },
+        {
+          "corpus": "squad2",
+          "name": "squad-1",
+          "before": 195,
+          "after": 141,
+          "saved_pct": 27.69
+        },
+        {
+          "corpus": "squad2",
+          "name": "squad-2",
+          "before": 196,
+          "after": 190,
+          "saved_pct": 3.06
+        },
+        {
+          "corpus": "squad2",
+          "name": "squad-3",
+          "before": 194,
+          "after": 188,
+          "saved_pct": 3.09
+        },
+        {
+          "corpus": "truthfulqa",
+          "name": "truthfulqa-0",
+          "before": 113,
+          "after": 102,
+          "saved_pct": 9.73
+        },
+        {
+          "corpus": "truthfulqa",
+          "name": "truthfulqa-1",
+          "before": 78,
+          "after": 97,
+          "saved_pct": -24.36
+        },
+        {
+          "corpus": "truthfulqa",
+          "name": "truthfulqa-2",
+          "before": 68,
+          "after": 87,
+          "saved_pct": -27.94
+        },
+        {
+          "corpus": "truthfulqa",
+          "name": "truthfulqa-3",
+          "before": 59,
+          "after": 78,
+          "saved_pct": -32.2
+        },
+        {
+          "corpus": "cnn",
+          "name": "cnn-0",
+          "before": 921,
+          "after": 940,
+          "saved_pct": -2.06
+        },
+        {
+          "corpus": "cnn",
+          "name": "cnn-1",
+          "before": 1604,
+          "after": 1623,
+          "saved_pct": -1.18
+        },
+        {
+          "corpus": "cnn",
+          "name": "cnn-2",
+          "before": 541,
+          "after": 560,
+          "saved_pct": -3.51
+        },
+        {
+          "corpus": "cnn",
+          "name": "cnn-3",
+          "before": 443,
+          "after": 462,
+          "saved_pct": -4.29
+        },
+        {
+          "corpus": "lb_qasper",
+          "name": "qasper-0",
+          "before": 3829,
+          "after": 1762,
+          "saved_pct": 53.98
+        },
+        {
+          "corpus": "lb_qasper",
+          "name": "qasper-1",
+          "before": 3187,
+          "after": 1071,
+          "saved_pct": 66.39
+        },
+        {
+          "corpus": "lb_qasper",
+          "name": "qasper-2",
+          "before": 4215,
+          "after": 1557,
+          "saved_pct": 63.06
+        },
+        {
+          "corpus": "lb_qasper",
+          "name": "qasper-3",
+          "before": 2815,
+          "after": 1111,
+          "saved_pct": 60.53
+        },
+        {
+          "corpus": "lb_multifieldqa",
+          "name": "multifieldqa_en-0",
+          "before": 1458,
+          "after": 578,
+          "saved_pct": 60.36
+        },
+        {
+          "corpus": "lb_multifieldqa",
+          "name": "multifieldqa_en-1",
+          "before": 10930,
+          "after": 4324,
+          "saved_pct": 60.44
+        },
+        {
+          "corpus": "lb_multifieldqa",
+          "name": "multifieldqa_en-2",
+          "before": 8064,
+          "after": 3390,
+          "saved_pct": 57.96
+        },
+        {
+          "corpus": "lb_multifieldqa",
+          "name": "multifieldqa_en-3",
+          "before": 11771,
+          "after": 11790,
+          "saved_pct": -0.16
+        },
+        {
+          "corpus": "lb_2wikimqa",
+          "name": "2wikimqa-0",
+          "before": 6881,
+          "after": 4451,
+          "saved_pct": 35.31
+        },
+        {
+          "corpus": "lb_2wikimqa",
+          "name": "2wikimqa-1",
+          "before": 6732,
+          "after": 1809,
+          "saved_pct": 73.13
+        },
+        {
+          "corpus": "lb_2wikimqa",
+          "name": "2wikimqa-2",
+          "before": 6188,
+          "after": 4155,
+          "saved_pct": 32.85
+        },
+        {
+          "corpus": "lb_2wikimqa",
+          "name": "2wikimqa-3",
+          "before": 10890,
+          "after": 6573,
+          "saved_pct": 39.64
+        },
+        {
+          "corpus": "lb_gov_report",
+          "name": "gov_report-0",
+          "before": 10770,
+          "after": 10789,
+          "saved_pct": -0.18
+        },
+        {
+          "corpus": "lb_gov_report",
+          "name": "gov_report-1",
+          "before": 16059,
+          "after": 16078,
+          "saved_pct": -0.12
+        },
+        {
+          "corpus": "lb_gov_report",
+          "name": "gov_report-2",
+          "before": 9574,
+          "after": 9593,
+          "saved_pct": -0.2
+        },
+        {
+          "corpus": "lb_gov_report",
+          "name": "gov_report-3",
+          "before": 8582,
+          "after": 8601,
+          "saved_pct": -0.22
+        },
+        {
+          "corpus": "lb_multinews",
+          "name": "multi_news-0",
+          "before": 2661,
+          "after": 2680,
+          "saved_pct": -0.71
+        },
+        {
+          "corpus": "lb_multinews",
+          "name": "multi_news-1",
+          "before": 1632,
+          "after": 1651,
+          "saved_pct": -1.16
+        },
+        {
+          "corpus": "lb_multinews",
+          "name": "multi_news-2",
+          "before": 1600,
+          "after": 1619,
+          "saved_pct": -1.19
+        },
+        {
+          "corpus": "lb_multinews",
+          "name": "multi_news-3",
+          "before": 1705,
+          "after": 1724,
+          "saved_pct": -1.11
+        }
+      ],
+      "input_cost_before_usd": 0.00403593,
+      "input_cost_after_usd": 0.0030113310000000003,
+      "overhead_ms_median": 5.484643392264843,
+      "overhead_ms_p95": 42.93765500187874,
+      "ml_fired": 0,
+      "per_corpus": {
+        "gsm8k": {
+          "reduction_pct": -35.18518518518518,
+          "tokens_before": 216,
+          "tokens_after": 292
+        },
+        "hotpotqa": {
+          "reduction_pct": 24.39125910509885,
+          "tokens_before": 4805,
+          "tokens_after": 3633
+        },
+        "squad2": {
+          "reduction_pct": 15.404364569961492,
+          "tokens_before": 779,
+          "tokens_after": 659
+        },
+        "truthfulqa": {
+          "reduction_pct": -14.465408805031444,
+          "tokens_before": 318,
+          "tokens_after": 364
+        },
+        "cnn": {
+          "reduction_pct": -2.1658592191507564,
+          "tokens_before": 3509,
+          "tokens_after": 3585
+        },
+        "lb_qasper": {
+          "reduction_pct": 60.83582514594903,
+          "tokens_before": 14046,
+          "tokens_after": 5501
+        },
+        "lb_multifieldqa": {
+          "reduction_pct": 37.678056046923004,
+          "tokens_before": 32223,
+          "tokens_after": 20082
+        },
+        "lb_2wikimqa": {
+          "reduction_pct": 44.648268221954325,
+          "tokens_before": 30691,
+          "tokens_after": 16988
+        },
+        "lb_gov_report": {
+          "reduction_pct": -0.16894520395687174,
+          "tokens_before": 44985,
+          "tokens_after": 45061
+        },
+        "lb_multinews": {
+          "reduction_pct": -1.0002632271650436,
+          "tokens_before": 7598,
+          "tokens_after": 7674
+        }
+      }
+    },
+    "aggressive": {
+      "tool": "llmtrim",
+      "n": 40,
+      "tokens_before": 139170,
+      "tokens_after": 100106,
+      "reduction_pct": 28.069267801968813,
+      "reduction_ci": [
+        16.664378295254835,
+        41.548819677900326
+      ],
+      "per_case": [
+        {
+          "corpus": "gsm8k",
+          "name": "gsm8k-0",
+          "before": 74,
+          "after": 93,
+          "saved_pct": -25.68
+        },
+        {
+          "corpus": "gsm8k",
+          "name": "gsm8k-1",
+          "before": 37,
+          "after": 56,
+          "saved_pct": -51.35
+        },
+        {
+          "corpus": "gsm8k",
+          "name": "gsm8k-2",
+          "before": 60,
+          "after": 79,
+          "saved_pct": -31.67
+        },
+        {
+          "corpus": "gsm8k",
+          "name": "gsm8k-3",
+          "before": 45,
+          "after": 64,
+          "saved_pct": -42.22
+        },
+        {
+          "corpus": "hotpotqa",
+          "name": "hotpot-0",
+          "before": 1126,
+          "after": 1145,
+          "saved_pct": -1.69
+        },
+        {
+          "corpus": "hotpotqa",
+          "name": "hotpot-1",
+          "before": 1233,
+          "after": 1252,
+          "saved_pct": -1.54
+        },
+        {
+          "corpus": "hotpotqa",
+          "name": "hotpot-2",
+          "before": 1484,
+          "after": 753,
+          "saved_pct": 49.26
+        },
+        {
+          "corpus": "hotpotqa",
+          "name": "hotpot-3",
+          "before": 962,
+          "after": 481,
+          "saved_pct": 50.0
+        },
+        {
+          "corpus": "squad2",
+          "name": "squad-0",
+          "before": 194,
+          "after": 140,
+          "saved_pct": 27.84
+        },
+        {
+          "corpus": "squad2",
+          "name": "squad-1",
+          "before": 195,
+          "after": 141,
+          "saved_pct": 27.69
+        },
+        {
+          "corpus": "squad2",
+          "name": "squad-2",
+          "before": 196,
+          "after": 190,
+          "saved_pct": 3.06
+        },
+        {
+          "corpus": "squad2",
+          "name": "squad-3",
+          "before": 194,
+          "after": 188,
+          "saved_pct": 3.09
+        },
+        {
+          "corpus": "truthfulqa",
+          "name": "truthfulqa-0",
+          "before": 113,
+          "after": 102,
+          "saved_pct": 9.73
+        },
+        {
+          "corpus": "truthfulqa",
+          "name": "truthfulqa-1",
+          "before": 78,
+          "after": 97,
+          "saved_pct": -24.36
+        },
+        {
+          "corpus": "truthfulqa",
+          "name": "truthfulqa-2",
+          "before": 68,
+          "after": 87,
+          "saved_pct": -27.94
+        },
+        {
+          "corpus": "truthfulqa",
+          "name": "truthfulqa-3",
+          "before": 59,
+          "after": 78,
+          "saved_pct": -32.2
+        },
+        {
+          "corpus": "cnn",
+          "name": "cnn-0",
+          "before": 921,
+          "after": 940,
+          "saved_pct": -2.06
+        },
+        {
+          "corpus": "cnn",
+          "name": "cnn-1",
+          "before": 1604,
+          "after": 1623,
+          "saved_pct": -1.18
+        },
+        {
+          "corpus": "cnn",
+          "name": "cnn-2",
+          "before": 541,
+          "after": 560,
+          "saved_pct": -3.51
+        },
+        {
+          "corpus": "cnn",
+          "name": "cnn-3",
+          "before": 443,
+          "after": 462,
+          "saved_pct": -4.29
+        },
+        {
+          "corpus": "lb_qasper",
+          "name": "qasper-0",
+          "before": 3829,
+          "after": 1745,
+          "saved_pct": 54.43
+        },
+        {
+          "corpus": "lb_qasper",
+          "name": "qasper-1",
+          "before": 3187,
+          "after": 1065,
+          "saved_pct": 66.58
+        },
+        {
+          "corpus": "lb_qasper",
+          "name": "qasper-2",
+          "before": 4215,
+          "after": 1530,
+          "saved_pct": 63.7
+        },
+        {
+          "corpus": "lb_qasper",
+          "name": "qasper-3",
+          "before": 2815,
+          "after": 1097,
+          "saved_pct": 61.03
+        },
+        {
+          "corpus": "lb_multifieldqa",
+          "name": "multifieldqa_en-0",
+          "before": 1458,
+          "after": 578,
+          "saved_pct": 60.36
+        },
+        {
+          "corpus": "lb_multifieldqa",
+          "name": "multifieldqa_en-1",
+          "before": 10930,
+          "after": 4166,
+          "saved_pct": 61.88
+        },
+        {
+          "corpus": "lb_multifieldqa",
+          "name": "multifieldqa_en-2",
+          "before": 8064,
+          "after": 3280,
+          "saved_pct": 59.33
+        },
+        {
+          "corpus": "lb_multifieldqa",
+          "name": "multifieldqa_en-3",
+          "before": 11771,
+          "after": 11380,
+          "saved_pct": 3.32
+        },
+        {
+          "corpus": "lb_2wikimqa",
+          "name": "2wikimqa-0",
+          "before": 6881,
+          "after": 4432,
+          "saved_pct": 35.59
+        },
+        {
+          "corpus": "lb_2wikimqa",
+          "name": "2wikimqa-1",
+          "before": 6732,
+          "after": 1798,
+          "saved_pct": 73.29
+        },
+        {
+          "corpus": "lb_2wikimqa",
+          "name": "2wikimqa-2",
+          "before": 6188,
+          "after": 4155,
+          "saved_pct": 32.85
+        },
+        {
+          "corpus": "lb_2wikimqa",
+          "name": "2wikimqa-3",
+          "before": 10890,
+          "after": 6571,
+          "saved_pct": 39.66
+        },
+        {
+          "corpus": "lb_gov_report",
+          "name": "gov_report-0",
+          "before": 10770,
+          "after": 10507,
+          "saved_pct": 2.44
+        },
+        {
+          "corpus": "lb_gov_report",
+          "name": "gov_report-1",
+          "before": 16059,
+          "after": 14808,
+          "saved_pct": 7.79
+        },
+        {
+          "corpus": "lb_gov_report",
+          "name": "gov_report-2",
+          "before": 9574,
+          "after": 9113,
+          "saved_pct": 4.82
+        },
+        {
+          "corpus": "lb_gov_report",
+          "name": "gov_report-3",
+          "before": 8582,
+          "after": 8548,
+          "saved_pct": 0.4
+        },
+        {
+          "corpus": "lb_multinews",
+          "name": "multi_news-0",
+          "before": 2661,
+          "after": 2439,
+          "saved_pct": 8.34
+        },
+        {
+          "corpus": "lb_multinews",
+          "name": "multi_news-1",
+          "before": 1632,
+          "after": 1409,
+          "saved_pct": 13.66
+        },
+        {
+          "corpus": "lb_multinews",
+          "name": "multi_news-2",
+          "before": 1600,
+          "after": 1512,
+          "saved_pct": 5.5
+        },
+        {
+          "corpus": "lb_multinews",
+          "name": "multi_news-3",
+          "before": 1705,
+          "after": 1442,
+          "saved_pct": 15.43
+        }
+      ],
+      "input_cost_before_usd": 0.00403593,
+      "input_cost_after_usd": 0.0029030740000000003,
+      "overhead_ms_median": 5.669504404067993,
+      "overhead_ms_p95": 434.22809178009595,
+      "ml_fired": 0,
+      "per_corpus": {
+        "gsm8k": {
+          "reduction_pct": -35.18518518518518,
+          "tokens_before": 216,
+          "tokens_after": 292
+        },
+        "hotpotqa": {
+          "reduction_pct": 24.432882414151923,
+          "tokens_before": 4805,
+          "tokens_after": 3631
+        },
+        "squad2": {
+          "reduction_pct": 15.404364569961492,
+          "tokens_before": 779,
+          "tokens_after": 659
+        },
+        "truthfulqa": {
+          "reduction_pct": -14.465408805031444,
+          "tokens_before": 318,
+          "tokens_after": 364
+        },
+        "cnn": {
+          "reduction_pct": -2.1658592191507564,
+          "tokens_before": 3509,
+          "tokens_after": 3585
+        },
+        "lb_qasper": {
+          "reduction_pct": 61.29147088138972,
+          "tokens_before": 14046,
+          "tokens_after": 5437
+        },
+        "lb_multifieldqa": {
+          "reduction_pct": 39.782143189647144,
+          "tokens_before": 32223,
+          "tokens_after": 19404
+        },
+        "lb_2wikimqa": {
+          "reduction_pct": 44.75253331595582,
+          "tokens_before": 30691,
+          "tokens_after": 16956
+        },
+        "lb_gov_report": {
+          "reduction_pct": 4.465933088807383,
+          "tokens_before": 44985,
+          "tokens_after": 42976
+        },
+        "lb_multinews": {
+          "reduction_pct": 10.476441168728613,
+          "tokens_before": 7598,
+          "tokens_after": 6802
+        }
+      }
+    },
+    "lc-keep1.00": {
+      "tool": "leanctx",
+      "n": 40,
+      "tokens_before": 139170,
+      "tokens_after": 138371,
+      "reduction_pct": 0.5741179851979639,
+      "reduction_ci": [
+        0.3403020341072538,
+        0.8831279334669095
+      ],
+      "per_case": [
+        {
+          "corpus": "gsm8k",
+          "name": "gsm8k-0",
+          "before": 74,
+          "after": 74,
+          "saved_pct": 0.0
+        },
+        {
+          "corpus": "gsm8k",
+          "name": "gsm8k-1",
+          "before": 37,
+          "after": 36,
+          "saved_pct": 2.7
+        },
+        {
+          "corpus": "gsm8k",
+          "name": "gsm8k-2",
+          "before": 60,
+          "after": 57,
+          "saved_pct": 5.0
+        },
+        {
+          "corpus": "gsm8k",
+          "name": "gsm8k-3",
+          "before": 45,
+          "after": 43,
+          "saved_pct": 4.44
+        },
+        {
+          "corpus": "hotpotqa",
+          "name": "hotpot-0",
+          "before": 1126,
+          "after": 1122,
+          "saved_pct": 0.36
+        },
+        {
+          "corpus": "hotpotqa",
+          "name": "hotpot-1",
+          "before": 1233,
+          "after": 1227,
+          "saved_pct": 0.49
+        },
+        {
+          "corpus": "hotpotqa",
+          "name": "hotpot-2",
+          "before": 1484,
+          "after": 1481,
+          "saved_pct": 0.2
+        },
+        {
+          "corpus": "hotpotqa",
+          "name": "hotpot-3",
+          "before": 962,
+          "after": 956,
+          "saved_pct": 0.62
+        },
+        {
+          "corpus": "squad2",
+          "name": "squad-0",
+          "before": 194,
+          "after": 194,
+          "saved_pct": 0.0
+        },
+        {
+          "corpus": "squad2",
+          "name": "squad-1",
+          "before": 195,
+          "after": 195,
+          "saved_pct": 0.0
+        },
+        {
+          "corpus": "squad2",
+          "name": "squad-2",
+          "before": 196,
+          "after": 196,
+          "saved_pct": 0.0
+        },
+        {
+          "corpus": "squad2",
+          "name": "squad-3",
+          "before": 194,
+          "after": 194,
+          "saved_pct": 0.0
+        },
+        {
+          "corpus": "truthfulqa",
+          "name": "truthfulqa-0",
+          "before": 113,
+          "after": 113,
+          "saved_pct": 0.0
+        },
+        {
+          "corpus": "truthfulqa",
+          "name": "truthfulqa-1",
+          "before": 78,
+          "after": 78,
+          "saved_pct": 0.0
+        },
+        {
+          "corpus": "truthfulqa",
+          "name": "truthfulqa-2",
+          "before": 68,
+          "after": 68,
+          "saved_pct": 0.0
+        },
+        {
+          "corpus": "truthfulqa",
+          "name": "truthfulqa-3",
+          "before": 59,
+          "after": 59,
+          "saved_pct": 0.0
+        },
+        {
+          "corpus": "cnn",
+          "name": "cnn-0",
+          "before": 921,
+          "after": 920,
+          "saved_pct": 0.11
+        },
+        {
+          "corpus": "cnn",
+          "name": "cnn-1",
+          "before": 1604,
+          "after": 1601,
+          "saved_pct": 0.19
+        },
+        {
+          "corpus": "cnn",
+          "name": "cnn-2",
+          "before": 541,
+          "after": 540,
+          "saved_pct": 0.18
+        },
+        {
+          "corpus": "cnn",
+          "name": "cnn-3",
+          "before": 443,
+          "after": 443,
+          "saved_pct": 0.0
+        },
+        {
+          "corpus": "lb_qasper",
+          "name": "qasper-0",
+          "before": 3829,
+          "after": 3808,
+          "saved_pct": 0.55
+        },
+        {
+          "corpus": "lb_qasper",
+          "name": "qasper-1",
+          "before": 3187,
+          "after": 3166,
+          "saved_pct": 0.66
+        },
+        {
+          "corpus": "lb_qasper",
+          "name": "qasper-2",
+          "before": 4215,
+          "after": 4190,
+          "saved_pct": 0.59
+        },
+        {
+          "corpus": "lb_qasper",
+          "name": "qasper-3",
+          "before": 2815,
+          "after": 2795,
+          "saved_pct": 0.71
+        },
+        {
+          "corpus": "lb_multifieldqa",
+          "name": "multifieldqa_en-0",
+          "before": 1458,
+          "after": 1415,
+          "saved_pct": 2.95
+        },
+        {
+          "corpus": "lb_multifieldqa",
+          "name": "multifieldqa_en-1",
+          "before": 10930,
+          "after": 10915,
+          "saved_pct": 0.14
+        },
+        {
+          "corpus": "lb_multifieldqa",
+          "name": "multifieldqa_en-2",
+          "before": 8064,
+          "after": 8008,
+          "saved_pct": 0.69
+        },
+        {
+          "corpus": "lb_multifieldqa",
+          "name": "multifieldqa_en-3",
+          "before": 11771,
+          "after": 11737,
+          "saved_pct": 0.29
+        },
+        {
+          "corpus": "lb_2wikimqa",
+          "name": "2wikimqa-0",
+          "before": 6881,
+          "after": 6768,
+          "saved_pct": 1.64
+        },
+        {
+          "corpus": "lb_2wikimqa",
+          "name": "2wikimqa-1",
+          "before": 6732,
+          "after": 6649,
+          "saved_pct": 1.23
+        },
+        {
+          "corpus": "lb_2wikimqa",
+          "name": "2wikimqa-2",
+          "before": 6188,
+          "after": 6060,
+          "saved_pct": 2.07
+        },
+        {
+          "corpus": "lb_2wikimqa",
+          "name": "2wikimqa-3",
+          "before": 10890,
+          "after": 10761,
+          "saved_pct": 1.18
+        },
+        {
+          "corpus": "lb_gov_report",
+          "name": "gov_report-0",
+          "before": 10770,
+          "after": 10752,
+          "saved_pct": 0.17
+        },
+        {
+          "corpus": "lb_gov_report",
+          "name": "gov_report-1",
+          "before": 16059,
+          "after": 16036,
+          "saved_pct": 0.14
+        },
+        {
+          "corpus": "lb_gov_report",
+          "name": "gov_report-2",
+          "before": 9574,
+          "after": 9565,
+          "saved_pct": 0.09
+        },
+        {
+          "corpus": "lb_gov_report",
+          "name": "gov_report-3",
+          "before": 8582,
+          "after": 8569,
+          "saved_pct": 0.15
+        },
+        {
+          "corpus": "lb_multinews",
+          "name": "multi_news-0",
+          "before": 2661,
+          "after": 2655,
+          "saved_pct": 0.23
+        },
+        {
+          "corpus": "lb_multinews",
+          "name": "multi_news-1",
+          "before": 1632,
+          "after": 1627,
+          "saved_pct": 0.31
+        },
+        {
+          "corpus": "lb_multinews",
+          "name": "multi_news-2",
+          "before": 1600,
+          "after": 1596,
+          "saved_pct": 0.25
+        },
+        {
+          "corpus": "lb_multinews",
+          "name": "multi_news-3",
+          "before": 1705,
+          "after": 1702,
+          "saved_pct": 0.18
+        }
+      ],
+      "input_cost_before_usd": 0.00403593,
+      "input_cost_after_usd": 0.004012759,
+      "overhead_ms_median": 8.266786113381386,
+      "overhead_ms_p95": 63.83187919855112,
+      "ml_fired": 40,
+      "per_corpus": {
+        "gsm8k": {
+          "reduction_pct": 2.777777777777779,
+          "tokens_before": 216,
+          "tokens_after": 210
+        },
+        "hotpotqa": {
+          "reduction_pct": 0.3954214360041619,
+          "tokens_before": 4805,
+          "tokens_after": 4786
+        },
+        "squad2": {
+          "reduction_pct": 0.0,
+          "tokens_before": 779,
+          "tokens_after": 779
+        },
+        "truthfulqa": {
+          "reduction_pct": 0.0,
+          "tokens_before": 318,
+          "tokens_after": 318
+        },
+        "cnn": {
+          "reduction_pct": 0.14249073810201907,
+          "tokens_before": 3509,
+          "tokens_after": 3504
+        },
+        "lb_qasper": {
+          "reduction_pct": 0.6193934216147001,
+          "tokens_before": 14046,
+          "tokens_after": 13959
+        },
+        "lb_multifieldqa": {
+          "reduction_pct": 0.45929925829376606,
+          "tokens_before": 32223,
+          "tokens_after": 32075
+        },
+        "lb_2wikimqa": {
+          "reduction_pct": 1.4760027369587148,
+          "tokens_before": 30691,
+          "tokens_after": 30238
+        },
+        "lb_gov_report": {
+          "reduction_pct": 0.14004668222741268,
+          "tokens_before": 44985,
+          "tokens_after": 44922
+        },
+        "lb_multinews": {
+          "reduction_pct": 0.2369044485390881,
+          "tokens_before": 7598,
+          "tokens_after": 7580
+        }
+      }
+    },
+    "lc-keep0.75": {
+      "tool": "leanctx",
+      "n": 40,
+      "tokens_before": 139170,
+      "tokens_after": 102885,
+      "reduction_pct": 26.072429402888552,
+      "reduction_ci": [
+        25.584969120589175,
+        26.55681742791144
+      ],
+      "per_case": [
+        {
+          "corpus": "gsm8k",
+          "name": "gsm8k-0",
+          "before": 74,
+          "after": 55,
+          "saved_pct": 25.68
+        },
+        {
+          "corpus": "gsm8k",
+          "name": "gsm8k-1",
+          "before": 37,
+          "after": 26,
+          "saved_pct": 29.73
+        },
+        {
+          "corpus": "gsm8k",
+          "name": "gsm8k-2",
+          "before": 60,
+          "after": 43,
+          "saved_pct": 28.33
+        },
+        {
+          "corpus": "gsm8k",
+          "name": "gsm8k-3",
+          "before": 45,
+          "after": 31,
+          "saved_pct": 31.11
+        },
+        {
+          "corpus": "hotpotqa",
+          "name": "hotpot-0",
+          "before": 1126,
+          "after": 847,
+          "saved_pct": 24.78
+        },
+        {
+          "corpus": "hotpotqa",
+          "name": "hotpot-1",
+          "before": 1233,
+          "after": 938,
+          "saved_pct": 23.93
+        },
+        {
+          "corpus": "hotpotqa",
+          "name": "hotpot-2",
+          "before": 1484,
+          "after": 1099,
+          "saved_pct": 25.94
+        },
+        {
+          "corpus": "hotpotqa",
+          "name": "hotpot-3",
+          "before": 962,
+          "after": 734,
+          "saved_pct": 23.7
+        },
+        {
+          "corpus": "squad2",
+          "name": "squad-0",
+          "before": 194,
+          "after": 145,
+          "saved_pct": 25.26
+        },
+        {
+          "corpus": "squad2",
+          "name": "squad-1",
+          "before": 195,
+          "after": 146,
+          "saved_pct": 25.13
+        },
+        {
+          "corpus": "squad2",
+          "name": "squad-2",
+          "before": 196,
+          "after": 146,
+          "saved_pct": 25.51
+        },
+        {
+          "corpus": "squad2",
+          "name": "squad-3",
+          "before": 194,
+          "after": 145,
+          "saved_pct": 25.26
+        },
+        {
+          "corpus": "truthfulqa",
+          "name": "truthfulqa-0",
+          "before": 113,
+          "after": 85,
+          "saved_pct": 24.78
+        },
+        {
+          "corpus": "truthfulqa",
+          "name": "truthfulqa-1",
+          "before": 78,
+          "after": 58,
+          "saved_pct": 25.64
+        },
+        {
+          "corpus": "truthfulqa",
+          "name": "truthfulqa-2",
+          "before": 68,
+          "after": 51,
+          "saved_pct": 25.0
+        },
+        {
+          "corpus": "truthfulqa",
+          "name": "truthfulqa-3",
+          "before": 59,
+          "after": 42,
+          "saved_pct": 28.81
+        },
+        {
+          "corpus": "cnn",
+          "name": "cnn-0",
+          "before": 921,
+          "after": 681,
+          "saved_pct": 26.06
+        },
+        {
+          "corpus": "cnn",
+          "name": "cnn-1",
+          "before": 1604,
+          "after": 1204,
+          "saved_pct": 24.94
+        },
+        {
+          "corpus": "cnn",
+          "name": "cnn-2",
+          "before": 541,
+          "after": 397,
+          "saved_pct": 26.62
+        },
+        {
+          "corpus": "cnn",
+          "name": "cnn-3",
+          "before": 443,
+          "after": 333,
+          "saved_pct": 24.83
+        },
+        {
+          "corpus": "lb_qasper",
+          "name": "qasper-0",
+          "before": 3829,
+          "after": 2811,
+          "saved_pct": 26.59
+        },
+        {
+          "corpus": "lb_qasper",
+          "name": "qasper-1",
+          "before": 3187,
+          "after": 2386,
+          "saved_pct": 25.13
+        },
+        {
+          "corpus": "lb_qasper",
+          "name": "qasper-2",
+          "before": 4215,
+          "after": 3139,
+          "saved_pct": 25.53
+        },
+        {
+          "corpus": "lb_qasper",
+          "name": "qasper-3",
+          "before": 2815,
+          "after": 2067,
+          "saved_pct": 26.57
+        },
+        {
+          "corpus": "lb_multifieldqa",
+          "name": "multifieldqa_en-0",
+          "before": 1458,
+          "after": 1085,
+          "saved_pct": 25.58
+        },
+        {
+          "corpus": "lb_multifieldqa",
+          "name": "multifieldqa_en-1",
+          "before": 10930,
+          "after": 8266,
+          "saved_pct": 24.37
+        },
+        {
+          "corpus": "lb_multifieldqa",
+          "name": "multifieldqa_en-2",
+          "before": 8064,
+          "after": 6036,
+          "saved_pct": 25.15
+        },
+        {
+          "corpus": "lb_multifieldqa",
+          "name": "multifieldqa_en-3",
+          "before": 11771,
+          "after": 8737,
+          "saved_pct": 25.78
+        },
+        {
+          "corpus": "lb_2wikimqa",
+          "name": "2wikimqa-0",
+          "before": 6881,
+          "after": 5113,
+          "saved_pct": 25.69
+        },
+        {
+          "corpus": "lb_2wikimqa",
+          "name": "2wikimqa-1",
+          "before": 6732,
+          "after": 4926,
+          "saved_pct": 26.83
+        },
+        {
+          "corpus": "lb_2wikimqa",
+          "name": "2wikimqa-2",
+          "before": 6188,
+          "after": 4535,
+          "saved_pct": 26.71
+        },
+        {
+          "corpus": "lb_2wikimqa",
+          "name": "2wikimqa-3",
+          "before": 10890,
+          "after": 7949,
+          "saved_pct": 27.01
+        },
+        {
+          "corpus": "lb_gov_report",
+          "name": "gov_report-0",
+          "before": 10770,
+          "after": 8111,
+          "saved_pct": 24.69
+        },
+        {
+          "corpus": "lb_gov_report",
+          "name": "gov_report-1",
+          "before": 16059,
+          "after": 11884,
+          "saved_pct": 26.0
+        },
+        {
+          "corpus": "lb_gov_report",
+          "name": "gov_report-2",
+          "before": 9574,
+          "after": 6964,
+          "saved_pct": 27.26
+        },
+        {
+          "corpus": "lb_gov_report",
+          "name": "gov_report-3",
+          "before": 8582,
+          "after": 6258,
+          "saved_pct": 27.08
+        },
+        {
+          "corpus": "lb_multinews",
+          "name": "multi_news-0",
+          "before": 2661,
+          "after": 1898,
+          "saved_pct": 28.67
+        },
+        {
+          "corpus": "lb_multinews",
+          "name": "multi_news-1",
+          "before": 1632,
+          "after": 1166,
+          "saved_pct": 28.55
+        },
+        {
+          "corpus": "lb_multinews",
+          "name": "multi_news-2",
+          "before": 1600,
+          "after": 1123,
+          "saved_pct": 29.81
+        },
+        {
+          "corpus": "lb_multinews",
+          "name": "multi_news-3",
+          "before": 1705,
+          "after": 1225,
+          "saved_pct": 28.15
+        }
+      ],
+      "input_cost_before_usd": 0.00403593,
+      "input_cost_after_usd": 0.0029836650000000004,
+      "overhead_ms_median": 6483.6097955703735,
+      "overhead_ms_p95": 39088.93245412037,
+      "ml_fired": 40,
+      "per_corpus": {
+        "gsm8k": {
+          "reduction_pct": 28.240740740740744,
+          "tokens_before": 216,
+          "tokens_after": 155
+        },
+        "hotpotqa": {
+          "reduction_pct": 24.703433922996876,
+          "tokens_before": 4805,
+          "tokens_after": 3618
+        },
+        "squad2": {
+          "reduction_pct": 25.288831835686775,
+          "tokens_before": 779,
+          "tokens_after": 582
+        },
+        "truthfulqa": {
+          "reduction_pct": 25.786163522012583,
+          "tokens_before": 318,
+          "tokens_after": 236
+        },
+        "cnn": {
+          "reduction_pct": 25.477343972641776,
+          "tokens_before": 3509,
+          "tokens_after": 2615
+        },
+        "lb_qasper": {
+          "reduction_pct": 25.936209597038307,
+          "tokens_before": 14046,
+          "tokens_after": 10403
+        },
+        "lb_multifieldqa": {
+          "reduction_pct": 25.134220898116254,
+          "tokens_before": 32223,
+          "tokens_after": 24124
+        },
+        "lb_2wikimqa": {
+          "reduction_pct": 26.61366524388257,
+          "tokens_before": 30691,
+          "tokens_after": 22523
+        },
+        "lb_gov_report": {
+          "reduction_pct": 26.159831054796044,
+          "tokens_before": 44985,
+          "tokens_after": 33217
+        },
+        "lb_multinews": {
+          "reduction_pct": 28.770729139247177,
+          "tokens_before": 7598,
+          "tokens_after": 5412
+        }
+      }
+    },
+    "lc-keep0.50": {
+      "tool": "leanctx",
+      "n": 40,
+      "tokens_before": 139170,
+      "tokens_after": 66987,
+      "reduction_pct": 51.86678163397285,
+      "reduction_ci": [
+        51.25885713579086,
+        52.508932635766705
+      ],
+      "per_case": [
+        {
+          "corpus": "gsm8k",
+          "name": "gsm8k-0",
+          "before": 74,
+          "after": 35,
+          "saved_pct": 52.7
+        },
+        {
+          "corpus": "gsm8k",
+          "name": "gsm8k-1",
+          "before": 37,
+          "after": 16,
+          "saved_pct": 56.76
+        },
+        {
+          "corpus": "gsm8k",
+          "name": "gsm8k-2",
+          "before": 60,
+          "after": 29,
+          "saved_pct": 51.67
+        },
+        {
+          "corpus": "gsm8k",
+          "name": "gsm8k-3",
+          "before": 45,
+          "after": 20,
+          "saved_pct": 55.56
+        },
+        {
+          "corpus": "hotpotqa",
+          "name": "hotpot-0",
+          "before": 1126,
+          "after": 557,
+          "saved_pct": 50.53
+        },
+        {
+          "corpus": "hotpotqa",
+          "name": "hotpot-1",
+          "before": 1233,
+          "after": 634,
+          "saved_pct": 48.58
+        },
+        {
+          "corpus": "hotpotqa",
+          "name": "hotpot-2",
+          "before": 1484,
+          "after": 715,
+          "saved_pct": 51.82
+        },
+        {
+          "corpus": "hotpotqa",
+          "name": "hotpot-3",
+          "before": 962,
+          "after": 474,
+          "saved_pct": 50.73
+        },
+        {
+          "corpus": "squad2",
+          "name": "squad-0",
+          "before": 194,
+          "after": 92,
+          "saved_pct": 52.58
+        },
+        {
+          "corpus": "squad2",
+          "name": "squad-1",
+          "before": 195,
+          "after": 93,
+          "saved_pct": 52.31
+        },
+        {
+          "corpus": "squad2",
+          "name": "squad-2",
+          "before": 196,
+          "after": 94,
+          "saved_pct": 52.04
+        },
+        {
+          "corpus": "squad2",
+          "name": "squad-3",
+          "before": 194,
+          "after": 92,
+          "saved_pct": 52.58
+        },
+        {
+          "corpus": "truthfulqa",
+          "name": "truthfulqa-0",
+          "before": 113,
+          "after": 59,
+          "saved_pct": 47.79
+        },
+        {
+          "corpus": "truthfulqa",
+          "name": "truthfulqa-1",
+          "before": 78,
+          "after": 37,
+          "saved_pct": 52.56
+        },
+        {
+          "corpus": "truthfulqa",
+          "name": "truthfulqa-2",
+          "before": 68,
+          "after": 34,
+          "saved_pct": 50.0
+        },
+        {
+          "corpus": "truthfulqa",
+          "name": "truthfulqa-3",
+          "before": 59,
+          "after": 25,
+          "saved_pct": 57.63
+        },
+        {
+          "corpus": "cnn",
+          "name": "cnn-0",
+          "before": 921,
+          "after": 429,
+          "saved_pct": 53.42
+        },
+        {
+          "corpus": "cnn",
+          "name": "cnn-1",
+          "before": 1604,
+          "after": 768,
+          "saved_pct": 52.12
+        },
+        {
+          "corpus": "cnn",
+          "name": "cnn-2",
+          "before": 541,
+          "after": 253,
+          "saved_pct": 53.23
+        },
+        {
+          "corpus": "cnn",
+          "name": "cnn-3",
+          "before": 443,
+          "after": 219,
+          "saved_pct": 50.56
+        },
+        {
+          "corpus": "lb_qasper",
+          "name": "qasper-0",
+          "before": 3829,
+          "after": 1795,
+          "saved_pct": 53.12
+        },
+        {
+          "corpus": "lb_qasper",
+          "name": "qasper-1",
+          "before": 3187,
+          "after": 1614,
+          "saved_pct": 49.36
+        },
+        {
+          "corpus": "lb_qasper",
+          "name": "qasper-2",
+          "before": 4215,
+          "after": 2044,
+          "saved_pct": 51.51
+        },
+        {
+          "corpus": "lb_qasper",
+          "name": "qasper-3",
+          "before": 2815,
+          "after": 1310,
+          "saved_pct": 53.46
+        },
+        {
+          "corpus": "lb_multifieldqa",
+          "name": "multifieldqa_en-0",
+          "before": 1458,
+          "after": 702,
+          "saved_pct": 51.85
+        },
+        {
+          "corpus": "lb_multifieldqa",
+          "name": "multifieldqa_en-1",
+          "before": 10930,
+          "after": 5531,
+          "saved_pct": 49.4
+        },
+        {
+          "corpus": "lb_multifieldqa",
+          "name": "multifieldqa_en-2",
+          "before": 8064,
+          "after": 3805,
+          "saved_pct": 52.81
+        },
+        {
+          "corpus": "lb_multifieldqa",
+          "name": "multifieldqa_en-3",
+          "before": 11771,
+          "after": 5637,
+          "saved_pct": 52.11
+        },
+        {
+          "corpus": "lb_2wikimqa",
+          "name": "2wikimqa-0",
+          "before": 6881,
+          "after": 3399,
+          "saved_pct": 50.6
+        },
+        {
+          "corpus": "lb_2wikimqa",
+          "name": "2wikimqa-1",
+          "before": 6732,
+          "after": 3219,
+          "saved_pct": 52.18
+        },
+        {
+          "corpus": "lb_2wikimqa",
+          "name": "2wikimqa-2",
+          "before": 6188,
+          "after": 2998,
+          "saved_pct": 51.55
+        },
+        {
+          "corpus": "lb_2wikimqa",
+          "name": "2wikimqa-3",
+          "before": 10890,
+          "after": 5232,
+          "saved_pct": 51.96
+        },
+        {
+          "corpus": "lb_gov_report",
+          "name": "gov_report-0",
+          "before": 10770,
+          "after": 5315,
+          "saved_pct": 50.65
+        },
+        {
+          "corpus": "lb_gov_report",
+          "name": "gov_report-1",
+          "before": 16059,
+          "after": 7846,
+          "saved_pct": 51.14
+        },
+        {
+          "corpus": "lb_gov_report",
+          "name": "gov_report-2",
+          "before": 9574,
+          "after": 4449,
+          "saved_pct": 53.53
+        },
+        {
+          "corpus": "lb_gov_report",
+          "name": "gov_report-3",
+          "before": 8582,
+          "after": 3997,
+          "saved_pct": 53.43
+        },
+        {
+          "corpus": "lb_multinews",
+          "name": "multi_news-0",
+          "before": 2661,
+          "after": 1200,
+          "saved_pct": 54.9
+        },
+        {
+          "corpus": "lb_multinews",
+          "name": "multi_news-1",
+          "before": 1632,
+          "after": 730,
+          "saved_pct": 55.27
+        },
+        {
+          "corpus": "lb_multinews",
+          "name": "multi_news-2",
+          "before": 1600,
+          "after": 710,
+          "saved_pct": 55.62
+        },
+        {
+          "corpus": "lb_multinews",
+          "name": "multi_news-3",
+          "before": 1705,
+          "after": 779,
+          "saved_pct": 54.31
+        }
+      ],
+      "input_cost_before_usd": 0.00403593,
+      "input_cost_after_usd": 0.0019426230000000003,
+      "overhead_ms_median": 6327.527542598546,
+      "overhead_ms_p95": 39395.97631637007,
+      "ml_fired": 40,
+      "per_corpus": {
+        "gsm8k": {
+          "reduction_pct": 53.703703703703695,
+          "tokens_before": 216,
+          "tokens_after": 100
+        },
+        "hotpotqa": {
+          "reduction_pct": 50.46826222684704,
+          "tokens_before": 4805,
+          "tokens_after": 2380
+        },
+        "squad2": {
+          "reduction_pct": 52.37483953786906,
+          "tokens_before": 779,
+          "tokens_after": 371
+        },
+        "truthfulqa": {
+          "reduction_pct": 51.257861635220124,
+          "tokens_before": 318,
+          "tokens_after": 155
+        },
+        "cnn": {
+          "reduction_pct": 52.43659162154459,
+          "tokens_before": 3509,
+          "tokens_after": 1669
+        },
+        "lb_qasper": {
+          "reduction_pct": 51.85106080022782,
+          "tokens_before": 14046,
+          "tokens_after": 6763
+        },
+        "lb_multifieldqa": {
+          "reduction_pct": 51.35462247462992,
+          "tokens_before": 32223,
+          "tokens_after": 15675
+        },
+        "lb_2wikimqa": {
+          "reduction_pct": 51.62099638330455,
+          "tokens_before": 30691,
+          "tokens_after": 14848
+        },
+        "lb_gov_report": {
+          "reduction_pct": 51.96843392241859,
+          "tokens_before": 44985,
+          "tokens_after": 21607
+        },
+        "lb_multinews": {
+          "reduction_pct": 55.00131613582522,
+          "tokens_before": 7598,
+          "tokens_after": 3419
+        }
+      }
+    },
+    "lc-keep0.33": {
+      "tool": "leanctx",
+      "n": 40,
+      "tokens_before": 139170,
+      "tokens_after": 44292,
+      "reduction_pct": 68.17417546885105,
+      "reduction_ci": [
+        67.55895128762023,
+        68.85474860335195
+      ],
+      "per_case": [
+        {
+          "corpus": "gsm8k",
+          "name": "gsm8k-0",
+          "before": 74,
+          "after": 23,
+          "saved_pct": 68.92
+        },
+        {
+          "corpus": "gsm8k",
+          "name": "gsm8k-1",
+          "before": 37,
+          "after": 11,
+          "saved_pct": 70.27
+        },
+        {
+          "corpus": "gsm8k",
+          "name": "gsm8k-2",
+          "before": 60,
+          "after": 20,
+          "saved_pct": 66.67
+        },
+        {
+          "corpus": "gsm8k",
+          "name": "gsm8k-3",
+          "before": 45,
+          "after": 14,
+          "saved_pct": 68.89
+        },
+        {
+          "corpus": "hotpotqa",
+          "name": "hotpot-0",
+          "before": 1126,
+          "after": 360,
+          "saved_pct": 68.03
+        },
+        {
+          "corpus": "hotpotqa",
+          "name": "hotpot-1",
+          "before": 1233,
+          "after": 418,
+          "saved_pct": 66.1
+        },
+        {
+          "corpus": "hotpotqa",
+          "name": "hotpot-2",
+          "before": 1484,
+          "after": 482,
+          "saved_pct": 67.52
+        },
+        {
+          "corpus": "hotpotqa",
+          "name": "hotpot-3",
+          "before": 962,
+          "after": 324,
+          "saved_pct": 66.32
+        },
+        {
+          "corpus": "squad2",
+          "name": "squad-0",
+          "before": 194,
+          "after": 63,
+          "saved_pct": 67.53
+        },
+        {
+          "corpus": "squad2",
+          "name": "squad-1",
+          "before": 195,
+          "after": 64,
+          "saved_pct": 67.18
+        },
+        {
+          "corpus": "squad2",
+          "name": "squad-2",
+          "before": 196,
+          "after": 63,
+          "saved_pct": 67.86
+        },
+        {
+          "corpus": "squad2",
+          "name": "squad-3",
+          "before": 194,
+          "after": 63,
+          "saved_pct": 67.53
+        },
+        {
+          "corpus": "truthfulqa",
+          "name": "truthfulqa-0",
+          "before": 113,
+          "after": 40,
+          "saved_pct": 64.6
+        },
+        {
+          "corpus": "truthfulqa",
+          "name": "truthfulqa-1",
+          "before": 78,
+          "after": 21,
+          "saved_pct": 73.08
+        },
+        {
+          "corpus": "truthfulqa",
+          "name": "truthfulqa-2",
+          "before": 68,
+          "after": 20,
+          "saved_pct": 70.59
+        },
+        {
+          "corpus": "truthfulqa",
+          "name": "truthfulqa-3",
+          "before": 59,
+          "after": 16,
+          "saved_pct": 72.88
+        },
+        {
+          "corpus": "cnn",
+          "name": "cnn-0",
+          "before": 921,
+          "after": 278,
+          "saved_pct": 69.82
+        },
+        {
+          "corpus": "cnn",
+          "name": "cnn-1",
+          "before": 1604,
+          "after": 510,
+          "saved_pct": 68.2
+        },
+        {
+          "corpus": "cnn",
+          "name": "cnn-2",
+          "before": 541,
+          "after": 163,
+          "saved_pct": 69.87
+        },
+        {
+          "corpus": "cnn",
+          "name": "cnn-3",
+          "before": 443,
+          "after": 149,
+          "saved_pct": 66.37
+        },
+        {
+          "corpus": "lb_qasper",
+          "name": "qasper-0",
+          "before": 3829,
+          "after": 1205,
+          "saved_pct": 68.53
+        },
+        {
+          "corpus": "lb_qasper",
+          "name": "qasper-1",
+          "before": 3187,
+          "after": 1107,
+          "saved_pct": 65.27
+        },
+        {
+          "corpus": "lb_qasper",
+          "name": "qasper-2",
+          "before": 4215,
+          "after": 1344,
+          "saved_pct": 68.11
+        },
+        {
+          "corpus": "lb_qasper",
+          "name": "qasper-3",
+          "before": 2815,
+          "after": 869,
+          "saved_pct": 69.13
+        },
+        {
+          "corpus": "lb_multifieldqa",
+          "name": "multifieldqa_en-0",
+          "before": 1458,
+          "after": 451,
+          "saved_pct": 69.07
+        },
+        {
+          "corpus": "lb_multifieldqa",
+          "name": "multifieldqa_en-1",
+          "before": 10930,
+          "after": 3730,
+          "saved_pct": 65.87
+        },
+        {
+          "corpus": "lb_multifieldqa",
+          "name": "multifieldqa_en-2",
+          "before": 8064,
+          "after": 2347,
+          "saved_pct": 70.9
+        },
+        {
+          "corpus": "lb_multifieldqa",
+          "name": "multifieldqa_en-3",
+          "before": 11771,
+          "after": 3748,
+          "saved_pct": 68.16
+        },
+        {
+          "corpus": "lb_2wikimqa",
+          "name": "2wikimqa-0",
+          "before": 6881,
+          "after": 2232,
+          "saved_pct": 67.56
+        },
+        {
+          "corpus": "lb_2wikimqa",
+          "name": "2wikimqa-1",
+          "before": 6732,
+          "after": 2138,
+          "saved_pct": 68.24
+        },
+        {
+          "corpus": "lb_2wikimqa",
+          "name": "2wikimqa-2",
+          "before": 6188,
+          "after": 1970,
+          "saved_pct": 68.16
+        },
+        {
+          "corpus": "lb_2wikimqa",
+          "name": "2wikimqa-3",
+          "before": 10890,
+          "after": 3483,
+          "saved_pct": 68.02
+        },
+        {
+          "corpus": "lb_gov_report",
+          "name": "gov_report-0",
+          "before": 10770,
+          "after": 3508,
+          "saved_pct": 67.43
+        },
+        {
+          "corpus": "lb_gov_report",
+          "name": "gov_report-1",
+          "before": 16059,
+          "after": 5285,
+          "saved_pct": 67.09
+        },
+        {
+          "corpus": "lb_gov_report",
+          "name": "gov_report-2",
+          "before": 9574,
+          "after": 2922,
+          "saved_pct": 69.48
+        },
+        {
+          "corpus": "lb_gov_report",
+          "name": "gov_report-3",
+          "before": 8582,
+          "after": 2604,
+          "saved_pct": 69.66
+        },
+        {
+          "corpus": "lb_multinews",
+          "name": "multi_news-0",
+          "before": 2661,
+          "after": 801,
+          "saved_pct": 69.9
+        },
+        {
+          "corpus": "lb_multinews",
+          "name": "multi_news-1",
+          "before": 1632,
+          "after": 471,
+          "saved_pct": 71.14
+        },
+        {
+          "corpus": "lb_multinews",
+          "name": "multi_news-2",
+          "before": 1600,
+          "after": 465,
+          "saved_pct": 70.94
+        },
+        {
+          "corpus": "lb_multinews",
+          "name": "multi_news-3",
+          "before": 1705,
+          "after": 510,
+          "saved_pct": 70.09
+        }
+      ],
+      "input_cost_before_usd": 0.00403593,
+      "input_cost_after_usd": 0.001284468,
+      "overhead_ms_median": 6340.020066127181,
+      "overhead_ms_p95": 38373.21524443105,
+      "ml_fired": 40,
+      "per_corpus": {
+        "gsm8k": {
+          "reduction_pct": 68.5185185185185,
+          "tokens_before": 216,
+          "tokens_after": 68
+        },
+        "hotpotqa": {
+          "reduction_pct": 67.03433922996878,
+          "tokens_before": 4805,
+          "tokens_after": 1584
+        },
+        "squad2": {
+          "reduction_pct": 67.52246469833119,
+          "tokens_before": 779,
+          "tokens_after": 253
+        },
+        "truthfulqa": {
+          "reduction_pct": 69.49685534591194,
+          "tokens_before": 318,
+          "tokens_after": 97
+        },
+        "cnn": {
+          "reduction_pct": 68.65203761755485,
+          "tokens_before": 3509,
+          "tokens_after": 1100
+        },
+        "lb_qasper": {
+          "reduction_pct": 67.78442261141961,
+          "tokens_before": 14046,
+          "tokens_after": 4525
+        },
+        "lb_multifieldqa": {
+          "reduction_pct": 68.10973528225182,
+          "tokens_before": 32223,
+          "tokens_after": 10276
+        },
+        "lb_2wikimqa": {
+          "reduction_pct": 67.99387442572741,
+          "tokens_before": 30691,
+          "tokens_after": 9823
+        },
+        "lb_gov_report": {
+          "reduction_pct": 68.16938979659886,
+          "tokens_before": 44985,
+          "tokens_after": 14319
+        },
+        "lb_multinews": {
+          "reduction_pct": 70.42642800737036,
+          "tokens_before": 7598,
+          "tokens_after": 2247
+        }
+      }
+    },
+    "lc-keep0.20": {
+      "tool": "leanctx",
+      "n": 40,
+      "tokens_before": 139170,
+      "tokens_after": 26960,
+      "reduction_pct": 80.62800890996623,
+      "reduction_ci": [
+        80.12581789047314,
+        81.22260152592013
+      ],
+      "per_case": [
+        {
+          "corpus": "gsm8k",
+          "name": "gsm8k-0",
+          "before": 74,
+          "after": 14,
+          "saved_pct": 81.08
+        },
+        {
+          "corpus": "gsm8k",
+          "name": "gsm8k-1",
+          "before": 37,
+          "after": 7,
+          "saved_pct": 81.08
+        },
+        {
+          "corpus": "gsm8k",
+          "name": "gsm8k-2",
+          "before": 60,
+          "after": 15,
+          "saved_pct": 75.0
+        },
+        {
+          "corpus": "gsm8k",
+          "name": "gsm8k-3",
+          "before": 45,
+          "after": 9,
+          "saved_pct": 80.0
+        },
+        {
+          "corpus": "hotpotqa",
+          "name": "hotpot-0",
+          "before": 1126,
+          "after": 211,
+          "saved_pct": 81.26
+        },
+        {
+          "corpus": "hotpotqa",
+          "name": "hotpot-1",
+          "before": 1233,
+          "after": 237,
+          "saved_pct": 80.78
+        },
+        {
+          "corpus": "hotpotqa",
+          "name": "hotpot-2",
+          "before": 1484,
+          "after": 303,
+          "saved_pct": 79.58
+        },
+        {
+          "corpus": "hotpotqa",
+          "name": "hotpot-3",
+          "before": 962,
+          "after": 189,
+          "saved_pct": 80.35
+        },
+        {
+          "corpus": "squad2",
+          "name": "squad-0",
+          "before": 194,
+          "after": 40,
+          "saved_pct": 79.38
+        },
+        {
+          "corpus": "squad2",
+          "name": "squad-1",
+          "before": 195,
+          "after": 40,
+          "saved_pct": 79.49
+        },
+        {
+          "corpus": "squad2",
+          "name": "squad-2",
+          "before": 196,
+          "after": 40,
+          "saved_pct": 79.59
+        },
+        {
+          "corpus": "squad2",
+          "name": "squad-3",
+          "before": 194,
+          "after": 40,
+          "saved_pct": 79.38
+        },
+        {
+          "corpus": "truthfulqa",
+          "name": "truthfulqa-0",
+          "before": 113,
+          "after": 22,
+          "saved_pct": 80.53
+        },
+        {
+          "corpus": "truthfulqa",
+          "name": "truthfulqa-1",
+          "before": 78,
+          "after": 12,
+          "saved_pct": 84.62
+        },
+        {
+          "corpus": "truthfulqa",
+          "name": "truthfulqa-2",
+          "before": 68,
+          "after": 12,
+          "saved_pct": 82.35
+        },
+        {
+          "corpus": "truthfulqa",
+          "name": "truthfulqa-3",
+          "before": 59,
+          "after": 9,
+          "saved_pct": 84.75
+        },
+        {
+          "corpus": "cnn",
+          "name": "cnn-0",
+          "before": 921,
+          "after": 171,
+          "saved_pct": 81.43
+        },
+        {
+          "corpus": "cnn",
+          "name": "cnn-1",
+          "before": 1604,
+          "after": 312,
+          "saved_pct": 80.55
+        },
+        {
+          "corpus": "cnn",
+          "name": "cnn-2",
+          "before": 541,
+          "after": 101,
+          "saved_pct": 81.33
+        },
+        {
+          "corpus": "cnn",
+          "name": "cnn-3",
+          "before": 443,
+          "after": 95,
+          "saved_pct": 78.56
+        },
+        {
+          "corpus": "lb_qasper",
+          "name": "qasper-0",
+          "before": 3829,
+          "after": 737,
+          "saved_pct": 80.75
+        },
+        {
+          "corpus": "lb_qasper",
+          "name": "qasper-1",
+          "before": 3187,
+          "after": 704,
+          "saved_pct": 77.91
+        },
+        {
+          "corpus": "lb_qasper",
+          "name": "qasper-2",
+          "before": 4215,
+          "after": 821,
+          "saved_pct": 80.52
+        },
+        {
+          "corpus": "lb_qasper",
+          "name": "qasper-3",
+          "before": 2815,
+          "after": 526,
+          "saved_pct": 81.31
+        },
+        {
+          "corpus": "lb_multifieldqa",
+          "name": "multifieldqa_en-0",
+          "before": 1458,
+          "after": 280,
+          "saved_pct": 80.8
+        },
+        {
+          "corpus": "lb_multifieldqa",
+          "name": "multifieldqa_en-1",
+          "before": 10930,
+          "after": 2279,
+          "saved_pct": 79.15
+        },
+        {
+          "corpus": "lb_multifieldqa",
+          "name": "multifieldqa_en-2",
+          "before": 8064,
+          "after": 1346,
+          "saved_pct": 83.31
+        },
+        {
+          "corpus": "lb_multifieldqa",
+          "name": "multifieldqa_en-3",
+          "before": 11771,
+          "after": 2315,
+          "saved_pct": 80.33
+        },
+        {
+          "corpus": "lb_2wikimqa",
+          "name": "2wikimqa-0",
+          "before": 6881,
+          "after": 1356,
+          "saved_pct": 80.29
+        },
+        {
+          "corpus": "lb_2wikimqa",
+          "name": "2wikimqa-1",
+          "before": 6732,
+          "after": 1289,
+          "saved_pct": 80.85
+        },
+        {
+          "corpus": "lb_2wikimqa",
+          "name": "2wikimqa-2",
+          "before": 6188,
+          "after": 1150,
+          "saved_pct": 81.42
+        },
+        {
+          "corpus": "lb_2wikimqa",
+          "name": "2wikimqa-3",
+          "before": 10890,
+          "after": 2161,
+          "saved_pct": 80.16
+        },
+        {
+          "corpus": "lb_gov_report",
+          "name": "gov_report-0",
+          "before": 10770,
+          "after": 2143,
+          "saved_pct": 80.1
+        },
+        {
+          "corpus": "lb_gov_report",
+          "name": "gov_report-1",
+          "before": 16059,
+          "after": 3296,
+          "saved_pct": 79.48
+        },
+        {
+          "corpus": "lb_gov_report",
+          "name": "gov_report-2",
+          "before": 9574,
+          "after": 1761,
+          "saved_pct": 81.61
+        },
+        {
+          "corpus": "lb_gov_report",
+          "name": "gov_report-3",
+          "before": 8582,
+          "after": 1568,
+          "saved_pct": 81.73
+        },
+        {
+          "corpus": "lb_multinews",
+          "name": "multi_news-0",
+          "before": 2661,
+          "after": 482,
+          "saved_pct": 81.89
+        },
+        {
+          "corpus": "lb_multinews",
+          "name": "multi_news-1",
+          "before": 1632,
+          "after": 284,
+          "saved_pct": 82.6
+        },
+        {
+          "corpus": "lb_multinews",
+          "name": "multi_news-2",
+          "before": 1600,
+          "after": 279,
+          "saved_pct": 82.56
+        },
+        {
+          "corpus": "lb_multinews",
+          "name": "multi_news-3",
+          "before": 1705,
+          "after": 304,
+          "saved_pct": 82.17
+        }
+      ],
+      "input_cost_before_usd": 0.00403593,
+      "input_cost_after_usd": 0.0007818400000000001,
+      "overhead_ms_median": 6474.056528881192,
+      "overhead_ms_p95": 39061.121613997966,
+      "ml_fired": 40,
+      "per_corpus": {
+        "gsm8k": {
+          "reduction_pct": 79.16666666666666,
+          "tokens_before": 216,
+          "tokens_after": 45
+        },
+        "hotpotqa": {
+          "reduction_pct": 80.43704474505724,
+          "tokens_before": 4805,
+          "tokens_after": 940
+        },
+        "squad2": {
+          "reduction_pct": 79.46084724005135,
+          "tokens_before": 779,
+          "tokens_after": 160
+        },
+        "truthfulqa": {
+          "reduction_pct": 82.70440251572327,
+          "tokens_before": 318,
+          "tokens_after": 55
+        },
+        "cnn": {
+          "reduction_pct": 80.64975776574522,
+          "tokens_before": 3509,
+          "tokens_after": 679
+        },
+        "lb_qasper": {
+          "reduction_pct": 80.15093264986473,
+          "tokens_before": 14046,
+          "tokens_after": 2788
+        },
+        "lb_multifieldqa": {
+          "reduction_pct": 80.69701765819445,
+          "tokens_before": 32223,
+          "tokens_after": 6220
+        },
+        "lb_2wikimqa": {
+          "reduction_pct": 80.59365937897103,
+          "tokens_before": 30691,
+          "tokens_after": 5956
+        },
+        "lb_gov_report": {
+          "reduction_pct": 80.50905857508059,
+          "tokens_before": 44985,
+          "tokens_after": 8768
+        },
+        "lb_multinews": {
+          "reduction_pct": 82.24532771782049,
+          "tokens_before": 7598,
+          "tokens_after": 1349
+        }
+      }
+    }
+  },
+  "live": {
+    "iso-moderate": {
+      "n": 20,
+      "per_sample": [
+        {
+          "name": "gsm8k-0",
+          "corpus": "gsm8k",
+          "scorer": "numeric",
+          "seed": 0,
+          "q": {
+            "original": 1.0,
+            "llmtrim": 1.0,
+            "leanctx": 1.0
+          },
+          "in_tokens": {
+            "original": 74,
+            "llmtrim": 93,
+            "leanctx": 55
+          },
+          "out_tokens": {
+            "original": 279,
+            "llmtrim": 84,
+            "leanctx": 350
+          },
+          "cost": {
+            "original": 4.1206000000000005e-05,
+            "llmtrim": 1.4457e-05,
+            "leanctx": 5.0595000000000006e-05
+          },
+          "truncated": {
+            "original": false,
+            "llmtrim": false,
+            "leanctx": false
+          }
+        },
+        {
+          "name": "multifieldqa_en-3",
+          "corpus": "lb_multifieldqa",
+          "scorer": "f1",
+          "seed": 0,
+          "q": {
+            "original": 0.25925925925925924,
+            "llmtrim": 0.3773584905660377,
+            "leanctx": 0.28125
+          },
+          "in_tokens": {
+            "original": 11771,
+            "llmtrim": 11790,
+            "leanctx": 8737
+          },
+          "out_tokens": {
+            "original": 148,
+            "llmtrim": 126,
+            "leanctx": 148
+          },
+          "cost": {
+            "original": 0.000362079,
+            "llmtrim": 0.00035955000000000004,
+            "leanctx": 0.000274093
+          },
+          "truncated": {
+            "original": false,
+            "llmtrim": false,
+            "leanctx": false
+          }
+        },
+        {
+          "name": "truthfulqa-0",
+          "corpus": "truthfulqa",
+          "scorer": "choice",
+          "seed": 0,
+          "q": {
+            "original": 1.0,
+            "llmtrim": 1.0,
+            "leanctx": 1.0
+          },
+          "in_tokens": {
+            "original": 113,
+            "llmtrim": 102,
+            "leanctx": 85
+          },
+          "out_tokens": {
+            "original": 259,
+            "llmtrim": 167,
+            "leanctx": 295
+          },
+          "cost": {
+            "original": 3.9537000000000004e-05,
+            "llmtrim": 2.6338e-05,
+            "leanctx": 4.3765000000000005e-05
+          },
+          "truncated": {
+            "original": false,
+            "llmtrim": false,
+            "leanctx": false
+          }
+        },
+        {
+          "name": "qasper-1",
+          "corpus": "lb_qasper",
+          "scorer": "f1",
+          "seed": 0,
+          "q": {
+            "original": 0.11764705882352941,
+            "llmtrim": 0.11538461538461539,
+            "leanctx": 0.08653846153846155
+          },
+          "in_tokens": {
+            "original": 3187,
+            "llmtrim": 1071,
+            "leanctx": 2386
+          },
+          "out_tokens": {
+            "original": 167,
+            "llmtrim": 186,
+            "leanctx": 386
+          },
+          "cost": {
+            "original": 0.000115803,
+            "llmtrim": 5.7099e-05,
+            "leanctx": 0.000123234
+          },
+          "truncated": {
+            "original": false,
+            "llmtrim": false,
+            "leanctx": false
+          }
+        },
+        {
+          "name": "2wikimqa-1",
+          "corpus": "lb_2wikimqa",
+          "scorer": "f1",
+          "seed": 0,
+          "q": {
+            "original": 1.0,
+            "llmtrim": 1.0,
+            "leanctx": 0.1621621621621622
+          },
+          "in_tokens": {
+            "original": 6732,
+            "llmtrim": 1809,
+            "leanctx": 4926
+          },
+          "out_tokens": {
+            "original": 147,
+            "llmtrim": 153,
+            "leanctx": 397
+          },
+          "cost": {
+            "original": 0.000215808,
+            "llmtrim": 7.3881e-05,
+            "leanctx": 0.00019843400000000002
+          },
+          "truncated": {
+            "original": false,
+            "llmtrim": false,
+            "leanctx": false
+          }
+        },
+        {
+          "name": "truthfulqa-3",
+          "corpus": "truthfulqa",
+          "scorer": "choice",
+          "seed": 0,
+          "q": {
+            "original": 1.0,
+            "llmtrim": 1.0,
+            "leanctx": 1.0
+          },
+          "in_tokens": {
+            "original": 59,
+            "llmtrim": 78,
+            "leanctx": 42
+          },
+          "out_tokens": {
+            "original": 143,
+            "llmtrim": 134,
+            "leanctx": 238
+          },
+          "cost": {
+            "original": 2.1731000000000003e-05,
+            "llmtrim": 2.1022000000000003e-05,
+            "leanctx": 3.453800000000001e-05
+          },
+          "truncated": {
+            "original": false,
+            "llmtrim": false,
+            "leanctx": false
+          }
+        },
+        {
+          "name": "multi_news-2",
+          "corpus": "lb_multinews",
+          "scorer": "rouge",
+          "seed": 0,
+          "q": {
+            "original": 0.18957345971563985,
+            "llmtrim": 0.16184971098265893,
+            "leanctx": 0.17224880382775118
+          },
+          "in_tokens": {
+            "original": 1600,
+            "llmtrim": 1619,
+            "leanctx": 1123
+          },
+          "out_tokens": {
+            "original": 297,
+            "llmtrim": 228,
+            "leanctx": 302
+          },
+          "cost": {
+            "original": 8.798000000000001e-05,
+            "llmtrim": 7.887100000000001e-05,
+            "leanctx": 7.484700000000001e-05
+          },
+          "truncated": {
+            "original": false,
+            "llmtrim": false,
+            "leanctx": false
+          }
+        },
+        {
+          "name": "gov_report-2",
+          "corpus": "lb_gov_report",
+          "scorer": "rouge",
+          "seed": 0,
+          "q": {
+            "original": 0.1417910447761194,
+            "llmtrim": 0.17424242424242425,
+            "leanctx": 0.13746630727762804
+          },
+          "in_tokens": {
+            "original": 9574,
+            "llmtrim": 9593,
+            "leanctx": 6964
+          },
+          "out_tokens": {
+            "original": 400,
+            "llmtrim": 287,
+            "leanctx": 400
+          },
+          "cost": {
+            "original": 0.000333646,
+            "llmtrim": 0.00031837700000000006,
+            "leanctx": 0.000257956
+          },
+          "truncated": {
+            "original": true,
+            "llmtrim": false,
+            "leanctx": true
+          }
+        },
+        {
+          "name": "gsm8k-1",
+          "corpus": "gsm8k",
+          "scorer": "numeric",
+          "seed": 0,
+          "q": {
+            "original": 0.0,
+            "llmtrim": 1.0,
+            "leanctx": 1.0
+          },
+          "in_tokens": {
+            "original": 37,
+            "llmtrim": 56,
+            "leanctx": 26
+          },
+          "out_tokens": {
+            "original": 400,
+            "llmtrim": 172,
+            "leanctx": 381
+          },
+          "cost": {
+            "original": 5.707300000000001e-05,
+            "llmtrim": 2.5704000000000003e-05,
+            "leanctx": 5.4094e-05
+          },
+          "truncated": {
+            "original": true,
+            "llmtrim": false,
+            "leanctx": false
+          }
+        },
+        {
+          "name": "qasper-0",
+          "corpus": "lb_qasper",
+          "scorer": "f1",
+          "seed": 0,
+          "q": {
+            "original": 0.1639344262295082,
+            "llmtrim": 0.15625,
+            "leanctx": 0.17543859649122806
+          },
+          "in_tokens": {
+            "original": 3829,
+            "llmtrim": 1762,
+            "leanctx": 2811
+          },
+          "out_tokens": {
+            "original": 179,
+            "llmtrim": 154,
+            "leanctx": 175
+          },
+          "cost": {
+            "original": 0.00013610100000000002,
+            "llmtrim": 7.2658e-05,
+            "leanctx": 0.000106019
+          },
+          "truncated": {
+            "original": false,
+            "llmtrim": false,
+            "leanctx": false
+          }
+        },
+        {
+          "name": "gsm8k-0",
+          "corpus": "gsm8k",
+          "scorer": "numeric",
+          "seed": 1,
+          "q": {
+            "original": 1.0,
+            "llmtrim": 1.0,
+            "leanctx": 1.0
+          },
+          "in_tokens": {
+            "original": 74,
+            "llmtrim": 93,
+            "leanctx": 55
+          },
+          "out_tokens": {
+            "original": 336,
+            "llmtrim": 85,
+            "leanctx": 350
+          },
+          "cost": {
+            "original": 4.9186000000000006e-05,
+            "llmtrim": 1.4597000000000001e-05,
+            "leanctx": 5.0595000000000006e-05
+          },
+          "truncated": {
+            "original": false,
+            "llmtrim": false,
+            "leanctx": false
+          }
+        },
+        {
+          "name": "multifieldqa_en-3",
+          "corpus": "lb_multifieldqa",
+          "scorer": "f1",
+          "seed": 1,
+          "q": {
+            "original": 0.25925925925925924,
+            "llmtrim": 0.3333333333333333,
+            "leanctx": 0.2903225806451613
+          },
+          "in_tokens": {
+            "original": 11771,
+            "llmtrim": 11790,
+            "leanctx": 8737
+          },
+          "out_tokens": {
+            "original": 148,
+            "llmtrim": 134,
+            "leanctx": 135
+          },
+          "cost": {
+            "original": 0.000362079,
+            "llmtrim": 0.00036067,
+            "leanctx": 0.000272273
+          },
+          "truncated": {
+            "original": false,
+            "llmtrim": false,
+            "leanctx": false
+          }
+        },
+        {
+          "name": "truthfulqa-0",
+          "corpus": "truthfulqa",
+          "scorer": "choice",
+          "seed": 1,
+          "q": {
+            "original": 1.0,
+            "llmtrim": 1.0,
+            "leanctx": 1.0
+          },
+          "in_tokens": {
+            "original": 113,
+            "llmtrim": 102,
+            "leanctx": 85
+          },
+          "out_tokens": {
+            "original": 269,
+            "llmtrim": 167,
+            "leanctx": 300
+          },
+          "cost": {
+            "original": 4.0937000000000005e-05,
+            "llmtrim": 2.6338e-05,
+            "leanctx": 4.4464999999999995e-05
+          },
+          "truncated": {
+            "original": false,
+            "llmtrim": false,
+            "leanctx": false
+          }
+        },
+        {
+          "name": "qasper-1",
+          "corpus": "lb_qasper",
+          "scorer": "f1",
+          "seed": 1,
+          "q": {
+            "original": 0.11267605633802817,
+            "llmtrim": 0.13861386138613863,
+            "leanctx": 0.07608695652173915
+          },
+          "in_tokens": {
+            "original": 3187,
+            "llmtrim": 1071,
+            "leanctx": 2386
+          },
+          "out_tokens": {
+            "original": 239,
+            "llmtrim": 175,
+            "leanctx": 379
+          },
+          "cost": {
+            "original": 0.000125883,
+            "llmtrim": 5.5559e-05,
+            "leanctx": 0.000122254
+          },
+          "truncated": {
+            "original": false,
+            "llmtrim": false,
+            "leanctx": false
+          }
+        },
+        {
+          "name": "2wikimqa-1",
+          "corpus": "lb_2wikimqa",
+          "scorer": "f1",
+          "seed": 1,
+          "q": {
+            "original": 1.0,
+            "llmtrim": 1.0,
+            "leanctx": 0.0
+          },
+          "in_tokens": {
+            "original": 6732,
+            "llmtrim": 1809,
+            "leanctx": 4926
+          },
+          "out_tokens": {
+            "original": 147,
+            "llmtrim": 155,
+            "leanctx": 400
+          },
+          "cost": {
+            "original": 0.000215808,
+            "llmtrim": 7.416100000000001e-05,
+            "leanctx": 0.00019885400000000002
+          },
+          "truncated": {
+            "original": false,
+            "llmtrim": false,
+            "leanctx": true
+          }
+        },
+        {
+          "name": "truthfulqa-3",
+          "corpus": "truthfulqa",
+          "scorer": "choice",
+          "seed": 1,
+          "q": {
+            "original": 1.0,
+            "llmtrim": 1.0,
+            "leanctx": 1.0
+          },
+          "in_tokens": {
+            "original": 59,
+            "llmtrim": 78,
+            "leanctx": 42
+          },
+          "out_tokens": {
+            "original": 143,
+            "llmtrim": 134,
+            "leanctx": 238
+          },
+          "cost": {
+            "original": 2.1731000000000003e-05,
+            "llmtrim": 2.1022000000000003e-05,
+            "leanctx": 3.453800000000001e-05
+          },
+          "truncated": {
+            "original": false,
+            "llmtrim": false,
+            "leanctx": false
+          }
+        },
+        {
+          "name": "multi_news-2",
+          "corpus": "lb_multinews",
+          "scorer": "rouge",
+          "seed": 1,
+          "q": {
+            "original": 0.1724137931034483,
+            "llmtrim": 0.16568047337278108,
+            "leanctx": 0.16589861751152074
+          },
+          "in_tokens": {
+            "original": 1600,
+            "llmtrim": 1619,
+            "leanctx": 1123
+          },
+          "out_tokens": {
+            "original": 278,
+            "llmtrim": 214,
+            "leanctx": 318
+          },
+          "cost": {
+            "original": 8.532e-05,
+            "llmtrim": 7.691100000000001e-05,
+            "leanctx": 7.7087e-05
+          },
+          "truncated": {
+            "original": false,
+            "llmtrim": false,
+            "leanctx": false
+          }
+        },
+        {
+          "name": "gov_report-2",
+          "corpus": "lb_gov_report",
+          "scorer": "rouge",
+          "seed": 1,
+          "q": {
+            "original": 0.1417910447761194,
+            "llmtrim": 0.17721518987341772,
+            "leanctx": 0.1251700680272109
+          },
+          "in_tokens": {
+            "original": 9574,
+            "llmtrim": 9593,
+            "leanctx": 6964
+          },
+          "out_tokens": {
+            "original": 400,
+            "llmtrim": 281,
+            "leanctx": 400
+          },
+          "cost": {
+            "original": 0.000333646,
+            "llmtrim": 0.00031753700000000006,
+            "leanctx": 0.000257956
+          },
+          "truncated": {
+            "original": true,
+            "llmtrim": false,
+            "leanctx": true
+          }
+        },
+        {
+          "name": "gsm8k-1",
+          "corpus": "gsm8k",
+          "scorer": "numeric",
+          "seed": 1,
+          "q": {
+            "original": 0.0,
+            "llmtrim": 1.0,
+            "leanctx": 1.0
+          },
+          "in_tokens": {
+            "original": 37,
+            "llmtrim": 56,
+            "leanctx": 26
+          },
+          "out_tokens": {
+            "original": 400,
+            "llmtrim": 129,
+            "leanctx": 381
+          },
+          "cost": {
+            "original": 5.707300000000001e-05,
+            "llmtrim": 1.9684e-05,
+            "leanctx": 5.4094e-05
+          },
+          "truncated": {
+            "original": true,
+            "llmtrim": false,
+            "leanctx": false
+          }
+        },
+        {
+          "name": "qasper-0",
+          "corpus": "lb_qasper",
+          "scorer": "f1",
+          "seed": 1,
+          "q": {
+            "original": 0.14285714285714285,
+            "llmtrim": 0.1388888888888889,
+            "leanctx": 0.17543859649122806
+          },
+          "in_tokens": {
+            "original": 3829,
+            "llmtrim": 1762,
+            "leanctx": 2811
+          },
+          "out_tokens": {
+            "original": 198,
+            "llmtrim": 166,
+            "leanctx": 175
+          },
+          "cost": {
+            "original": 0.00013876100000000002,
+            "llmtrim": 7.433799999999999e-05,
+            "leanctx": 0.000106019
+          },
+          "truncated": {
+            "original": false,
+            "llmtrim": false,
+            "leanctx": false
+          }
+        }
+      ],
+      "arms": {
+        "original": {
+          "n": 20,
+          "quality": 0.48506012725690273,
+          "score_sum": 9.701202545138054,
+          "input_tokens": 73952,
+          "output_tokens_total": 4977,
+          "output_tokens_median": 249.0,
+          "truncated": 4,
+          "total_cost_usd": 0.0028413880000000002,
+          "cpca_usd": 0.0002928902872380514
+        },
+        "llmtrim": {
+          "n": 20,
+          "quality": 0.5969408494015148,
+          "score_sum": 11.938816988030297,
+          "input_tokens": 55946,
+          "output_tokens_total": 3331,
+          "output_tokens_median": 160.5,
+          "truncated": 0,
+          "total_cost_usd": 0.0020887740000000003,
+          "cpca_usd": 0.00017495653062562044
+        },
+        "leanctx": {
+          "n": 20,
+          "quality": 0.49240105752470453,
+          "score_sum": 9.848021150494091,
+          "input_tokens": 54310,
+          "output_tokens_total": 6148,
+          "output_tokens_median": 334.0,
+          "truncated": 3,
+          "total_cost_usd": 0.0024357100000000002,
+          "cpca_usd": 0.00024732989123178283
+        }
+      },
+      "quality_diff": {
+        "llmtrim_minus_headroom_mean": 0.10453979187681024,
+        "ci95": [
+          0.007714992150475886,
+          0.24252995438738303
+        ],
+        "significant": true,
+        "n_paired": 20
+      },
+      "match": {
+        "preset": "auto",
+        "hr_label": "lc-keep0.75",
+        "llmtrim_reduction_pct": 25.38693683983617,
+        "headroom_reduction_pct": 26.072429402888552
+      }
+    },
+    "iso-aggressive": {
+      "n": 20,
+      "per_sample": [
+        {
+          "name": "gsm8k-0",
+          "corpus": "gsm8k",
+          "scorer": "numeric",
+          "seed": 0,
+          "q": {
+            "original": 1.0,
+            "llmtrim": 1.0,
+            "leanctx": 1.0
+          },
+          "in_tokens": {
+            "original": 74,
+            "llmtrim": 93,
+            "leanctx": 55
+          },
+          "out_tokens": {
+            "original": 326,
+            "llmtrim": 84,
+            "leanctx": 381
+          },
+          "cost": {
+            "original": 4.7786000000000006e-05,
+            "llmtrim": 1.4457e-05,
+            "leanctx": 5.4935e-05
+          },
+          "truncated": {
+            "original": false,
+            "llmtrim": false,
+            "leanctx": false
+          }
+        },
+        {
+          "name": "multifieldqa_en-3",
+          "corpus": "lb_multifieldqa",
+          "scorer": "f1",
+          "seed": 0,
+          "q": {
+            "original": 0.33898305084745767,
+            "llmtrim": 0.2631578947368421,
+            "leanctx": 0.2903225806451613
+          },
+          "in_tokens": {
+            "original": 11771,
+            "llmtrim": 11380,
+            "leanctx": 8737
+          },
+          "out_tokens": {
+            "original": 140,
+            "llmtrim": 158,
+            "leanctx": 135
+          },
+          "cost": {
+            "original": 0.000360959,
+            "llmtrim": 0.00035213999999999997,
+            "leanctx": 0.000272273
+          },
+          "truncated": {
+            "original": false,
+            "llmtrim": false,
+            "leanctx": false
+          }
+        },
+        {
+          "name": "truthfulqa-0",
+          "corpus": "truthfulqa",
+          "scorer": "choice",
+          "seed": 0,
+          "q": {
+            "original": 1.0,
+            "llmtrim": 1.0,
+            "leanctx": 1.0
+          },
+          "in_tokens": {
+            "original": 113,
+            "llmtrim": 102,
+            "leanctx": 85
+          },
+          "out_tokens": {
+            "original": 262,
+            "llmtrim": 167,
+            "leanctx": 305
+          },
+          "cost": {
+            "original": 3.995700000000001e-05,
+            "llmtrim": 2.6338e-05,
+            "leanctx": 4.5165e-05
+          },
+          "truncated": {
+            "original": false,
+            "llmtrim": false,
+            "leanctx": false
+          }
+        },
+        {
+          "name": "qasper-1",
+          "corpus": "lb_qasper",
+          "scorer": "f1",
+          "seed": 0,
+          "q": {
+            "original": 0.10958904109589042,
+            "llmtrim": 0.14414414414414417,
+            "leanctx": 0.11518324607329843
+          },
+          "in_tokens": {
+            "original": 3187,
+            "llmtrim": 1065,
+            "leanctx": 2386
+          },
+          "out_tokens": {
+            "original": 245,
+            "llmtrim": 225,
+            "leanctx": 400
+          },
+          "cost": {
+            "original": 0.000126723,
+            "llmtrim": 6.2385e-05,
+            "leanctx": 0.00012519400000000002
+          },
+          "truncated": {
+            "original": false,
+            "llmtrim": false,
+            "leanctx": true
+          }
+        },
+        {
+          "name": "2wikimqa-1",
+          "corpus": "lb_2wikimqa",
+          "scorer": "f1",
+          "seed": 0,
+          "q": {
+            "original": 1.0,
+            "llmtrim": 1.0,
+            "leanctx": 0.06451612903225806
+          },
+          "in_tokens": {
+            "original": 6732,
+            "llmtrim": 1798,
+            "leanctx": 4926
+          },
+          "out_tokens": {
+            "original": 147,
+            "llmtrim": 153,
+            "leanctx": 400
+          },
+          "cost": {
+            "original": 0.000215808,
+            "llmtrim": 7.3562e-05,
+            "leanctx": 0.00019885400000000002
+          },
+          "truncated": {
+            "original": false,
+            "llmtrim": false,
+            "leanctx": true
+          }
+        },
+        {
+          "name": "truthfulqa-3",
+          "corpus": "truthfulqa",
+          "scorer": "choice",
+          "seed": 0,
+          "q": {
+            "original": 1.0,
+            "llmtrim": 1.0,
+            "leanctx": 1.0
+          },
+          "in_tokens": {
+            "original": 59,
+            "llmtrim": 78,
+            "leanctx": 42
+          },
+          "out_tokens": {
+            "original": 143,
+            "llmtrim": 134,
+            "leanctx": 238
+          },
+          "cost": {
+            "original": 2.1731000000000003e-05,
+            "llmtrim": 2.1022000000000003e-05,
+            "leanctx": 3.453800000000001e-05
+          },
+          "truncated": {
+            "original": false,
+            "llmtrim": false,
+            "leanctx": false
+          }
+        },
+        {
+          "name": "multi_news-2",
+          "corpus": "lb_multinews",
+          "scorer": "rouge",
+          "seed": 0,
+          "q": {
+            "original": 0.1830985915492958,
+            "llmtrim": 0.16847826086956522,
+            "leanctx": 0.16455696202531647
+          },
+          "in_tokens": {
+            "original": 1600,
+            "llmtrim": 1512,
+            "leanctx": 1123
+          },
+          "out_tokens": {
+            "original": 300,
+            "llmtrim": 237,
+            "leanctx": 400
+          },
+          "cost": {
+            "original": 8.840000000000001e-05,
+            "llmtrim": 7.702800000000001e-05,
+            "leanctx": 8.856700000000001e-05
+          },
+          "truncated": {
+            "original": false,
+            "llmtrim": false,
+            "leanctx": true
+          }
+        },
+        {
+          "name": "gov_report-2",
+          "corpus": "lb_gov_report",
+          "scorer": "rouge",
+          "seed": 0,
+          "q": {
+            "original": 0.17433414043583537,
+            "llmtrim": 0.20788530465949817,
+            "leanctx": 0.05696202531645569
+          },
+          "in_tokens": {
+            "original": 9574,
+            "llmtrim": 9113,
+            "leanctx": 6964
+          },
+          "out_tokens": {
+            "original": 400,
+            "llmtrim": 340,
+            "leanctx": 400
+          },
+          "cost": {
+            "original": 0.000333646,
+            "llmtrim": 0.000311877,
+            "leanctx": 0.000257956
+          },
+          "truncated": {
+            "original": true,
+            "llmtrim": false,
+            "leanctx": true
+          }
+        },
+        {
+          "name": "gsm8k-1",
+          "corpus": "gsm8k",
+          "scorer": "numeric",
+          "seed": 0,
+          "q": {
+            "original": 0.0,
+            "llmtrim": 1.0,
+            "leanctx": 1.0
+          },
+          "in_tokens": {
+            "original": 37,
+            "llmtrim": 56,
+            "leanctx": 26
+          },
+          "out_tokens": {
+            "original": 400,
+            "llmtrim": 129,
+            "leanctx": 366
+          },
+          "cost": {
+            "original": 5.707300000000001e-05,
+            "llmtrim": 1.9684e-05,
+            "leanctx": 5.1994000000000004e-05
+          },
+          "truncated": {
+            "original": true,
+            "llmtrim": false,
+            "leanctx": false
+          }
+        },
+        {
+          "name": "qasper-0",
+          "corpus": "lb_qasper",
+          "scorer": "f1",
+          "seed": 0,
+          "q": {
+            "original": 0.15384615384615383,
+            "llmtrim": 0.16666666666666666,
+            "leanctx": 0.17543859649122806
+          },
+          "in_tokens": {
+            "original": 3829,
+            "llmtrim": 1745,
+            "leanctx": 2811
+          },
+          "out_tokens": {
+            "original": 184,
+            "llmtrim": 186,
+            "leanctx": 174
+          },
+          "cost": {
+            "original": 0.000136801,
+            "llmtrim": 7.6645e-05,
+            "leanctx": 0.00010587900000000001
+          },
+          "truncated": {
+            "original": false,
+            "llmtrim": false,
+            "leanctx": false
+          }
+        },
+        {
+          "name": "gsm8k-0",
+          "corpus": "gsm8k",
+          "scorer": "numeric",
+          "seed": 1,
+          "q": {
+            "original": 1.0,
+            "llmtrim": 1.0,
+            "leanctx": 1.0
+          },
+          "in_tokens": {
+            "original": 74,
+            "llmtrim": 93,
+            "leanctx": 55
+          },
+          "out_tokens": {
+            "original": 322,
+            "llmtrim": 85,
+            "leanctx": 391
+          },
+          "cost": {
+            "original": 4.722600000000001e-05,
+            "llmtrim": 1.4597000000000001e-05,
+            "leanctx": 5.633500000000001e-05
+          },
+          "truncated": {
+            "original": false,
+            "llmtrim": false,
+            "leanctx": false
+          }
+        },
+        {
+          "name": "multifieldqa_en-3",
+          "corpus": "lb_multifieldqa",
+          "scorer": "f1",
+          "seed": 1,
+          "q": {
+            "original": 0.3728813559322034,
+            "llmtrim": 0.2631578947368421,
+            "leanctx": 0.2903225806451613
+          },
+          "in_tokens": {
+            "original": 11771,
+            "llmtrim": 11380,
+            "leanctx": 8737
+          },
+          "out_tokens": {
+            "original": 140,
+            "llmtrim": 158,
+            "leanctx": 135
+          },
+          "cost": {
+            "original": 0.000360959,
+            "llmtrim": 0.00035213999999999997,
+            "leanctx": 0.000272273
+          },
+          "truncated": {
+            "original": false,
+            "llmtrim": false,
+            "leanctx": false
+          }
+        },
+        {
+          "name": "truthfulqa-0",
+          "corpus": "truthfulqa",
+          "scorer": "choice",
+          "seed": 1,
+          "q": {
+            "original": 1.0,
+            "llmtrim": 1.0,
+            "leanctx": 1.0
+          },
+          "in_tokens": {
+            "original": 113,
+            "llmtrim": 102,
+            "leanctx": 85
+          },
+          "out_tokens": {
+            "original": 259,
+            "llmtrim": 169,
+            "leanctx": 249
+          },
+          "cost": {
+            "original": 3.9537000000000004e-05,
+            "llmtrim": 2.6618e-05,
+            "leanctx": 3.7325e-05
+          },
+          "truncated": {
+            "original": false,
+            "llmtrim": false,
+            "leanctx": false
+          }
+        },
+        {
+          "name": "qasper-1",
+          "corpus": "lb_qasper",
+          "scorer": "f1",
+          "seed": 1,
+          "q": {
+            "original": 0.11510791366906475,
+            "llmtrim": 0.12844036697247704,
+            "leanctx": 0.07142857142857144
+          },
+          "in_tokens": {
+            "original": 3187,
+            "llmtrim": 1065,
+            "leanctx": 2386
+          },
+          "out_tokens": {
+            "original": 236,
+            "llmtrim": 211,
+            "leanctx": 400
+          },
+          "cost": {
+            "original": 0.000125463,
+            "llmtrim": 6.0425000000000005e-05,
+            "leanctx": 0.00012519400000000002
+          },
+          "truncated": {
+            "original": false,
+            "llmtrim": false,
+            "leanctx": true
+          }
+        },
+        {
+          "name": "2wikimqa-1",
+          "corpus": "lb_2wikimqa",
+          "scorer": "f1",
+          "seed": 1,
+          "q": {
+            "original": 1.0,
+            "llmtrim": 1.0,
+            "leanctx": 0.10526315789473684
+          },
+          "in_tokens": {
+            "original": 6732,
+            "llmtrim": 1798,
+            "leanctx": 4926
+          },
+          "out_tokens": {
+            "original": 147,
+            "llmtrim": 152,
+            "leanctx": 400
+          },
+          "cost": {
+            "original": 0.000215808,
+            "llmtrim": 7.3422e-05,
+            "leanctx": 0.00019885400000000002
+          },
+          "truncated": {
+            "original": false,
+            "llmtrim": false,
+            "leanctx": true
+          }
+        },
+        {
+          "name": "truthfulqa-3",
+          "corpus": "truthfulqa",
+          "scorer": "choice",
+          "seed": 1,
+          "q": {
+            "original": 1.0,
+            "llmtrim": 1.0,
+            "leanctx": 1.0
+          },
+          "in_tokens": {
+            "original": 59,
+            "llmtrim": 78,
+            "leanctx": 42
+          },
+          "out_tokens": {
+            "original": 156,
+            "llmtrim": 134,
+            "leanctx": 213
+          },
+          "cost": {
+            "original": 2.3551000000000002e-05,
+            "llmtrim": 2.1022000000000003e-05,
+            "leanctx": 3.1038e-05
+          },
+          "truncated": {
+            "original": false,
+            "llmtrim": false,
+            "leanctx": false
+          }
+        },
+        {
+          "name": "multi_news-2",
+          "corpus": "lb_multinews",
+          "scorer": "rouge",
+          "seed": 1,
+          "q": {
+            "original": 0.18499999999999997,
+            "llmtrim": 0.16847826086956522,
+            "leanctx": 0.13759213759213756
+          },
+          "in_tokens": {
+            "original": 1600,
+            "llmtrim": 1512,
+            "leanctx": 1123
+          },
+          "out_tokens": {
+            "original": 273,
+            "llmtrim": 237,
+            "leanctx": 331
+          },
+          "cost": {
+            "original": 8.462000000000001e-05,
+            "llmtrim": 7.702800000000001e-05,
+            "leanctx": 7.890700000000001e-05
+          },
+          "truncated": {
+            "original": false,
+            "llmtrim": false,
+            "leanctx": false
+          }
+        },
+        {
+          "name": "gov_report-2",
+          "corpus": "lb_gov_report",
+          "scorer": "rouge",
+          "seed": 1,
+          "q": {
+            "original": 0.1444582814445828,
+            "llmtrim": 0.1707920792079208,
+            "leanctx": 0.14382632293080055
+          },
+          "in_tokens": {
+            "original": 9574,
+            "llmtrim": 9113,
+            "leanctx": 6964
+          },
+          "out_tokens": {
+            "original": 400,
+            "llmtrim": 331,
+            "leanctx": 400
+          },
+          "cost": {
+            "original": 0.000333646,
+            "llmtrim": 0.000310617,
+            "leanctx": 0.000257956
+          },
+          "truncated": {
+            "original": true,
+            "llmtrim": false,
+            "leanctx": true
+          }
+        },
+        {
+          "name": "gsm8k-1",
+          "corpus": "gsm8k",
+          "scorer": "numeric",
+          "seed": 1,
+          "q": {
+            "original": 1.0,
+            "llmtrim": 1.0,
+            "leanctx": 1.0
+          },
+          "in_tokens": {
+            "original": 37,
+            "llmtrim": 56,
+            "leanctx": 26
+          },
+          "out_tokens": {
+            "original": 269,
+            "llmtrim": 129,
+            "leanctx": 366
+          },
+          "cost": {
+            "original": 3.8733e-05,
+            "llmtrim": 1.9684e-05,
+            "leanctx": 5.1994000000000004e-05
+          },
+          "truncated": {
+            "original": false,
+            "llmtrim": false,
+            "leanctx": false
+          }
+        },
+        {
+          "name": "qasper-0",
+          "corpus": "lb_qasper",
+          "scorer": "f1",
+          "seed": 1,
+          "q": {
+            "original": 0.1639344262295082,
+            "llmtrim": 0.15384615384615383,
+            "leanctx": 0.17543859649122806
+          },
+          "in_tokens": {
+            "original": 3829,
+            "llmtrim": 1745,
+            "leanctx": 2811
+          },
+          "out_tokens": {
+            "original": 179,
+            "llmtrim": 174,
+            "leanctx": 174
+          },
+          "cost": {
+            "original": 0.00013610100000000002,
+            "llmtrim": 7.4965e-05,
+            "leanctx": 0.00010587900000000001
+          },
+          "truncated": {
+            "original": false,
+            "llmtrim": false,
+            "leanctx": false
+          }
+        }
+      ],
+      "arms": {
+        "original": {
+          "n": 20,
+          "quality": 0.5470616477524997,
+          "score_sum": 10.941232955049992,
+          "input_tokens": 73952,
+          "output_tokens_total": 4928,
+          "output_tokens_median": 252.0,
+          "truncated": 3,
+          "total_cost_usd": 0.0028345280000000002,
+          "cpca_usd": 0.00025906842598499895
+        },
+        "llmtrim": {
+          "n": 20,
+          "quality": 0.5917523513354838,
+          "score_sum": 11.835047026709676,
+          "input_tokens": 53884,
+          "output_tokens_total": 3593,
+          "output_tokens_median": 162.5,
+          "truncated": 0,
+          "total_cost_usd": 0.002065656,
+          "cpca_usd": 0.0001745372025424291
+        },
+        "leanctx": {
+          "n": 20,
+          "quality": 0.48954254532831765,
+          "score_sum": 9.790850906566353,
+          "input_tokens": 54310,
+          "output_tokens_total": 6258,
+          "output_tokens_median": 366.0,
+          "truncated": 7,
+          "total_cost_usd": 0.0024511100000000003,
+          "cpca_usd": 0.0002503469844848861
+        }
+      },
+      "quality_diff": {
+        "llmtrim_minus_headroom_mean": 0.10220980600716607,
+        "ci95": [
+          0.004312619711001056,
+          0.2375099475289663
+        ],
+        "significant": true,
+        "n_paired": 20
+      },
+      "match": {
+        "preset": "aggressive",
+        "hr_label": "lc-keep0.75",
+        "llmtrim_reduction_pct": 28.069267801968813,
+        "headroom_reduction_pct": 26.072429402888552
+      }
+    },
+    "_budget_spent_usd": 0.0147,
+    "_budget_cap_usd": 0.3,
+    "_seeds": 2,
+    "_max_out": 400
+  }
+}

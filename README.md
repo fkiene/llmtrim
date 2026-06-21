@@ -39,12 +39,12 @@
 
 <p align="center">
   <a href="#what-it-actually-does">What it does</a> &bull;
-  <a href="#see-it-on-real-output">See it in action</a> &bull;
+  <a href="#see-it-on-real-output">In action</a> &bull;
   <a href="#get-started">Get started</a> &bull;
-  <a href="#use-it-as-a-cli-mcp-or-library">CLI, MCP &amp; library</a> &bull;
+  <a href="#use-it-as-a-cli-mcp-or-library">CLI &amp; library</a> &bull;
   <a href="#works-with">Works with</a> &bull;
-  <a href="#configuration">Configuration</a> &bull;
-  <a href="#the-numbers">Numbers</a>
+  <a href="#the-numbers">Numbers</a> &bull;
+  <a href="#how-it-compares">How it compares</a>
 </p>
 
 ---
@@ -335,7 +335,7 @@ Three tiers cover almost everyone. To force one, set `LLMTRIM_PRESET=<name>` or 
 <details>
 <summary><b>Per-flag overrides (power users)</b></summary>
 
-Every stage is individually tunable via config flags; `preset` wins over individual flags. The full table is long; see the field list in [`src/config.rs`](src/config.rs) or run `llmtrim compress --help`. The most useful knobs:
+Every stage is individually tunable via config flags; `preset` wins over individual flags. The full table is long; see the field list in [`config.rs`](crates/llmtrim-core/src/config.rs) or run `llmtrim compress --help`. The most useful knobs:
 
 | field | default | meaning |
 | --- | --- | --- |
@@ -434,7 +434,7 @@ Three rows compress with no quality loss; GSM8K is the one dip:
 Evidence and a one-line reproduce ([named-benchmark snapshot](crates/llmtrim-cli/bench/snapshots/named-benchmarks/README.md)):
 
 ```bash
-python3 crates/llmtrim-cli/bench/scripts/download.py 40 truthfulqa,squad2,bfcl
+make -C crates/llmtrim-cli/bench data
 (cd crates/llmtrim-cli && cargo run -q --features live -- bench quality \
    --corpus bench/data/squad2.jsonl --preset rag \
    --model qwen/qwen3-next-80b-a3b-instruct --route "" --n 20)
@@ -445,32 +445,53 @@ python3 crates/llmtrim-cli/bench/scripts/download.py 40 truthfulqa,squad2,bfcl
 Methodology, per-corpus frontier, and confidence intervals: [crates/llmtrim-cli/bench/README.md](crates/llmtrim-cli/bench/README.md). Reproduce it:
 
 ```bash
-python3 crates/llmtrim-cli/bench/scripts/download.py 40   # pull real corpora (gsm8k, humaneval, dolly, hotpotqa, …)
+make -C crates/llmtrim-cli/bench data   # pull real corpora (gsm8k, humaneval, dolly, hotpotqa, …)
 (cd crates/llmtrim-cli && cargo run -q --features live -- bench suite)  # live A/B across all corpora (needs OPENROUTER_API_KEY)
-python3 crates/llmtrim-cli/bench/scripts/chart.py         # regenerate the chart + table
+(cd crates/llmtrim-cli/bench/scripts && PYTHONPATH=. python3 -m benchkit.tools.chart)  # regenerate the chart + table
 ```
 
-<details>
-<summary><b>How does it compare to RTK / Headroom / caveman?</b></summary>
+## How it compares
 
-Three neighbors each compress one layer of the problem; llmtrim does the whole round-trip and is quality-gated so it can't increase your bill.
+Each tool compresses one slice of the request. llmtrim compresses input and output, leaves the cached prefix untouched to keep the prompt cache stable, and scores on whether the answer survives the cut, not on tokens removed. Both axes below use the `o200k_base` encoder and reproduce from this repo.
 
 | | **llmtrim** | Headroom | RTK | caveman |
 |---|:---:|:---:|:---:|:---:|
-| Whole round-trip (input · output · cache) | ✅ | input only | CLI only | output only |
-| Can't increase your bill (auto-revert) | ✅ | ❌ | ✅ | ❌ |
-| Live A/B: savings *and* quality | ✅ | offline | ❌ | tokens only |
-| Install: one static binary | ✅ | Python + GB models | ✅ | ✅ |
-| Overhead added / request | **<10 ms** | ~0.9 s/call on fresh input + 2.7 s one-time load | <10 ms | n/a |
-| Prompt overhead injected | **19 tokens** | n/a | n/a | 949 tokens |
+| Compresses | input · output | input | tool/CLI output | model output |
+| Skips no-op transforms | ✅ | ❌ | ❌ | n/a |
+| One static binary | ✅ | Python + models | ✅ | ✅ |
 
-Headroom is the closest comparison, so we measured it head to head against its latest release (`headroom-ai==0.26.0`) on the same `o200k_base` tokenizer, over public corpora (gsm8k, hotpotqa, squad2, truthfulqa, cnn, LongBench), scored with each corpus's own metric. At matched compression llmtrim is even or ahead: its `auto` default cuts about as much as Headroom's most aggressive setting (25% vs 24%), and `aggressive` cuts more (28% vs 24%, because Headroom's ML caps near 24% on prose).
+### Input
 
-Answer quality is a statistical tie at this sample size (n=30, the paired-bootstrap CI spans zero), but llmtrim is not behind on any axis: it produces about half the output tokens, costs less per unit of answer quality, and adds about 5 ms per call against Headroom's ~0.9 s per call on fresh input plus a one-time ~2.7 s model load (Headroom caches embeddings, so a repeated prefix is faster, but each new tool output pays the full inference). Headroom also cannot compress prose at all with its ML model disabled (its deterministic routers no-op there). The full tables, the near-iso caveat, and the repro are in the [artifact](crates/llmtrim-cli/bench/snapshots/vs-headroom/README.md); reproduce with `make -C crates/llmtrim-cli/bench bench`.
+Input reduction (deterministic) next to answer quality from a live A/B. Quality is the drop vs llmtrim at each tool's compared setting (✅ held, a statistical tie; ❌ significantly lower), so a big reduction with a ❌ means the tool bought tokens by losing answers:
 
-They also stack: RTK shrinks the CLI output, then llmtrim compresses the tool schemas Claude Code resends on top of it. Detailed head-to-heads with [RTK](https://github.com/rtk-ai/rtk), [Headroom](https://github.com/chopratejas/headroom), and [caveman](https://github.com/JuliusBrussee/caveman) are in [crates/llmtrim-cli/bench/README.md](crates/llmtrim-cli/bench/README.md).
+| Tool | Reduction | Quality vs llmtrim | Overhead |
+|---|---:|---:|---:|
+| llmtrim `auto` | 25% | ✅ ref | ~5 ms |
+| llmtrim `aggressive` | 28% | ✅ ref | ~5 ms |
+| Headroom (ML on) | 24% | ✅ tie | ~0.9 s |
+| leanctx / LLMLingua-2 | 52-81% | ❌ 18% lower | ~6 s |
+| entroly | 80-89% | ❌ 42% lower | <1 ms |
 
-</details>
+Overhead is the median per-call compress time (Python wall-clock, not like-for-like CPU): Headroom and leanctx run ML on CPU here (faster on a GPU) and pay a one-time model load on top (~3 s and ~4 s); llmtrim is Rust and entroly is lexical, so neither does.
+
+- `auto` is the quality-gated default; `aggressive` accepts lossy cuts where the gate holds.
+- Headroom drops to 0% with its ML disabled (its routers no-op on prose).
+- leanctx and entroly are lossy with no quality gate; entroly has no low-reduction mode.
+
+Headroom ties at matched reduction (24-25%, n=30, not significant) but its longer answers hit the model's output-token limit and get truncated 12 times to llmtrim's 2, the output inflation behind its higher cost. leanctx (measured at 26%) and entroly (at 69%, its mildest) score significantly lower than llmtrim (n=20), and fall further at their headline reductions ([vs-leanctx](crates/llmtrim-cli/bench/snapshots/vs-leanctx/README.md), [vs-entroly](crates/llmtrim-cli/bench/snapshots/vs-entroly/README.md)).
+
+### Output
+
+Output reduction by asking for terser responses, on a paid live call over 9 coding prompts:
+
+| | output cut | overhead / request |
+|---|---:|---:|
+| caveman | 80% | 949 tokens |
+| llmtrim `output_terse` | 69% | 19 tokens |
+
+The cost is the 949-token system prompt caveman resends on every request (right column); llmtrim's is 19 for nearly the same cut. Both still net-save here, so caveman's deeper cut comes out ahead only when the output it removes is worth more than the 949 tokens it adds back ([vs-caveman artifact](crates/llmtrim-cli/bench/snapshots/vs-caveman/README.md)).
+
+The tools stack: RTK shrinks CLI output, then llmtrim compresses the tool schemas on top. Full head-to-heads: [crates/llmtrim-cli/bench/README.md](crates/llmtrim-cli/bench/README.md).
 
 ## Known limits
 

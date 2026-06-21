@@ -116,6 +116,42 @@ llmtrim bench compare headroom             # head-to-head vs Headroom (dispatche
 ```
 
 
+## How llmtrim compares to the field
+
+The competitor suite (`benchkit`) runs each tool on the axis it was built for and never mixes
+axes in one table. Tokens are counted on the same `o200k_base` encoder for every tool. The input
+table is deterministic and offline ($0); the output A/B is the only paid leg. Add a tool by
+implementing the `Competitor` interface, not by forking the harness
+([scripts/README.md](scripts/README.md)).
+
+### Input (deterministic, $0)
+
+Token reduction over the prompt and context (public corpora: gsm8k, hotpotqa, squad2,
+truthfulqa, cnn, LongBench), every tool on the same encoder:
+
+| tool | reduction | n | knob | reproduce |
+|---|--:|--:|---|---|
+| llmtrim `auto` | 25% | 50 | quality-gated default | `bench.py headroom --limit 5` |
+| llmtrim `aggressive` | 28% | 50 | accepts lossy cuts where the gate holds | `bench.py headroom --limit 5` |
+| Headroom (ML on) | 24% | 50 | 0% with ML disabled (routers no-op on prose) | `bench.py headroom --no-ml` |
+| leanctx / LLMLingua-2 | 52% .. 81% | 40 | lossy keep-ratio (`keep0.50` 52%, `keep0.20` 81%) | `bench.py leanctx --limit 4` |
+| entroly | 80% .. 89% | 80 | lossy budget/distill (`en-0.4` 80%, `en-max` 89%) | `bench.py entroly --limit 8` |
+
+leanctx and entroly reach a bigger reduction by dropping content. That is a token win, not a
+quality-matched one. A live A/B confirms the cost: at matched compression leanctx scores 0.49
+vs llmtrim's 0.60 (n=20, gap significant), and entroly, which has no low-reduction mode, scores
+0.18 vs llmtrim's 0.31 even while cutting far more (69% vs 25%). llmtrim's reduction figures
+come from the vs-Headroom sweep (n=50); leanctx and entroly now have committed live snapshots
+([vs-leanctx](snapshots/vs-leanctx/README.md), [vs-entroly](snapshots/vs-entroly/README.md)).
+
+### Output (paid live)
+
+Both cut the model's OUTPUT tokens by asking for terser responses, measured on a paid live call
+over 9 coding prompts. caveman injects a 949-token system prompt (its SKILL.md) on every request;
+llmtrim's `output_terse` uses 19 tokens. caveman cut output 80% and llmtrim 69%, but caveman pays
+that 949-token overhead on every call, so on short or one-shot prompts the
+overhead can outweigh the output saving ([snapshots/vs-caveman/README.md](snapshots/vs-caveman/README.md), `bench.py caveman`).
+
 ## Head-to-head: Headroom
 
 Both libraries run through their Python APIs on the same inputs and the same `o200k_base`
