@@ -66,3 +66,4 @@ __pycache__/
 /crates/llmtrim-uniffi/packaging/swift/Sources/Llmtrim/llmtrim_ffi.swift
 /crates/llmtrim-uniffi/packaging/swift/llmtrimFFI.xcframework/
 /crates/llmtrim-uniffi/packaging/swift/.build/
+tmp/
