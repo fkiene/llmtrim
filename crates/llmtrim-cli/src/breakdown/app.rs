@@ -46,7 +46,11 @@ pub enum StatusKind {
     /// On, healthy, no traffic yet.
     #[default]
     Ready,
-    /// On but needs attention (e.g. a version-mismatch restart).
+    /// On and serving, but the running daemon is an older binary than the one installed — a
+    /// restart applies the update. Not a fault, so it shows the normal dashboard with a `u`
+    /// (Update) nudge, not the Repair alert.
+    Stale,
+    /// On but needs attention / broken — the Repair alert state.
     Degraded,
     /// Not catching traffic (wired but down) — the alarm state.
     Off,
@@ -307,14 +311,16 @@ pub fn run(
 }
 
 /// What the caller should do after the TUI exits — set by a key, run on the normal screen.
-#[derive(Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Clone, Copy, PartialEq, Eq, Default, Debug)]
 pub enum PostAction {
     #[default]
     None,
     /// `d` — run `llmtrim doctor` (repair check).
     Doctor,
-    /// `u` — run `llmtrim update`.
+    /// `u` — run `llmtrim update` (a newer release is available).
     Update,
+    /// `u` on a stale daemon — restart it (`llmtrim start --force`) to load the new binary.
+    Restart,
 }
 
 struct App {
@@ -412,7 +418,17 @@ impl App {
                 return true;
             }
             KeyCode::Char('u') => {
-                self.action = PostAction::Update;
+                // On a stale daemon `u` restarts to apply the installed update; otherwise it
+                // runs the updater for a newer release.
+                self.action = if self
+                    .overview
+                    .as_ref()
+                    .is_some_and(|o| o.status.kind == StatusKind::Stale)
+                {
+                    PostAction::Restart
+                } else {
+                    PostAction::Update
+                };
                 return true;
             }
             KeyCode::Char('1') => self.tab = Tab::Overview,
@@ -749,16 +765,23 @@ impl App {
     }
 
     fn render_help(&self, f: &mut Frame, area: Rect) {
-        // `d repair` only when a problem is actually detected; `u update` only when a newer
-        // release exists — so the bar isn't cluttered with actions that do nothing useful.
+        // `d repair` only when a real problem is detected (a stale daemon isn't a fault, it just
+        // needs a restart); `u update` when a newer release exists or the daemon is stale — so
+        // the bar isn't cluttered with actions that do nothing useful.
+        let stale = self
+            .overview
+            .as_ref()
+            .is_some_and(|o| o.status.kind == StatusKind::Stale);
         let problem = self
             .overview
             .as_ref()
-            .is_some_and(|o| o.status.fix.is_some());
-        let update = self
-            .overview
-            .as_ref()
-            .is_some_and(|o| o.update_available.is_some());
+            .is_some_and(|o| o.status.fix.is_some())
+            && !stale;
+        let update = stale
+            || self
+                .overview
+                .as_ref()
+                .is_some_and(|o| o.update_available.is_some());
         let mut keys = match self.tab {
             Tab::Overview => String::from(" Tab tabs"),
             Tab::Sessions => String::from(" Tab tabs · ↑↓ move · →/← expand · ⏎ drill"),
@@ -950,6 +973,7 @@ fn render_status_banner(f: &mut Frame, area: Rect, ov: &OverviewData) {
     let dot = match ov.status.kind {
         StatusKind::Working => palette::green(),
         StatusKind::Ready => palette::blue(),
+        StatusKind::Stale => palette::warn(),
         StatusKind::Degraded => palette::warn(),
         StatusKind::Off => palette::alarm(),
     };
@@ -979,8 +1003,9 @@ fn render_status_banner(f: &mut Frame, area: Rect, ov: &OverviewData) {
         Line::from(Span::styled(sheep_quip(ov, secs), dim)),
     ];
     // The healthy banner has no "problem", so no Repair button here (it lives on the alert
-    // screen). Show a high-visibility Update button only when a newer release exists.
-    if ov.update_available.is_some() {
+    // screen). Show a high-visibility Update button when a newer release exists, or when the
+    // running daemon is stale (a restart applies the installed update — also driven by `u`).
+    if ov.update_available.is_some() || ov.status.kind == StatusKind::Stale {
         let btn = " u  Update ";
         let w = (btn.chars().count() as u16).min(inner.width);
         let cols = Layout::horizontal([Constraint::Min(10), Constraint::Length(w)]).split(inner);
@@ -2123,6 +2148,45 @@ mod tests {
         assert!(s.contains("llmtrim start"));
         // savings demoted to a frozen aside, not the hero
         assert!(s.contains("Saved while it was on"));
+    }
+
+    #[test]
+    fn stale_daemon_shows_update_not_repair() {
+        let mut ov = sample_overview();
+        ov.status = StatusLine {
+            kind: StatusKind::Stale,
+            text: "llmtrim is on, but running an older version — restart to apply the update"
+                .into(),
+            fix: Some("llmtrim start --force".into()),
+            uninstall: None,
+        };
+        ov.update_available = None;
+        // A stale daemon is not broken: it renders the normal dashboard with a `u Update` nudge,
+        // never the Repair alert.
+        let s = render_to_string(140, 30, |f| render_overview_main(f, f.area(), &ov));
+        assert!(s.contains("older version"), "{s}");
+        assert!(s.contains("Update"), "u Update affordance shown: {s}");
+        assert!(
+            !s.contains("Repair"),
+            "no Repair on a stale (not broken) daemon: {s}"
+        );
+    }
+
+    #[test]
+    fn u_key_restarts_a_stale_daemon_else_updates() {
+        let mut app = App::new(None, Duration::from_secs(2));
+        let mut ov = sample_overview();
+        ov.status.kind = StatusKind::Stale;
+        app.overview = Some(ov);
+        app.handle_key(KeyCode::Char('u'));
+        assert_eq!(app.action, PostAction::Restart);
+
+        let mut app = App::new(None, Duration::from_secs(2));
+        let mut ov = sample_overview();
+        ov.status.kind = StatusKind::Working;
+        app.overview = Some(ov);
+        app.handle_key(KeyCode::Char('u'));
+        assert_eq!(app.action, PostAction::Update);
     }
 
     #[test]

@@ -1778,9 +1778,12 @@ fn overview_data(tracker: &Tracker) -> llmtrim::breakdown::app::OverviewData {
             .is_some_and(|v| v != daemon.binary_version);
         if daemon.running && version_stale {
             StatusLine {
-                kind: StatusKind::Degraded,
-                text: "llmtrim needs a quick restart to update".into(),
-                fix: Some("llmtrim restart".into()),
+                kind: StatusKind::Stale,
+                text: "llmtrim is on, but running an older version — restart to apply the update"
+                    .into(),
+                // `llmtrim start --force` restarts the daemon onto the new binary (there is no
+                // `restart` subcommand). The `u` key runs this for you.
+                fix: Some("llmtrim start --force".into()),
                 uninstall: None,
             }
         } else if daemon.running {
@@ -2088,6 +2091,15 @@ fn run_monitor(
                     print!("{}", llmtrim::doctor::render(ui::color_stdout(), &report));
                 }
                 PostAction::Update => llmtrim::update::run()?,
+                PostAction::Restart => {
+                    // Stale daemon: restart it onto the freshly-installed binary. `start --force`
+                    // is the documented "pick up a new binary after an update" path.
+                    let exe = std::env::current_exe().context("locate llmtrim binary")?;
+                    std::process::Command::new(exe)
+                        .args(["start", "--force"])
+                        .status()
+                        .context("run llmtrim start --force")?;
+                }
                 PostAction::None => {}
             }
             return Ok(());
