@@ -6,6 +6,12 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Fixed
+- **The gateway plugin's GitHub Release asset is now named `llmtrim-gateway-plugin.wasm`.** In
+  v0.3.0 it published as `plugin.wasm` (the `file#label` upload syntax sets a display label, not
+  the filename), which did not match the name the README points Kong users at. The release
+  publish job now uploads it under the correct name and its post-publish verify passes.
+
 ## [0.3.0] - 2026-06-21
 
 ### Added

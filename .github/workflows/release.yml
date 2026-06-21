@@ -454,7 +454,10 @@ jobs:
       - name: Stage and validate the artifact
         run: |
           set -euo pipefail
+          # `plugin.wasm` is the name Higress expects inside the OCI tar.gz; the release asset
+          # gets the descriptive name the README points Kong users at. Same bytes, two names.
           cp target/wasm32-wasip1/release/llmtrim_gateway_plugin.wasm plugin.wasm
+          cp plugin.wasm llmtrim-gateway-plugin.wasm
           ls -lh plugin.wasm
           # A zero-byte or non-wasm file would otherwise publish silently. Check it is a real
           # wasm module (magic bytes "\0asm") before pushing it anywhere.
@@ -471,7 +474,7 @@ jobs:
           if gh release view "$TAG" --json assets --jq '.assets[].name' | grep -qx 'llmtrim-gateway-plugin.wasm'; then
             echo "asset already published for $TAG; skipping"
           else
-            gh release upload "$TAG" plugin.wasm#llmtrim-gateway-plugin.wasm
+            gh release upload "$TAG" llmtrim-gateway-plugin.wasm
           fi
       - uses: oras-project/setup-oras@v1
       - name: Log in to GHCR
