@@ -239,7 +239,7 @@ pub fn compress(input: &str, provider: Option<ProviderKind>) -> Result<CompressR
     compress_with_config(input, provider, &config)
 }
 
-/// Compress with an explicit [`DenseConfig`] (no environment access — the
+/// Compress with an explicit [`config::DenseConfig`] (no environment access — the
 /// deterministic core used by tests and embedders).
 ///
 /// The request is parsed into the neutral [`Request`], measured with the real

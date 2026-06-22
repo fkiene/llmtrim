@@ -277,7 +277,7 @@ impl Tracker {
         Self::open_reader_at(&path)
     }
 
-    /// [`open_reader`] at an explicit path.
+    /// `open_reader` at an explicit path.
     #[cfg(any(test, feature = "breakdown"))]
     pub fn open_reader_at(path: &Path) -> Result<Self> {
         if let Some(parent) = path.parent() {
@@ -740,7 +740,7 @@ impl Tracker {
         self.by_model_where("")
     }
 
-    /// [`by_model`] restricted to rows recorded today (UTC) — prices the dashboard's
+    /// [`Self::by_model`] restricted to rows recorded today (UTC) — prices the dashboard's
     /// "today" figure. Same day bucketing as `by_period(Day)`: `ts` is rfc3339 UTC, so its
     /// first 10 chars are the UTC date.
     pub fn by_model_today(&self) -> Result<Vec<ModelRow>> {
@@ -751,7 +751,7 @@ impl Tracker {
         self.by_model_where("WHERE ts >= date('now') || 'T00:00:00+00:00'")
     }
 
-    /// Shared query for [`by_model`]/[`by_model_today`]. `where_clause` is a static SQL
+    /// Shared query for [`Self::by_model`]/[`by_model_today`]. `where_clause` is a static SQL
     /// fragment chosen by the callers above, never user input.
     fn by_model_where(&self, where_clause: &str) -> Result<Vec<ModelRow>> {
         let mut stmt = self

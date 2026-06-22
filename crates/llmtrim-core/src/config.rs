@@ -537,7 +537,7 @@ impl RuntimeConfig {
     /// Process-wide instance, loaded once from env + the config file on first use. Env vars
     /// don't change mid-process, so caching is safe and keeps per-request paths (the capture
     /// cap) off the filesystem. Because it is cached for the process lifetime, **tests must use
-    /// [`resolve`](Self::resolve), never `get`** — the first caller fixes the value for the
+    /// `resolve`, never `get`** — the first caller fixes the value for the
     /// whole test binary, so `get` can't observe a per-test environment.
     pub fn get() -> &'static RuntimeConfig {
         static CACHE: std::sync::OnceLock<RuntimeConfig> = std::sync::OnceLock::new();

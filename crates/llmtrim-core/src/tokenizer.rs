@@ -121,7 +121,7 @@ fn estimate_tokens(text: &str) -> usize {
 }
 
 /// Token counter for providers without a public tokenizer (Anthropic, Google): the cheap
-/// [`estimate_tokens`] heuristic, flagged approximate.
+/// `estimate_tokens` heuristic, flagged approximate.
 pub struct ApproxCounter {
     label: &'static str,
 }

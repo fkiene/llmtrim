@@ -40,7 +40,7 @@
 //!
 //! Coverage is tracked as a `bigram → covered-weight` map (`O(n · avg_bigrams)` memory),
 //! never an `n×n` similarity matrix — the marginal of one item touches only *its own*
-//! bigrams. Tokenization is the crate's shared Unicode word splitter ([`lex_words`],
+//! bigrams. Tokenization is the crate's shared Unicode word splitter (`lex_words`,
 //! UAX#29), so it is script-universal, not English-only.
 
 use std::collections::HashMap;

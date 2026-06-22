@@ -79,7 +79,7 @@ pub struct BreakdownDb {
 }
 
 impl BreakdownDb {
-    /// Open the ledger for reading. Goes through [`Tracker`], which creates the file if
+    /// Open the ledger for reading. Goes through `Tracker`, which creates the file if
     /// absent (fresh install, before any proxy run — the TUI then just shows no sessions),
     /// runs the schema migration, and sets WAL + a busy timeout. WAL lets this reader run
     /// alongside the daemon's writer without blocking it; opening read-write (we only ever

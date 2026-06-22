@@ -16,7 +16,7 @@
 //! no-ops on scripts without inter-word spaces (CJK, Thai) — a word-level glossary
 //! doesn't apply there, so that content is left verbatim rather than mis-abbreviated.
 //!
-//! Mining (see [`crate::stages::ngram_sa`]): the repeated phrases are the *maximal
+//! Mining (see `crate::stages::ngram_sa`): the repeated phrases are the *maximal
 //! repeats* of the word sequence, enumerated from a suffix array + LCP array in
 //! O(n log n) ("Efficient Repeat Finding via Suffix Arrays", arXiv:1304.0528), then
 //! chosen greedily by their real token gain with overlap accounting — the Re-Pair idea

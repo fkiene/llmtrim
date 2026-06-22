@@ -15,23 +15,23 @@
 //! The shape detectors contribute only structure *hints* (what a file field is, which
 //! tokens are failure levels, where hunks begin); none of them owns a drop policy. The
 //! drop policy is one shared recipe — fold losslessly first, ship that if it fits, else
-//! window under an adaptive budget ([`crate::stages::sizing`]) with dropped runs
+//! window under an adaptive budget (`crate::stages::sizing`) with dropped runs
 //! becoming positional elision markers (`[… N lines omitted …]`, like the `retrieve`
 //! stage) — plus three universal rails that apply to every windowed segment, current
 //! and future kinds alike:
 //!
-//! 1. **Attribution** ([`rebuild`]): windowed output opens with a self-identifying
+//! 1. **Attribution** (`rebuild`): windowed output opens with a self-identifying
 //!    header naming llmtrim and the recovery action, so an agent never misattributes
 //!    the elision to the tool (or to whatever wrapper ran it).
 //! 2. **Repeat → passthrough** ([`ToolOutputStage::apply`]): when a candidate's content
 //!    already appears earlier in the request — the agent re-ran the tool to get the
 //!    dropped detail back — the newest occurrence ships in full. Equality is on a
-//!    volatile-value-masked fingerprint ([`template::fingerprint`]), since re-runs are
+//!    volatile-value-masked fingerprint (`template::fingerprint`), since re-runs are
 //!    rarely byte-identical (timings, timestamps, PIDs). This is what makes the
 //!    header's "re-run the tool" promise true: compression is deterministic, so
 //!    without this rail a retry would be windowed identically and the agent would
 //!    conclude the tool itself is broken.
-//! 3. **Never inflate** ([`elide_into`]): an elision marker is emitted only when it is
+//! 3. **Never inflate** (`elide_into`): an elision marker is emitted only when it is
 //!    shorter than the lines it hides; a lone `--` separator survives as itself.
 //!
 //! Lossy, `InputTokens`-gated (reverts if it doesn't cut tokens), `Content`-scoped.
@@ -41,7 +41,7 @@
 //! *machine-emitted* by runtimes and build tools (`ERROR`, `FATAL`, `Traceback`,
 //! `panicked`), not human prose, so a fixed set is appropriate. Locale-specific terms
 //! from the user's request are handled by the query-overlap bonus, which is
-//! Unicode-segmented via [`lex_words`].
+//! Unicode-segmented via `lex_words`.
 
 mod detect;
 mod diff;
@@ -205,7 +205,7 @@ impl Transform for ToolOutputStage {
         // earlier content pointer is a re-invocation returning the same output — the
         // agent asking for the windowed detail back (the elision header tells it to).
         // Ship the newest occurrence in full. Equality is on the volatile-value-masked
-        // [`template::fingerprint`], not raw text: most re-runs are *not* byte-identical
+        // `template::fingerprint`, not raw text: most re-runs are *not* byte-identical
         // (test timings like TAP's `duration_ms`, log timestamps, ports, PIDs), and raw
         // equality would re-window exactly the retry the header promised would work.
         // Masking is provider-neutral and language-free; a masked false match merely

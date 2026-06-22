@@ -5,7 +5,7 @@
 //! This module supplies the missing axis — does query-relevant source content
 //! *survive* the cut — using pure n-gram arithmetic, no model, no embeddings,
 //! deterministic and language-universal (tokenization via the shared Unicode
-//! [`lex_words`]).
+//! `lex_words`).
 //!
 //! Two measures, after Grusky, Naaman & Artzi, "Newsroom" (NAACL 2018):
 //!
@@ -30,7 +30,7 @@
 //! answer-bearing content with probability ≥ `1 − alpha`
 //! (arXiv:2509.20461, "Document Summarization with Conformal Importance Guarantees").
 //! To re-run against a real corpus: load recall cases (e.g. LongBench / ZeroSCROLLS
-//! via [`crate::quality::load_corpus`]), compress each with the target preset,
+//! via `load_corpus`), compress each with the target preset,
 //! compute `coverage(source, compressed, query_terms)` per case alongside the known
 //! `recall(must_keep)`, then call `calibrate_threshold(&scored, 0.9, 0.1)` and paste
 //! the returned value here. The shipped value is calibrated on the synthetic fixture
@@ -93,7 +93,7 @@ pub fn context_text(req: &Request, provider: &dyn Provider) -> String {
 /// exists to do. The gate fires only when we actually know what the question is.
 ///
 /// Wire-shape agnostic (provider role/turn seam), language-universal (tokenized by
-/// [`lex_words`]).
+/// `lex_words`).
 pub fn query_terms(req: &Request, provider: &dyn Provider) -> Vec<String> {
     let q_turn = question_turn(req, provider);
     let mut text = String::new();
@@ -141,7 +141,7 @@ pub const COVERAGE_THRESHOLD: f64 = 0.5;
 /// query-agnostic proxy for "how much of the source structure survived".
 ///
 /// Deterministic and language-universal: tokenization is the shared Unicode
-/// [`lex_words`] (works on CJK / Cyrillic / Arabic …, not an ASCII split).
+/// `lex_words` (works on CJK / Cyrillic / Arabic …, not an ASCII split).
 ///
 /// Degenerate inputs: empty source ⇒ `1.0` (nothing to lose); non-empty source with
 /// empty compressed ⇒ `0.0` (everything lost).

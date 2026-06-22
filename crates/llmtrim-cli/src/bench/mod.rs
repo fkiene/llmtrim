@@ -51,7 +51,7 @@ pub enum Scorer {
     /// chosen answer, not a letter mentioned in passing.
     ChoiceExact,
     /// Run the model's code against provided unit tests (HumanEval/MBPP). Gold is
-    /// JSON `{"test":…, "entry_point":…}`; scored in [`exec`] (needs a subprocess).
+    /// JSON `{"test":…, "entry_point":…}`; scored by `pass_at_one` (needs a subprocess).
     PassAtOne,
     /// Compare the emitted tool call (name + args) against gold JSON (agent corpora).
     ToolCallMatch,

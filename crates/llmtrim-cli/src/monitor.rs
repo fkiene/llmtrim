@@ -957,7 +957,7 @@ fn cache_multipliers(provider: &str) -> (f64, f64) {
     }
 }
 
-/// USD cost figures priced per model via [`llm_prices`], `None` when no recorded model
+/// USD cost figures priced per model via `llm_prices`, `None` when no recorded model
 /// is priced.
 ///
 /// - `saved`/`spend` value tokens at **list input rates** (tokens cut × input price; the
