@@ -1,0 +1,64 @@
+name: Publish to MCP Registry
+
+# Registers/updates llmtrim in the official MCP Registry
+# (registry.modelcontextprotocol.io) under the io.github.fkiene namespace.
+# Runs after a GitHub Release is published, once release.yml has published
+# the matching @llmtrim/cli version to npm. Authenticates with GitHub OIDC,
+# so no stored token is needed.
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version to publish (without leading v), e.g. 0.3.1"
+        required: true
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write # OIDC, proves the io.github.fkiene namespace
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Resolve version
+        id: ver
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            v="${{ github.event.inputs.version }}"
+          else
+            v="${GITHUB_REF_NAME#v}"
+          fi
+          echo "version=$v" >> "$GITHUB_OUTPUT"
+
+      - name: Wait for @llmtrim/cli on npm
+        run: |
+          v="${{ steps.ver.outputs.version }}"
+          for i in $(seq 1 20); do
+            if npm view "@llmtrim/cli@$v" version >/dev/null 2>&1; then
+              echo "@llmtrim/cli@$v is on npm"; exit 0
+            fi
+            echo "waiting for @llmtrim/cli@$v on npm ($i/20)"; sleep 30
+          done
+          echo "timed out waiting for @llmtrim/cli@$v on npm" >&2; exit 1
+
+      - name: Sync version into server.json
+        run: |
+          v="${{ steps.ver.outputs.version }}"
+          jq --arg v "$v" '.version = $v | .packages[0].version = $v' server.json > server.tmp
+          mv server.tmp server.json
+          cat server.json
+
+      - name: Install mcp-publisher
+        run: |
+          curl -L "https://github.com/modelcontextprotocol/registry/releases/latest/download/mcp-publisher_$(uname -s | tr '[:upper:]' '[:lower:]')_$(uname -m | sed 's/x86_64/amd64/;s/aarch64/arm64/').tar.gz" | tar xz mcp-publisher
+
+      - name: Authenticate to MCP Registry (OIDC)
+        run: ./mcp-publisher login github-oidc
+
+      - name: Publish to MCP Registry
+        run: ./mcp-publisher publish
