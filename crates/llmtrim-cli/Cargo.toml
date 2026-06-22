@@ -8,7 +8,7 @@ repository.workspace = true
 homepage.workspace = true
 license.workspace = true
 readme = "README.md"
-keywords = ["llm", "tokens", "mcp", "compression", "openai"]
+keywords = ["llm", "mcp", "compression", "openai", "anthropic"]
 categories = ["command-line-utilities", "development-tools", "compression"]
 # Keep the published crate lean — benchmark corpora, CI config and editor rules aren't
 # needed to build or use llmtrim. bench/pricing.json is re-included: main.rs embeds it

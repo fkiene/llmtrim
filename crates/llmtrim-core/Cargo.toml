@@ -8,7 +8,7 @@ repository.workspace = true
 homepage.workspace = true
 license.workspace = true
 readme = "README.md"
-keywords = ["llm", "tokens", "mcp", "compression", "openai"]
+keywords = ["llm", "mcp", "compression", "openai", "anthropic"]
 categories = ["compression", "text-processing", "api-bindings", "development-tools"]
 
 # Workspace CHANGELOG stamping (run once, on this crate). cargo-release resolves `file`
