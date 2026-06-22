@@ -6,6 +6,13 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Fixed
+- **`update` now restarts the daemon itself instead of leaving it stale.** On the binary
+  channel (the installer path), `llmtrim update` laid down the new binary but left the running
+  daemon on the old build, so `status` still showed a `u  Update` nudge and you had to restart
+  by hand. It now runs `llmtrim start --force` after a successful install, finishing the job in
+  one command.
+
 ## [0.3.1] - 2026-06-21
 
 ### Fixed

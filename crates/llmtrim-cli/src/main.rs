@@ -2092,16 +2092,12 @@ fn run_monitor(
                 }
                 PostAction::Update => llmtrim::update::run()?,
                 PostAction::Restart => {
-                    // Stale daemon: restart it onto the freshly-installed binary. `start --force`
-                    // is the documented "pick up a new binary after an update" path.
-                    let exe = std::env::current_exe().context("locate llmtrim binary")?;
-                    let status = std::process::Command::new(exe)
-                        .args(["start", "--force"])
-                        .status()
-                        .context("run llmtrim start --force")?;
+                    // Stale daemon: restart it onto the freshly-installed binary via the shared
+                    // helper (`start --force`, the documented "pick up a new binary" path).
                     // Surface a failed restart (port held, permission, ...) instead of exiting 0.
-                    if !status.success() {
-                        std::process::exit(status.code().unwrap_or(1));
+                    if let Err(e) = llmtrim::update::restart_daemon(ui::color_stdout()) {
+                        eprintln!("{e:#}");
+                        std::process::exit(1);
                     }
                 }
                 PostAction::None => {}

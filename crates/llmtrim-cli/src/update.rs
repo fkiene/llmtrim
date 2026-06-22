@@ -182,7 +182,7 @@ pub fn run() -> Result<()> {
             "update via cargo",
             &[
                 "cargo install --locked llmtrim --force",
-                "llmtrim setup    # restart the daemon on the new binary",
+                "llmtrim start --force    # restart the daemon on the new binary",
             ],
         ),
         Channel::Homebrew => instructions(
@@ -190,14 +190,14 @@ pub fn run() -> Result<()> {
             &[
                 "brew tap fkiene/tap",
                 "brew upgrade fkiene/tap/llmtrim",
-                "llmtrim setup    # restart the daemon on the new binary",
+                "llmtrim start --force    # restart the daemon on the new binary",
             ],
         ),
         Channel::Npm => instructions(
             "update via npm",
             &[
                 "npm install -g @llmtrim/cli@latest",
-                "llmtrim setup    # restart the daemon on the new binary",
+                "llmtrim start --force    # restart the daemon on the new binary",
             ],
         ),
         Channel::Binary => {
@@ -213,7 +213,7 @@ pub fn run() -> Result<()> {
                         "iwr -useb https://raw.githubusercontent.com/{}/{tag}/install.ps1 | iex",
                         repo()
                     ),
-                    "llmtrim setup    # restart the daemon on the new binary",
+                    "llmtrim start --force    # restart the daemon on the new binary",
                 ],
             );
             #[cfg(not(windows))]
@@ -223,7 +223,7 @@ pub fn run() -> Result<()> {
                     repo()
                 );
                 println!(
-                    "Updating via the installer (downloads the latest release; `setup` restarts the daemon)…"
+                    "Updating via the installer (downloads the latest release, then restarts the daemon)…"
                 );
                 let mut cmd = std::process::Command::new("sh");
                 cmd.args(["-c", &format!("curl -fsSL {url} | sh")]);
@@ -241,8 +241,46 @@ pub fn run() -> Result<()> {
                 if let Some(v) = latest {
                     write_cache(&v); // clear the `monitor` banner
                 }
+                // The installer laid down the new binary, but the running daemon is still on
+                // the old one (Stale). Finish the job here so `update` leaves nothing behind —
+                // otherwise `status` would show a `u  Update` nudge for a restart the user must
+                // do by hand. Same path as the TUI's `u` (PostAction::Restart).
+                restart_daemon(color)?;
             }
         }
+    }
+    Ok(())
+}
+
+/// Restart the daemon onto the freshly-installed binary via `start --force` (the documented
+/// "pick up a new binary after an update" path). Shared by the binary channel here (which runs
+/// the installer) and the TUI's `PostAction::Restart` in `main.rs`, so the restart lives in one
+/// place. On failure it bails with an actionable message rather than leaving the user guessing.
+pub fn restart_daemon(color: bool) -> Result<()> {
+    // The installer replaces the binary on disk; on Linux `current_exe()` can then resolve to a
+    // `…/llmtrim (deleted)` ghost path. Fall back to `llmtrim` on PATH when the resolved path no
+    // longer exists, so the restart still lands on the freshly-installed binary.
+    let exe = std::env::current_exe()
+        .ok()
+        .filter(|p| p.exists())
+        .unwrap_or_else(|| std::path::PathBuf::from("llmtrim"));
+    println!(
+        "\n{}",
+        crate::ui::paint(
+            color,
+            crate::ui::Tone::Dim,
+            "Restarting the daemon on the new binary…"
+        )
+    );
+    let status = std::process::Command::new(exe)
+        .args(["start", "--force"])
+        .status()
+        .context("run llmtrim start --force")?;
+    if !status.success() {
+        anyhow::bail!(
+            "daemon restart failed (llmtrim start --force exited non-zero). \
+             Restart it yourself with: llmtrim start --force"
+        );
     }
     Ok(())
 }
