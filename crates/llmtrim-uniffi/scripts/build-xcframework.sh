@@ -38,8 +38,8 @@ echo "==> building static libs per Apple target"
 # Note: x86_64 iOS is only ever the simulator, so its target is `x86_64-apple-ios` (no
 # `-sim` suffix — that exists only for aarch64, to split arm64 device vs arm64 sim).
 #
-# XCFRAMEWORK_FAST=1 builds only the slices a host `swift test` actually links against
-# (Apple-silicon macOS + iOS-sim arm64), skipping the x86_64 and iOS-device cross-compiles.
+# XCFRAMEWORK_FAST=1 builds only the slice a host `swift test` actually links against
+# (Apple-silicon macOS), skipping the x86_64 and iOS cross-compiles.
 # CI PR runs set it to cut wall-clock; the release build leaves it unset for the full
 # universal/device xcframework.
 if [ "${XCFRAMEWORK_FAST:-0}" = "1" ]; then

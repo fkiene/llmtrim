@@ -345,10 +345,10 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: swift-package
-      # XCFRAMEWORK_FAST builds only the Apple-silicon macOS + iOS-sim arm64 slices — the
-      # ones a host `swift test` actually links against — skipping the x86_64 and iOS-device
-      # cross-compiles. The SwiftPM build+test validation below is unchanged: it links and
-      # runs the real test target against a valid (if reduced) xcframework. The full
+      # XCFRAMEWORK_FAST builds only the Apple-silicon macOS slice — the one a host
+      # `swift test` on the arm64 runner actually links against — skipping the x86_64 and
+      # iOS cross-compiles. The SwiftPM build+test validation below is unchanged: it links
+      # and runs the real test target against a valid (if reduced) xcframework. The full
       # universal/device xcframework is built unconditionally by release-bindings.yml on tags.
       - name: Build the XCFramework
         env:
