@@ -2,13 +2,15 @@ name: Publish to MCP Registry
 
 # Registers/updates llmtrim in the official MCP Registry
 # (registry.modelcontextprotocol.io) under the io.github.fkiene namespace.
-# Runs after a GitHub Release is published, once release.yml has published
-# the matching @llmtrim/cli version to npm. Authenticates with GitHub OIDC,
-# so no stored token is needed.
+# Fires on the vX.Y.Z tag that release.yml pushes, waits for release.yml to
+# publish the matching @llmtrim/cli version to npm, then publishes. Uses a tag
+# trigger, not `release: published`, because a release created by the Actions
+# GITHUB_TOKEN does not trigger other workflows. Authenticates with GitHub
+# OIDC, so no stored token is needed.
 
 on:
-  release:
-    types: [published]
+  push:
+    tags: ["v*"]
   workflow_dispatch:
     inputs:
       version:
@@ -51,11 +53,13 @@ jobs:
         env:
           VERSION: ${{ steps.ver.outputs.version }}
         run: |
-          for i in $(seq 1 20); do
+          # release.yml builds 6 binaries then publishes @llmtrim/cli; a flaky
+          # binary leg + rerun can push that out, so wait generously (~60 min).
+          for i in $(seq 1 60); do
             if npm view "@llmtrim/cli@${VERSION}" version >/dev/null 2>&1; then
               echo "@llmtrim/cli@${VERSION} is on npm"; exit 0
             fi
-            echo "waiting for @llmtrim/cli@${VERSION} on npm ($i/20)"; sleep 30
+            echo "waiting for @llmtrim/cli@${VERSION} on npm ($i/60)"; sleep 60
           done
           echo "timed out waiting for @llmtrim/cli@${VERSION} on npm" >&2; exit 1
 
