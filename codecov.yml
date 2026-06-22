@@ -1,0 +1,16 @@
+# Coverage gating policy.
+#
+# `project` is the blocking gate: overall coverage must not regress (a small
+# threshold absorbs rounding noise). `patch` is informational only, never a
+# blocker, because real-IO entrypoints (installer and daemon spawns, stdio run
+# loops, real-ledger open arms) are legitimately uncovered, and a hard per-diff
+# gate would block PRs that add them.
+coverage:
+  status:
+    project:
+      default:
+        target: auto
+        threshold: 1%
+    patch:
+      default:
+        informational: true
