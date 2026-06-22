@@ -12,6 +12,9 @@ All notable changes to this project are documented here. The format follows
   daemon on the old build, so `status` still showed a `u  Update` nudge and you had to restart
   by hand. It now runs `llmtrim start --force` after a successful install, finishing the job in
   one command.
+- **A failed `update` now shows how to finish it by hand.** When the installer can't launch or
+  exits non-zero, `update` prints the manual command for that channel (the `curl … | sh`
+  one-liner, version pin included) plus the daemon restart, instead of just reporting the error.
 
 ## [0.3.1] - 2026-06-21
 
