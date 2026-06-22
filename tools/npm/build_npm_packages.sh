@@ -85,10 +85,11 @@ cat > "$META/package.json" <<EOF
   "name": "@llmtrim/cli",
   "version": "$VERSION",
   "description": "Cut your LLM bill: drop-in proxy that compresses input, output, and cache. Any provider, answers unchanged.",
+  "mcpName": "io.github.fkiene/llmtrim",
   "repository": "$REPO",
   "homepage": "$REPO#readme",
   "license": "MPL-2.0",
-  "keywords": ["llm", "tokens", "compression", "proxy", "openai", "anthropic", "claude"],
+  "keywords": ["llm", "tokens", "compression", "proxy", "mcp", "openai", "anthropic", "claude"],
   "bin": { "llmtrim": "bin/llmtrim.js" },
   "files": ["bin", "README.md"],
   "optionalDependencies": {
