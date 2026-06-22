@@ -36,7 +36,10 @@ csv.workspace = true
 gaoya = "0.2.0"
 # Optional: image decoders (png/jpeg) for Stage H downscaling. Behind the default-on
 # `multimodal` feature so text-only / size-constrained builds (wasm) can drop them.
-image = { version = "0.25.10", default-features = false, features = ["png", "jpeg"], optional = true }
+image = { version = "0.25.10", default-features = false, features = [
+  "png",
+  "jpeg",
+], optional = true }
 once_cell.workspace = true
 regex.workspace = true
 serde.workspace = true
@@ -89,21 +92,21 @@ multimodal = ["dep:image"]
 tiktoken = ["dep:tiktoken-rs"]
 # Stage C tree-sitter code skeletonization. Drop it for targets with no C toolchain.
 skeleton = [
-    "dep:tree-sitter",
-    "dep:tree-sitter-javascript",
-    "dep:tree-sitter-rust",
-    "dep:tree-sitter-typescript",
-    "dep:tree-sitter-python",
-    "dep:tree-sitter-go",
-    "dep:tree-sitter-java",
-    "dep:tree-sitter-c",
-    "dep:tree-sitter-cpp",
-    "dep:tree-sitter-c-sharp",
-    "dep:tree-sitter-kotlin-ng",
-    "dep:tree-sitter-swift",
-    "dep:tree-sitter-zig",
-    "dep:tree-sitter-ruby",
-    "dep:tree-sitter-php",
+  "dep:tree-sitter",
+  "dep:tree-sitter-javascript",
+  "dep:tree-sitter-rust",
+  "dep:tree-sitter-typescript",
+  "dep:tree-sitter-python",
+  "dep:tree-sitter-go",
+  "dep:tree-sitter-java",
+  "dep:tree-sitter-c",
+  "dep:tree-sitter-cpp",
+  "dep:tree-sitter-c-sharp",
+  "dep:tree-sitter-kotlin-ng",
+  "dep:tree-sitter-swift",
+  "dep:tree-sitter-zig",
+  "dep:tree-sitter-ruby",
+  "dep:tree-sitter-php",
 ]
 
 [lints]

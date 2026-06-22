@@ -10,10 +10,10 @@ requires-python = ">=3.9"
 license = { text = "MPL-2.0" }
 keywords = ["llm", "tokens", "compression", "openai", "anthropic"]
 classifiers = [
-    "Programming Language :: Rust",
-    "Programming Language :: Python :: 3",
-    "Topic :: Text Processing",
-    "License :: OSI Approved :: Mozilla Public License 2.0 (MPL 2.0)",
+  "Programming Language :: Rust",
+  "Programming Language :: Python :: 3",
+  "Topic :: Text Processing",
+  "License :: OSI Approved :: Mozilla Public License 2.0 (MPL 2.0)",
 ]
 dynamic = ["version"]
 

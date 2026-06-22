@@ -18,8 +18,8 @@ consolidate-commits = true
 # directory (crates/<name>/), so the path is workspace-root-relative; the script itself
 # is cwd-agnostic (git/gh resolve the repo from any subdir).
 pre-release-hook = ["sh", "../../tools/check_ci_green.sh"]
-publish = false      # crates.io publish happens in release.yml via Trusted Publishing
-verify = false       # CI is the verifier; keep the release command fast
+publish = false # crates.io publish happens in release.yml via Trusted Publishing
+verify = false # CI is the verifier; keep the release command fast
 push = true
 tag-name = "v{{version}}"
 pre-release-commit-message = "release: v{{version}}"

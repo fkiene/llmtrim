@@ -16,22 +16,22 @@ all-features = true
 # confidence-threshold: how sure the SPDX scanner must be (0.8 = standard).
 confidence-threshold = 0.8
 allow = [
-    "MIT",
-    "Apache-2.0",
-    "Apache-2.0 WITH LLVM-exception",
-    "BSD-2-Clause",
-    "BSD-3-Clause",
-    "ISC",
-    "Zlib",
-    "BSL-1.0",          # Boost — permissive
-    "0BSD",
-    "CC0-1.0",          # public-domain dedication
-    "MIT-0",
-    "Unicode-3.0",      # unicode-ident data
-    "Unlicense",
-    "CDLA-Permissive-2.0", # webpki-roots cert data
-    "MPL-2.0",          # weak copyleft (file-level) — our own crates + transitive deps
-    "OpenSSL",          # ring/aws-lc transitive, permissive
+  "MIT",
+  "Apache-2.0",
+  "Apache-2.0 WITH LLVM-exception",
+  "BSD-2-Clause",
+  "BSD-3-Clause",
+  "ISC",
+  "Zlib",
+  "BSL-1.0", # Boost — permissive
+  "0BSD",
+  "CC0-1.0", # public-domain dedication
+  "MIT-0",
+  "Unicode-3.0", # unicode-ident data
+  "Unlicense",
+  "CDLA-Permissive-2.0", # webpki-roots cert data
+  "MPL-2.0", # weak copyleft (file-level) — our own crates + transitive deps
+  "OpenSSL", # ring/aws-lc transitive, permissive
 ]
 # fuchsia-cprng (transitive via gaoya→random_choice→rand, fuchsia-target only) has no
 # `license` field in its manifest — only a BSD-3-Clause LICENSE file. Clarify keeps the
