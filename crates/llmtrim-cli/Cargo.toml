@@ -39,11 +39,9 @@ path = "src/main.rs"
 # lockstep with llmtrim-core by cargo-release's shared-version on every bump.
 llmtrim-core = { path = "../llmtrim-core", version = "0.3.2-dev" }
 anyhow.workspace = true
-base64.workspace = true
 chrono = "0.4.45"
 clap = { version = "4.6.1", features = ["derive"] }
 comfy-table = { version = "7.2.2", default-features = false, features = ["custom_styling"] }
-csv.workspace = true
 ctrlc = "3.5.2"
 dotenvy = "0.15.7"
 once_cell.workspace = true
@@ -56,7 +54,6 @@ statrs = "0.18.0"
 # Terminal width for the watch-mode repaint (truncates lines to one screen row so the
 # in-place repaint never drifts on narrow terminals). Wraps the already-present rustix.
 terminal_size = "0.4"
-tiktoken-rs.workspace = true
 toml.workspace = true
 unicode-width = "0.2"
 ureq = "3.3.0"
@@ -64,9 +61,21 @@ wait-timeout = "0.2.1"
 # Live A/B benchmarking (the `bench` command's network path).
 async-openai = { version = "0.41.0", features = ["chat-completion", "byot"], optional = true }
 reqwest = { version = "0.13", default-features = false, optional = true }
-tokio = { version = "1.52", features = ["rt", "rt-multi-thread", "macros", "net", "io-util", "signal", "time"], optional = true }
+tokio = { version = "1.52", features = [
+  "rt",
+  "rt-multi-thread",
+  "macros",
+  "net",
+  "io-util",
+  "signal",
+  "time",
+], optional = true }
 # The MITM interceptor (`serve`).
-hudsucker = { version = "0.24", default-features = false, features = ["rcgen-ca", "rustls-client", "http2"], optional = true }
+hudsucker = { version = "0.24", default-features = false, features = [
+  "rcgen-ca",
+  "rustls-client",
+  "http2",
+], optional = true }
 # Upstream-proxy connector for the MITM path — tunnels HTTPS origin connections via CONNECT.
 # `rustls-tls-native-roots` enables the `__rustls` internal feature, which causes ProxyConnector
 # to build a tokio-rustls TlsConnector for the ORIGIN leg of tunnelled connections (the part
@@ -74,11 +83,13 @@ hudsucker = { version = "0.24", default-features = false, features = ["rcgen-ca"
 # so it needs no TLS. The tokio-rustls ClientConfig inherits whatever CryptoProvider is
 # installed at runtime; we call aws_lc_rs::default_provider() at startup, so origin TLS uses
 # aws-lc-rs throughout — no ring is pulled in as an active provider.
-hyper-http-proxy = { version = "1.1", default-features = false, features = ["rustls-tls-native-roots"], optional = true }
-# Direct dep so serve.rs can call HttpsConnectorBuilder if needed for non-proxy paths.
-hyper-rustls = { version = "0.27", default-features = false, features = ["native-tokio", "http1", "http2"], optional = true }
-hyper-util = { version = "0.1", default-features = false, features = ["client-legacy", "http2"], optional = true }
-async-trait = { version = "0.1", optional = true }
+hyper-http-proxy = { version = "1.1", default-features = false, features = [
+  "rustls-tls-native-roots",
+], optional = true }
+hyper-util = { version = "0.1", default-features = false, features = [
+  "client-legacy",
+  "http2",
+], optional = true }
 http-body-util = { version = "0.1", optional = true }
 bytes = { version = "1", optional = true }
 llm_providers = { version = "0.14", optional = true }
@@ -88,7 +99,11 @@ llm_providers = { version = "0.14", optional = true }
 time = { version = ">=0.3.36, <0.3.48", default-features = false, optional = true }
 # MCP server over stdio (`mcp`). rmcp is the official Model Context Protocol Rust SDK;
 # `transport-io` is the stdio transport, `macros` derives each tool's JSON Schema.
-rmcp = { version = "1.7", default-features = false, features = ["server", "macros", "transport-io"], optional = true }
+rmcp = { version = "1.7", default-features = false, features = [
+  "server",
+  "macros",
+  "transport-io",
+], optional = true }
 schemars = { version = "1", optional = true }
 # Interactive cost-breakdown TUI (`status`/`monitor` on a TTY). crossterm is the terminal
 # backend; ratatui draws the tabbed tree-tables.
@@ -96,7 +111,6 @@ ratatui = { version = "0.29", default-features = false, features = ["crossterm"]
 crossterm = { version = "0.28", optional = true }
 # Parse the existing ANSI-colored dashboard string into styled ratatui spans for the
 # Overview tab (so the hero box / gauges / sparkline keep their colors).
-ansi-to-tui = { version = "7", optional = true }
 
 # The protocol-level MCP test (`tests/mcp_protocol.rs`, gated on the `mcp` feature) drives
 # the server through an in-memory client, which needs rmcp's `client` side. Dev-only —
@@ -118,8 +132,17 @@ winreg = "0.56"
 default = ["intercept", "mcp", "breakdown"]
 live = ["dep:async-openai", "dep:reqwest", "dep:tokio"]
 # Interactive cost-breakdown TUI. In default so the shipped binary's `status` opens it on a TTY.
-breakdown = ["dep:ratatui", "dep:crossterm", "dep:ansi-to-tui"]
-intercept = ["dep:hudsucker", "dep:tokio", "dep:async-trait", "dep:http-body-util", "dep:bytes", "dep:llm_providers", "dep:time", "dep:hyper-http-proxy", "dep:hyper-util", "dep:hyper-rustls"]
+breakdown = ["dep:ratatui", "dep:crossterm"]
+intercept = [
+  "dep:hudsucker",
+  "dep:tokio",
+  "dep:http-body-util",
+  "dep:bytes",
+  "dep:llm_providers",
+  "dep:time",
+  "dep:hyper-http-proxy",
+  "dep:hyper-util",
+]
 mcp = ["dep:rmcp", "dep:schemars", "dep:tokio"]
 
 [lints]
