@@ -306,6 +306,9 @@ pub fn restart_daemon(color: bool) -> Result<()> {
 /// installer subprocess runs. For a pinned tag the version goes on the `sh` stage of the pipe
 /// (`… | LLMTRIM_VERSION=<tag> sh`), where `install.sh` reads it — same env the subprocess sets
 /// via `.env()`. The `main` channel runs unpinned.
+// Called only from the `#[cfg(not(windows))]` installer path above; on Windows it is used
+// solely by unit tests, so allow it to be unused in the non-test build there.
+#[cfg_attr(windows, allow(dead_code))]
 fn manual_install_cmd(url: &str, tag: &str) -> String {
     if tag == "main" {
         format!("curl -fsSL {url} | sh")
