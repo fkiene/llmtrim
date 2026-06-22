@@ -15,6 +15,10 @@ use anyhow::{Context, Result};
 
 const CURRENT: &str = env!("CARGO_PKG_VERSION");
 
+/// The "now restart the daemon onto the new binary" follow-up, shown after every channel's
+/// update instructions. One constant so the command and its comment stay in lockstep.
+const RESTART_HINT: &str = "llmtrim start --force    # restart the daemon on the new binary";
+
 /// `owner/name` parsed from the crate's repository URL.
 fn repo() -> &'static str {
     env!("CARGO_PKG_REPOSITORY")
@@ -180,25 +184,19 @@ pub fn run() -> Result<()> {
     match channel() {
         Channel::Cargo => instructions(
             "update via cargo",
-            &[
-                "cargo install --locked llmtrim --force",
-                "llmtrim start --force    # restart the daemon on the new binary",
-            ],
+            &["cargo install --locked llmtrim --force", RESTART_HINT],
         ),
         Channel::Homebrew => instructions(
             "update via Homebrew",
             &[
                 "brew tap fkiene/tap",
                 "brew upgrade fkiene/tap/llmtrim",
-                "llmtrim start --force    # restart the daemon on the new binary",
+                RESTART_HINT,
             ],
         ),
         Channel::Npm => instructions(
             "update via npm",
-            &[
-                "npm install -g @llmtrim/cli@latest",
-                "llmtrim start --force    # restart the daemon on the new binary",
-            ],
+            &["npm install -g @llmtrim/cli@latest", RESTART_HINT],
         ),
         Channel::Binary => {
             let tag = latest
@@ -213,7 +211,7 @@ pub fn run() -> Result<()> {
                         "iwr -useb https://raw.githubusercontent.com/{}/{tag}/install.ps1 | iex",
                         repo()
                     ),
-                    "llmtrim start --force    # restart the daemon on the new binary",
+                    RESTART_HINT,
                 ],
             );
             #[cfg(not(windows))]
@@ -232,10 +230,29 @@ pub fn run() -> Result<()> {
                 if tag != "main" {
                     cmd.env("LLMTRIM_VERSION", &tag);
                 }
-                let status = cmd
-                    .status()
-                    .context("failed to launch the installer (curl + sh required)")?;
+                // If the install fails, the user is left on the old binary. Show the manual
+                // command for this channel (same curl one-liner, version pin included) so they
+                // can finish the update by hand, then restart the daemon.
+                let manual = || {
+                    print!(
+                        "\n{}",
+                        crate::ui::panel(
+                            color,
+                            "update failed, finish it manually",
+                            &[manual_install_cmd(&url, &tag), RESTART_HINT.to_string()],
+                        )
+                    );
+                };
+                let status = match cmd.status() {
+                    Ok(s) => s,
+                    Err(e) => {
+                        manual();
+                        return Err(e)
+                            .context("failed to launch the installer (curl + sh required)");
+                    }
+                };
                 if !status.success() {
+                    manual();
                     anyhow::bail!("installer exited non-zero");
                 }
                 if let Some(v) = latest {
@@ -283,6 +300,18 @@ pub fn restart_daemon(color: bool) -> Result<()> {
         );
     }
     Ok(())
+}
+
+/// The copy-pasteable manual install one-liner for the binary channel, mirroring what the
+/// installer subprocess runs. For a pinned tag the version goes on the `sh` stage of the pipe
+/// (`… | LLMTRIM_VERSION=<tag> sh`), where `install.sh` reads it — same env the subprocess sets
+/// via `.env()`. The `main` channel runs unpinned.
+fn manual_install_cmd(url: &str, tag: &str) -> String {
+    if tag == "main" {
+        format!("curl -fsSL {url} | sh")
+    } else {
+        format!("curl -fsSL {url} | LLMTRIM_VERSION={tag} sh")
+    }
 }
 
 #[cfg(test)]
@@ -349,5 +378,20 @@ mod tests {
     fn repo_is_owner_slash_name() {
         assert!(!repo().starts_with("http"));
         assert_eq!(repo().matches('/').count(), 1, "owner/name");
+    }
+
+    #[test]
+    fn manual_install_cmd_pins_version_on_the_sh_stage() {
+        // A resolved tag pins the version on the `sh` stage of the pipe, where install.sh
+        // reads it — matching the env the installer subprocess sets via `.env()`.
+        assert_eq!(
+            manual_install_cmd("https://example/install.sh", "v1.2.3"),
+            "curl -fsSL https://example/install.sh | LLMTRIM_VERSION=v1.2.3 sh"
+        );
+        // The `main` channel runs unpinned.
+        assert_eq!(
+            manual_install_cmd("https://example/install.sh", "main"),
+            "curl -fsSL https://example/install.sh | sh"
+        );
     }
 }
