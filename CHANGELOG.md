@@ -6,6 +6,12 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+- **llmtrim is registered in the official MCP Registry.** A `server.json` declares the
+  `io.github.fkiene/llmtrim` server, `@llmtrim/cli` carries the `mcpName` ownership marker, and a
+  release workflow publishes to `registry.modelcontextprotocol.io` over GitHub OIDC, so MCP
+  clients can discover the server (`llmtrim_compress`, `llmtrim_compress_text`, `llmtrim_stats`).
+
 ### Fixed
 - **`update` now restarts the daemon itself instead of leaving it stale.** On the binary
   channel (the installer path), `llmtrim update` laid down the new binary but left the running

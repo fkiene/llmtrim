@@ -1,5 +1,5 @@
 {
-  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-09-29/server.schema.json",
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
   "name": "io.github.fkiene/llmtrim",
   "description": "MCP server and proxy that compresses LLM prompts, tool output, and replies to cut token cost.",
   "title": "llmtrim",
@@ -8,13 +8,13 @@
     "url": "https://github.com/fkiene/llmtrim",
     "source": "github"
   },
-  "version": "0.3.1",
+  "version": "0.0.0",
   "packages": [
     {
       "registryType": "npm",
       "registryBaseUrl": "https://registry.npmjs.org",
       "identifier": "@llmtrim/cli",
-      "version": "0.3.1",
+      "version": "0.0.0",
       "transport": {
         "type": "stdio"
       },
