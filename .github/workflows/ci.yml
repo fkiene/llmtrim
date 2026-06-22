@@ -18,13 +18,20 @@ concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: true
 
-# Least privilege: every job only reads the repo; none of them write anything back.
+# Least privilege default: read-only. The one exception is the `test` job, which grants
+# itself `checks: write` to post JUnit annotations (overridden at that job's level).
 permissions:
   contents: read
 
 env:
   CARGO_TERM_COLOR: always
   RUSTFLAGS: "-D warnings"
+  # Incremental compilation is pure overhead in CI (every job is a clean-ish build) and its
+  # per-crate artifacts bloat the rust-cache without ever being reused. Disable it everywhere.
+  CARGO_INCREMENTAL: "0"
+  # The stable channel is pinned repo-wide by rust-toolchain.toml. MSRV lives here so the
+  # `msrv` job (which must override that file via RUSTUP_TOOLCHAIN) bumps in one place.
+  RUST_MSRV: "1.88"
 
 jobs:
   # Detect whether anything other than docs/assets changed. On a docs-only change the
@@ -45,6 +52,8 @@ jobs:
       code: ${{ steps.filter.outputs.code }}
     steps:
       - uses: actions/checkout@v6
+        with:
+          fetch-depth: 1
       - uses: dorny/paths-filter@v3
         id: filter
         with:
@@ -74,6 +83,10 @@ jobs:
     # keeps it running even if the `changes` job failed (fail-safe — never skip real tests).
     if: ${{ !cancelled() }}
     runs-on: ${{ matrix.os }}
+    # checks: write lets the junit reporter annotate failing tests inline on the PR.
+    permissions:
+      contents: read
+      checks: write
     strategy:
       fail-fast: false
       matrix:
@@ -85,44 +98,88 @@ jobs:
     steps:
       - if: ${{ env.RUN != 'false' }}
         uses: actions/checkout@v6
+        with:
+          fetch-depth: 1
       - if: ${{ env.RUN != 'false' }}
         uses: dtolnay/rust-toolchain@stable
         with:
-          components: rustfmt, clippy
+          components: clippy
       - if: ${{ env.RUN != 'false' }}
         uses: Swatinem/rust-cache@v2
+        with:
+          # Per-OS cache; the 3-OS matrix would otherwise collide on one key.
+          shared-key: test-${{ matrix.os }}
+      - if: ${{ env.RUN != 'false' }}
+        uses: taiki-e/install-action@nextest
       # aws-lc-rs (pulled in by the interceptor's rustls stack) assembles with NASM on Windows.
       - name: Install NASM (Windows)
         if: ${{ env.RUN != 'false' && runner.os == 'Windows' }}
         uses: ilammy/setup-nasm@v1
-      - name: Format
-        if: ${{ env.RUN != 'false' }}
-        run: cargo fmt --all -- --check
+      # Clippy stays per-OS: setup.rs/daemon.rs carry heavy `#[cfg(windows)]`/`#[cfg(unix)]`/
+      # `#[cfg(target_os = ...)]` gated code (40+ blocks in setup.rs alone), so an
+      # ubuntu-only clippy would miss lints in the Windows/macOS arms. fmt and the
+      # release/feature-variant builds (platform-independent) move to the `lint` job.
       - name: Clippy
         if: ${{ env.RUN != 'false' }}
         run: cargo clippy --all-targets -- -D warnings
       - name: Test
         if: ${{ env.RUN != 'false' }}
-        run: cargo test
-      - name: Build (release)
+        run: cargo nextest run --profile ci
+      # Surface failing tests as inline PR annotations instead of buried log lines.
+      # !cancelled() so it still reports when the test step above failed (but not on cancel).
+      - name: Annotate test results
+        if: ${{ !cancelled() && env.RUN != 'false' }}
+        uses: mikepenz/action-junit-report@v5
+        with:
+          # Glob (not a literal path) so it also matches Windows' backslash output.
+          report_paths: "**/nextest/ci/junit.xml"
+          check_name: Test report (${{ matrix.os }})
+          fail_on_failure: false
+      # nextest does not run doctests; keep the 16 doc examples under test.
+      - name: Doctests
         if: ${{ env.RUN != 'false' }}
+        run: cargo test --doc
+      # The optional features (skeleton/tiktoken/multimodal) must each drop cleanly: the
+      # no-default build is the one the wasm binding ships, so guard it (and run its tests).
+      # Kept per-OS — it's a real test run, cheap, and surfaces platform-specific breaks.
+      - name: Compile + test core with all optional features off
+        if: ${{ env.RUN != 'false' }}
+        run: cargo nextest run --profile ci -p llmtrim-core --no-default-features
+
+  # Platform-independent build/lint work, run once on ubuntu instead of on all 3 OS in the
+  # `test` matrix. `cargo build --release` was the single biggest matrix step (~205s on
+  # Windows, ~105s on Linux) yet adds little over the per-OS test compile — the release
+  # *profile* almost never surfaces an error the dev/test compile misses, and release.yml
+  # builds the real shipping binaries on tags. fmt and the feature-variant compile checks are
+  # likewise OS-independent. Clippy stays in the matrix (per-OS) because of the heavy
+  # platform-gated code (see that job).
+  lint:
+    name: Lint and build
+    needs: changes
+    if: ${{ !cancelled() && needs.changes.outputs.code != 'false' }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 1
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: lint
+      - name: Format
+        run: cargo fmt --all -- --check
+      - name: Build (release)
         run: cargo build --release
       - name: Compile live feature
-        if: ${{ env.RUN != 'false' }}
         run: cargo build -p llmtrim --features live
       # Guard the embeddable engine: llmtrim-core must build standalone, and the CLI lib
       # must still compile with the interceptor (+ tokio) dropped. `--features`/`--lib` are
       # package-scoped — they can't run at the virtual workspace root.
       - name: Compile embedder core (llmtrim-core)
-        if: ${{ env.RUN != 'false' }}
         run: cargo check -p llmtrim-core
-      # The optional features (skeleton/tiktoken/multimodal) must each drop cleanly: the
-      # no-default build is the one the wasm binding ships, so guard it (and run its tests).
-      - name: Compile + test core with all optional features off
-        if: ${{ env.RUN != 'false' }}
-        run: cargo test -p llmtrim-core --no-default-features
       - name: Compile CLI lib without the interceptor
-        if: ${{ env.RUN != 'false' }}
         run: cargo check -p llmtrim --no-default-features --lib
 
   # Exercise the UniFFI bindings end-to-end, not just the Rust-side tests in the `test`
@@ -136,8 +193,12 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
+        with:
+          fetch-depth: 1
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: bindings
       - uses: actions/setup-python@v6
         with:
           python-version: '3.x'
@@ -170,10 +231,15 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
+        with:
+          fetch-depth: 1
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: wasm32-unknown-unknown
       - uses: Swatinem/rust-cache@v2
+        with:
+          # wasm32 target artifacts + a custom RUSTFLAGS (getrandom wasm_js) — own key.
+          shared-key: wasm
       # wasm-bindgen-cli must match the wasm-bindgen crate version in Cargo.lock exactly
       # (the binary checks a schema version), so derive it instead of pinning a literal.
       - name: Resolve wasm-bindgen version
@@ -205,8 +271,12 @@ jobs:
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v6
+        with:
+          fetch-depth: 1
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: swift-smoke
       - name: Build cdylib + generate Swift
         run: |
           cargo build -p llmtrim-uniffi
@@ -230,8 +300,12 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
+        with:
+          fetch-depth: 1
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: kotlin-smoke
       - uses: actions/setup-java@v4
         with:
           distribution: temurin
@@ -265,9 +339,20 @@ jobs:
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v6
+        with:
+          fetch-depth: 1
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: swift-package
+      # XCFRAMEWORK_FAST builds only the Apple-silicon macOS + iOS-sim arm64 slices — the
+      # ones a host `swift test` actually links against — skipping the x86_64 and iOS-device
+      # cross-compiles. The SwiftPM build+test validation below is unchanged: it links and
+      # runs the real test target against a valid (if reduced) xcframework. The full
+      # universal/device xcframework is built unconditionally by release-bindings.yml on tags.
       - name: Build the XCFramework
+        env:
+          XCFRAMEWORK_FAST: "1"
         run: crates/llmtrim-uniffi/scripts/build-xcframework.sh
       - name: Build + test the SwiftPM package against it
         run: swift test --package-path crates/llmtrim-uniffi/packaging/swift
@@ -281,6 +366,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
+        with:
+          fetch-depth: 1
       - uses: EmbarkStudios/cargo-deny-action@v2
         with:
           command: check licenses sources
@@ -307,6 +394,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
+        with:
+          fetch-depth: 1
       - run: for f in Formula/*.rb; do ruby -c "$f"; done
 
   # Guard the advertised MSRV (`rust-version` in Cargo.toml). Stable-only CI can silently
@@ -318,6 +407,121 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
-      - uses: dtolnay/rust-toolchain@1.88
+        with:
+          fetch-depth: 1
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUST_MSRV }}
       - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: msrv
+      # rust-toolchain.toml pins stable repo-wide; RUSTUP_TOOLCHAIN overrides it so this job
+      # actually compiles against the advertised MSRV instead of silently using stable.
       - run: cargo check --all-targets
+        env:
+          RUSTUP_TOOLCHAIN: ${{ env.RUST_MSRV }}
+
+  # Coverage gate. The local "Coverage gate" loop (CLAUDE.md) is opt-in and bypassable;
+  # this job runs it for every PR so a new module can't merge untested. Same feature set
+  # (`intercept,mcp`) as the fast-check loop so the build reuses that cache.
+  coverage:
+    name: Coverage
+    needs: changes
+    if: ${{ !cancelled() && needs.changes.outputs.code != 'false' }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 1
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: llvm-tools-preview
+      - uses: Swatinem/rust-cache@v2
+        with:
+          # Coverage compiles with llvm instrumentation (-C instrument-coverage) — distinct
+          # artifacts from every other job. Keep it on its own key so it never evicts or gets
+          # evicted by the normal builds.
+          shared-key: coverage
+      - uses: taiki-e/install-action@cargo-llvm-cov
+      - uses: taiki-e/install-action@nextest
+      # nextest under llvm-cov so coverage matches the runner we actually test with.
+      - name: Collect coverage
+        run: cargo llvm-cov nextest --features intercept,mcp --lcov --output-path lcov.info
+      - name: Upload to Codecov
+        uses: codecov/codecov-action@v5
+        with:
+          files: lcov.info
+          fail_ci_if_error: false
+        env:
+          CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
+
+  # Doc build with warnings denied: catches broken intra-doc links and malformed `///`
+  # examples before they reach docs.rs (both llmtrim-core and llmtrim are published).
+  docs:
+    name: Doc build
+    needs: changes
+    if: ${{ !cancelled() && needs.changes.outputs.code != 'false' }}
+    runs-on: ubuntu-latest
+    env:
+      RUSTDOCFLAGS: -D warnings
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 1
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: docs
+      - run: cargo doc --no-deps --all-features --workspace
+
+  # API-compatibility gate for the two published crates. They share one version and ship
+  # together, so an accidental breaking change in a patch/minor would break downstreams.
+  # The action infers the required bump from the git tags and fails if the diff exceeds it.
+  semver:
+    name: SemVer (public API)
+    needs: changes
+    if: ${{ !cancelled() && needs.changes.outputs.code != 'false' }}
+    runs-on: ubuntu-latest
+    steps:
+      # No fetch-depth limit: the action infers the required bump from the git tags, which a
+      # shallow clone would omit.
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: semver
+      # Baseline is the last version published on crates.io. Between releases the workspace
+      # carries an `X.Y.Z-dev` version; the action compares the public API against that
+      # published baseline and fails when the diff exceeds the implied bump. A deliberate
+      # pre-1.0 breaking change therefore needs its version bumped before this passes.
+      - uses: obi1kenobi/cargo-semver-checks-action@v2
+        with:
+          package: llmtrim-core, llmtrim
+
+  # Unused-dependency check. Dead deps inflate the binary and slow the build/startup that
+  # this CLI optimizes for. cargo-machete is fast (manifest scan, no compile).
+  machete:
+    name: Unused deps (machete)
+    needs: changes
+    if: ${{ !cancelled() && needs.changes.outputs.code != 'false' }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 1
+      - uses: taiki-e/install-action@cargo-machete
+      - run: cargo machete
+
+  # TOML formatting gate (Cargo.toml, deny.toml, filter configs). Options + excludes live in
+  # taplo.toml; keeps hand-edited manifests in one consistent shape.
+  toml:
+    name: TOML format
+    needs: changes
+    if: ${{ !cancelled() && needs.changes.outputs.code != 'false' }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 1
+      - uses: taiki-e/install-action@taplo
+      - run: taplo fmt --check

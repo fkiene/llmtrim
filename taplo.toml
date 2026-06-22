@@ -1,0 +1,11 @@
+# taplo (TOML) formatter config. The CI `toml` job runs `taplo fmt --check` against this.
+# Conservative options: keep key/array order and avoid column alignment so the heavily
+# commented Cargo.toml lints/feature blocks aren't churned into a different shape.
+exclude = [".claude/**", "target/**", "**/worktrees/**", "**/node_modules/**"]
+
+[formatting]
+reorder_keys = false
+reorder_arrays = false
+align_entries = false
+align_comments = false
+column_width = 100

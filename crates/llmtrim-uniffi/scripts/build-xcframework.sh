@@ -37,23 +37,41 @@ cp "$gen/llmtrim_ffi.swift" "$pkg_dir/Sources/Llmtrim/llmtrim_ffi.swift"
 echo "==> building static libs per Apple target"
 # Note: x86_64 iOS is only ever the simulator, so its target is `x86_64-apple-ios` (no
 # `-sim` suffix — that exists only for aarch64, to split arm64 device vs arm64 sim).
-targets="aarch64-apple-darwin x86_64-apple-darwin aarch64-apple-ios aarch64-apple-ios-sim x86_64-apple-ios"
+#
+# XCFRAMEWORK_FAST=1 builds only the slices a host `swift test` actually links against
+# (Apple-silicon macOS + iOS-sim arm64), skipping the x86_64 and iOS-device cross-compiles.
+# CI PR runs set it to cut wall-clock; the release build leaves it unset for the full
+# universal/device xcframework.
+if [ "${XCFRAMEWORK_FAST:-0}" = "1" ]; then
+    # The host `swift test` runs on Apple-silicon macOS and links only the macOS arm64
+    # slice, so build just that one target — the iOS/sim slices are never exercised here.
+    echo "    (fast mode: Apple-silicon macOS only)"
+    targets="aarch64-apple-darwin"
+else
+    targets="aarch64-apple-darwin x86_64-apple-darwin aarch64-apple-ios aarch64-apple-ios-sim x86_64-apple-ios"
+fi
 for t in $targets; do
     rustup target add "$t" >/dev/null 2>&1 || true
     cargo build --release -p llmtrim-uniffi --target "$t"
 done
 
 lib() { echo "target/$1/release/libllmtrim_ffi.a"; }
-mkdir -p "$work/macos" "$work/ios" "$work/iossim"
-lipo -create "$(lib aarch64-apple-darwin)" "$(lib x86_64-apple-darwin)" -output "$work/macos/libllmtrim_ffi.a"
-cp "$(lib aarch64-apple-ios)" "$work/ios/libllmtrim_ffi.a"
-lipo -create "$(lib aarch64-apple-ios-sim)" "$(lib x86_64-apple-ios)" -output "$work/iossim/libllmtrim_ffi.a"
+mkdir -p "$work/macos"
+xcargs=()
+if [ "${XCFRAMEWORK_FAST:-0}" = "1" ]; then
+    cp "$(lib aarch64-apple-darwin)" "$work/macos/libllmtrim_ffi.a"
+    xcargs+=(-library "$work/macos/libllmtrim_ffi.a" -headers "$hdrs")
+else
+    mkdir -p "$work/ios" "$work/iossim"
+    lipo -create "$(lib aarch64-apple-darwin)" "$(lib x86_64-apple-darwin)" -output "$work/macos/libllmtrim_ffi.a"
+    cp "$(lib aarch64-apple-ios)" "$work/ios/libllmtrim_ffi.a"
+    lipo -create "$(lib aarch64-apple-ios-sim)" "$(lib x86_64-apple-ios)" -output "$work/iossim/libllmtrim_ffi.a"
+    xcargs+=(-library "$work/macos/libllmtrim_ffi.a" -headers "$hdrs")
+    xcargs+=(-library "$work/ios/libllmtrim_ffi.a" -headers "$hdrs")
+    xcargs+=(-library "$work/iossim/libllmtrim_ffi.a" -headers "$hdrs")
+fi
 
 echo "==> assembling llmtrimFFI.xcframework"
 rm -rf "$pkg_dir/llmtrimFFI.xcframework"
-xcodebuild -create-xcframework \
-    -library "$work/macos/libllmtrim_ffi.a"  -headers "$hdrs" \
-    -library "$work/ios/libllmtrim_ffi.a"     -headers "$hdrs" \
-    -library "$work/iossim/libllmtrim_ffi.a"  -headers "$hdrs" \
-    -output "$pkg_dir/llmtrimFFI.xcframework"
+xcodebuild -create-xcframework "${xcargs[@]}" -output "$pkg_dir/llmtrimFFI.xcframework"
 echo "==> done: $pkg_dir/llmtrimFFI.xcframework"

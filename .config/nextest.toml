@@ -1,0 +1,18 @@
+# nextest configuration. The `default` profile governs local runs; `ci` is selected in
+# GitHub Actions with `--profile ci` for retries on flaky tests and JUnit reporting.
+
+[profile.default]
+# Surface slow tests early without failing the run.
+slow-timeout = { period = "30s", terminate-after = 4 }
+
+[profile.ci]
+# Retry a failing test up to twice before reporting it red — absorbs transient flakes
+# (network, filesystem races) without hiding a genuinely broken test.
+retries = 2
+# Print final status for every test so CI logs show the full picture.
+status-level = "all"
+final-status-level = "slow"
+fail-fast = false
+
+[profile.ci.junit]
+path = "junit.xml"
