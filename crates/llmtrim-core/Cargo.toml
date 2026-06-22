@@ -8,8 +8,8 @@ repository.workspace = true
 homepage.workspace = true
 license.workspace = true
 readme = "README.md"
-keywords = ["llm", "tokens", "compression", "openai", "anthropic"]
-categories = ["compression", "text-processing", "api-bindings"]
+keywords = ["llm", "tokens", "mcp", "compression", "openai"]
+categories = ["compression", "text-processing", "api-bindings", "development-tools"]
 
 # Workspace CHANGELOG stamping (run once, on this crate). cargo-release resolves `file`
 # relative to this manifest, so `../../CHANGELOG.md` is the repo-root changelog shared by
