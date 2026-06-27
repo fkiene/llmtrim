@@ -14,6 +14,11 @@ All notable changes to this project are documented here. The format follows
   precise. Each env var is comma-separated and replaces the file array. Set
   `exclude_providers = ["anthropic"]` (or `LLMTRIM_EXCLUDE_PROVIDERS=anthropic`) to leave Claude
   Code traffic untouched while still compressing everything else.
+- **Cost breakdown now labels 18 coding agents, up from 3.** The per-source view recognized
+  only Claude Code, Codex, and Cursor; every other tool's traffic landed under `unknown`. It
+  now fingerprints cline, roo, kilo, goose, opencode, crush, gemini, qwen, grok, kimi,
+  mistral-vibe, mux, pi, forge, and openclaw from their system prompts as well, so their token
+  and cost stats show up under the right name.
 
 ### Fixed
 - **Replies now stay in the user's language.** The output-shaping instructions are written in

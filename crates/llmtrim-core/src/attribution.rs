@@ -652,20 +652,110 @@ fn stable_hash(s: &str) -> String {
     format!("{h:016x}")
 }
 
-/// Identify the agent from well-known system-prompt markers. These are registered product
-/// names that appear verbatim in the system prompt regardless of the user's locale, so the
-/// match is intentionally ASCII brand-name based, not localized; an unrecognized agent maps
-/// to `None` and is grouped under "unknown".
+/// A known coding agent and the verbatim product strings it embeds in its system prompt.
+///
+/// Identification is by system-prompt body, never by `User-Agent` or other headers: some
+/// agents deliberately spoof another's headers (Oh My Pi sends the Gemini CLI / Antigravity
+/// `User-Agent`; Forge sends Anthropic's `anthropic-beta: claude-code-20250219`), so a header
+/// match would mislabel them. The `markers` are registered ASCII brand strings that appear
+/// regardless of the user's locale, so the match is brand-name based, not localized.
+struct AgentFingerprint {
+    label: &'static str,
+    markers: &'static [&'static str],
+}
+
+/// The Tier A roster: agents that route through a host the live proxy intercepts and carry a
+/// verified system-prompt marker. Order matters only where a generic fallback marker could
+/// collide: Qwen Code is a Gemini CLI fork and can carry Gemini's legacy generic phrase, so
+/// `qwen` is listed before `gemini` and the brand-specific marker wins.
+static AGENTS: &[AgentFingerprint] = &[
+    AgentFingerprint {
+        label: "claude-code",
+        markers: &["Claude Code"],
+    },
+    AgentFingerprint {
+        label: "codex",
+        markers: &["running as a coding agent in the Codex CLI", "Codex CLI"],
+    },
+    AgentFingerprint {
+        label: "cursor",
+        markers: &["You operate exclusively in Cursor"],
+    },
+    AgentFingerprint {
+        label: "cline",
+        markers: &["You are Cline,"],
+    },
+    AgentFingerprint {
+        label: "roo",
+        markers: &["You are Roo,"],
+    },
+    AgentFingerprint {
+        label: "kilo",
+        markers: &["You are Kilo Code,"],
+    },
+    AgentFingerprint {
+        label: "goose",
+        markers: &["agent called goose"],
+    },
+    AgentFingerprint {
+        label: "opencode",
+        markers: &["You are OpenCode,", "You are opencode,"],
+    },
+    AgentFingerprint {
+        label: "crush",
+        markers: &["You are Crush,"],
+    },
+    AgentFingerprint {
+        label: "qwen",
+        markers: &["You are Qwen Code,"],
+    },
+    AgentFingerprint {
+        label: "grok",
+        markers: &["You are Grok CLI"],
+    },
+    AgentFingerprint {
+        label: "kimi",
+        markers: &["You are Kimi Code CLI,"],
+    },
+    AgentFingerprint {
+        label: "mistral-vibe",
+        markers: &["operating as and within Mistral Vibe"],
+    },
+    AgentFingerprint {
+        label: "mux",
+        markers: &["agent called Mux"],
+    },
+    AgentFingerprint {
+        label: "pi",
+        markers: &["Oh My Pi"],
+    },
+    AgentFingerprint {
+        label: "forge",
+        markers: &["You are Forge,"],
+    },
+    AgentFingerprint {
+        label: "openclaw",
+        markers: &["OpenClaw"],
+    },
+    // Listed after qwen: its primary marker is brand-specific, but the legacy fallback phrase
+    // is generic and also appears in Gemini CLI forks like Qwen Code.
+    AgentFingerprint {
+        label: "gemini",
+        markers: &[
+            "You are Gemini CLI,",
+            "interactive CLI agent specializing in software engineering tasks",
+        ],
+    },
+];
+
+/// Identify the agent from well-known system-prompt markers. Returns the first registered
+/// agent whose marker appears verbatim in the system prompt; an unrecognized agent maps to
+/// `None` and is grouped under "unknown".
 fn fingerprint_agent(system: &str) -> Option<&'static str> {
-    if system.contains("Claude Code") {
-        Some("claude-code")
-    } else if system.contains("Codex") || system.contains("codex") {
-        Some("codex")
-    } else if system.contains("Cursor") {
-        Some("cursor")
-    } else {
-        None
-    }
+    AGENTS
+        .iter()
+        .find(|a| a.markers.iter().any(|m| system.contains(m)))
+        .map(|a| a.label)
 }
 
 /// Pull a working-directory hint out of the system prompt. Claude Code and Codex embed a
@@ -853,6 +943,46 @@ mod tests {
             id.session_id,
             extract_identity(&body2, ProviderKind::Anthropic).session_id
         );
+    }
+
+    #[test]
+    fn every_registered_agent_fingerprints() {
+        // Drive the test from the registry itself, not a parallel table: every agent's first
+        // marker, fed through the real extraction path (which also guards `system_text`), must
+        // resolve back to that agent. A new `AGENTS` entry is covered the day it is added.
+        for agent in AGENTS {
+            let marker = agent.markers[0];
+            let body = json!({ "system": marker, "messages": [] });
+            let id = extract_identity(&body, ProviderKind::Anthropic);
+            assert_eq!(
+                id.agent.as_deref(),
+                Some(agent.label),
+                "marker {marker:?} did not fingerprint as {}",
+                agent.label
+            );
+        }
+    }
+
+    #[test]
+    fn qwen_legacy_phrase_does_not_steal_from_gemini_fork() {
+        // Qwen Code is a Gemini CLI fork: its prompt can carry both its own brand marker and
+        // Gemini's generic legacy phrase. The brand-specific qwen marker must win.
+        let body = json!({
+            "system": "You are Qwen Code, an interactive CLI agent specializing in software engineering tasks.",
+            "messages": []
+        });
+        assert_eq!(
+            extract_identity(&body, ProviderKind::Anthropic)
+                .agent
+                .as_deref(),
+            Some("qwen")
+        );
+    }
+
+    #[test]
+    fn unknown_agent_is_none() {
+        let body = json!({ "system": "You are a helpful assistant.", "messages": [] });
+        assert_eq!(extract_identity(&body, ProviderKind::Anthropic).agent, None);
     }
 
     #[test]
