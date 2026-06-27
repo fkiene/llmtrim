@@ -361,6 +361,8 @@ These knobs are orthogonal to compression. Each resolves env-first, then from th
 | env var | config key | meaning |
 | --- | --- | --- |
 | `LLMTRIM_EXTRA_HOSTS` | `extra_hosts` | extra exact LLM-API hosts to intercept (comma-separated env / array in file), e.g. a self-hosted OpenAI-compatible endpoint |
+| `LLMTRIM_EXCLUDE_PROVIDERS` | `exclude_providers` | wire shapes to skip compressing — `openai` / `anthropic` / `google` (e.g. `anthropic` to leave Claude Code untouched); coarse, covers every host of that shape |
+| `LLMTRIM_EXCLUDE_HOSTS` | `exclude_hosts` | exact hostnames to skip compressing (e.g. `openrouter.ai`); precise, leaves other hosts of the same shape compressed |
 | `LLMTRIM_UPSTREAM_PROXY` | `upstream_proxy` | route egress through another proxy (see below) |
 | `LLMTRIM_DB_PATH` | `db_path` | ledger location |
 | `LLMTRIM_CAPTURE_DIR` | `capture_dir` | before/after QA capture directory |

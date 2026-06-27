@@ -139,6 +139,21 @@ mod imp {
             || user_hosts.iter().any(|s| host == s)
     }
 
+    /// True if a request to `host` resolving to wire shape `provider` should bypass compression
+    /// (user opt-out via `exclude_hosts` / `exclude_providers`). Excluded traffic is still
+    /// intercepted; it is just forwarded verbatim. Host match is exact (mirrors a user
+    /// `extra_hosts` entry); provider match is by canonical wire-shape name. `host` is expected
+    /// lowercased (the entries are normalized at config load).
+    fn exclusion_match(
+        host: &str,
+        provider: ProviderKind,
+        exclude_hosts: &[String],
+        exclude_providers: &[String],
+    ) -> bool {
+        exclude_hosts.iter().any(|h| host == h)
+            || exclude_providers.iter().any(|p| p == provider.as_str())
+    }
+
     /// Every name-constraint domain the CA should permit: the registry parent domains plus the
     /// curated extra hosts, sorted + deduped. The single source of truth for what we intend to
     /// intercept; compared byte-for-byte against the CA's sidecar to decide whether to regenerate.
@@ -627,6 +642,11 @@ mod imp {
         /// (`forward_post`). The primary MITM interception path honours this setting via the
         /// `ProxyConnector` built at startup (see the `start` function in this module).
         upstream_proxy: Option<String>,
+        /// User opt-out lists (`exclude_hosts` / `exclude_providers`), snapshotted from
+        /// [`RuntimeConfig`] at construction like `domains` above: a request matching either is
+        /// forwarded verbatim (still intercepted, just not compressed).
+        exclude_hosts: Arc<Vec<String>>,
+        exclude_providers: Arc<Vec<String>>,
     }
 
     impl Drop for Interceptor {
@@ -676,7 +696,9 @@ mod imp {
         /// constructing a `hudsucker::HttpContext` (which is `#[non_exhaustive]` and
         /// cannot be instantiated outside the hudsucker crate).
         async fn handle_request_inner(&mut self, req: Request<Body>) -> RequestOrResponse {
-            let host = host_of(&req);
+            // Lowercase the host once: every host comparison below (Vertex suffix, provider
+            // lookup, exclusion match) is case-insensitive.
+            let host = host_of(&req).map(|h| h.to_ascii_lowercase());
             // Vertex AI serves all three wire shapes on one host, keyed by the path; every other
             // host is host-derived. Either way the kind here is only the fallback — the body
             // shape (`provider::detect`) refines it at compress time.
@@ -691,6 +713,13 @@ mod imp {
             let Some(provider) = provider.filter(|_| req.method() == Method::POST) else {
                 return req.into();
             };
+            // User opt-out: a host/provider on the exclude list is forwarded verbatim (still
+            // MITM'd, just not compressed) — e.g. exclude Anthropic so Claude Code is untouched.
+            if let Some(h) = host.as_deref()
+                && exclusion_match(h, provider, &self.exclude_hosts, &self.exclude_providers)
+            {
+                return req.into();
+            }
             // Compress text-generation endpoints only. Embeddings / moderations / token-count
             // bodies aren't prompts (or our edits would skew the result), so forward verbatim —
             // never silently mutate the input of a `/v1/embeddings` call.
@@ -1606,6 +1635,10 @@ mod imp {
             );
         }
 
+        // User opt-out lists, resolved once at startup (env + config file) like the other runtime
+        // settings, then snapshotted onto the handler.
+        let exclusions = llmtrim_core::config::exclusions();
+
         let handler = Interceptor {
             config: Arc::new(DenseConfig::load_for_interceptor()),
             ledger: tx,
@@ -1617,6 +1650,8 @@ mod imp {
             memo: Arc::new(Memo::with_capacity(llmtrim_core::memo::DEFAULT_CAPACITY)),
             pending: None,
             upstream_proxy: upstream_proxy.clone(),
+            exclude_providers: Arc::new(exclusions.providers.clone()),
+            exclude_hosts: Arc::new(exclusions.hosts.clone()),
         };
         // Pre-flight bind: hudsucker's `Proxy::start` collapses a bind failure to a bare
         // "io error", hiding whether the port is in use or OS-reserved. Bind once ourselves
@@ -2403,6 +2438,46 @@ mod imp {
         }
 
         #[test]
+        fn exclusion_match_by_host_and_provider() {
+            // Provider exclusion is by canonical wire-shape name (coarse): excludes every host of
+            // that shape.
+            let excl_providers = vec!["anthropic".to_string()];
+            assert!(exclusion_match(
+                "api.anthropic.com",
+                ProviderKind::Anthropic,
+                &[],
+                &excl_providers,
+            ));
+            assert!(
+                !exclusion_match("api.openai.com", ProviderKind::OpenAi, &[], &excl_providers),
+                "a different wire shape is not excluded"
+            );
+            // Host exclusion is exact — one OpenAI-shaped host opts out without affecting siblings.
+            let excl_hosts = vec!["openrouter.ai".to_string()];
+            assert!(exclusion_match(
+                "openrouter.ai",
+                ProviderKind::OpenAi,
+                &excl_hosts,
+                &[],
+            ));
+            assert!(
+                !exclusion_match("api.groq.com", ProviderKind::OpenAi, &excl_hosts, &[]),
+                "another OpenAI-shaped host stays compressed"
+            );
+            assert!(
+                !exclusion_match("api.openrouter.ai", ProviderKind::OpenAi, &excl_hosts, &[]),
+                "host match is exact, not by subdomain"
+            );
+            // Empty lists exclude nothing.
+            assert!(!exclusion_match(
+                "api.anthropic.com",
+                ProviderKind::Anthropic,
+                &[],
+                &[],
+            ));
+        }
+
+        #[test]
         fn intercept_set_does_not_widen_to_shared_cloud_parents() {
             // Security: we key on exact endpoint hosts, never the registrable parent — else the
             // name-constrained MITM CA could forge certs for, and intercept, all of Google
@@ -2622,6 +2697,8 @@ mod imp {
                 memo: Arc::new(Memo::with_capacity(llmtrim_core::memo::DEFAULT_CAPACITY)),
                 pending: None,
                 upstream_proxy: None,
+                exclude_hosts: Arc::new(Vec::new()),
+                exclude_providers: Arc::new(Vec::new()),
             };
             (handler, rx)
         }
@@ -2859,6 +2936,59 @@ mod imp {
             );
             let out_body = drain_body(out_req.into_body()).await;
             assert_eq!(out_body, body.as_bytes());
+        }
+
+        /// A compressible request whose host/provider is on the exclude list must pass through
+        /// verbatim (still routed, just not compressed): `pending` stays None and the body is
+        /// returned byte-identical. Covers the `exclusion_match` gate in `handle_request_inner`.
+        #[tokio::test]
+        async fn handle_request_inner_excludes_matching_host_and_provider() {
+            let body = r#"{"model":"gpt-4o","messages":[{"role":"user","content":"hello world"}]}"#;
+            let uri = "https://api.openai.com/v1/chat/completions";
+
+            // Exclude by exact host.
+            let (mut handler, _rx) = make_interceptor();
+            handler.exclude_hosts = Arc::new(vec!["api.openai.com".to_string()]);
+            let result = handler.handle_request_inner(post_request(uri, body)).await;
+            let RequestOrResponse::Request(out_req) = result else {
+                panic!("expected passthrough Request, got Response");
+            };
+            assert!(handler.pending.is_none(), "excluded host must not compress");
+            assert_eq!(drain_body(out_req.into_body()).await, body.as_bytes());
+
+            // Exclude by provider wire shape (api.openai.com → OpenAi).
+            let (mut handler, _rx) = make_interceptor();
+            handler.exclude_providers = Arc::new(vec!["openai".to_string()]);
+            let result = handler.handle_request_inner(post_request(uri, body)).await;
+            let RequestOrResponse::Request(out_req) = result else {
+                panic!("expected passthrough Request, got Response");
+            };
+            assert!(
+                handler.pending.is_none(),
+                "excluded provider must not compress"
+            );
+            assert_eq!(drain_body(out_req.into_body()).await, body.as_bytes());
+        }
+
+        /// A mixed-case `Host` header still matches a (lowercased) exclude entry — the gate
+        /// lowercases the host before comparing, like `provider_for_host` does.
+        #[tokio::test]
+        async fn handle_request_inner_exclude_host_is_case_insensitive() {
+            let (mut handler, _rx) = make_interceptor();
+            handler.exclude_hosts = Arc::new(vec!["api.openai.com".to_string()]);
+            let body = r#"{"model":"gpt-4o","messages":[{"role":"user","content":"hello world"}]}"#;
+            let req = post_request("https://API.OpenAI.COM/v1/chat/completions", body);
+
+            let result = handler.handle_request_inner(req).await;
+
+            let RequestOrResponse::Request(out_req) = result else {
+                panic!("expected passthrough Request, got Response");
+            };
+            assert!(
+                handler.pending.is_none(),
+                "mixed-case host must still be excluded"
+            );
+            assert_eq!(drain_body(out_req.into_body()).await, body.as_bytes());
         }
 
         // Test 3: replay on 400 ───────────────────────────────────────────────

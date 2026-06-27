@@ -6,6 +6,15 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+- **Exclude providers or hosts from compression.** Two new config keys let a request pass
+  through verbatim while still being proxied: `exclude_providers` (env
+  `LLMTRIM_EXCLUDE_PROVIDERS`) by wire shape — `openai`, `anthropic`, `google`; coarse, covers
+  every host of that shape — and `exclude_hosts` (env `LLMTRIM_EXCLUDE_HOSTS`) by exact hostname,
+  precise. Each env var is comma-separated and replaces the file array. Set
+  `exclude_providers = ["anthropic"]` (or `LLMTRIM_EXCLUDE_PROVIDERS=anthropic`) to leave Claude
+  Code traffic untouched while still compressing everything else.
+
 ### Fixed
 - **Replies now stay in the user's language.** The output-shaping instructions are written in
   English and land last in the request, which biased the model to answer in English even when

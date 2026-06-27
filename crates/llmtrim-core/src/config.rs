@@ -5,6 +5,7 @@
 //! the default is `auto` (shape-routing). See [`DenseConfig::load`].
 
 use std::path::PathBuf;
+use std::str::FromStr;
 
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
@@ -475,6 +476,8 @@ fn config_path() -> Option<PathBuf> {
 /// and keeps the `auto` default, instead of silently downgrading shape-routing.
 pub(crate) const RUNTIME_ONLY_KEYS: &[&str] = &[
     "extra_hosts",
+    "exclude_providers",
+    "exclude_hosts",
     "upstream_proxy",
     "capture_dir",
     "db_path",
@@ -546,11 +549,7 @@ impl RuntimeConfig {
 
     /// Load from the real environment and config file (the one parse of the TOML).
     fn load() -> RuntimeConfig {
-        let file = config_path()
-            .filter(|p| p.exists())
-            .and_then(|p| std::fs::read_to_string(p).ok())
-            .and_then(|t| toml::from_str::<toml::Value>(&t).ok());
-        Self::resolve(|k| std::env::var(k).ok(), file.as_ref())
+        Self::resolve(|k| std::env::var(k).ok(), cached_config_file())
     }
 
     /// Pure resolver: `env` looks up an environment variable, `file` is the parsed config TOML
@@ -570,23 +569,12 @@ impl RuntimeConfig {
         let fbool = |key: &str| file.and_then(|v| v.get(key)).and_then(toml::Value::as_bool);
         let positive = |v: Option<i64>| v.filter(|n| *n > 0);
 
-        // extra_hosts: env (comma-split) replaces the file array; both normalized + validated.
-        let raw_hosts: Vec<String> = match env_set("LLMTRIM_EXTRA_HOSTS") {
-            Some(s) => s.split(',').map(str::to_string).collect(),
-            None => file
-                .and_then(|v| v.get("extra_hosts"))
-                .and_then(toml::Value::as_array)
-                .map(|a| {
-                    a.iter()
-                        .filter_map(|e| e.as_str().map(str::to_string))
-                        .collect()
-                })
-                .unwrap_or_default(),
-        };
-        let mut extra_hosts: Vec<String> =
-            raw_hosts.iter().filter_map(|h| normalize_host(h)).collect();
-        extra_hosts.sort();
-        extra_hosts.dedup();
+        let extra_hosts = resolve_str_list(
+            env_set("LLMTRIM_EXTRA_HOSTS"),
+            file,
+            "extra_hosts",
+            normalize_host,
+        );
 
         RuntimeConfig {
             extra_hosts,
@@ -654,6 +642,107 @@ fn save_theme_at(path: &std::path::Path, name: &str) -> Result<()> {
     let mut text = out.join("\n");
     text.push('\n');
     std::fs::write(path, text).with_context(|| format!("failed to write {}", path.display()))
+}
+
+/// Canonicalize a user-supplied provider name to its wire-shape key (`openai` / `anthropic` /
+/// `google`), accepting the [`ProviderKind`](crate::ir::ProviderKind) aliases (`claude`,
+/// `gemini`, `gpt`, …). Returns `None` for an unknown name, which is silently dropped — same
+/// policy as a malformed host in [`normalize_host`].
+fn canon_provider(raw: &str) -> Option<String> {
+    crate::ir::ProviderKind::from_str(raw.trim())
+        .ok()
+        .map(|k| k.as_str().to_string())
+}
+
+/// One env-first-then-file string-list setting: the env var (comma-split) replaces the file
+/// array, each item passes through `norm` (validate/canonicalize, or drop), and survivors are
+/// sorted + deduped. Shared by `extra_hosts` and the exclusion lists.
+fn resolve_str_list(
+    env_value: Option<String>,
+    file: Option<&toml::Value>,
+    file_key: &str,
+    norm: fn(&str) -> Option<String>,
+) -> Vec<String> {
+    let raw: Vec<String> = match env_value {
+        Some(s) => s.split(',').map(str::to_string).collect(),
+        None => file
+            .and_then(|v| v.get(file_key))
+            .and_then(toml::Value::as_array)
+            .map(|a| {
+                a.iter()
+                    .filter_map(|e| e.as_str().map(str::to_string))
+                    .collect()
+            })
+            .unwrap_or_default(),
+    };
+    let mut out: Vec<String> = raw.iter().filter_map(|s| norm(s)).collect();
+    out.sort();
+    out.dedup();
+    out
+}
+
+/// The provider/host exclusion lists. Kept as its own type rather than fields on
+/// [`RuntimeConfig`] — surfaced via the additive [`exclusions`] accessor — so the feature stays
+/// backward-compatible with the published `llmtrim-core` API. A request whose host or resolved
+/// wire-shape provider matches is forwarded verbatim (still MITM'd, just not compressed).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Exclusions {
+    /// Wire-shape provider names to exclude (`openai`/`anthropic`/`google`; the
+    /// [`ProviderKind`](crate::ir::ProviderKind) aliases `claude`/`gemini`/`gpt` are accepted and
+    /// canonicalized, unknowns dropped). Coarse by design: the proxy classifies a host by wire
+    /// shape, so `openai` excludes *every* OpenAI-shaped host (OpenRouter, Groq, …), not just
+    /// `api.openai.com`. Use [`Exclusions::hosts`] to exclude one host precisely.
+    pub providers: Vec<String>,
+    /// Exact hosts to exclude, normalized like `extra_hosts` (lowercase plain hostnames;
+    /// malformed/overbroad entries dropped) and matched **exactly**, so excluding `api.openai.com`
+    /// leaves other OpenAI-shaped hosts compressed.
+    pub hosts: Vec<String>,
+}
+
+/// Pure resolver for the [`Exclusions`] lists. Env (`LLMTRIM_EXCLUDE_*`, comma-split) replaces the
+/// file array per list; each item is canonicalized/normalized (or dropped).
+fn resolve_exclusions(
+    env: impl Fn(&str) -> Option<String>,
+    file: Option<&toml::Value>,
+) -> Exclusions {
+    let env_set = |k: &str| env(k).filter(|s| !s.is_empty());
+    Exclusions {
+        providers: resolve_str_list(
+            env_set("LLMTRIM_EXCLUDE_PROVIDERS"),
+            file,
+            "exclude_providers",
+            canon_provider,
+        ),
+        hosts: resolve_str_list(
+            env_set("LLMTRIM_EXCLUDE_HOSTS"),
+            file,
+            "exclude_hosts",
+            normalize_host,
+        ),
+    }
+}
+
+/// Process-wide [`Exclusions`], loaded once from env + the config file like [`RuntimeConfig::get`].
+/// Cached for the process lifetime, so **tests must call `resolve_exclusions` directly** rather
+/// than this accessor.
+pub fn exclusions() -> &'static Exclusions {
+    static CACHE: std::sync::OnceLock<Exclusions> = std::sync::OnceLock::new();
+    CACHE.get_or_init(|| resolve_exclusions(|k| std::env::var(k).ok(), cached_config_file()))
+}
+
+/// The config TOML parsed once for the whole process (if it exists and parses), shared by
+/// [`RuntimeConfig::load`] and [`exclusions`] so the file is read a single time.
+fn cached_config_file() -> Option<&'static toml::Value> {
+    static FILE: std::sync::OnceLock<Option<toml::Value>> = std::sync::OnceLock::new();
+    FILE.get_or_init(load_config_file).as_ref()
+}
+
+/// Read + parse the config TOML (if it exists and parses). Wrapped by [`cached_config_file`].
+fn load_config_file() -> Option<toml::Value> {
+    config_path()
+        .filter(|p| p.exists())
+        .and_then(|p| std::fs::read_to_string(p).ok())
+        .and_then(|t| toml::from_str::<toml::Value>(&t).ok())
 }
 
 /// Normalize + validate a user-supplied intercept host: trim a trailing dot, lowercase, and
@@ -984,6 +1073,75 @@ mod tests {
     fn extra_hosts_from_file_when_env_absent() {
         let c = resolve_file("extra_hosts = [\"llm.acme.com\", \"gw.example.net\"]");
         assert_eq!(c.extra_hosts, vec!["gw.example.net", "llm.acme.com"]);
+    }
+
+    /// Resolve the exclusion lists with an explicit env map and file TOML.
+    fn exclusions_env(env: &[(&str, &str)], toml_src: &str) -> Exclusions {
+        let value: toml::Value = toml::from_str(toml_src).unwrap();
+        let env: std::collections::HashMap<String, String> = env
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect();
+        resolve_exclusions(|k| env.get(k).cloned(), Some(&value))
+    }
+
+    #[test]
+    fn exclude_providers_canonicalizes_and_drops_unknown() {
+        // Aliases map to canonical names; unknown entries are dropped; sorted + deduped.
+        let ex = exclusions_env(
+            &[(
+                "LLMTRIM_EXCLUDE_PROVIDERS",
+                "claude, anthropic, gemini, bogus",
+            )],
+            "exclude_providers = [\"ignored\"]",
+        );
+        assert_eq!(ex.providers, vec!["anthropic", "google"]);
+    }
+
+    #[test]
+    fn exclude_providers_from_file_when_env_absent() {
+        let value = toml::from_str("exclude_providers = [\"openai\", \"claude\"]").unwrap();
+        let ex = resolve_exclusions(|_| None, Some(&value));
+        assert_eq!(ex.providers, vec!["anthropic", "openai"]);
+    }
+
+    #[test]
+    fn exclude_hosts_normalizes_like_extra_hosts() {
+        // Env wins over file; lowercased, sorted, deduped; malformed dropped.
+        let ex = exclusions_env(
+            &[(
+                "LLMTRIM_EXCLUDE_HOSTS",
+                "API.OpenAI.com, *.bad, openrouter.ai",
+            )],
+            "exclude_hosts = [\"ignored.example\"]",
+        );
+        assert_eq!(ex.hosts, vec!["api.openai.com", "openrouter.ai"]);
+    }
+
+    #[test]
+    fn exclude_env_replaces_file_for_both_lists() {
+        // Env (comma-split) wins over the file array for each list independently.
+        let ex = exclusions_env(
+            &[
+                ("LLMTRIM_EXCLUDE_PROVIDERS", "openai"),
+                ("LLMTRIM_EXCLUDE_HOSTS", "api.openai.com"),
+            ],
+            "exclude_providers = [\"anthropic\"]\nexclude_hosts = [\"api.anthropic.com\"]\n",
+        );
+        assert_eq!(ex.providers, vec!["openai"]);
+        assert_eq!(ex.hosts, vec!["api.openai.com"]);
+    }
+
+    #[test]
+    fn exclude_keys_keep_auto_shape_routing() {
+        // A config that sets only the exclude keys must keep `auto` routing, not downgrade it.
+        for src in [
+            "exclude_providers = [\"anthropic\"]",
+            "exclude_hosts = [\"api.anthropic.com\"]",
+        ] {
+            let c = DenseConfig::from_toml_value(toml::from_str(src).unwrap()).unwrap();
+            assert!(c.auto, "exclude-only config `{src}` must keep auto routing");
+        }
     }
 
     #[test]
