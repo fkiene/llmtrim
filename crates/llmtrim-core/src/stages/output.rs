@@ -14,7 +14,37 @@ use serde_json::Value;
 
 use crate::gate::{GateKind, PlanEntry, Transform};
 use crate::ir::Request;
-use crate::provider::Provider;
+use crate::provider::{Provider, Role};
+use crate::stages::tools::detect_lang;
+
+/// Cap on the user-prose sample handed to `detect_lang`: a reliable detection needs only a
+/// sentence or two, and agent requests can carry megabytes of pasted context. Enforced before
+/// each copy so one huge block can't blow the budget (char-boundary-safe, like `stopword_set`).
+const PROSE_SAMPLE_MAX_BYTES: usize = 4096;
+
+/// Concatenate the request's user-turn text — the language signal for the reply-language
+/// decision — up to [`PROSE_SAMPLE_MAX_BYTES`].
+fn user_prose(req: &Request, provider: &dyn Provider) -> String {
+    let mut prose = String::new();
+    for ptr in provider.content_text_pointers(req) {
+        if provider.role_at(req, &ptr) == Some(Role::User)
+            && let Some(text) = req.get_str(&ptr)
+        {
+            let mut take = PROSE_SAMPLE_MAX_BYTES
+                .saturating_sub(prose.len())
+                .min(text.len());
+            while take > 0 && !text.is_char_boundary(take) {
+                take -= 1;
+            }
+            prose.push_str(&text[..take]);
+            prose.push(' ');
+            if prose.len() >= PROSE_SAMPLE_MAX_BYTES {
+                break;
+            }
+        }
+    }
+    prose
+}
 
 /// `terse` tier: a small, fixed input cost for a real output-token reduction
 /// (output tokens cost ~3–5× input).
@@ -23,6 +53,12 @@ use crate::provider::Provider;
 // Output costs ~3–5× input, so the instruction's small input cost buys a much larger
 // output saving. Don't trade it away to flatter the input %.
 pub const TERSE_INSTRUCTION: &str = include_str!("../../prompts/output_terse.txt");
+
+/// Language-preservation clause appended to the primary shaping instruction. The injected
+/// instructions are in English and land last, biasing the model to answer in English even
+/// when the user wrote in another language; this one universal clause (no per-language
+/// detection) corrects that for a handful of input tokens. Only ships when shaping is on.
+pub const REPLY_LANGUAGE_CLAUSE: &str = " Reply in the user's language.";
 
 /// `draft` tier: Chain-of-Draft — collapse the reasoning scaffold, not the prose
 /// (arXiv:2502.18600). Targets reasoning-model output tokens, which concentrate in
@@ -95,7 +131,17 @@ impl Transform for OutputControlStage {
         // cap below stays (it costs nothing). `tool_choice: "none"` means the model is
         // told NOT to call, so the answer is prose again and shaping applies.
         if !tool_call_shaped(req) {
-            provider.add_system_instruction(req, self.level.instruction());
+            // The clause only earns its tokens when the user wrote in a non-English language;
+            // an English (or too-short-to-detect) prompt already answers in English, so skip
+            // it there and add nothing. `detect_lang` returns `Some` only on a reliable
+            // detection, so ambiguous/short prose keeps the clause (cheap, safe).
+            let non_english = detect_lang(&user_prose(req, provider)) != Some(whatlang::Lang::Eng);
+            let instruction = if non_english {
+                format!("{}{}", self.level.instruction(), REPLY_LANGUAGE_CLAUSE)
+            } else {
+                self.level.instruction().to_string()
+            };
+            provider.add_system_instruction(req, &instruction);
             // Soft numeric token budgets ("answer within N tokens") FAIL on reasoning
             // models: the batch-prompting overthinking study (arXiv:2511.04108, 2025)
             // found explicit thinking-budget instructions are ignored on DeepSeek-R1 /
@@ -289,11 +335,71 @@ mod tests {
         );
         let sys = req.get_str("/messages/0/content").unwrap();
         assert!(sys.contains("concise"));
+        assert!(
+            sys.contains("Reply in the user's language."),
+            "language-preservation clause rides the shaping instruction: {sys}"
+        );
         assert_eq!(
             req.raw()
                 .pointer("/messages/0/role")
                 .and_then(Value::as_str),
             Some("system")
+        );
+    }
+
+    #[test]
+    fn non_english_prompt_gets_language_clause() {
+        let req = run_one(
+            json!({"messages":[{"role":"user",
+                "content":"Peux-tu m'expliquer comment fonctionne ce module de compression ?"}]}),
+            OutputControlStage {
+                level: OutputLevel::Terse,
+                max_tokens: None,
+                token_budget: None,
+                compact_code: false,
+            },
+        );
+        let sys = req.get_str("/messages/0/content").unwrap();
+        assert!(
+            sys.contains("Reply in the user's language."),
+            "non-English prompt keeps the language clause: {sys}"
+        );
+    }
+
+    #[test]
+    fn english_prompt_skips_language_clause() {
+        let req = run_one(
+            json!({"messages":[{"role":"user",
+                "content":"Can you explain how this compression module works under the hood?"}]}),
+            OutputControlStage {
+                level: OutputLevel::Terse,
+                max_tokens: None,
+                token_budget: None,
+                compact_code: false,
+            },
+        );
+        let sys = req.get_str("/messages/0/content").unwrap();
+        assert!(sys.contains("concise"), "shaping still applies: {sys}");
+        assert!(
+            !sys.contains("Reply in the user's language."),
+            "English prompt pays no clause tokens: {sys}"
+        );
+    }
+
+    #[test]
+    fn user_prose_caps_a_huge_block_without_panicking() {
+        // A single multi-megabyte user turn must not be copied whole, and slicing a
+        // multibyte-char block must stay on a char boundary.
+        let huge = "é".repeat(1_000_000); // 2 MB, 2-byte chars
+        let req = Request::from_value(
+            ProviderKind::OpenAi,
+            json!({"messages": [{"role": "user", "content": huge}]}),
+        );
+        let sample = user_prose(&req, &OpenAiProvider);
+        assert!(
+            sample.len() <= PROSE_SAMPLE_MAX_BYTES + 1,
+            "sample bounded: {}",
+            sample.len()
         );
     }
 

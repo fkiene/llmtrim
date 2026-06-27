@@ -20,7 +20,7 @@
       "messages": [
         {
           "role": "system",
-          "content": "Be concise: no preamble, no restating the question, no filler. Answer directly."
+          "content": "Be concise: no preamble, no restating the question, no filler. Answer directly. Reply in the user's language."
         },
         {
           "role": "user",
@@ -28,7 +28,7 @@
         }
       ],
       "max_tokens": 5,
-      "prompt_cache_key": "f2e91a8ec143f0dc"
+      "prompt_cache_key": "77920950cbfe6fc7"
     }
   }
 }

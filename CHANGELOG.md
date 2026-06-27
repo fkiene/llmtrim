@@ -6,6 +6,15 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Fixed
+- **Replies now stay in the user's language.** The output-shaping instructions are written in
+  English and land last in the request, which biased the model to answer in English even when
+  the user wrote in another language. When the prompt is detected as non-English, the primary
+  shaping instruction now carries a short `Reply in the user's language.` clause; reliably
+  English prompts add nothing, so the fix costs no tokens on the common case (prompts too short
+  to detect get the clause as a cheap, safe fallback). Only applies when output shaping is
+  already active (never on tool-call requests).
+
 ## [0.3.2] - 2026-06-22
 
 ### Added
