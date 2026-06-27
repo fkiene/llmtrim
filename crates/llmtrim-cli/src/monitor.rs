@@ -1070,6 +1070,24 @@ pub fn overview_data(
         0.0
     };
 
+    // The same saving over the WHOLE prompt (the reused, cached prefix included) — the diluted
+    // basis the `c` toggle reveals. On cache-heavy agent traffic most of the input is the frozen
+    // prefix llmtrim can't touch, so this reads far smaller than the compressible-surface
+    // `pct_less` above. Both are honest; they answer "% of new content" vs "% of everything".
+    //
+    // It must share `pct_less`'s numerator and accounting so it can never EXCEED it (a bigger
+    // denominator only ever shrinks the figure): on the metered branch, keep the metered
+    // surface numerator and widen the denominator to the whole metered prompt; otherwise fall
+    // back to the same whole-ledger ratio `pct_less` uses. Mixing the metered numerator with the
+    // non-metered total here would let unmetered savings leak in and read larger than `pct_less`.
+    let pct_less_whole = if summary.frozen_input_tokens > 0 && new_before > 0 {
+        (new_before - new_after).max(0) as f64 / summary.metered_input_before as f64
+    } else if summary.input_before > 0 {
+        summary.saved() as f64 / summary.input_before as f64
+    } else {
+        0.0
+    };
+
     // Daily $ trend: scale the daily token-savings series by the blended $/token rate.
     let blend = match cost.as_ref() {
         Some(c) if summary.saved() > 0 => c.net_saved / summary.saved() as f64,
@@ -1111,6 +1129,7 @@ pub fn overview_data(
         saved_usd,
         saved_today_usd: today_saved_usd(tracker).filter(|t| *t >= 0.005),
         pct_less,
+        pct_less_whole,
         added_ms: summary.avg_compress_micros.map(|us| us / 1000.0),
         requests: summary.events,
         trend_daily_usd,
@@ -1591,6 +1610,86 @@ mod tests {
         assert_eq!(v["requests"], 2);
         assert_eq!(v["daemon"], serde_json::Value::Null);
         assert!(v["by_model"].as_array().is_some_and(|m| !m.is_empty()));
+    }
+
+    #[test]
+    fn overview_data_reports_both_savings_bases() {
+        use crate::tracking::Record;
+        let tracker = Tracker::open_in_memory().unwrap();
+        // 1000 input → 600 after (400 trimmed); 600 of the prompt is the frozen cached prefix.
+        tracker
+            .record(&Record {
+                provider: "openai".into(),
+                model: Some("gpt-4o".into()),
+                tokenizer: "tiktoken".into(),
+                exact: true,
+                input_before: 1000,
+                input_after: 600,
+                output_before: None,
+                output_after: None,
+                compress_micros: None,
+                cache_read_tokens: None,
+                fresh_input_tokens: None,
+                cache_write_tokens: None,
+                output_shaped: Some(false),
+                frozen_input_tokens: Some(600),
+            })
+            .unwrap();
+        let ov = overview_data(&tracker, |_, _| {
+            crate::breakdown::app::StatusLine::default()
+        });
+        // Whole prompt: 400/1000 = 0.40. New content excludes the frozen prefix, so it reads
+        // at least as large — the two honest framings the `c` toggle switches between.
+        assert!(
+            (ov.pct_less_whole - 0.40).abs() < 1e-6,
+            "{}",
+            ov.pct_less_whole
+        );
+        assert!(
+            ov.pct_less >= ov.pct_less_whole,
+            "{} {}",
+            ov.pct_less,
+            ov.pct_less_whole
+        );
+    }
+
+    // A mixed ledger (a metered row with the frozen meter, plus a pre-meter row that recorded
+    // no meter) is where the two bases can diverge wrongly: `pct_less` only sees the metered
+    // row's surface saving, so `pct_less_whole` must use the same metered numerator — not the
+    // whole-ledger `saved()`, which would fold in the pre-meter row's saving and read LARGER
+    // than `pct_less`, an impossible "whole prompt beats new content".
+    #[test]
+    fn whole_prompt_basis_never_exceeds_new_content_on_a_mixed_ledger() {
+        use crate::tracking::Record;
+        let rec = |before, after, frozen| Record {
+            provider: "openai".into(),
+            model: Some("gpt-4o".into()),
+            tokenizer: "tiktoken".into(),
+            exact: true,
+            input_before: before,
+            input_after: after,
+            output_before: None,
+            output_after: None,
+            compress_micros: None,
+            cache_read_tokens: None,
+            fresh_input_tokens: None,
+            cache_write_tokens: None,
+            output_shaped: Some(false),
+            frozen_input_tokens: frozen,
+        };
+        let tracker = Tracker::open_in_memory().unwrap();
+        // Metered row: 100 frozen, no saving on its 300-token surface.
+        tracker.record(&rec(400, 400, Some(100))).unwrap();
+        // Pre-meter row: a real 400-token saving, but no frozen meter recorded.
+        tracker.record(&rec(600, 200, None)).unwrap();
+        let ov = overview_data(&tracker, |_, _| {
+            crate::breakdown::app::StatusLine::default()
+        });
+        // The metered surface saved nothing, so both bases are 0 — the pre-meter row's saving
+        // must not leak into the whole-prompt figure.
+        assert!(ov.pct_less.abs() < 1e-6, "{}", ov.pct_less);
+        assert!(ov.pct_less_whole.abs() < 1e-6, "{}", ov.pct_less_whole);
+        assert!(ov.pct_less_whole <= ov.pct_less + 1e-9);
     }
 
     #[test]

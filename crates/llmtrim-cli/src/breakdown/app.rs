@@ -66,8 +66,13 @@ pub struct OverviewData {
     pub would_have_usd: Option<f64>,
     pub saved_usd: Option<f64>,
     pub saved_today_usd: Option<f64>,
-    /// Input-savings fraction (0..1) → spoken as "about a third less".
+    /// Input-savings fraction (0..1) over the compressible surface → spoken as "about a third
+    /// less". This is the headline basis ("% of new content").
     pub pct_less: f64,
+    /// The same saving over the whole prompt (the cached prefix included) — the diluted basis
+    /// the `c` toggle reveals. Shares `pct_less`'s numerator with a wider denominator, so it is
+    /// always `<= pct_less` (see `overview_data`).
+    pub pct_less_whole: f64,
     pub added_ms: Option<f64>,
     pub requests: i64,
     /// Net $ saved per day, oldest→newest, last 7 days (for the sparkline).
@@ -88,6 +93,19 @@ pub struct OverviewData {
     /// A newer release version if the (cached, opt-out) update check found one — shown in the
     /// meta bar; `u` then runs the updater.
     pub update_available: Option<String>,
+}
+
+impl OverviewData {
+    /// Size-reduction fraction for the gauge: over the whole prompt (cached prefix included)
+    /// when `whole_prompt`, else over the compressible surface — the default headline. Dollars
+    /// are always the real net bill; only this percentage has two honest framings.
+    fn pct_smaller(&self, whole_prompt: bool) -> f64 {
+        if whole_prompt {
+            self.pct_less_whole
+        } else {
+            self.pct_less
+        }
+    }
 }
 
 /// Which tab is active.
@@ -333,6 +351,10 @@ struct App {
     /// background thread now, not on this timer.
     refresh: Duration,
     tab: Tab,
+    /// `c` flips the size gauge between "% of new content" (`false`, the default headline) and
+    /// "% of the whole prompt" (`true`, diluted by the cached prefix). Overview-only. Dollars
+    /// never change — they are always the real net-of-cache bill.
+    whole_prompt: bool,
     overview: Option<OverviewData>,
     /// Full-screen keymap overlay (`?`); dismissed by any key.
     show_help: bool,
@@ -353,6 +375,7 @@ impl App {
             db,
             refresh,
             tab: Tab::Overview,
+            whole_prompt: false,
             overview: None,
             show_help: false,
             sessions: TreeTable::new(
@@ -372,6 +395,7 @@ impl App {
     /// SQLite runs on the UI thread here — just cheap tree building.
     fn apply(&mut self, mut ov: OverviewData, rows: Vec<SessionRow>) {
         ov.sessions = rows.len() as i64;
+        self.overview = Some(ov);
         // Grand-total footer: total spend, overall savings %, and total messages.
         let bill: i64 = rows.iter().map(|r| r.bill_micros).sum();
         let turns: i64 = rows.iter().map(|r| r.turns).sum();
@@ -391,7 +415,6 @@ impl App {
             String::new(),
         ]);
         self.sessions.set_roots(build_session_tree(&rows));
-        self.overview = Some(ov);
     }
 
     /// Handle a key; returns true to quit.
@@ -430,6 +453,13 @@ impl App {
                     PostAction::Update
                 };
                 return true;
+            }
+            // `c` flips the Overview gauge between "% of new content" and "% of the whole prompt"
+            // — the one figure with two honest framings. It's a no-op on the other tabs, which
+            // have no size figure to reframe. Dollars are always the real net bill, so they
+            // never move.
+            KeyCode::Char('c') if self.tab == Tab::Overview => {
+                self.whole_prompt = !self.whole_prompt;
             }
             KeyCode::Char('1') => self.tab = Tab::Overview,
             KeyCode::Char('2') => self.tab = Tab::Sessions,
@@ -704,6 +734,7 @@ impl App {
         };
         // Borrow, don't clone: the sub-renderers take `&OverviewData`, so cloning the whole
         // struct (its Vecs + Strings) every frame was pure waste.
+        let whole_prompt = self.whole_prompt;
         let Some(ov) = self.overview.as_ref() else {
             return;
         };
@@ -712,9 +743,9 @@ impl App {
             StatusKind::Off | StatusKind::Degraded => render_overview_alert(f, inner, ov),
             // A stale daemon always shows the dashboard (and its `u  Update` nudge), even before
             // the first request — otherwise the empty-state card would hide the restart prompt.
-            StatusKind::Stale => render_overview_main(f, inner, ov),
+            StatusKind::Stale => render_overview_main(f, inner, ov, whole_prompt),
             _ if !ov.has_traffic => render_overview_empty(f, inner, ov),
-            _ => render_overview_main(f, inner, ov),
+            _ => render_overview_main(f, inner, ov, whole_prompt),
         }
     }
 
@@ -785,8 +816,10 @@ impl App {
                 .overview
                 .as_ref()
                 .is_some_and(|o| o.update_available.is_some());
+        // `c` flips the saved-% basis on the Overview gauge only — that's the one screen with a
+        // size figure to reframe — so the hint lives on that tab alone.
         let mut keys = match self.tab {
-            Tab::Overview => String::from(" Tab tabs"),
+            Tab::Overview => String::from(" Tab tabs · c %"),
             Tab::Sessions => String::from(" Tab tabs · ↑↓ move · →/← expand · ⏎ drill"),
             Tab::Detail => String::from(" Tab tabs · ⇧Tab pane · ↑↓ move · →/← expand"),
         };
@@ -844,6 +877,7 @@ fn render_help_overlay(f: &mut Frame) {
         Line::from("  Shift-Tab          switch pane (in Detail)"),
         Line::from("  Esc                back to Sessions"),
         Line::from("  t                  cycle theme (Mocha/Macchiato/Frappé/Latte)"),
+        Line::from("  c                  size %: new content / whole prompt (Overview)"),
         Line::from(""),
         Line::from("  \"would have cost\" = the price at your provider's"),
         Line::from("   normal rate; \"you paid\" is after llmtrim trimmed it."),
@@ -1323,11 +1357,11 @@ fn render_trend(f: &mut Frame, area: Rect, ov: &OverviewData) {
 
 /// Band D-mid — the "you send smaller requests" gauge: the percentage, a bar meter, and the
 /// 0–100 scale. (ratatui has no arc widget; a horizontal Gauge is the honest built-in.)
-fn render_gauge(f: &mut Frame, area: Rect, ov: &OverviewData) {
+fn render_gauge(f: &mut Frame, area: Rect, ov: &OverviewData, whole_prompt: bool) {
     let block = card("SMALLER REQUESTS", false);
     let inner = block.inner(area);
     f.render_widget(block, area);
-    let pct = ov.pct_less.clamp(0.0, 1.0);
+    let pct = ov.pct_smaller(whole_prompt).clamp(0.0, 1.0);
     let dim = Style::default().fg(palette::muted_gray());
     let rows = Layout::vertical([
         Constraint::Min(0),
@@ -1364,10 +1398,17 @@ fn render_gauge(f: &mut Frame, area: Rect, ov: &OverviewData) {
         Paragraph::new(Line::from(Span::styled("100%", dim))).alignment(Alignment::Right),
         ends[1],
     );
+    // Second caption line names the active basis, so the gauge is never ambiguous (the `c` key
+    // that flips it is documented in the footer and help overlay, not crammed in here).
+    let basis = if whole_prompt {
+        "of the whole prompt"
+    } else {
+        "of new content"
+    };
     f.render_widget(
         Paragraph::new(vec![
             Line::from(Span::styled("Average size reduction", dim)),
-            Line::from(Span::styled("across all requests", dim)),
+            Line::from(Span::styled(basis, dim)),
         ])
         .alignment(Alignment::Center),
         rows[4],
@@ -1491,7 +1532,7 @@ fn render_metrics(f: &mut Frame, area: Rect, ov: &OverviewData) {
 /// Healthy Overview — the edge-to-edge dashboard from the design mockup: status banner ·
 /// 5 KPI tiles · charts row (trend | gauge | top models) · 5 metric tiles · footer banner.
 /// Bands drop under height pressure; tiny terminals fall back to the spoken status line.
-fn render_overview_main(f: &mut Frame, inner: Rect, ov: &OverviewData) {
+fn render_overview_main(f: &mut Frame, inner: Rect, ov: &OverviewData, whole_prompt: bool) {
     // Tiny terminals: never hand widgets zero-height rects.
     if inner.height < 6 {
         f.render_widget(status_line(ov), inner);
@@ -1553,7 +1594,7 @@ fn render_overview_main(f: &mut Frame, inner: Rect, ov: &OverviewData) {
         .spacing(1)
         .split(charts);
         render_trend(f, c[0], ov);
-        render_gauge(f, c[1], ov);
+        render_gauge(f, c[1], ov, whole_prompt);
         render_savers(f, c[2], ov);
     } else if charts.width >= 60 {
         let c = Layout::horizontal([Constraint::Percentage(50), Constraint::Percentage(50)])
@@ -2131,6 +2172,7 @@ mod tests {
             saved_usd: Some(142.58),
             saved_today_usd: Some(4.10),
             pct_less: 0.33,
+            pct_less_whole: 0.12,
             added_ms: Some(32.0),
             requests: 1204,
             trend_daily_usd: vec![7.0, 9.0, 11.0, 10.0, 13.0, 14.0, 16.0],
@@ -2157,7 +2199,7 @@ mod tests {
     #[test]
     fn overview_cards_show_kpis_charts_and_metrics() {
         let ov = sample_overview();
-        let s = render_to_string(140, 30, |f| render_overview_main(f, f.area(), &ov));
+        let s = render_to_string(140, 30, |f| render_overview_main(f, f.area(), &ov, false));
         // Band C — KPI tiles (values are plain text now, no block-glyph art).
         assert!(s.contains("TOTAL SAVED"), "{s}");
         assert!(s.contains("WOULD HAVE COST") && s.contains("226.82"));
@@ -2172,9 +2214,30 @@ mod tests {
     }
 
     #[test]
+    fn size_gauge_toggles_basis_but_dollars_never_change() {
+        let ov = sample_overview();
+        // Default (new content): the compressible-surface 33%, dollars are the net bill.
+        let new = render_to_string(140, 30, |f| render_overview_main(f, f.area(), &ov, false));
+        assert!(new.contains("33% smaller"), "{new}");
+        assert!(new.contains("of new content"), "{new}");
+        // Whole prompt: the diluted 12%. The dollar KPIs are byte-for-byte the same — only the
+        // percentage moved, so the toggle can never overstate the saving in money terms.
+        let whole = render_to_string(140, 30, |f| render_overview_main(f, f.area(), &ov, true));
+        assert!(whole.contains("12% smaller"), "{whole}");
+        assert!(whole.contains("of the whole prompt"), "{whole}");
+        for dollars in ["226.82", "84.24", "142.58"] {
+            assert_eq!(
+                new.contains(dollars),
+                whole.contains(dollars),
+                "dollar figure {dollars} must not depend on the size-basis toggle"
+            );
+        }
+    }
+
+    #[test]
     fn overview_keeps_jargon_off_the_default_screen() {
         let ov = sample_overview();
-        let s = render_to_string(140, 30, |f| render_overview_main(f, f.area(), &ov));
+        let s = render_to_string(140, 30, |f| render_overview_main(f, f.area(), &ov, false));
         assert!(s.contains("REQUESTS HANDLED"));
         // The old expert "more numbers" strip (and its jargon) is gone entirely.
         assert!(!s.contains("net of cache"));
@@ -2209,13 +2272,36 @@ mod tests {
         ov.update_available = None;
         // A stale daemon is not broken: it renders the normal dashboard with a `u Update` nudge,
         // never the Repair alert.
-        let s = render_to_string(140, 30, |f| render_overview_main(f, f.area(), &ov));
+        let s = render_to_string(140, 30, |f| render_overview_main(f, f.area(), &ov, false));
         assert!(s.contains("older version"), "{s}");
         assert!(s.contains("Update"), "u Update affordance shown: {s}");
         assert!(
             !s.contains("Repair"),
             "no Repair on a stale (not broken) daemon: {s}"
         );
+    }
+
+    #[test]
+    fn c_key_flips_the_size_basis_on_overview_only() {
+        let mut app = App::new(None, Duration::from_secs(2));
+        app.overview = Some(sample_overview());
+
+        // On Overview, `c` toggles the gauge basis.
+        assert!(!app.whole_prompt);
+        app.handle_key(KeyCode::Char('c'));
+        assert!(app.whole_prompt);
+        app.handle_key(KeyCode::Char('c'));
+        assert!(!app.whole_prompt);
+
+        // On the other tabs there is no size figure to reframe, so `c` is a no-op.
+        for tab in [Tab::Sessions, Tab::Detail] {
+            app.tab = tab;
+            app.handle_key(KeyCode::Char('c'));
+            assert!(
+                !app.whole_prompt,
+                "c must not toggle the basis off Overview"
+            );
+        }
     }
 
     #[test]

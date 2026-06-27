@@ -19,6 +19,10 @@ All notable changes to this project are documented here. The format follows
   now fingerprints cline, roo, kilo, goose, opencode, crush, gemini, qwen, grok, kimi,
   mistral-vibe, mux, pi, forge, and openclaw from their system prompts as well, so their token
   and cost stats show up under the right name.
+- **`status` dashboard: press `c` to switch what the size gauge measures.** On the Overview tab,
+  the "SMALLER REQUESTS" gauge toggles between the reduction of new content (the default, what
+  llmtrim can actually trim) and the reduction across the whole prompt (diluted by the reused
+  cached prefix). The caption names the active basis. Dollar figures are unaffected.
 
 ### Fixed
 - **The SAVINGS TREND chart no longer prints the dollar amount on top of the bar.** ratatui's
@@ -32,6 +36,10 @@ All notable changes to this project are documented here. The format follows
   English prompts add nothing, so the fix costs no tokens on the common case (prompts too short
   to detect get the clause as a cheap, safe fallback). Only applies when output shaping is
   already active (never on tool-call requests).
+- **`status` dashboard: "SAVED TODAY" now reconciles with the totals.** It was priced at list
+  rates while the all-time and weekly figures used the real, cache-discounted bill, so on
+  cache-heavy traffic (e.g. Claude with prompt caching) today could read higher than the total
+  ever saved. Every dollar figure is now the same net-of-cache basis.
 
 ## [0.3.2] - 2026-06-22
 
