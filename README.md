@@ -288,18 +288,22 @@ The printed block is the standard MCP config; for a client you edit by hand it l
 
 ## Works with
 
-Any tool that honors `HTTPS_PROXY` and an env-provided CA, which is essentially every CLI agent and most Node apps:
+Any tool that honors `HTTPS_PROXY` and an env-provided CA. That covers all 18 agents below plus any HTTPS_PROXY-aware CLI or SDK you build yourself:
 
 | Tool | Works | Notes |
 |---|:---:|---|
 | Claude Code | ✅ | Prompt-cache discount stays intact |
 | Codex CLI | ✅ | |
 | Gemini CLI | ✅ | |
-| Cursor / VS Code extensions | ✅ | Node-based: picks up `NODE_EXTRA_CA_CERTS` |
-| Aider, OpenCode, any `HTTPS_PROXY`-aware CLI | ✅ | |
-| Hermes Agent | ✅ | route its upstream through llmtrim; add a `custom:` host via `extra_hosts` ([guide](HERMES.md)) |
-| Your own app / SDK | ✅ | or call the [CLI / library](#use-it-as-a-cli-mcp-or-library) directly |
-| GitHub Copilot | ❌ | certificate pinning blocks interception |
+| Cursor (IDE), Cline, Roo, Kilo Code | ✅ | VS Code extensions; set `NODE_EXTRA_CA_CERTS` for the Node host process |
+| Goose, OpenCode, Crush, Mux, Forge, OpenClaw, Pi/OMP | ✅ | CLI agents on standard provider hosts |
+| Qwen Code, Grok CLI, Kimi Code, Mistral Vibe | ✅ | Provider hosts ship in the `llm_providers` registry, intercepted out of the box |
+| Aider, any other `HTTPS_PROXY`-aware CLI | ✅ | |
+| Hermes, Droid (BYOK mode) | ✅ | Interceptable only when a direct provider key is configured; see [guide](HERMES.md) for Hermes |
+| Your own app / SDK | ✅ | Or call the [CLI / library](#use-it-as-a-cli-mcp-or-library) directly |
+| GitHub Copilot | ❌ | Certificate pinning blocks interception |
+| Warp, Devin | ❌ | Provider call is server-side; a local proxy never sees it |
+| Cursor Agent, Kiro | ❌ | Routes through a vendor gateway, not a standard provider host |
 
 Prefer no proxy? Any MCP client (Claude Code, Cursor, custom agents) can call llmtrim directly as tools instead: run `llmtrim mcp install`, or see [CLI, MCP, or library](#use-it-as-a-cli-mcp-or-library).
 
