@@ -21,6 +21,10 @@ All notable changes to this project are documented here. The format follows
   and cost stats show up under the right name.
 
 ### Fixed
+- **The SAVINGS TREND chart no longer prints the dollar amount on top of the bar.** ratatui's
+  `BarChart` overlays its value label on the bar's base, so the `$/day` figure was painted over
+  the green bar. The amount now sits on its own row between the bar and the weekday label, so the
+  bar, amount, and day read as three clean rows.
 - **Replies now stay in the user's language.** The output-shaping instructions are written in
   English and land last in the request, which biased the model to answer in English even when
   the user wrote in another language. When the prompt is detected as non-English, the primary

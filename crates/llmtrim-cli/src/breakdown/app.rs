@@ -1256,15 +1256,25 @@ fn render_trend(f: &mut Frame, area: Rect, ov: &OverviewData) {
     let last = ov.trend_daily_usd.len() - 1;
     let green = Style::default().fg(palette::green());
     let green_b = green.add_modifier(Modifier::BOLD);
+    let dim = Style::default().fg(palette::muted_gray());
+    let dim_b = dim.add_modifier(Modifier::BOLD);
+    // Reserve a row for the $ value and a row for the weekday, both BELOW the bars, so the
+    // amount sits between the bar and the day instead of being painted over the bar (ratatui's
+    // BarChart can only overlay `text_value` on the bar base).
+    let rows = Layout::vertical([
+        Constraint::Min(1),    // bars
+        Constraint::Length(1), // $ value
+        Constraint::Length(1), // weekday
+    ])
+    .split(inner);
     let bars: Vec<Bar> = ov
         .trend_daily_usd
         .iter()
         .enumerate()
-        .map(|(i, v)| {
+        .map(|(i, _)| {
             Bar::default()
-                .value((v * 100.0).round().max(0.0) as u64)
-                .text_value(money_round(*v))
-                .label(Line::from(labels.get(i).copied().unwrap_or_default()))
+                .value((ov.trend_daily_usd[i] * 100.0).round().max(0.0) as u64)
+                .text_value(String::new())
                 .style(if i == last { green_b } else { green })
         })
         .collect();
@@ -1279,7 +1289,36 @@ fn render_trend(f: &mut Frame, area: Rect, ov: &OverviewData) {
         .bar_gap(gap)
         .value_style(Style::default().fg(palette::muted_gray()))
         .label_style(Style::default().fg(palette::muted_gray()));
-    f.render_widget(chart, inner);
+    f.render_widget(chart, rows[0]);
+
+    // Center each label under its bar (bars start flush-left at inner.x, pitch = bw + gap).
+    let pitch = (bw + gap) as usize;
+    let bw = bw as usize;
+    let centered_row = |cells: Vec<(String, Style)>| -> Line<'static> {
+        let mut spans: Vec<Span> = Vec::new();
+        let mut col = 0usize;
+        for (i, (text, style)) in cells.into_iter().enumerate() {
+            let len = text.chars().count();
+            let start = i * pitch + bw.saturating_sub(len) / 2;
+            if start > col {
+                spans.push(Span::raw(" ".repeat(start - col)));
+                col = start;
+            }
+            col += len;
+            spans.push(Span::styled(text, style));
+        }
+        Line::from(spans)
+    };
+    let dollars = centered_row(
+        ov.trend_daily_usd
+            .iter()
+            .enumerate()
+            .map(|(i, v)| (money_round(*v), if i == last { dim_b } else { dim }))
+            .collect(),
+    );
+    let days = centered_row(labels.iter().map(|l| (l.to_string(), dim)).collect());
+    f.render_widget(Paragraph::new(dollars), rows[1]);
+    f.render_widget(Paragraph::new(days), rows[2]);
 }
 
 /// Band D-mid — the "you send smaller requests" gauge: the percentage, a bar meter, and the
