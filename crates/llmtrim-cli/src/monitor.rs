@@ -915,10 +915,12 @@ pub fn model_views_from(rows: &[ModelRow]) -> Vec<ModelView> {
 }
 
 /// Today's priced saving (UTC), for the hero's recency anchor. `None` when nothing
-/// priced ran today — the dashboard hides the figure rather than showing $0.00.
+/// priced ran today — the dashboard hides the figure rather than showing $0.00. Net-of-cache
+/// to match the text hero's all-time figure: a list-rate "today" next to a net all-time total
+/// is what made today exceed the total (issue #100).
 pub fn today_saved_usd(tracker: &Tracker) -> Option<f64> {
     let models = tracker.by_model_today().ok()?;
-    cost_estimate(&models).map(|c| c.saved)
+    cost_estimate(&models).map(|c| c.net_saved)
 }
 
 /// Per-1M-token rates for one turn, frozen into the breakdown ledger so a historical session
