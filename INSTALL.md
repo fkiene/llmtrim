@@ -109,7 +109,7 @@ The `curl | sh` installer runs this for you. If you built from source or skipped
 
 ```bash
 llmtrim setup     # CA + HTTPS_PROXY/NODE_EXTRA_CA_CERTS in your shell profile + autostart + start
-llmtrim status    # savings dashboard (add --watch for a live view)
+llmtrim status    # live savings dashboard
 ```
 
 llmtrim is purely a MITM proxy; it configures your **environment** (no IDE settings).

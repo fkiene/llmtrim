@@ -24,7 +24,7 @@
 <p align="center">
   <picture>
     <source media="(prefers-color-scheme: light)" srcset="assets/status-watch-light.svg">
-    <img src="assets/status-watch-dark.svg" alt="llmtrim status --watch: a live dashboard showing tokens trimmed, dollars saved off your real bill, input/output savings bars, and a per-model breakdown" width="760">
+    <img src="assets/status-watch-dark.svg" alt="llmtrim status: a live dashboard showing tokens trimmed, dollars saved off your real bill, input/output savings bars, and a per-model breakdown" width="760">
   </picture>
 </p>
 
@@ -160,7 +160,7 @@ npm install -g @llmtrim/cli@latest && llmtrim setup
 # 2. Open a new shell. Your AI tools now route through llmtrim automatically.
 
 # 3. Watch the savings add up as you work
-llmtrim status --watch
+llmtrim status
 ```
 
 **No Node?** Use an installer instead:

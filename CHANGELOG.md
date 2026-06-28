@@ -6,6 +6,9 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Changed
+- **`llmtrim status` opens the live dashboard directly on a TTY.** The `--watch` flag is now a hidden no-op, kept so existing scripts keep working.
+
 ## [0.4.0] - 2026-06-28
 
 ### Added

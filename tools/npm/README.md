@@ -12,7 +12,7 @@ save, so it can never increase your bill or break a request.
 ```bash
 npm install -g @llmtrim/cli@latest && llmtrim setup
 # open a new shell, then watch the bill shrink:
-llmtrim status --watch
+llmtrim status
 ```
 
 `setup` is transparent and fully reversible (`llmtrim uninstall`): a local CA, a proxy
