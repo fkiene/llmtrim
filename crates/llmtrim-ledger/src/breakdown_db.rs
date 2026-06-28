@@ -75,7 +75,7 @@ pub struct CostRow {
 }
 
 pub struct BreakdownDb {
-    conn: Connection,
+    pub(crate) conn: Connection,
 }
 
 impl BreakdownDb {

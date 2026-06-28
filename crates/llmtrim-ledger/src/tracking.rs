@@ -152,7 +152,7 @@ pub enum Period {
 impl Period {
     /// SQL expression that buckets the rfc3339 `ts` column (string-sliced, no date parse
     /// for day/month; `strftime` only for ISO week).
-    fn sql_bucket(self) -> &'static str {
+    pub(crate) fn sql_bucket(self) -> &'static str {
         match self {
             Period::Day => "substr(ts, 1, 10)",       // YYYY-MM-DD
             Period::Month => "substr(ts, 1, 7)",      // YYYY-MM
@@ -587,6 +587,64 @@ impl Tracker {
             )
             .context("failed to cap-prune breakdown turns")? as u64;
         Ok(deleted)
+    }
+
+    /// Test-only: insert a breakdown turn with NULL `input_before`/`input_after` to simulate
+    /// pre-meter rows (rows recorded before the compression-meter columns were added).
+    #[cfg(test)]
+    pub fn record_breakdown_premeter(&self, agent: &str, bill_micros: i64) -> Result<i64> {
+        let ts = chrono::Utc::now().to_rfc3339();
+        self.conn
+            .execute(
+                "INSERT INTO breakdown_turns
+                    (ts, session_id, agent, provider, window,
+                     fresh_input, cache_read, cache_write, output_tok,
+                     input_rate, output_rate, cache_read_rate, cache_write_rate,
+                     bill_micros, input_before, input_after)
+                 VALUES (?1, ?2, ?3, 'anthropic', 200000,
+                         0, 0, 0, 0, 3.0, 15.0, 0.3, 3.75,
+                         ?4, NULL, NULL)",
+                params![ts, format!("premeter-{agent}"), agent, bill_micros],
+            )
+            .context("failed to record pre-meter turn")?;
+        Ok(self.conn.last_insert_rowid())
+    }
+
+    /// Test-only: insert a breakdown turn with an explicit `ts` (for bucket-boundary tests).
+    #[cfg(test)]
+    pub fn record_breakdown_with_ts(&self, turn: &BreakdownTurn, ts: &str) -> Result<i64> {
+        self.conn
+            .execute(
+                "INSERT INTO breakdown_turns
+                    (ts, session_id, agent, project, session_name, provider, model, window,
+                     fresh_input, cache_read, cache_write, output_tok,
+                     input_rate, output_rate, cache_read_rate, cache_write_rate, bill_micros,
+                     input_before, input_after)
+                 VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19)",
+                params![
+                    ts,
+                    turn.session_id,
+                    turn.agent,
+                    turn.project,
+                    turn.session_name,
+                    turn.provider,
+                    turn.model,
+                    turn.window,
+                    turn.fresh_input,
+                    turn.cache_read,
+                    turn.cache_write,
+                    turn.output_tok,
+                    turn.input_rate,
+                    turn.output_rate,
+                    turn.cache_read_rate,
+                    turn.cache_write_rate,
+                    turn.bill_micros,
+                    turn.input_before,
+                    turn.input_after,
+                ],
+            )
+            .context("failed to record breakdown turn with ts")?;
+        Ok(self.conn.last_insert_rowid())
     }
 
     /// Test-only: insert a record stamped with an explicit `ts`, to exercise age retention

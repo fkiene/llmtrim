@@ -4,4 +4,5 @@
 //! `breakdown_db` — read-only query layer for the cost-breakdown view (BreakdownDb, SessionRow, …).
 
 pub mod breakdown_db;
+pub mod dashboard;
 pub mod tracking;

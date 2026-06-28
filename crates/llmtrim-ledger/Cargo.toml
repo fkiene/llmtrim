@@ -14,9 +14,11 @@ llmtrim-core = { path = "../llmtrim-core", version = "0.4.1-dev" }
 anyhow.workspace = true
 chrono = "0.4.45"
 rusqlite = { version = "0.39", features = ["bundled"] }
+serde = { version = "1", features = ["derive"] }
 
 [dev-dependencies]
 insta = "1"
+serde_json = "1"
 
 [lints]
 workspace = true
