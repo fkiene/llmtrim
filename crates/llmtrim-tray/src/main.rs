@@ -11,7 +11,7 @@ use llmtrim_ledger::breakdown_db::BreakdownDb;
 use llmtrim_ledger::dashboard::{Dashboard, build_dashboard, parse_period, sanitise_error};
 use llmtrim_ledger::tracking::{Period, db_path};
 use tauri::image::Image;
-use tauri::menu::{MenuBuilder, MenuItemBuilder, PredefinedMenuItem};
+use tauri::menu::{MenuBuilder, MenuItem, MenuItemBuilder, PredefinedMenuItem};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
 use tauri::{AppHandle, Emitter, Manager, RunEvent, State};
 use tauri_plugin_positioner::{Position, WindowExt};
@@ -194,6 +194,45 @@ fn stop_proxy() -> Result<(), String> {
     run_llmtrim(&["stop"])
 }
 
+/// Whether the interceptor daemon is currently running.
+///
+/// Running state is not in the ledger DB — it's the live pidfile + port probe the CLI
+/// owns (`daemon::running`). We read it back through the CLI's authoritative
+/// `status --json` `daemon.running` boolean rather than re-implementing cross-platform
+/// process liveness here. (`status --quiet`/health is the wrong signal: it reports
+/// `degraded` for a stopped-but-still-wired proxy, so it can't tell running from stopped.)
+/// Any failure reads as "not running" so the menu offers Start, the safe default.
+fn proxy_running() -> bool {
+    let bin = llmtrim_binary();
+    let Ok(output) = std::process::Command::new(&bin)
+        .args(["status", "--json"])
+        .output()
+    else {
+        return false;
+    };
+    serde_json::from_slice::<serde_json::Value>(&output.stdout)
+        .ok()
+        .and_then(|v| v["daemon"]["running"].as_bool())
+        .unwrap_or(false)
+}
+
+/// The single proxy menu item, retained so the poll loop and the menu handler can flip
+/// its label between "Start proxy" and "Stop proxy". Only one line ever shows; the click
+/// re-checks the live state and runs the matching action.
+struct ProxyMenu {
+    item: MenuItem<tauri::Wry>,
+}
+
+/// Update the proxy item's label to match whether the proxy is running.
+fn refresh_proxy_menu(app: &AppHandle) {
+    let label = if proxy_running() {
+        "Stop proxy"
+    } else {
+        "Start proxy"
+    };
+    let _ = app.state::<ProxyMenu>().item.set_text(label);
+}
+
 /// Whether the tray is set to open at login. Reads the CLI's scriptable status;
 /// any failure reads as "off" so the toggle defaults to a safe state.
 #[tauri::command]
@@ -273,22 +312,31 @@ fn main() {
             // Linux users reach the popover. On macOS/Windows the menu is the
             // right-click companion to the left-click toggle.
             let open_item = MenuItemBuilder::with_id("open", "Open llmtrim").build(app)?;
-            let start_item = MenuItemBuilder::with_id("start", "Start proxy").build(app)?;
-            let stop_item = MenuItemBuilder::with_id("stop", "Stop proxy").build(app)?;
+            // One toggling item, not separate Start/Stop lines: the label tracks the proxy's
+            // state and the click runs the matching action (see the "proxy" menu event). The
+            // initial label is corrected by `refresh_proxy_menu` once the state is known.
+            let proxy_item = MenuItemBuilder::with_id("proxy", "Start proxy").build(app)?;
             let settings_item = MenuItemBuilder::with_id("settings", "Settings…").build(app)?;
             let quit_item = MenuItemBuilder::with_id("quit", "Quit").build(app)?;
             let menu = MenuBuilder::new(app)
                 .items(&[
                     &open_item,
                     &PredefinedMenuItem::separator(app)?,
-                    &start_item,
-                    &stop_item,
+                    &proxy_item,
                     &PredefinedMenuItem::separator(app)?,
                     &settings_item,
                     &PredefinedMenuItem::separator(app)?,
                     &quit_item,
                 ])
                 .build()?;
+
+            // Retain the item so the poll loop and menu handler can relabel it, and set the
+            // initial label off the main thread so startup stays snappy.
+            app.manage(ProxyMenu {
+                item: proxy_item.clone(),
+            });
+            let init_app = app.handle().clone();
+            std::thread::spawn(move || refresh_proxy_menu(&init_app));
 
             let menu_app = app.handle().clone();
             TrayIconBuilder::with_id("main")
@@ -307,14 +355,17 @@ fn main() {
                     // events fire on the main event loop, so calling inline would
                     // freeze the icon. Errors are logged to stderr by `run_llmtrim`;
                     // the Settings panel is the interactive surface for failures.
-                    "start" => {
-                        std::thread::spawn(|| {
-                            let _ = start_proxy();
-                        });
-                    }
-                    "stop" => {
-                        std::thread::spawn(|| {
-                            let _ = stop_proxy();
+                    // Re-check the live state at click time (the label is only a hint),
+                    // run the opposite action, then relabel the item.
+                    "proxy" => {
+                        let handle = menu_app.clone();
+                        std::thread::spawn(move || {
+                            if proxy_running() {
+                                let _ = stop_proxy();
+                            } else {
+                                let _ = start_proxy();
+                            }
+                            refresh_proxy_menu(&handle);
                         });
                     }
                     "settings" => {
@@ -470,6 +521,10 @@ fn poll_loop(app: AppHandle, stop: Arc<AtomicBool>) {
         if stop.load(Ordering::Relaxed) {
             return;
         }
+
+        // Keep the proxy item's label in sync with state changed outside the tray
+        // (e.g. `llmtrim start`/`stop` from a shell, or a crash).
+        refresh_proxy_menu(&app);
 
         match load_dashboard(secs) {
             Ok(dash) => {

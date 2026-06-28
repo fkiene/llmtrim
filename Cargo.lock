@@ -2988,6 +2988,7 @@ dependencies = [
  "anyhow",
  "chrono",
  "llmtrim-ledger",
+ "serde_json",
  "tauri",
  "tauri-build",
  "tauri-plugin-positioner",

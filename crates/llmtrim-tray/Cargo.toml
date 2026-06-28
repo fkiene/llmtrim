@@ -23,6 +23,10 @@ tauri = { version = "2", features = ["tray-icon", "image-png"] }
 tauri-plugin-positioner = { version = "2", features = ["tray-icon"] }
 anyhow = "1"
 chrono = "0.4"
+# Parse the CLI's `status --json` to read the authoritative `daemon.running` flag.
+# Proxy liveness is runtime state (pidfile + port probe), never stored in the ledger DB,
+# so it can't be read from SQLite like the savings figures are.
+serde_json.workspace = true
 
 # Tauri macro-generated scaffolding contains `unsafe` blocks, so this crate cannot
 # inherit the workspace `unsafe_code = "forbid"`. Re-declare lints here without it,
