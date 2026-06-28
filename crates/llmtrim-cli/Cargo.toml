@@ -42,7 +42,6 @@ anyhow.workspace = true
 chrono = "0.4.45"
 clap = { version = "4.6.1", features = ["derive"] }
 comfy-table = { version = "7.2.2", default-features = false, features = ["custom_styling"] }
-ctrlc = "3.5.2"
 dotenvy = "0.15.7"
 once_cell.workspace = true
 owo-colors = "4.3.0"
@@ -51,9 +50,6 @@ rusqlite = { version = "0.39", features = ["bundled"] }
 serde.workspace = true
 serde_json.workspace = true
 statrs = "0.18.0"
-# Terminal width for the watch-mode repaint (truncates lines to one screen row so the
-# in-place repaint never drifts on narrow terminals). Wraps the already-present rustix.
-terminal_size = "0.4"
 toml.workspace = true
 unicode-width = "0.2"
 ureq = "3.3.0"

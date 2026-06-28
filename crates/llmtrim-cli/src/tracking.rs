@@ -316,7 +316,7 @@ impl Tracker {
 
     fn migrate(&self) -> Result<()> {
         // The ledger is written by the daemon thread AND by every CLI compress/send while
-        // `monitor --watch` reads it every 2s. With rusqlite's defaults (rollback journal,
+        // the `status` TUI reads it every ~2s. With rusqlite's defaults (rollback journal,
         // busy_timeout 0) a concurrent writer/reader hits SQLITE_BUSY immediately, dropping
         // rows or failing reads. WAL lets a reader and a writer proceed together; a 2s busy
         // timeout absorbs the brief writer-vs-writer overlap. Best-effort: an in-memory DB
@@ -1189,7 +1189,7 @@ mod tests {
     #[test]
     fn file_ledger_enables_wal_and_busy_timeout() {
         // WAL + a non-zero busy timeout protect the always-on daemon writer against the
-        // `monitor --watch` reader. (In-memory DBs can't run WAL, so test a file path.)
+        // `status` TUI reader. (In-memory DBs can't run WAL, so test a file path.)
         let dir = std::env::temp_dir().join(format!("llmtrim_wal_{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("t.db");

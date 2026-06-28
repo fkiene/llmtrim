@@ -198,14 +198,16 @@ enum Commands {
     ///
     /// Savings from the ledger, plus the health chain (daemon → port → env → CA →
     /// traffic). Default: a snapshot, exiting 0 healthy / 1 stopped / 2 degraded;
-    /// `-q` for the health word only; `--watch` for a live view;
+    /// `-q` for the health word only; on a TTY opens the live cost-breakdown TUI;
     /// `--daily/--weekly/--monthly` for time-series; `--json/--csv` to export.
     #[command(name = "status", visible_aliases = ["monitor", "gain"])]
     Monitor {
-        /// Live refreshing dashboard (Ctrl-C to exit).
-        #[arg(long)]
+        /// Deprecated no-op kept for backward compatibility: `status` opens the live
+        /// dashboard on a TTY by default, so `--watch` is no longer needed. Hidden from
+        /// help; still accepted so existing scripts and aliases don't break.
+        #[arg(long, hide = true)]
         watch: bool,
-        /// Refresh interval for `--watch`, in seconds.
+        /// Refresh interval for the live dashboard, in seconds.
         #[arg(long, default_value_t = 2)]
         interval: u64,
         /// Daily time-series report.
@@ -224,7 +226,7 @@ enum Commands {
         #[arg(long)]
         csv: bool,
         /// Health only: print healthy|degraded|stopped and exit 0/2/1 (script-friendly).
-        #[arg(long, short, conflicts_with_all = ["watch", "daily", "weekly", "monthly", "json", "csv"])]
+        #[arg(long, short, conflicts_with_all = ["daily", "weekly", "monthly", "json", "csv"])]
         quiet: bool,
     },
     /// Run an MCP server over stdio (or `mcp install` to register it with a client)
@@ -701,7 +703,8 @@ fn run() -> Result<()> {
             Some(McpAction::Install { print, force }) => llmtrim::mcp::install(print, force)?,
         },
         Commands::Monitor {
-            watch,
+            // Deprecated no-op (see the field docs): accepted, then ignored.
+            watch: _,
             interval,
             daily,
             weekly,
@@ -709,7 +712,7 @@ fn run() -> Result<()> {
             json,
             csv,
             quiet,
-        } => run_monitor(watch, interval, daily, weekly, monthly, json, csv, quiet)?,
+        } => run_monitor(interval, daily, weekly, monthly, json, csv, quiet)?,
         Commands::Doctor => {
             let report = llmtrim::doctor::gather();
             print!("{}", llmtrim::doctor::render(ui::color_stdout(), &report));
@@ -1821,129 +1824,6 @@ fn overview_data(tracker: &Tracker) -> llmtrim::breakdown::app::OverviewData {
     })
 }
 
-/// Restores the normal screen buffer when the watch loop unwinds (error/broken pipe).
-/// The Ctrl-C path can't rely on Drop (`process::exit` skips destructors), so the
-/// signal handler in [`run_watch`] writes the same escape itself.
-struct AltScreenGuard;
-
-impl Drop for AltScreenGuard {
-    fn drop(&mut self) {
-        let mut out = std::io::stdout();
-        let _ = out.write_all(b"\x1b[?1049l");
-        let _ = out.flush();
-    }
-}
-
-/// Live dashboard. On a TTY it runs in the alternate screen buffer (the user's
-/// scrollback survives, like htop/less), repaints in place — home + per-line
-/// clear-to-EOL instead of a full-screen wipe, wrapped in synchronized-output marks
-/// (DEC 2026) so capable terminals commit each frame atomically: no flicker, no
-/// infinite scroll. Piped/redirected output keeps plain appended frames. Exits on
-/// Ctrl-C, restoring the normal screen.
-fn run_watch(tracker: &Tracker, interval: u64) -> Result<()> {
-    let color = ui::color_stdout();
-    // Screen-control escapes are for interactive terminals only — piped/redirected
-    // watch output gets appended frames instead of raw escapes.
-    let tty = ui::stdout_is_tty();
-    let _alt = if tty {
-        let mut out = std::io::stdout();
-        let _ = out.write_all(b"\x1b[?1049h\x1b[H");
-        let _ = out.flush();
-        // Default SIGINT would kill the process inside the alternate screen, leaving
-        // the terminal stuck in it — restore first, then exit.
-        let _ = ctrlc::set_handler(|| {
-            let mut out = std::io::stdout();
-            let _ = out.write_all(b"\x1b[?1049l");
-            let _ = out.flush();
-            std::process::exit(0);
-        });
-        Some(AltScreenGuard)
-    } else {
-        None
-    };
-    let mut prev: Option<i64> = None;
-    let mut frame_n: usize = 0;
-    loop {
-        let summary = tracker.summary()?;
-        let mut body = render_snapshot(tracker, color, false, false)?.0;
-        // Live throughput this interval, folded into the status bar below — only when traffic
-        // actually flowed (a perpetual "+0/s" on an idle proxy reads like fake data), and
-        // humanised to match the rest of the dashboard.
-        let rate_seg = match prev {
-            Some(p) if (summary.saved() - p) as f64 / interval as f64 >= 0.5 => {
-                let rate = (summary.saved() - p) as f64 / interval as f64;
-                format!(" · +{} tok/s saved", ui::human(rate as i64))
-            }
-            _ => String::new(),
-        };
-        prev = Some(summary.saved());
-
-        // Live status-bar footer. On a TTY: a spinner that advances every refresh (proves the
-        // view is live even when the numbers don't move), a ticking clock, the live rate when
-        // traffic flowed, and a right-aligned quit keycap. Piped output keeps a plain one-liner.
-        let cols = if tty {
-            terminal_size::terminal_size()
-                .map(|(w, _)| w.0 as usize)
-                .unwrap_or(80)
-        } else {
-            0
-        };
-        if tty {
-            const SPIN: [&str; 8] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧"];
-            // Workload liveness — "is traffic flowing?" — is more useful here than a wall
-            // clock (the spinner already proves the UI is live). Idle shows how long ago the
-            // last request was, so a stalled workload is obvious.
-            let traffic = summary
-                .last_ts
-                .as_deref()
-                .and_then(llmtrim::daemon::human_age)
-                .map(|age| format!("last request {age}"))
-                .unwrap_or_else(|| "no requests yet".to_string());
-            let left = format!(
-                "{}  {}",
-                ui::paint(color, Tone::Accent, SPIN[frame_n % SPIN.len()]),
-                ui::paint(color, Tone::Dim, &format!("{traffic}{rate_seg}")),
-            );
-            let right = format!(
-                "{} {}",
-                ui::paint(color, Tone::Bold, "Ctrl-C"),
-                ui::paint(color, Tone::Dim, "exit"),
-            );
-            let used = 1 + ui::visible_width(&left) + ui::visible_width(&right);
-            let pad = " ".repeat(cols.saturating_sub(used).max(1));
-            body.push_str(&format!(" {left}{pad}{right}\n"));
-        } else {
-            body.push_str(&format!(
-                "  refreshing every {interval}s{rate_seg} · Ctrl-C to exit\n"
-            ));
-        }
-        frame_n += 1;
-
-        let frame = if tty {
-            // Each logical line must occupy exactly one screen row, or the home + per-line
-            // `\x1b[K` repaint drifts when a line soft-wraps. Truncate to the terminal width
-            // (ANSI-aware), then sync-begin + home, clear each line's tail (`\x1b[K`), clear
-            // below the frame (`\x1b[0J`), sync-end. The full untruncated text stays in the
-            // one-shot `status` (no repaint there, so wrapping is harmless).
-            let painted: String = body
-                .lines()
-                .map(|l| format!("{}\x1b[K\n", ui::truncate_visible(l, cols)))
-                .collect();
-            format!("\x1b[?2026h\x1b[H{painted}\x1b[0J\x1b[?2026l")
-        } else {
-            body
-        };
-        // Write, don't print!: a piped reader that exits (e.g. `| head`) closes the
-        // pipe, and print! would panic on the broken pipe — exit cleanly instead.
-        let mut stdout = std::io::stdout();
-        if stdout.write_all(frame.as_bytes()).is_err() {
-            return Ok(());
-        }
-        stdout.flush().ok();
-        std::thread::sleep(std::time::Duration::from_secs(interval));
-    }
-}
-
 /// Merge the per-source breakdown (every session + corpus-wide per-source cost) into a
 /// `status --json` string. No-op when the breakdown feature is off or no data exists yet,
 /// so the JSON shape is a superset of the prior one (additive `breakdown` key).
@@ -1991,7 +1871,6 @@ fn print_top_sources() {
 
 #[allow(clippy::too_many_arguments)]
 fn run_monitor(
-    watch: bool,
     interval: u64,
     daily: bool,
     weekly: bool,
@@ -2000,6 +1879,10 @@ fn run_monitor(
     csv: bool,
     quiet: bool,
 ) -> Result<()> {
+    // `interval` only drives the breakdown TUI's refresh; without that feature there is no
+    // live view to refresh, so it is unused.
+    #[cfg(not(feature = "breakdown"))]
+    let _ = interval;
     let tracker = Tracker::open().context("failed to open savings ledger")?;
 
     // Health-only mode: one word + the health exit code, for scripts and prompts
@@ -2056,7 +1939,7 @@ fn run_monitor(
         return Ok(());
     }
 
-    // On a TTY, the interactive view (watch or default) opens the cost-breakdown TUI:
+    // On a TTY, the interactive view opens the cost-breakdown TUI:
     // a tabbed Overview / Sessions / Detail explorer. Piped output and the export modes
     // above keep the plain snapshot, so scripts and `| less` are unaffected.
     #[cfg(feature = "breakdown")]
@@ -2106,20 +1989,16 @@ fn run_monitor(
         }
     }
 
-    if watch {
-        run_watch(&tracker, interval.max(1))
-    } else {
-        let (out, health) = render_snapshot(&tracker, ui::color_stdout(), false, false)?;
-        print!("{out}");
-        // Propagate health as the exit code (0 healthy / 1 stopped / 2 degraded) so
-        // `llmtrim status && …` means "llmtrim is actually working".
-        if health != monitor::Health::Healthy {
-            use std::io::Write as _;
-            let _ = std::io::stdout().flush();
-            std::process::exit(health.exit_code());
-        }
-        Ok(())
+    let (out, health) = render_snapshot(&tracker, ui::color_stdout(), false, false)?;
+    print!("{out}");
+    // Propagate health as the exit code (0 healthy / 1 stopped / 2 degraded) so
+    // `llmtrim status && …` means "llmtrim is actually working".
+    if health != monitor::Health::Healthy {
+        use std::io::Write as _;
+        let _ = std::io::stdout().flush();
+        std::process::exit(health.exit_code());
     }
+    Ok(())
 }
 
 /// Per-provider `(cache_read, cache_write)` price multipliers vs the list input rate:
@@ -2131,6 +2010,18 @@ fn run_monitor(
 mod tests {
     use super::*;
     use std::time::{SystemTime, UNIX_EPOCH};
+
+    // `--watch` is a deprecated no-op, but it must still parse: removing it outright would
+    // break existing `llmtrim status --watch` scripts and aliases.
+    #[test]
+    fn status_still_accepts_deprecated_watch_flag() {
+        let cli = Cli::try_parse_from(["llmtrim", "status", "--watch"])
+            .expect("status --watch must still parse for backward compatibility");
+        match cli.command {
+            Commands::Monitor { watch, .. } => assert!(watch),
+            _ => panic!("expected status to parse as the Monitor command"),
+        }
+    }
 
     fn scratch_dir(tag: &str) -> PathBuf {
         let nanos = SystemTime::now()

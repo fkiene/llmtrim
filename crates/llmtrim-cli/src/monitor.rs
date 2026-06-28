@@ -440,8 +440,8 @@ fn render_header(color: bool, d: &DaemonView) -> String {
 }
 
 /// The savings dashboard: daemon header + health chain, a hero panel (cost / round-trip /
-/// requests), per-axis bars, and a per-model table. Returned as a string so the watch
-/// loop can repaint it atomically. `today_saved_usd` is the priced saving for today (UTC),
+/// requests), per-axis bars, and a per-model table. Returned as a string for the plain-text
+/// snapshot path (piped output, `--json/--csv`, non-TTY). `today_saved_usd` is the priced saving for today (UTC),
 /// shown next to the all-time hero when it is non-trivial.
 #[allow(clippy::too_many_arguments)]
 pub fn snapshot(
