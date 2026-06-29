@@ -157,7 +157,7 @@ mod imp {
         }
 
         #[tool(
-            description = "Report recent savings from the local ledger: tokens trimmed, dollars saved, and a per-model breakdown. The same data the `llmtrim status --json` dashboard shows."
+            description = "Report recent savings from the local ledger: tokens trimmed and dollars saved. The same headline figures the `llmtrim status --json` dashboard shows."
         )]
         fn llmtrim_stats(
             &self,

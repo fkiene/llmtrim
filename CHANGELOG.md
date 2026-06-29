@@ -6,10 +6,15 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+- **Ledger retention is now configurable.** Two new settings cap how much history llmtrim keeps: `max_rows` (env `LLMTRIM_MAX_ROWS`) for the compression event ledger and `max_breakdown_turns` (env `LLMTRIM_MAX_BREAKDOWN_TURNS`) for the per-source cost breakdown. Both take a positive integer and fall back to the built-in defaults when unset. Raise `max_breakdown_turns` to keep a deeper breakdown history at the cost of a larger database file.
+
 ### Changed
 - **`llmtrim status` opens the live dashboard directly on a TTY.** The `--watch` flag is now a hidden no-op, kept so existing scripts keep working.
 
 ### Fixed
+- **`status --json` no longer scans the whole ledger by default.** The per-source/per-session `breakdown` object aggregated the entire history on every call (a full `breakdown_blocks` scan that pinned a CPU core and used over a gigabyte of RAM on a large database). It is now opt-in via `status --json --breakdown`; the default export carries the same health and savings fields it always did.
+- **The per-source breakdown table is now bounded.** It was capped at 100,000 *turns*, but each turn fans out into hundreds of source rows, so the table reached millions of rows and its write-ahead log grew past 700 MB without a checkpoint. Breakdown retention now defaults to 50,000 turns (tunable via `max_breakdown_turns`) and is enforced both as the daemon records turns and when the ledger is next opened, with a WAL checkpoint after pruning so the file shrinks once the daemon is stopped. Note: on first run after upgrading, breakdown history beyond the cap is deleted permanently.
 - **Restart-to-update hints now point at `llmtrim start --force` everywhere.** The stale-version banner in `status`/`doctor` and the Homebrew/Cargo note in INSTALL.md previously suggested `llmtrim stop && llmtrim start` or `llmtrim setup`; the latter does not restart a healthy daemon already on the right port, so it could leave the old binary running after an update. All three now match what `llmtrim update` actually runs.
 
 ## [0.4.0] - 2026-06-28

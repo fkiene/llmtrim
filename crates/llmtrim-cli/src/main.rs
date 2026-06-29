@@ -222,6 +222,12 @@ enum Commands {
         /// Emit JSON instead of the dashboard (snapshot + time-series).
         #[arg(long)]
         json: bool,
+        /// Include the heavy per-source/per-session `breakdown` object in `--json`.
+        /// Off by default: it aggregates the entire ledger history (a full
+        /// `breakdown_blocks` scan that is expensive on a large DB), and the common
+        /// consumers — the health badge and savings percentages — never read it.
+        #[arg(long, requires = "json")]
+        breakdown: bool,
         /// Emit CSV time-series instead of the dashboard.
         #[arg(long)]
         csv: bool,
@@ -710,9 +716,12 @@ fn run() -> Result<()> {
             weekly,
             monthly,
             json,
+            breakdown,
             csv,
             quiet,
-        } => run_monitor(interval, daily, weekly, monthly, json, csv, quiet)?,
+        } => run_monitor(
+            interval, daily, weekly, monthly, json, breakdown, csv, quiet,
+        )?,
         Commands::Doctor => {
             let report = llmtrim::doctor::gather();
             print!("{}", llmtrim::doctor::render(ui::color_stdout(), &report));
@@ -1825,9 +1834,13 @@ fn overview_data(tracker: &Tracker) -> llmtrim::breakdown::app::OverviewData {
 }
 
 /// Merge the per-source breakdown (every session + corpus-wide per-source cost) into a
-/// `status --json` string. No-op when the breakdown feature is off or no data exists yet,
-/// so the JSON shape is a superset of the prior one (additive `breakdown` key).
-fn merge_breakdown_json(s: String) -> String {
+/// `status --json` string. No-op unless `--breakdown` is given (the section aggregates
+/// the full ledger history, which is expensive on a large DB) and the breakdown feature
+/// is built in with data present; the `breakdown` key is purely additive when emitted.
+fn merge_breakdown_json(s: String, include: bool) -> String {
+    if !include {
+        return s;
+    }
     #[cfg(feature = "breakdown")]
     if let Some(bd) = llmtrim::breakdown::export::breakdown_json() {
         // A parse failure here means a regression upstream in the status JSON — surface it
@@ -1876,6 +1889,7 @@ fn run_monitor(
     weekly: bool,
     monthly: bool,
     json: bool,
+    breakdown: bool,
     csv: bool,
     quiet: bool,
 ) -> Result<()> {
@@ -1912,7 +1926,7 @@ fn run_monitor(
                 &rows,
                 Some(&daemon),
             );
-            println!("{}", merge_breakdown_json(out));
+            println!("{}", merge_breakdown_json(out, breakdown));
         } else {
             print!(
                 "{}",
@@ -1933,7 +1947,7 @@ fn run_monitor(
             let daemon = daemon_view(&tracker.summary()?);
             println!(
                 "{}",
-                merge_breakdown_json(monitor::stats_json(&tracker, Some(&daemon))?)
+                merge_breakdown_json(monitor::stats_json(&tracker, Some(&daemon))?, breakdown)
             );
         }
         return Ok(());
@@ -2021,6 +2035,26 @@ mod tests {
             Commands::Monitor { watch, .. } => assert!(watch),
             _ => panic!("expected status to parse as the Monitor command"),
         }
+    }
+
+    // The heavy per-source `breakdown` object is opt-in: without `--breakdown`, `status --json`
+    // must not run the full-history aggregation, so the merge is a no-op that returns the input
+    // untouched (the common consumers — health badge, savings % — never read that section).
+    #[test]
+    fn breakdown_section_is_omitted_unless_requested() {
+        let base = r#"{"daemon":{"running":true}}"#.to_string();
+        assert_eq!(merge_breakdown_json(base.clone(), false), base);
+    }
+
+    // The flag only makes sense with `--json`; clap must reject it on its own.
+    #[test]
+    fn breakdown_flag_requires_json() {
+        assert!(
+            Cli::try_parse_from(["llmtrim", "status", "--breakdown"]).is_err(),
+            "--breakdown without --json must be rejected"
+        );
+        Cli::try_parse_from(["llmtrim", "status", "--json", "--breakdown"])
+            .expect("status --json --breakdown must parse");
     }
 
     fn scratch_dir(tag: &str) -> PathBuf {
