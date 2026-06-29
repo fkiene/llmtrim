@@ -378,7 +378,7 @@ fn render_header(color: bool, d: &DaemonView) -> String {
                 color,
                 Tone::Warn,
                 &format!(
-                    "  {} daemon is v{v}, binary is v{} — restart to update: llmtrim stop && llmtrim start\n",
+                    "  {} daemon is v{v}, binary is v{} — restart to update: llmtrim start --force\n",
                     ui::WARN, d.binary_version
                 ),
             ));
@@ -1876,7 +1876,7 @@ mod tests {
             },
         );
         assert!(out.contains("daemon is v0.0.9, binary is v0.1.0"));
-        assert!(out.contains("llmtrim stop && llmtrim start"));
+        assert!(out.contains("llmtrim start --force"));
 
         let out = render_header(
             false,

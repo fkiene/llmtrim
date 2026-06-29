@@ -9,6 +9,9 @@ All notable changes to this project are documented here. The format follows
 ### Changed
 - **`llmtrim status` opens the live dashboard directly on a TTY.** The `--watch` flag is now a hidden no-op, kept so existing scripts keep working.
 
+### Fixed
+- **Restart-to-update hints now point at `llmtrim start --force` everywhere.** The stale-version banner in `status`/`doctor` and the Homebrew/Cargo note in INSTALL.md previously suggested `llmtrim stop && llmtrim start` or `llmtrim setup`; the latter does not restart a healthy daemon already on the right port, so it could leave the old binary running after an update. All three now match what `llmtrim update` actually runs.
+
 ## [0.4.0] - 2026-06-28
 
 ### Added

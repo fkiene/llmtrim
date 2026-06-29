@@ -126,7 +126,7 @@ llmtrim update
 
 - **Binary** (`curl | sh`): re-runs the installer to fetch the latest release, then restarts.
 - **Cargo / Homebrew**: prints the right command (`cargo install --locked llmtrim --force` /
-  `brew upgrade fkiene/tap/llmtrim`), then run `llmtrim setup` to restart the daemon on it.
+  `brew upgrade fkiene/tap/llmtrim`), then run `llmtrim start --force` to restart the daemon on it.
 
 `status` shows a one-line notice when a newer release exists (checked at most once a day,
 cached; set `LLMTRIM_NO_UPDATE_CHECK=1` to disable, and it's skipped offline). Pin a version
