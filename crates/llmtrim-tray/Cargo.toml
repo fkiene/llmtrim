@@ -1,0 +1,35 @@
+[package]
+name = "llmtrim-tray"
+description = "System-tray app showing per-agent compression savings (macOS + Windows)."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+homepage.workspace = true
+license.workspace = true
+publish = false
+
+[[bin]]
+name = "llmtrim-tray"
+path = "src/main.rs"
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+llmtrim-ledger = { path = "../llmtrim-ledger", version = "0.5.0-dev" }
+# image-png: required for Image::from_bytes to decode the embedded PNG tray icon.
+tauri = { version = "2", features = ["tray-icon", "image-png"] }
+tauri-plugin-positioner = { version = "2", features = ["tray-icon"] }
+anyhow = "1"
+chrono = "0.4"
+# Parse the CLI's `status --json` to read the authoritative `daemon.running` flag.
+# Proxy liveness is runtime state (pidfile + port probe), never stored in the ledger DB,
+# so it can't be read from SQLite like the savings figures are.
+serde_json.workspace = true
+
+# Tauri macro-generated scaffolding contains `unsafe` blocks, so this crate cannot
+# inherit the workspace `unsafe_code = "forbid"`. Re-declare lints here without it,
+# mirroring crates/llmtrim-uniffi/Cargo.toml.
+[lints.rust]
+warnings = "deny"

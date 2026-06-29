@@ -1,0 +1,154 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="400" height="520" viewBox="0 0 400 520" role="img" aria-label="llmtrim desktop tray popover showing aggregate and per-agent savings">
+  <title>llmtrim tray popover</title>
+  <defs>
+    <!-- header glow: radial-gradient(120% 80% at 50% -10%, var(-hero-glow), transparent) -->
+    <radialGradient id="heroGlow" cx="50%" cy="-10%" r="80%">
+      <stop offset="0%" stop-color="#34e0a1" stop-opacity="0.10"/>
+      <stop offset="60%" stop-color="#34e0a1" stop-opacity="0"/>
+    </radialGradient>
+    <!-- brand mark: linear-gradient(135deg, -accent, -accent-deep) -->
+    <linearGradient id="markGrad" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#34e0a1"/>
+      <stop offset="100%" stop-color="#1fbf8a"/>
+    </linearGradient>
+    <!-- meter fill: linear-gradient(90deg, -accent-deep, -accent) -->
+    <linearGradient id="meterGrad" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0%" stop-color="#1fbf8a"/>
+      <stop offset="100%" stop-color="#34e0a1"/>
+    </linearGradient>
+    <!-- sparkline area fill: accent 0.28 -> 0 -->
+    <linearGradient id="sparkGrad" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#34e0a1" stop-opacity="0.28"/>
+      <stop offset="100%" stop-color="#34e0a1" stop-opacity="0"/>
+    </linearGradient>
+    <filter id="popShadow" x="-30%" y="-30%" width="160%" height="160%">
+      <feDropShadow dx="0" dy="14" stdDeviation="22" flood-color="#000000" flood-opacity="0.45"/>
+    </filter>
+    <clipPath id="panelClip">
+      <rect x="20" y="20" width="360" height="480" rx="16"/>
+    </clipPath>
+  </defs>
+
+  <!-- neutral backdrop -->
+  <rect x="0" y="0" width="400" height="520" fill="#1b1d22"/>
+
+  <!-- popover panel -->
+  <rect x="20" y="20" width="360" height="480" rx="16" fill="#0b0d12" stroke="rgba(255,255,255,0.12)" stroke-width="1" filter="url(#popShadow)"/>
+
+  <g clip-path="url(#panelClip)">
+    <!-- app background base + hero glow -->
+    <rect x="20" y="20" width="360" height="480" fill="#0b0d12"/>
+    <rect x="20" y="20" width="360" height="220" fill="url(#heroGlow)"/>
+
+    <!-- text styles use the system sans stack; tabular numerals where the UI sets them -->
+    <style>
+      text { font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif; }
+      .wordmark { font-size:13px; font-weight:600; letter-spacing:0.26px; fill:#b3bbc9; }
+      .heroPct  { font-size:38px; font-weight:700; letter-spacing:-1.1px; fill:#34e0a1; }
+      .heroSub  { font-size:12.5px; fill:#8a92a3; }
+      .cardName { font-size:14px; font-weight:600; fill:#f2f4f8; }
+      .cardWhen { font-size:11px; fill:#8a92a3; }
+      .cardPct  { font-size:17px; font-weight:600; letter-spacing:-0.3px; fill:#f2f4f8; }
+      .cardTag  { font-size:10.5px; fill:#8a92a3; }
+      .statVal  { font-size:13px; font-weight:600; fill:#b3bbc9; }
+      .statLbl  { font-size:11px; letter-spacing:0.5px; fill:#8a92a3; }
+      .countdown{ font-size:11.5px; fill:#8a92a3; }
+      .interval { font-size:11.5px; fill:#b3bbc9; }
+      .quit     { font-size:11.5px; font-weight:600; fill:#f2f4f8; }
+    </style>
+
+    <!-- ================= HEADER ================= -->
+    <!-- brand: mark (12x12, r4) + wordmark -->
+    <rect x="38" y="36" width="12" height="12" rx="4" fill="url(#markGrad)"/>
+    <text class="wordmark" x="58" y="46">llmtrim</text>
+    <!-- hero: big saved-% + subtitle, baseline aligned -->
+    <text class="heroPct" x="38" y="94">64%</text>
+    <text class="heroSub" x="120" y="94">trimmed · $6.41 billed</text>
+    <!-- header border-bottom -->
+    <line x1="20" y1="112" x2="380" y2="112" stroke="rgba(255,255,255,0.07)" stroke-width="1"/>
+
+    <!-- ================= CARD 1: Claude Code ================= -->
+    <g transform="translate(32,124)">
+      <rect x="0" y="0" width="336" height="99" rx="14" fill="#14171f" stroke="rgba(255,255,255,0.07)" stroke-width="1"/>
+      <text class="cardName" x="12" y="25">Claude Code</text>
+      <text class="cardWhen" x="324" y="25" text-anchor="end">2 minutes ago</text>
+      <!-- savings meter (track + fill) -->
+      <rect x="12" y="44" width="238" height="7" rx="3.5" fill="rgba(255,255,255,0.07)"/>
+      <rect x="12" y="44" width="162" height="7" rx="3.5" fill="url(#meterGrad)"/>
+      <text class="cardPct" x="324" y="52" text-anchor="end">68%</text>
+      <text class="cardTag" x="288" y="52" text-anchor="end">saved</text>
+      <!-- stats -->
+      <text class="statVal" x="12" y="78">$4.12</text>
+      <text class="statLbl" x="12" y="91">BILLED</text>
+      <text class="statVal" x="78" y="78">12.3K</text>
+      <text class="statLbl" x="78" y="91">CACHE READS</text>
+      <!-- sparkline (96x28) -->
+      <g transform="translate(228,69)">
+        <polygon points="2,26 2,18 21.6,21 41.2,12 60.8,15 80.4,6 93.4,8 94,26" fill="url(#sparkGrad)"/>
+        <polyline points="2,18 21.6,21 41.2,12 60.8,15 80.4,6 93.4,8" fill="none" stroke="#34e0a1" stroke-width="1.6" stroke-linejoin="round" stroke-linecap="round"/>
+        <circle cx="93.4" cy="8" r="1.8" fill="#34e0a1"/>
+      </g>
+    </g>
+
+    <!-- ================= CARD 2: Codex ================= -->
+    <g transform="translate(32,233)">
+      <rect x="0" y="0" width="336" height="99" rx="14" fill="#14171f" stroke="rgba(255,255,255,0.07)" stroke-width="1"/>
+      <text class="cardName" x="12" y="25">Codex</text>
+      <text class="cardWhen" x="324" y="25" text-anchor="end">11 minutes ago</text>
+      <rect x="12" y="44" width="238" height="7" rx="3.5" fill="rgba(255,255,255,0.07)"/>
+      <rect x="12" y="44" width="129" height="7" rx="3.5" fill="url(#meterGrad)"/>
+      <text class="cardPct" x="324" y="52" text-anchor="end">54%</text>
+      <text class="cardTag" x="288" y="52" text-anchor="end">saved</text>
+      <text class="statVal" x="12" y="78">$1.87</text>
+      <text class="statLbl" x="12" y="91">BILLED</text>
+      <text class="statVal" x="78" y="78">4.8K</text>
+      <text class="statLbl" x="78" y="91">CACHE READS</text>
+      <g transform="translate(228,69)">
+        <polygon points="2,26 2,14 21.6,17 41.2,10 60.8,16 80.4,11 93.4,13 94,26" fill="url(#sparkGrad)"/>
+        <polyline points="2,14 21.6,17 41.2,10 60.8,16 80.4,11 93.4,13" fill="none" stroke="#34e0a1" stroke-width="1.6" stroke-linejoin="round" stroke-linecap="round"/>
+        <circle cx="93.4" cy="13" r="1.8" fill="#34e0a1"/>
+      </g>
+    </g>
+
+    <!-- ================= CARD 3: Gemini ================= -->
+    <g transform="translate(32,342)">
+      <rect x="0" y="0" width="336" height="99" rx="14" fill="#14171f" stroke="rgba(255,255,255,0.07)" stroke-width="1"/>
+      <text class="cardName" x="12" y="25">Gemini</text>
+      <text class="cardWhen" x="324" y="25" text-anchor="end">1 hour ago</text>
+      <rect x="12" y="44" width="238" height="7" rx="3.5" fill="rgba(255,255,255,0.07)"/>
+      <rect x="12" y="44" width="169" height="7" rx="3.5" fill="url(#meterGrad)"/>
+      <text class="cardPct" x="324" y="52" text-anchor="end">71%</text>
+      <text class="cardTag" x="288" y="52" text-anchor="end">saved</text>
+      <text class="statVal" x="12" y="78">$0.42</text>
+      <text class="statLbl" x="12" y="91">BILLED</text>
+      <text class="statVal" x="78" y="78">980</text>
+      <text class="statLbl" x="78" y="91">CACHE READS</text>
+      <g transform="translate(228,69)">
+        <polygon points="2,26 2,16 21.6,9 41.2,13 60.8,7 80.4,10 93.4,5 94,26" fill="url(#sparkGrad)"/>
+        <polyline points="2,16 21.6,9 41.2,13 60.8,7 80.4,10 93.4,5" fill="none" stroke="#34e0a1" stroke-width="1.6" stroke-linejoin="round" stroke-linecap="round"/>
+        <circle cx="93.4" cy="5" r="1.8" fill="#34e0a1"/>
+      </g>
+    </g>
+
+    <!-- ================= FOOTER ================= -->
+    <rect x="20" y="452" width="360" height="48" fill="rgba(11,13,18,0.7)"/>
+    <line x1="20" y1="452" x2="380" y2="452" stroke="rgba(255,255,255,0.07)" stroke-width="1"/>
+    <text class="countdown" x="34" y="480">Next update in 23s</text>
+
+    <!-- interval select (pill) -->
+    <rect x="192" y="463" width="78" height="26" rx="13" fill="#14171f" stroke="rgba(255,255,255,0.07)" stroke-width="1"/>
+    <text class="interval" x="203" y="480">Every 30s</text>
+    <path d="M252 474 l4 4 l4 -4" fill="none" stroke="#8a92a3" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/>
+
+    <!-- gear settings icon button (28x28) -->
+    <rect x="278" y="462" width="28" height="28" rx="14" fill="#14171f" stroke="rgba(255,255,255,0.07)" stroke-width="1"/>
+    <g transform="translate(292,476)" stroke="#b3bbc9" stroke-width="1.4" fill="none" stroke-linecap="round" stroke-linejoin="round">
+      <circle cx="0" cy="0" r="2.6"/>
+      <path d="M0 -6.2 L0 -4.2 M0 4.2 L0 6.2 M-6.2 0 L-4.2 0 M4.2 0 L6.2 0 M-4.4 -4.4 L-3 -3 M3 3 L4.4 4.4 M4.4 -4.4 L3 -3 M-3 3 L-4.4 4.4"/>
+    </g>
+
+    <!-- quit button (pill) -->
+    <rect x="314" y="463" width="52" height="26" rx="13" fill="#14171f" stroke="rgba(255,255,255,0.07)" stroke-width="1"/>
+    <text class="quit" x="340" y="480" text-anchor="middle">Quit</text>
+  </g>
+</svg>

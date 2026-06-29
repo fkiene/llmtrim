@@ -1,0 +1,6 @@
+---
+source: crates/llmtrim-ledger/src/breakdown_db.rs
+assertion_line: 1
+expression: out
+---
+session=sess-a agent=claude-code turns=2 bill_micros=2000

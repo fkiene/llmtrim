@@ -3,13 +3,25 @@ resolver = "3"
 members = [
   "crates/llmtrim-core",
   "crates/llmtrim-cli",
+  "crates/llmtrim-ledger",
+  "crates/llmtrim-uniffi",
+  "crates/llmtrim-wasm",
+  "crates/llmtrim-tray",
+]
+# Bare `cargo build/check/test` skips the Tauri crate (it needs webkit2gtk / WKWebView
+# which aren't present on Linux CI). The tray is compiled only by `cargo build -p
+# llmtrim-tray` or the dedicated tray.yml CI workflow.
+default-members = [
+  "crates/llmtrim-core",
+  "crates/llmtrim-cli",
+  "crates/llmtrim-ledger",
   "crates/llmtrim-uniffi",
   "crates/llmtrim-wasm",
 ]
 
 # Shared package metadata — inherited by each member via `field.workspace = true`.
 [workspace.package]
-version = "0.4.1-dev"
+version = "0.5.0-dev"
 edition = "2024"
 rust-version = "1.88"
 repository = "https://github.com/fkiene/llmtrim"

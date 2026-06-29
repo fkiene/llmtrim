@@ -1,0 +1,20 @@
+{
+  "$schema": "https://schemas.tauri.app/config/v2/capability.json",
+  "identifier": "main",
+  "description": "Capability for the llmtrim tray popover window. Explicit allowlist only — no shell/fs/http/updater/os/clipboard/global-shortcut permissions.",
+  "windows": ["popover"],
+  "permissions": [
+    "core:app:default",
+    "core:event:default",
+    "core:window:allow-hide",
+    "core:window:allow-is-visible",
+    "allow-get-dashboard",
+    "allow-get-agent-trend",
+    "allow-set-poll-interval",
+    "allow-start-proxy",
+    "allow-stop-proxy",
+    "allow-get-tray-autostart",
+    "allow-set-tray-autostart",
+    "allow-quit"
+  ]
+}

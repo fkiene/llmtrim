@@ -1,0 +1,44 @@
+---
+source: crates/llmtrim-ledger/src/dashboard.rs
+expression: json
+---
+{
+  "cards": [
+    {
+      "agent": "claude-code",
+      "display_name": "Claude Code",
+      "input_before": 10000,
+      "input_after": 4000,
+      "saved_pct": 60.0,
+      "has_savings_data": true,
+      "bill_micros": 500000,
+      "cache_read_tokens": 3000,
+      "trend": [
+        55.0,
+        60.0,
+        58.0
+      ],
+      "last_event_ts": "2024-06-01T10:00:00+00:00"
+    },
+    {
+      "agent": "codex",
+      "display_name": "Codex",
+      "input_before": 0,
+      "input_after": 0,
+      "saved_pct": 0.0,
+      "has_savings_data": false,
+      "bill_micros": 100000,
+      "cache_read_tokens": 0,
+      "trend": [],
+      "last_event_ts": "2024-06-01T09:00:00+00:00"
+    }
+  ],
+  "totals": {
+    "input_before": 10000,
+    "input_after": 4000,
+    "saved_pct": 60.0,
+    "bill_micros": 600000
+  },
+  "generated_at": "2024-06-01T10:05:00+00:00",
+  "next_update_secs": 30
+}

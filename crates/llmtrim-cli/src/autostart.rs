@@ -246,6 +246,173 @@ fn configure_auto_launch(enable: bool, port: u16) -> Result<()> {
     Ok(())
 }
 
+// ── Tray autostart ───────────────────────────────────────────────────────────
+//
+// A *second*, independent login entry that launches the desktop tray GUI
+// (`llmtrim-tray`), separate from the daemon entry above so a user can run one
+// without the other. Same per-OS backends (HKCU Run value / XDG `.desktop` /
+// launchd agent), keyed by a distinct name so the two never collide.
+
+/// Enable (or disable) launching the tray app at login. Errors if enabling when
+/// the tray binary isn't installed (a plain `cargo install` on a headless box).
+pub fn configure_tray(enable: bool) -> Result<()> {
+    let exe = crate::tray::tray_binary();
+    if enable && exe.is_none() {
+        anyhow::bail!(
+            "the llmtrim tray app isn't installed — install the desktop bundle before \
+             enabling tray autostart"
+        );
+    }
+    #[cfg(windows)]
+    {
+        configure_tray_windows(enable, exe.as_deref())
+    }
+    #[cfg(target_os = "linux")]
+    {
+        let home = std::env::var("HOME")
+            .context("HOME is not set — cannot determine XDG autostart directory")?;
+        configure_tray_in(enable, exe.as_deref(), std::path::Path::new(&home))
+    }
+    #[cfg(all(not(windows), not(target_os = "linux")))]
+    {
+        configure_tray_auto_launch(enable, exe.as_deref())
+    }
+}
+
+/// Is launch-tray-at-login currently enabled? Read-only probe, mirrors
+/// [`is_enabled`] but for the tray entry. `false` on any read failure.
+pub fn is_tray_enabled() -> bool {
+    #[cfg(windows)]
+    {
+        use winreg::RegKey;
+        use winreg::enums::{HKEY_CURRENT_USER, KEY_READ};
+        RegKey::predef(HKEY_CURRENT_USER)
+            .open_subkey_with_flags(RUN_KEY, KEY_READ)
+            .and_then(|key| key.get_value::<String, _>(VALUE_NAME_TRAY))
+            .is_ok()
+    }
+    #[cfg(target_os = "linux")]
+    {
+        std::env::var("HOME")
+            .map(|home| is_tray_enabled_in(std::path::Path::new(&home)))
+            .unwrap_or(false)
+    }
+    #[cfg(all(not(windows), not(target_os = "linux")))]
+    {
+        let Some(exe) = crate::tray::tray_binary() else {
+            return false;
+        };
+        let path = exe.to_string_lossy();
+        auto_launch::AutoLaunchBuilder::new()
+            .set_app_name("llmtrim-tray")
+            .set_app_path(path.as_ref())
+            .build()
+            .and_then(|auto| auto.is_enabled())
+            .unwrap_or(false)
+    }
+}
+
+#[cfg(windows)]
+const VALUE_NAME_TRAY: &str = "llmtrim-tray";
+
+#[cfg(windows)]
+fn configure_tray_windows(enable: bool, exe: Option<&std::path::Path>) -> Result<()> {
+    use winreg::RegKey;
+    use winreg::enums::{HKEY_CURRENT_USER, KEY_READ, KEY_WRITE};
+
+    let (key, _) = RegKey::predef(HKEY_CURRENT_USER)
+        .create_subkey_with_flags(RUN_KEY, KEY_READ | KEY_WRITE)
+        .with_context(|| format!("failed to open HKCU\\{RUN_KEY}"))?;
+    if enable {
+        // The tray is a windowless GUI exe (no console to hide), so just its path.
+        let exe = exe.context("the llmtrim tray app isn't installed")?;
+        let cmd = format!("\"{}\"", exe.display());
+        key.set_value(VALUE_NAME_TRAY, &cmd)
+            .context("failed to set llmtrim-tray autostart in the registry Run key")?;
+    } else {
+        // A missing value is fine (idempotent disable).
+        let _ = key.delete_value(VALUE_NAME_TRAY);
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn tray_desktop_entry(exe: &std::path::Path) -> String {
+    // XDG Desktop Entry spec: a literal `%` in Exec must be doubled (`%%`), and a
+    // path with spaces must be quoted or it parses as program + arguments. Escape
+    // `%` first, then wrap the whole path in double quotes.
+    let path = exe.to_string_lossy().replace('%', "%%");
+    format!(
+        "[Desktop Entry]\n\
+         Type=Application\n\
+         Version=1.0\n\
+         Name=llmtrim tray\n\
+         Comment=llmtrim compression savings tray\n\
+         Exec=\"{path}\"\n\
+         StartupNotify=false\n\
+         Terminal=false"
+    )
+}
+
+/// Inner seam for the Linux tray entry: write/remove the `.desktop` file under
+/// `base`. Tested with a temp dir and an explicit `exe` path.
+#[cfg(target_os = "linux")]
+fn configure_tray_in(
+    enable: bool,
+    exe: Option<&std::path::Path>,
+    base: &std::path::Path,
+) -> Result<()> {
+    let dir = xdg_autostart_dir(base);
+    let file = dir.join("llmtrim-tray.desktop");
+
+    if enable {
+        let exe = exe.context("the llmtrim tray app isn't installed")?;
+        std::fs::create_dir_all(&dir)
+            .with_context(|| format!("failed to create {}", dir.display()))?;
+        std::fs::write(&file, tray_desktop_entry(exe))
+            .with_context(|| format!("failed to write {}", file.display()))?;
+    } else if file.exists() {
+        std::fs::remove_file(&file)
+            .with_context(|| format!("failed to remove {}", file.display()))?;
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn is_tray_enabled_in(base: &std::path::Path) -> bool {
+    xdg_autostart_dir(base)
+        .join("llmtrim-tray.desktop")
+        .exists()
+}
+
+#[cfg(all(not(windows), not(target_os = "linux")))]
+fn configure_tray_auto_launch(enable: bool, exe: Option<&std::path::Path>) -> Result<()> {
+    use auto_launch::AutoLaunchBuilder;
+
+    // auto-launch keys the launchd label off the app name; the path only matters
+    // when enabling. On disable the tray may not be installed (no `exe`), so we
+    // pass an empty path to build the handle, then probe `is_enabled` before
+    // calling `disable` — that avoids relying on the library accepting a synthetic
+    // path, and keeps disable an idempotent no-op when nothing was registered.
+    let path = exe
+        .map(|p| p.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let auto = AutoLaunchBuilder::new()
+        .set_app_name("llmtrim-tray")
+        .set_app_path(&path)
+        .build()
+        .map_err(|e| anyhow::anyhow!("failed to configure tray autostart: {e}"))?;
+
+    if enable {
+        auto.enable()
+            .map_err(|e| anyhow::anyhow!("failed to enable tray autostart: {e}"))?;
+    } else if auto.is_enabled().unwrap_or(false) {
+        auto.disable()
+            .map_err(|e| anyhow::anyhow!("failed to disable tray autostart: {e}"))?;
+    }
+    Ok(())
+}
+
 #[cfg(all(test, target_os = "linux"))]
 mod tests {
     use super::*;
@@ -355,6 +522,54 @@ mod tests {
 
     #[cfg(target_os = "linux")]
     #[test]
+    fn configure_tray_in_writes_and_removes_distinct_desktop_file() {
+        let dir = TempDir::new("tray");
+        let base = dir.path();
+        let exe = PathBuf::from("/usr/local/bin/llmtrim-tray");
+
+        configure_tray_in(true, Some(&exe), base).expect("enable tray");
+        let file = base
+            .join(".config")
+            .join("autostart")
+            .join("llmtrim-tray.desktop");
+        assert!(file.exists(), "tray .desktop not created");
+
+        let content = std::fs::read_to_string(&file).expect("read tray .desktop");
+        assert!(content.contains("Name=llmtrim tray"), "missing tray Name=");
+        assert!(
+            content.contains("Exec=\"/usr/local/bin/llmtrim-tray\""),
+            "missing tray Exec="
+        );
+        // The daemon entry must be untouched by the tray entry.
+        assert!(
+            !base
+                .join(".config")
+                .join("autostart")
+                .join("llmtrim.desktop")
+                .exists(),
+            "tray enable should not create the daemon entry"
+        );
+
+        configure_tray_in(false, None, base).expect("disable tray");
+        assert!(!file.exists(), "tray .desktop still present after disable");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn is_tray_enabled_in_tracks_configure_tray_in() {
+        let dir = TempDir::new("tray-probe");
+        let base = dir.path();
+        let exe = PathBuf::from("/usr/local/bin/llmtrim-tray");
+
+        assert!(!is_tray_enabled_in(base), "fresh home → tray not enabled");
+        configure_tray_in(true, Some(&exe), base).expect("enable tray");
+        assert!(is_tray_enabled_in(base), "tray enabled after configure");
+        configure_tray_in(false, None, base).expect("disable tray");
+        assert!(!is_tray_enabled_in(base), "tray disabled after remove");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
     fn configure_in_remove_when_absent_is_ok_noop() {
         let dir = TempDir::new("remove-absent");
         let base = dir.path();
@@ -368,5 +583,31 @@ mod tests {
             .join("autostart")
             .join("llmtrim.desktop");
         assert!(!file.exists(), ".desktop file should not exist");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn configure_tray_in_remove_when_absent_is_ok() {
+        let dir = TempDir::new("tray-remove-absent");
+        let base = dir.path();
+
+        // `uninstall` disables the tray even on a machine that never had it.
+        // Disabling without ever enabling must be an Ok no-op.
+        configure_tray_in(false, None, base).expect("disable tray when absent must be Ok");
+        assert!(
+            !is_tray_enabled_in(base),
+            "no tray .desktop after no-op disable"
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn tray_desktop_entry_quotes_and_escapes_exec_path() {
+        // Paths with spaces or `%` must survive the XDG Exec= parser.
+        let entry = tray_desktop_entry(std::path::Path::new("/opt/my apps/llmtrim-tray %v"));
+        assert!(
+            entry.contains("Exec=\"/opt/my apps/llmtrim-tray %%v\""),
+            "Exec line not quoted/escaped: {entry}"
+        );
     }
 }

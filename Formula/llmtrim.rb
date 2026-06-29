@@ -15,6 +15,18 @@ class Llmtrim < Formula
     # fall back to "." — the formula then installs any tagged version, old or new.
     crate = File.directory?("crates/llmtrim-cli") ? "crates/llmtrim-cli" : "."
     system "cargo", "install", *std_cargo_args(path: crate)
+
+    # The desktop tray (llmtrim-tray) is a separate member, present only on tagged
+    # post-split tarballs and built from source like the CLI. The committed frontend
+    # dist/ ships in the tarball, so the build needs no Node toolchain. macOS only:
+    # it uses WKWebView (a system framework), so no extra deps are needed, whereas
+    # Linuxbrew would need WebKitGTK + AppIndicator at link time (not declared here);
+    # Linux users get the tray from the GitHub Release asset instead.
+    if File.directory?("crates/llmtrim-tray")
+      on_macos do
+        system "cargo", "install", *std_cargo_args(path: "crates/llmtrim-tray")
+      end
+    end
   end
 
   test do

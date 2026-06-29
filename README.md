@@ -163,6 +163,14 @@ npm install -g @llmtrim/cli@latest && llmtrim setup
 llmtrim status
 ```
 
+Prefer a GUI? The desktop tray app puts per-agent savings in your menu bar (macOS),
+system tray (Windows), or AppIndicator (Linux). `setup` offers to install it, or run
+`llmtrim tray` yourself. It ships in the Homebrew, Scoop, and npm packages; on Linux
+download `llmtrim-tray` from the [latest release](https://github.com/fkiene/llmtrim/releases)
+(needs `libwebkit2gtk-4.1` and `libayatana-appindicator3`).
+
+<p align="center"><img src="crates/llmtrim-tray/docs/popover.svg" alt="llmtrim tray popover" width="320"></p>
+
 **No Node?** Use an installer instead:
 
 ```bash

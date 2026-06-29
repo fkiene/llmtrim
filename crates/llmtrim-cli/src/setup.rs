@@ -444,6 +444,27 @@ pub fn run(requested: Option<u16>, force: bool) -> Result<()> {
         Err(e) => rows.push((ui::WARN, "Autostart".into(), format!("not enabled: {e}"))),
     }
 
+    // 3b. Desktop tray. Only offered when the GUI binary is installed next to the
+    //     CLI (the desktop bundles ship it; a headless `cargo install` doesn't),
+    //     which is also how "only on a desktop OS" is enforced. Default is on;
+    //     `--force` / a non-interactive setup take that default without asking.
+    if crate::tray::tray_binary().is_some() {
+        let want = force || confirm_tray_default_yes();
+        match crate::autostart::configure_tray(want) {
+            Ok(()) if want => rows.push((
+                ui::OK,
+                "Tray".into(),
+                "opens at login · run `llmtrim tray` to open now".into(),
+            )),
+            Ok(()) => rows.push((
+                ui::OK,
+                "Tray".into(),
+                "left disabled · enable later with `llmtrim autostart --tray`".into(),
+            )),
+            Err(e) => rows.push((ui::WARN, "Tray".into(), format!("not enabled: {e}"))),
+        }
+    }
+
     // 4. Reconcile the interceptor. If a healthy daemon is already serving the resolved port,
     //    leave it running — re-running `setup` must not drop in-flight requests (the old code
     //    stopped + respawned unconditionally on every run). Restart only when the port is
@@ -601,6 +622,25 @@ pub fn run(requested: Option<u16>, force: bool) -> Result<()> {
     Ok(())
 }
 
+/// Ask whether to enable the desktop tray, defaulting to yes. Returns `true`
+/// (the default) without asking when stdin isn't a terminal, so a scripted
+/// `setup` stays non-interactive and still enables the tray.
+fn confirm_tray_default_yes() -> bool {
+    use std::io::{IsTerminal, Write};
+    if !std::io::stdin().is_terminal() {
+        return true;
+    }
+    print!("Enable the llmtrim desktop tray (opens at login)? [Y/n] ");
+    let _ = std::io::stdout().flush();
+    let mut line = String::new();
+    if std::io::stdin().read_line(&mut line).is_err() {
+        // The prompt couldn't be completed (broken pipe, closed stdin). Decline
+        // rather than enable an optional component the user never confirmed.
+        return false;
+    }
+    !matches!(line.trim().to_ascii_lowercase().as_str(), "n" | "no")
+}
+
 /// Best-effort caveman detection: the flag file its session hook writes, its standalone
 /// hook files, or a Claude Code plugin-cache entry. Read-only probes; any I/O failure
 /// reads as "not installed" — setup must never fail because of someone else's tool.
@@ -677,6 +717,17 @@ pub fn uninstall(purge: bool, keep_binary: bool) -> Result<()> {
     match crate::autostart::configure(false, DEFAULT_PORT) {
         Ok(()) => rows.push((ui::OK, "Autostart".into(), "disabled".into())),
         Err(e) => rows.push((ui::WARN, "Autostart".into(), format!("not changed: {e}"))),
+    }
+
+    // 2b. Disable the tray's separate login entry too, so uninstall leaves nothing
+    //     that revives a GUI at next login.
+    match crate::autostart::configure_tray(false) {
+        Ok(()) => rows.push((ui::OK, "Tray autostart".into(), "disabled".into())),
+        Err(e) => rows.push((
+            ui::WARN,
+            "Tray autostart".into(),
+            format!("not changed: {e}"),
+        )),
     }
 
     // 3. Remove the interceptor env. Windows: the `HKCU\Environment` values (plus any legacy

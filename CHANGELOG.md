@@ -6,6 +6,17 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+- **A desktop tray app shows per-agent savings at a glance.** A menu-bar (macOS),
+  system-tray (Windows), or AppIndicator (Linux) popover reports llmtrim's aggregate
+  compression savings, a per-agent breakdown, and a savings trend, refreshed on a
+  configurable interval. It reads the same ledger the proxy writes and exposes only
+  aggregate numbers. Start and stop the proxy and enable launch-at-login from the
+  tray or from the CLI (`llmtrim tray`, `llmtrim setup`). It ships in the Homebrew,
+  Scoop, and npm packages alongside the CLI; the Linux build is a separate download
+  on the GitHub Release and needs `libwebkit2gtk-4.1` and `libayatana-appindicator3`.
+- **`llmtrim setup` offers to install the tray** and to enable launch-at-login for it.
+
 ### Changed
 - **`llmtrim status` opens the live dashboard directly on a TTY.** The `--watch` flag is now a hidden no-op, kept so existing scripts keep working.
 

@@ -37,7 +37,10 @@ path = "src/main.rs"
 [dependencies]
 # `version` is required for `cargo publish` (path alone isn't publishable) and is kept in
 # lockstep with llmtrim-core by cargo-release's shared-version on every bump.
-llmtrim-core = { path = "../llmtrim-core", version = "0.4.1-dev" }
+llmtrim-core = { path = "../llmtrim-core", version = "0.5.0-dev" }
+# Published alongside core (see release.yml publish order). `version` is required
+# for `cargo publish` and is kept in lockstep by cargo-release's shared-version.
+llmtrim-ledger = { path = "../llmtrim-ledger", version = "0.5.0-dev" }
 anyhow.workspace = true
 chrono = "0.4.45"
 clap = { version = "4.6.1", features = ["derive"] }
@@ -46,7 +49,6 @@ dotenvy = "0.15.7"
 once_cell.workspace = true
 owo-colors = "4.3.0"
 regex.workspace = true
-rusqlite = { version = "0.39", features = ["bundled"] }
 serde.workspace = true
 serde_json.workspace = true
 statrs = "0.18.0"
@@ -112,6 +114,7 @@ crossterm = { version = "0.28", optional = true }
 # the server through an in-memory client, which needs rmcp's `client` side. Dev-only —
 # the shipped binary keeps just the server features above.
 [dev-dependencies]
+insta = "1"
 rmcp = { version = "1.7", default-features = false, features = ["client", "transport-io"] }
 
 [target.'cfg(not(windows))'.dependencies]

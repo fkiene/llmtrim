@@ -49,6 +49,7 @@ Get started:
   setup      Set everything up and start saving (CA, env, autostart, daemon)
   status     Show the savings dashboard + interceptor health  [aliases: monitor, gain]
   wrap       Launch an agent (claude, codex, …) routed through the interceptor
+  tray       Open the desktop tray app (savings menu-bar / system-tray)
 
 Daemon:
   start      Start the background interceptor (no-op if already running)
@@ -257,7 +258,21 @@ enum Commands {
         /// nothing pinned falls back to the default port).
         #[arg(long)]
         port: Option<u16>,
+        /// Configure the desktop tray app's autostart instead of the daemon's.
+        /// `--port` is ignored with `--tray`.
+        #[arg(long)]
+        tray: bool,
+        /// Print whether autostart is currently enabled (`enabled`/`disabled`)
+        /// and exit without changing anything. Combine with `--tray` for the
+        /// tray entry. Scriptable: used by the tray's settings panel.
+        #[arg(long)]
+        status: bool,
     },
+    /// Open the desktop tray app (compression savings menu-bar / system-tray)
+    ///
+    /// Launches the bundled `llmtrim-tray` GUI. Installed by the desktop bundles
+    /// (npm / Homebrew); not built by a plain headless `cargo install`.
+    Tray,
     /// Print the local CA certificate path and how to trust it
     ///
     /// Generates the CA on first run. Required once before `serve` can intercept
@@ -720,8 +735,33 @@ fn run() -> Result<()> {
                 std::process::exit(1);
             }
         }
-        Commands::Autostart { off, port } => {
+        Commands::Tray => llmtrim::tray::run()?,
+        Commands::Autostart {
+            off,
+            port,
+            tray,
+            status,
+        } => {
             let color = ui::color_stdout();
+            if status {
+                let enabled = if tray {
+                    llmtrim::autostart::is_tray_enabled()
+                } else {
+                    llmtrim::autostart::is_enabled()
+                };
+                println!("{}", if enabled { "enabled" } else { "disabled" });
+                return Ok(());
+            }
+            if tray {
+                llmtrim::autostart::configure_tray(!off)?;
+                let msg = if off {
+                    "Tray autostart disabled."
+                } else {
+                    "Tray autostart enabled — the llmtrim tray opens at login."
+                };
+                println!("{}", ui::ok(color, msg));
+                return Ok(());
+            }
             if off {
                 // Port is unused when disabling; pass the default to match `uninstall`.
                 llmtrim::autostart::configure(false, llmtrim::setup::DEFAULT_PORT)?;

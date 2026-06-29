@@ -20,6 +20,7 @@ pub mod serve;
 pub mod setup;
 pub mod tracking;
 pub mod transport;
+pub mod tray;
 pub mod ui;
 pub mod update;
 pub mod wrap;

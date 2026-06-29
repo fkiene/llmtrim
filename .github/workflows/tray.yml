@@ -1,0 +1,93 @@
+name: Tray app
+
+# The Tauri tray app is excluded from the workspace default-members, so the main
+# CI (ci.yml) never compiles it. This workflow is its dedicated gate: it builds
+# the app on the three platforms it ships to (macOS, Windows, Linux). It is deliberately
+# NOT a required status check and is wholly separate from release.yml, so a tray
+# failure can never block the crates.io / npm release of the core + CLI.
+on:
+  push:
+    branches: [main, master]
+    paths:
+      - 'crates/llmtrim-tray/**'
+      - 'crates/llmtrim-ledger/**'
+      - '.github/workflows/tray.yml'
+  pull_request:
+    paths:
+      - 'crates/llmtrim-tray/**'
+      - 'crates/llmtrim-ledger/**'
+      - '.github/workflows/tray.yml'
+
+concurrency:
+  group: tray-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: "0"
+
+jobs:
+  build:
+    name: Build (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, windows-latest, ubuntu-latest]
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        working-directory: crates/llmtrim-tray
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 1
+      # Linux GUI build needs the WebKitGTK webview + AppIndicator tray libs;
+      # macOS/Windows ship their webview with the OS.
+      - name: Install Linux GUI dependencies
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libgtk-3-dev \
+            libayatana-appindicator3-dev librsvg2-dev patchelf
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+      - uses: Swatinem/rust-cache@v2
+        with:
+          # The Tauri build is its own artifact set; keep it off the ci.yml caches.
+          shared-key: tray-${{ matrix.os }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: crates/llmtrim-tray/package-lock.json
+      # Build the frontend first: tauri-build embeds `frontendDist` (./dist) into the
+      # binary at compile time, so dist/ must exist before any cargo build.
+      - name: Build frontend
+        run: |
+          npm ci
+          npm run build
+      # The committed dist/ is what Homebrew compiles from (no Node step on the user's
+      # machine), so it must match a fresh build of src-ui/. Check on Linux only — one
+      # platform is enough and avoids CRLF false positives. Rebuilt dist uses stable,
+      # hash-free names (vite.config.ts), so a clean tree means it is in sync.
+      - name: Verify committed dist is fresh
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          git diff --exit-code -- dist || {
+            echo "committed dist/ is stale; run 'npm run build' in crates/llmtrim-tray and commit dist/"
+            exit 1
+          }
+      - name: Rustfmt
+        run: cargo fmt -p llmtrim-tray -- --check
+      # No `-- -D warnings`: the crate's [lints.rust] warnings = "deny" already fails on
+      # any warning, and the extra flag would only fork the build cache (see CLAUDE.md).
+      - name: Clippy
+        run: cargo clippy -p llmtrim-tray --all-targets
+      # Compile the app (icons, capabilities and tauri.conf are all processed by the
+      # tauri-build script here). Bundling/codesigning is left to the release flow.
+      - name: Build
+        run: cargo build -p llmtrim-tray --release

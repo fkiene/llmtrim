@@ -472,7 +472,10 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: docs
-      - run: cargo doc --no-deps --all-features --workspace
+      # Exclude llmtrim-tray: the Tauri app needs webkit2gtk/WKWebView system libs
+      # that aren't installed on this runner, and it's publish=false (never on docs.rs).
+      # Its docs are covered by the dedicated tray.yml workflow.
+      - run: cargo doc --no-deps --all-features --workspace --exclude llmtrim-tray
 
   # API-compatibility gate for the two published crates. They share one version and ship
   # together, so an accidental breaking change in a patch/minor would break downstreams.
