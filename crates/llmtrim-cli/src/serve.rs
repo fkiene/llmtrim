@@ -1607,7 +1607,8 @@ mod imp {
                     since_prune += 1;
                     if since_prune >= PRUNE_EVERY {
                         since_prune = 0;
-                        let _ = tracker.prune_breakdown(crate::tracking::DEFAULT_MAX_ROWS);
+                        let _ = tracker
+                            .prune_breakdown(crate::tracking::Tracker::breakdown_turns_cap());
                     }
                 }
             }

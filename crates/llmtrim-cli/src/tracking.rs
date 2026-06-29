@@ -239,6 +239,18 @@ impl Summary {
 /// metadata only (~100 bytes), so this bounds the file to roughly 10-15 MB.
 pub const DEFAULT_MAX_ROWS: i64 = 100_000;
 
+/// Retention cap for the per-source breakdown, in *turns*. A turn fans out into one
+/// `breakdown_blocks` row per source (hundreds in agent traffic), so the block table grows
+/// far faster than `compressions` and needs its own cap — reusing `DEFAULT_MAX_ROWS` here let
+/// the blocks table reach millions of rows and made `status --json` aggregate a
+/// multi-hundred-MB join on every call.
+///
+/// The expensive aggregate is now opt-in (`status --json --breakdown`), so the cap no longer
+/// governs the hot path — it only bounds disk. We keep it generous to preserve a long history
+/// for the breakdown TUI; the file scales with usage (heavy agent traffic at this cap can reach
+/// a few hundred MB to ~1 GB).
+pub const DEFAULT_MAX_BREAKDOWN_TURNS: i64 = 50_000;
+
 pub struct Tracker {
     conn: Connection,
 }
@@ -263,6 +275,10 @@ impl Tracker {
         // Bound the ledger on open: row cap + (if configured) age retention. The daemon
         // opens once and re-prunes periodically (see serve.rs); CLI paths prune per call.
         let _ = tracker.prune_default();
+        // Also bound the per-source breakdown here, not just in the daemon's write loop, so a
+        // restart immediately reclaims a table that grew unbounded under an older build (it
+        // checkpoints the WAL when it deletes). A no-op COUNT once the table is within cap.
+        let _ = tracker.prune_breakdown(Self::breakdown_turns_cap());
         Ok(tracker)
     }
 
@@ -458,11 +474,21 @@ impl Tracker {
         Ok(deleted)
     }
 
-    /// Prune with the default policy: the built-in row cap ([`DEFAULT_MAX_ROWS`]) plus the
-    /// configured age retention (`LLMTRIM_RETENTION_DAYS` env or `retention_days` in the
-    /// config file; `None` = age retention disabled, row cap only).
+    /// Prune with the default policy: the configured row cap (`LLMTRIM_MAX_ROWS` env or `max_rows`
+    /// in the config file, default [`DEFAULT_MAX_ROWS`]) plus the configured age retention
+    /// (`LLMTRIM_RETENTION_DAYS` env or `retention_days` in the config file; `None` = age
+    /// retention disabled, row cap only).
     pub fn prune_default(&self) -> Result<u64> {
-        self.prune(DEFAULT_MAX_ROWS, llmtrim_core::config::retention_days())
+        self.prune(
+            llmtrim_core::config::max_rows().unwrap_or(DEFAULT_MAX_ROWS),
+            llmtrim_core::config::retention_days(),
+        )
+    }
+
+    /// The effective breakdown retention cap: the configured value (`LLMTRIM_MAX_BREAKDOWN_TURNS`
+    /// env or `max_breakdown_turns` in the config file) or [`DEFAULT_MAX_BREAKDOWN_TURNS`].
+    pub fn breakdown_turns_cap() -> i64 {
+        llmtrim_core::config::max_breakdown_turns().unwrap_or(DEFAULT_MAX_BREAKDOWN_TURNS)
     }
 
     pub fn record(&self, r: &Record) -> Result<()> {
@@ -565,8 +591,11 @@ impl Tracker {
         Ok(turn_id)
     }
 
-    /// Cap the breakdown tables to the most recent `max_turns` turns, deleting the blocks of any
-    /// dropped turn. Mirrors the `compressions` row cap so the always-on daemon stays bounded.
+    /// Cap the breakdown tables to the most recent `max_turns` *turns* (not rows — each turn owns
+    /// many `breakdown_blocks`), deleting the blocks of any dropped turn. Runs from both the daemon
+    /// write loop and `Tracker::open()`, so any CLI invocation can trigger it; turns beyond the cap
+    /// are deleted permanently. Mirrors the `compressions` row cap so the always-on daemon stays
+    /// bounded.
     pub fn prune_breakdown(&self, max_turns: i64) -> Result<u64> {
         let n: i64 = self
             .conn
@@ -589,6 +618,16 @@ impl Tracker {
                 params![max_turns],
             )
             .context("failed to cap-prune breakdown turns")? as u64;
+        // Deleting the bulk of `breakdown_blocks` writes a large volume to the WAL; without a
+        // checkpoint the WAL file grows unbounded (it reached ~700 MB in the wild) even as the
+        // logical row count shrinks. TRUNCATE checkpoints and resets the WAL to zero. Best-effort
+        // and only when we actually pruned, so the steady state stays cheap. Note TRUNCATE no-ops
+        // (returns SQLITE_BUSY, swallowed here) while another connection holds the WAL open — so a
+        // CLI prune only compacts the file when the daemon is stopped; otherwise the daemon's own
+        // prune loop does it.
+        if deleted > 0 {
+            let _ = self.conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);");
+        }
         Ok(deleted)
     }
 
@@ -1204,6 +1243,40 @@ mod tests {
             .query_row("PRAGMA busy_timeout", [], |r| r.get(0))
             .unwrap();
         assert!(timeout >= 2000, "busy_timeout set (got {timeout})");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn open_at_prunes_breakdown_without_dropping_in_cap_history() {
+        // open_at() runs the breakdown prune on every open (so a restart self-heals a table that
+        // grew under an older build). Exercise that path against a real on-disk DB: seed turns
+        // under the cap, reopen, and confirm the open-time prune is a safe no-op that keeps the
+        // full history. The over-cap deletion arm is covered by
+        // `prune_breakdown_caps_turns_and_orphan_blocks`; we can't drive the cap below the seed
+        // here because the cap comes from the process-wide RuntimeConfig cache.
+        let dir = std::env::temp_dir().join(format!("llmtrim_bd_open_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("t.db");
+        {
+            let t = Tracker::open_at(&path).expect("open file ledger");
+            for i in 0..5 {
+                t.record_breakdown(
+                    &breakdown_turn(&format!("s{i}")),
+                    &[breakdown_block("System prompt", 10)],
+                )
+                .unwrap();
+            }
+        }
+        // Reopen: this is the path that runs prune_breakdown(breakdown_turns_cap()).
+        let t = Tracker::open_at(&path).expect("reopen file ledger");
+        let turns: i64 = t
+            .conn
+            .query_row("SELECT COUNT(*) FROM breakdown_turns", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(
+            turns, 5,
+            "history within the cap survives the open-time prune"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
