@@ -502,6 +502,10 @@ pub(crate) const RUNTIME_ONLY_KEYS: &[&str] = &[
 /// `LLMTRIM_HOME` (base dir resolved before config loads), `LLMTRIM_PROFILE` (dev timing
 /// toggle), `LLMTRIM_VERSION` (internal updater handoff). None are persistable user settings.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
+// Constructed only inside this crate (`resolve`/`load`); every other crate just reads fields
+// off `RuntimeConfig::get()`. Marking it non-exhaustive keeps adding a new setting a
+// non-breaking change instead of tripping cargo-semver-checks' `constructible_struct_adds_field`.
+#[non_exhaustive]
 pub struct RuntimeConfig {
     /// Extra exact LLM-API hosts to intercept beyond the built-in registry. Env
     /// `LLMTRIM_EXTRA_HOSTS` (comma-separated) replaces the file `extra_hosts` array.
