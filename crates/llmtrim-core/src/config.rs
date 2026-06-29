@@ -536,6 +536,14 @@ pub struct RuntimeConfig {
     /// Ledger age-retention in days (env `LLMTRIM_RETENTION_DAYS` / file `retention_days`);
     /// positive only (`None` = age retention off, row cap alone bounds the ledger).
     pub retention_days: Option<i64>,
+    /// Ledger row cap — most-recent N compression events kept (env `LLMTRIM_MAX_ROWS` / file
+    /// `max_rows`); positive only (`None` = use the built-in default).
+    pub max_rows: Option<i64>,
+    /// Retention cap for the per-source breakdown, in *turns* (env `LLMTRIM_MAX_BREAKDOWN_TURNS`
+    /// / file `max_breakdown_turns`); positive only (`None` = use the built-in default). A turn
+    /// fans out into many block rows, so this is the knob that governs breakdown-history depth
+    /// and on-disk size.
+    pub max_breakdown_turns: Option<i64>,
     /// Breakdown-TUI color theme (env `LLMTRIM_THEME` / file `theme`); a Catppuccin flavor
     /// name (`mocha`/`macchiato`/`frappe`/`latte`). The `t` key persists the user's choice
     /// here via [`save_theme`]. The TUI validates the name and falls back to its default.
@@ -606,6 +614,16 @@ impl RuntimeConfig {
                 env_set("LLMTRIM_RETENTION_DAYS")
                     .and_then(|s| s.trim().parse::<i64>().ok())
                     .or_else(|| fint("retention_days")),
+            ),
+            max_rows: positive(
+                env_set("LLMTRIM_MAX_ROWS")
+                    .and_then(|s| s.trim().parse::<i64>().ok())
+                    .or_else(|| fint("max_rows")),
+            ),
+            max_breakdown_turns: positive(
+                env_set("LLMTRIM_MAX_BREAKDOWN_TURNS")
+                    .and_then(|s| s.trim().parse::<i64>().ok())
+                    .or_else(|| fint("max_breakdown_turns")),
             ),
             theme: env_set("LLMTRIM_THEME").or_else(|| fstr("theme")),
         }
@@ -788,47 +806,14 @@ pub fn retention_days() -> Option<i64> {
     RuntimeConfig::get().retention_days
 }
 
-/// Resolve a positive integer setting from the environment (first) then the config file,
-/// rejecting non-positive values (`<= 0` → `None`). Kept off [`RuntimeConfig`] and read on
-/// demand so the published struct's field set (and so its public API) stays stable; these caps
-/// are only consulted at prune time, not in any hot path.
-fn resolve_positive_int(
-    env: impl Fn(&str) -> Option<String>,
-    file: Option<&toml::Value>,
-    env_key: &str,
-    file_key: &str,
-) -> Option<i64> {
-    env(env_key)
-        .filter(|s| !s.is_empty())
-        .and_then(|s| s.trim().parse::<i64>().ok())
-        .or_else(|| {
-            file.and_then(|v| v.get(file_key))
-                .and_then(toml::Value::as_integer)
-        })
-        .filter(|n| *n > 0)
-}
-
-/// Configured ledger row cap (env `LLMTRIM_MAX_ROWS` / file `max_rows`), or `None` to fall back
-/// to the caller's built-in default. Positive only.
+/// Configured ledger row cap, or `None` to fall back to the caller's built-in default.
 pub fn max_rows() -> Option<i64> {
-    resolve_positive_int(
-        |k| std::env::var(k).ok(),
-        cached_config_file(),
-        "LLMTRIM_MAX_ROWS",
-        "max_rows",
-    )
+    RuntimeConfig::get().max_rows
 }
 
-/// Configured breakdown retention cap in turns (env `LLMTRIM_MAX_BREAKDOWN_TURNS` / file
-/// `max_breakdown_turns`), or `None` to fall back to the built-in default. Positive only; a turn
-/// fans out into many block rows, so this is the knob that governs breakdown-history depth.
+/// Configured breakdown retention cap (in turns), or `None` to fall back to the built-in default.
 pub fn max_breakdown_turns() -> Option<i64> {
-    resolve_positive_int(
-        |k| std::env::var(k).ok(),
-        cached_config_file(),
-        "LLMTRIM_MAX_BREAKDOWN_TURNS",
-        "max_breakdown_turns",
-    )
+    RuntimeConfig::get().max_breakdown_turns
 }
 
 #[cfg(test)]
@@ -1063,7 +1048,9 @@ mod tests {
             no_update_check = false\n\
             bind = \"127.0.0.1\"\n\
             capture_max_mb = 10\n\
-            retention_days = 7\n";
+            retention_days = 7\n\
+            max_rows = 1000\n\
+            max_breakdown_turns = 100\n";
         let c = resolve_env(
             &[
                 ("LLMTRIM_UPSTREAM_PROXY", "http://env:8080"),
@@ -1073,6 +1060,8 @@ mod tests {
                 ("LLMTRIM_BIND", "0.0.0.0"),
                 ("LLMTRIM_CAPTURE_MAX_MB", "99"),
                 ("LLMTRIM_RETENTION_DAYS", "14"),
+                ("LLMTRIM_MAX_ROWS", "2000"),
+                ("LLMTRIM_MAX_BREAKDOWN_TURNS", "200"),
             ],
             file,
         );
@@ -1083,39 +1072,25 @@ mod tests {
         assert_eq!(c.bind.as_deref(), Some("0.0.0.0"));
         assert_eq!(c.capture_max_mb, Some(99));
         assert_eq!(c.retention_days, Some(14));
+        assert_eq!(c.max_rows, Some(2000));
+        assert_eq!(c.max_breakdown_turns, Some(200));
     }
 
-    /// `resolve_positive_int` (backing `max_rows` / `max_breakdown_turns`) takes env over file,
-    /// parses both sources, and rejects non-positive values.
+    /// The two retention caps parse from env/file and reject non-positive values, like
+    /// `retention_days`.
     #[test]
-    fn positive_int_resolves_env_over_file_and_rejects_nonpositive() {
-        let file: toml::Value = toml::from_str("max_rows = 1000\n").unwrap();
-        let f = Some(&file);
-
-        // env wins over file
+    fn row_caps_parse_positive_only() {
+        assert_eq!(resolve_file("max_rows = 5000").max_rows, Some(5000));
+        assert_eq!(resolve_file("max_rows = 0").max_rows, None);
+        assert_eq!(resolve_file("max_rows = -1").max_rows, None);
         assert_eq!(
-            resolve_positive_int(
-                |k| (k == "LLMTRIM_MAX_ROWS").then(|| "2000".to_string()),
-                f,
-                "LLMTRIM_MAX_ROWS",
-                "max_rows",
-            ),
-            Some(2000)
+            resolve_file("max_breakdown_turns = 100000").max_breakdown_turns,
+            Some(100_000)
         );
-        // file used when env absent
         assert_eq!(
-            resolve_positive_int(|_| None, f, "LLMTRIM_MAX_ROWS", "max_rows"),
-            Some(1000)
+            resolve_file("max_breakdown_turns = 0").max_breakdown_turns,
+            None
         );
-        // non-positive (and missing) collapse to None
-        for src in ["max_rows = 0", "max_rows = -1", "hygiene = true"] {
-            let v: toml::Value = toml::from_str(src).unwrap();
-            assert_eq!(
-                resolve_positive_int(|_| None, Some(&v), "LLMTRIM_MAX_ROWS", "max_rows"),
-                None,
-                "{src}"
-            );
-        }
     }
 
     #[test]
