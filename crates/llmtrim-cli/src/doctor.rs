@@ -242,7 +242,7 @@ pub fn build(s: &State) -> Report {
             ui::WARN,
             "version".into(),
             format!(
-                "daemon is v{v}, binary is v{} — restart to update: llmtrim stop && llmtrim start",
+                "daemon is v{v}, binary is v{} — restart to update: llmtrim start --force",
                 s.binary_version
             ),
         ));
