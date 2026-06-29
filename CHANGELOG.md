@@ -6,6 +6,8 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-06-29
+
 ### Added
 - **Ledger retention is now configurable.** Two new settings cap how much history llmtrim keeps: `max_rows` (env `LLMTRIM_MAX_ROWS`) for the compression event ledger and `max_breakdown_turns` (env `LLMTRIM_MAX_BREAKDOWN_TURNS`) for the per-source cost breakdown. Both take a positive integer and fall back to the built-in defaults when unset. Raise `max_breakdown_turns` to keep a deeper breakdown history at the cost of a larger database file.
 
@@ -666,7 +668,8 @@ bill, never a broken call.
   (6 targets with SLSA build provenance), CI on Linux/macOS/Windows with secret
   scanning, license compliance, and MSRV gates.
 
-[Unreleased]: https://github.com/fkiene/llmtrim/compare/v0.4.0...HEAD
+[Unreleased]: https://github.com/fkiene/llmtrim/compare/v0.5.0...HEAD
+[0.5.0]: https://github.com/fkiene/llmtrim/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/fkiene/llmtrim/compare/v0.3.2...v0.4.0
 [0.3.2]: https://github.com/fkiene/llmtrim/compare/v0.3.1...v0.3.2
 [0.3.1]: https://github.com/fkiene/llmtrim/compare/v0.3.0...v0.3.1
