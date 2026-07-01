@@ -77,10 +77,12 @@ unicode-segmentation = "1.13.3"
 whatlang = "0.18.0"
 
 # wasm32 needs the JS-backed getrandom: 0.2 (via gaoya→rand) takes the `js` feature; 0.3
-# (via ahash) takes `wasm_js` plus `--cfg getrandom_backend="wasm_js"` in RUSTFLAGS.
+# (via ahash) and 0.4 (via newer gaoya→rand) take `wasm_js` plus
+# `--cfg getrandom_backend="wasm_js"` in RUSTFLAGS.
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 getrandom_02 = { package = "getrandom", version = "0.2", features = ["js"] }
 getrandom_03 = { package = "getrandom", version = "0.3", features = ["wasm_js"] }
+getrandom_04 = { package = "getrandom", version = "0.4", features = ["wasm_js"] }
 
 [features]
 default = ["skeleton", "tiktoken", "multimodal"]
