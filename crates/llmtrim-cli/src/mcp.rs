@@ -38,7 +38,7 @@ mod imp {
 
     use anyhow::{Context, Result};
     use rmcp::handler::server::wrapper::Parameters;
-    use rmcp::model::{CallToolResult, Content};
+    use rmcp::model::{CallToolResult, ContentBlock};
     use rmcp::{
         ErrorData as McpError, ServerHandler, ServiceExt, schemars, tool, tool_handler,
         tool_router, transport::stdio,
@@ -165,7 +165,7 @@ mod imp {
         ) -> Result<CallToolResult, McpError> {
             let tracker = self.tracker().map_err(internal)?;
             let stats = crate::monitor::stats_json(&tracker, None).map_err(internal)?;
-            Ok(CallToolResult::success(vec![Content::text(stats)]))
+            Ok(CallToolResult::success(vec![ContentBlock::text(stats)]))
         }
     }
 
@@ -335,7 +335,7 @@ mod imp {
     }
 
     fn ok_json(payload: &Value) -> Result<CallToolResult, McpError> {
-        Ok(CallToolResult::success(vec![Content::text(
+        Ok(CallToolResult::success(vec![ContentBlock::text(
             payload.to_string(),
         )]))
     }

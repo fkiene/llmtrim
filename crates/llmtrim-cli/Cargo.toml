@@ -95,7 +95,7 @@ llm_providers = { version = "0.14", optional = true }
 time = { version = ">=0.3.36, <0.3.48", default-features = false, optional = true }
 # MCP server over stdio (`mcp`). rmcp is the official Model Context Protocol Rust SDK;
 # `transport-io` is the stdio transport, `macros` derives each tool's JSON Schema.
-rmcp = { version = "1.7", default-features = false, features = [
+rmcp = { version = "2.0", default-features = false, features = [
   "server",
   "macros",
   "transport-io",
@@ -112,7 +112,7 @@ crossterm = { version = "0.28", optional = true }
 # the server through an in-memory client, which needs rmcp's `client` side. Dev-only —
 # the shipped binary keeps just the server features above.
 [dev-dependencies]
-rmcp = { version = "1.7", default-features = false, features = ["client", "transport-io"] }
+rmcp = { version = "2.0", default-features = false, features = ["client", "transport-io"] }
 
 [target.'cfg(not(windows))'.dependencies]
 auto-launch = "0.6.0"
