@@ -16,7 +16,7 @@ jobs:
   dco:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
         with:
           # Need the full PR commit range, not just the tip.
           fetch-depth: 0

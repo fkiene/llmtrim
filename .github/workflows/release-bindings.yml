@@ -44,7 +44,7 @@ jobs:
       run:
         shell: bash   # the build scripts are bash — force Git Bash on Windows
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
       - uses: actions/setup-python@v6
         with:
@@ -65,7 +65,7 @@ jobs:
         run: |
           pip install target/wheels/llmtrim-*.whl
           pytest crates/llmtrim-uniffi/tests/python -q
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: wheel-${{ matrix.target }}
           path: target/wheels/*.whl
@@ -78,7 +78,7 @@ jobs:
     permissions:
       id-token: write   # OIDC for Trusted Publishing — no stored token
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           pattern: wheel-*
           path: dist
@@ -104,7 +104,7 @@ jobs:
       run:
         shell: bash   # the build scripts are bash — force Git Bash on Windows
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
       - uses: ruby/setup-ruby@v1
         with:
@@ -118,7 +118,7 @@ jobs:
           # gem versions use X.Y.Z (no leading v).
           export LLMTRIM_VERSION="${LLMTRIM_VERSION#v}"
           crates/llmtrim-uniffi/scripts/build-gem.sh
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: gem-${{ matrix.target }}
           path: crates/llmtrim-uniffi/packaging/ruby/*.gem
@@ -134,12 +134,12 @@ jobs:
       - uses: ruby/setup-ruby@v1
         with:
           ruby-version: "3.3"
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           pattern: gem-*
           path: gems
           merge-multiple: true
-      - uses: rubygems/configure-rubygems-credentials@v1.0.0
+      - uses: rubygems/configure-rubygems-credentials@v2.1.0
       - run: |
           set -euo pipefail
           for g in gems/*.gem; do
@@ -164,7 +164,7 @@ jobs:
           - { os: windows-11-arm,   target: aarch64-pc-windows-msvc,   jna: win32-aarch64 }
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
       - name: Build release cdylib
         shell: bash
@@ -173,7 +173,7 @@ jobs:
           cargo build --release -p llmtrim-uniffi --target ${{ matrix.target }}
           mkdir out
           cp target/${{ matrix.target }}/release/{libllmtrim_ffi.so,libllmtrim_ffi.dylib,llmtrim_ffi.dll} out/ 2>/dev/null || true
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: native-${{ matrix.jna }}
           path: out/*
@@ -183,9 +183,9 @@ jobs:
     needs: kotlin-natives
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
-      - uses: actions/setup-java@v4
+      - uses: actions/setup-java@v5
         with:
           distribution: temurin
           java-version: "17"
@@ -196,7 +196,7 @@ jobs:
           cargo run -q --bin uniffi-bindgen -p llmtrim-uniffi -- \
             generate --library target/debug/libllmtrim_ffi.so --language kotlin \
             --out-dir crates/llmtrim-uniffi/packaging/kotlin/src/main/kotlin
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           pattern: native-*
           path: natives
@@ -236,7 +236,7 @@ jobs:
     outputs:
       checksum: ${{ steps.zip.outputs.checksum }}
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
       - name: Build the XCFramework
         run: crates/llmtrim-uniffi/scripts/build-xcframework.sh
@@ -285,7 +285,7 @@ jobs:
           fi
       - name: Checkout llmtrim-swift
         if: steps.gate.outputs.go == 'true'
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
         with:
           repository: fkiene/llmtrim-swift
           token: ${{ secrets.SWIFT_REPO_TOKEN }}

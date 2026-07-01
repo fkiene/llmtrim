@@ -21,7 +21,7 @@ jobs:
   create-release:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - name: Guard — tag matches Cargo.toml and CHANGELOG has the section
         run: |
           set -euo pipefail
@@ -48,7 +48,7 @@ jobs:
     needs: create-release
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - uses: actions/setup-python@v6
         with:
           python-version: '3.x'
@@ -59,7 +59,7 @@ jobs:
         run: cargo fetch --locked
       - name: Generate third-party license notice
         run: python3 tools/gen_third_party_licenses.py
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: third-party-licenses
           path: THIRD-PARTY-LICENSES.md
@@ -90,7 +90,7 @@ jobs:
             os: windows-11-arm
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       # aws-lc-rs assembles its x86 asm with NASM. Only x86_64 Windows needs it; the ARM64
       # runner uses a different assembler, and no arm64 NASM build exists.
       - name: Install NASM (Windows x64)
@@ -98,7 +98,7 @@ jobs:
         uses: ilammy/setup-nasm@v1
       # The NOTICE is generated once in the `license-notice` job (the same union for every
       # target) and pulled in here, so the archive can bundle it via `include` below.
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           name: third-party-licenses
           path: .
@@ -147,7 +147,7 @@ jobs:
     env:
       LLMTRIM_VERSION: ${{ github.ref_name }}
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - name: install.sh end-to-end
         if: runner.os != 'Windows'
         run: |
@@ -174,7 +174,7 @@ jobs:
     permissions:
       id-token: write # mint the OIDC token the auth action exchanges
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
       - uses: rust-lang/crates-io-auth-action@v1
         id: auth
@@ -211,7 +211,7 @@ jobs:
       packages: write
       contents: read
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - name: Stage released binaries per arch
         env:
           TAG: ${{ github.ref_name }}
@@ -221,14 +221,14 @@ jobs:
           mkdir -p binaries/amd64 binaries/arm64
           gh release download "$TAG" -p 'llmtrim-x86_64-unknown-linux-musl.tar.gz' -O - | tar -xz -C binaries/amd64 llmtrim
           gh release download "$TAG" -p 'llmtrim-aarch64-unknown-linux-gnu.tar.gz' -O - | tar -xz -C binaries/arm64 llmtrim
-      - uses: docker/setup-qemu-action@v3
-      - uses: docker/setup-buildx-action@v3
-      - uses: docker/login-action@v3
+      - uses: docker/setup-qemu-action@v4
+      - uses: docker/setup-buildx-action@v4
+      - uses: docker/login-action@v4
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
-      - uses: docker/build-push-action@v6
+      - uses: docker/build-push-action@v7
         with:
           context: .
           platforms: linux/amd64,linux/arm64
@@ -295,8 +295,8 @@ jobs:
     needs: build
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v6
         with:
           node-version: "22"
           registry-url: "https://registry.npmjs.org"
@@ -336,7 +336,7 @@ jobs:
     needs: create-release
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: wasm32-unknown-unknown
@@ -345,7 +345,7 @@ jobs:
           # Pinned so the bundled wasm-bindgen stays fixed; the CI `wasm` job derives its
           # wasm-bindgen-cli from Cargo.lock, so keep both in step when bumping either.
           tool: wasm-pack@0.13.1
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v6
         with:
           node-version: "22"
           registry-url: "https://registry.npmjs.org"
@@ -452,7 +452,7 @@ jobs:
     steps:
       # Need the repo's Formula/llmtrim.rb — it's the source of truth (incl. the
       # workspace-aware install method); the tap is just a stamped mirror of it.
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - name: Sync + stamp the tap formula
         env:
           TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}

@@ -51,10 +51,10 @@ jobs:
     outputs:
       code: ${{ steps.filter.outputs.code }}
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 1
-      - uses: dorny/paths-filter@v3
+      - uses: dorny/paths-filter@v4
         id: filter
         with:
           # `code` is true when the push/PR touches anything that is NOT a doc/asset.
@@ -97,7 +97,7 @@ jobs:
       RUN: ${{ needs.changes.outputs.code != 'false' }}
     steps:
       - if: ${{ env.RUN != 'false' }}
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
         with:
           fetch-depth: 1
       - if: ${{ env.RUN != 'false' }}
@@ -129,7 +129,7 @@ jobs:
       # !cancelled() so it still reports when the test step above failed (but not on cancel).
       - name: Annotate test results
         if: ${{ !cancelled() && env.RUN != 'false' }}
-        uses: mikepenz/action-junit-report@v5
+        uses: mikepenz/action-junit-report@v6
         with:
           # Glob (not a literal path) so it also matches Windows' backslash output.
           report_paths: "**/nextest/ci/junit.xml"
@@ -159,7 +159,7 @@ jobs:
     if: ${{ !cancelled() && needs.changes.outputs.code != 'false' }}
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 1
       - uses: dtolnay/rust-toolchain@stable
@@ -192,7 +192,7 @@ jobs:
     if: ${{ !cancelled() && needs.changes.outputs.code != 'false' }}
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 1
       - uses: dtolnay/rust-toolchain@stable
@@ -230,7 +230,7 @@ jobs:
     if: ${{ !cancelled() && needs.changes.outputs.code != 'false' }}
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 1
       - uses: dtolnay/rust-toolchain@stable
@@ -248,7 +248,7 @@ jobs:
       - uses: taiki-e/install-action@v2
         with:
           tool: wasm-bindgen-cli@${{ steps.wb.outputs.ver }}
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v6
         with:
           node-version: 20
       - name: Build for wasm32 + generate Node bindings
@@ -270,7 +270,7 @@ jobs:
     if: ${{ !cancelled() && needs.changes.outputs.code != 'false' }}
     runs-on: macos-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 1
       - uses: dtolnay/rust-toolchain@stable
@@ -299,14 +299,14 @@ jobs:
     if: ${{ !cancelled() && needs.changes.outputs.code != 'false' }}
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 1
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: kotlin-smoke
-      - uses: actions/setup-java@v4
+      - uses: actions/setup-java@v5
         with:
           distribution: temurin
           java-version: "17"
@@ -338,7 +338,7 @@ jobs:
     if: ${{ !cancelled() && needs.changes.outputs.code != 'false' }}
     runs-on: macos-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 1
       - uses: dtolnay/rust-toolchain@stable
@@ -365,7 +365,7 @@ jobs:
     if: ${{ !cancelled() && needs.changes.outputs.code != 'false' }}
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 1
       - uses: EmbarkStudios/cargo-deny-action@v2
@@ -379,7 +379,7 @@ jobs:
     name: Secret scan (gitleaks)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0
       - uses: gitleaks/gitleaks-action@v3
@@ -393,7 +393,7 @@ jobs:
     if: ${{ !cancelled() && needs.changes.outputs.code != 'false' }}
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 1
       - run: for f in Formula/*.rb; do ruby -c "$f"; done
@@ -406,7 +406,7 @@ jobs:
     if: ${{ !cancelled() && needs.changes.outputs.code != 'false' }}
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 1
       - uses: dtolnay/rust-toolchain@master
@@ -430,7 +430,7 @@ jobs:
     if: ${{ !cancelled() && needs.changes.outputs.code != 'false' }}
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 1
       - uses: dtolnay/rust-toolchain@stable
@@ -448,7 +448,7 @@ jobs:
       - name: Collect coverage
         run: cargo llvm-cov nextest --features intercept,mcp --lcov --output-path lcov.info
       - name: Upload to Codecov
-        uses: codecov/codecov-action@v5
+        uses: codecov/codecov-action@v7
         with:
           files: lcov.info
           fail_ci_if_error: false
@@ -465,7 +465,7 @@ jobs:
     env:
       RUSTDOCFLAGS: -D warnings
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 1
       - uses: dtolnay/rust-toolchain@stable
@@ -485,7 +485,7 @@ jobs:
     steps:
       # No fetch-depth limit: the action infers the required bump from the git tags, which a
       # shallow clone would omit.
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
         with:
@@ -506,7 +506,7 @@ jobs:
     if: ${{ !cancelled() && needs.changes.outputs.code != 'false' }}
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 1
       - uses: taiki-e/install-action@cargo-machete
@@ -520,7 +520,7 @@ jobs:
     if: ${{ !cancelled() && needs.changes.outputs.code != 'false' }}
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 1
       - uses: taiki-e/install-action@taplo
