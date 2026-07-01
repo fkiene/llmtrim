@@ -92,7 +92,7 @@ llm_providers = { version = "0.14", optional = true }
 # Not used directly — caps the transitive `time` (via hudsucker → rcgen) below 0.3.48,
 # whose new blanket impl collides with rcgen 0.14's `impl<T: Into<String>> From<T>`
 # (E0119), breaking un-`--locked` `cargo install`. Drop when rcgen ships a fix.
-time = { version = ">=0.3.36, <0.3.48", default-features = false, optional = true }
+time = { version = ">=0.3.36, <0.3.54", default-features = false, optional = true }
 # MCP server over stdio (`mcp`). rmcp is the official Model Context Protocol Rust SDK;
 # `transport-io` is the stdio transport, `macros` derives each tool's JSON Schema.
 rmcp = { version = "1.7", default-features = false, features = [
