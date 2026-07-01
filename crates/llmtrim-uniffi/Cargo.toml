@@ -22,7 +22,7 @@ path = "src/bin/uniffi-bindgen.rs"
 
 [dependencies]
 llmtrim-core = { path = "../llmtrim-core" }
-uniffi = { version = "0.31", features = ["cli"] }
+uniffi = { version = "0.32", features = ["cli"] }
 
 [dev-dependencies]
 serde_json.workspace = true
