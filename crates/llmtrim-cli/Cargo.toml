@@ -103,7 +103,7 @@ rmcp = { version = "1.7", default-features = false, features = [
 schemars = { version = "1", optional = true }
 # Interactive cost-breakdown TUI (`status`/`monitor` on a TTY). crossterm is the terminal
 # backend; ratatui draws the tabbed tree-tables.
-ratatui = { version = "0.29", default-features = false, features = ["crossterm"], optional = true }
+ratatui = { version = "0.30", default-features = false, features = ["crossterm"], optional = true }
 crossterm = { version = "0.28", optional = true }
 # Parse the existing ANSI-colored dashboard string into styled ratatui spans for the
 # Overview tab (so the hero box / gauges / sparkline keep their colors).
