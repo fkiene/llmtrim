@@ -100,10 +100,22 @@ body {
   border-bottom: 1px solid var(--border);
 }
 
+.header-top {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
 .brand {
   display: flex;
   align-items: center;
   gap: 8px;
+}
+
+/* Nudge the close button into the corner so it lines up with the padding edge. */
+.close-btn {
+  margin: -4px -4px 0 0;
 }
 
 .mark {

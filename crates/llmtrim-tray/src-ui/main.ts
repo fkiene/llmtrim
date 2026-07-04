@@ -1,5 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
+import { getCurrentWindow } from "@tauri-apps/api/window";
 
 import "./styles.css";
 import type { Dashboard } from "./types.js";
@@ -25,13 +26,43 @@ const app = document.getElementById("app");
 if (!app) throw new Error("missing #app root");
 const appRoot: HTMLElement = app;
 
+const SVG_NS = "http://www.w3.org/2000/svg";
+
+function closeIcon(): SVGSVGElement {
+  const svg = document.createElementNS(SVG_NS, "svg");
+  svg.setAttribute("viewBox", "0 0 24 24");
+  svg.setAttribute("width", "15");
+  svg.setAttribute("height", "15");
+  svg.setAttribute("fill", "none");
+  svg.setAttribute("stroke", "currentColor");
+  svg.setAttribute("stroke-width", "2");
+  svg.setAttribute("stroke-linecap", "round");
+  svg.setAttribute("stroke-linejoin", "round");
+  for (const d of ["M18 6 6 18", "M6 6l12 12"]) {
+    const p = document.createElementNS(SVG_NS, "path");
+    p.setAttribute("d", d);
+    svg.appendChild(p);
+  }
+  return svg;
+}
+
 const heroPct = el("span", { class: "hero-pct", "aria-live": "polite" }, ["—"]);
 const heroSub = el("span", { class: "hero-sub" }, ["of input trimmed"]);
 const mark = el("span", { class: "mark", "aria-hidden": "true" });
 const wordmark = el("span", { class: "wordmark" }, ["llmtrim"]);
 const brand = el("div", { class: "brand" }, [mark, wordmark]);
+
+// Close (hide) the popover. The window also auto-hides on blur; this is the
+// explicit affordance for dismissing it without clicking away.
+const closeBtn = el(
+  "button",
+  { class: "icon-btn close-btn", type: "button", "aria-label": "Hide window" },
+  [closeIcon()],
+);
+closeBtn.addEventListener("click", () => void getCurrentWindow().hide());
+
 const header = el("header", { class: "header" }, [
-  brand,
+  el("div", { class: "header-top" }, [brand, closeBtn]),
   el("div", { class: "hero" }, [heroPct, heroSub]),
 ]);
 
@@ -49,8 +80,6 @@ for (const secs of POLL_OPTIONS) {
 }
 intervalSelect.value = "30";
 intervalSelect.addEventListener("change", onIntervalChange);
-
-const SVG_NS = "http://www.w3.org/2000/svg";
 
 function gearIcon(): SVGSVGElement {
   const svg = document.createElementNS(SVG_NS, "svg");
