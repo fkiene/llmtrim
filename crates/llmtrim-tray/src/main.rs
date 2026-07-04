@@ -337,6 +337,12 @@ fn get_proxy_running() -> bool {
 
 fn main() {
     tauri::Builder::default()
+        // Must be registered first (Tauri guidance). A second launch — `y` in the
+        // status dashboard, `llmtrim tray`, or autostart racing a manual start —
+        // surfaces the existing popover instead of adding a duplicate tray icon.
+        .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
+            show_popover(app);
+        }))
         .plugin(tauri_plugin_positioner::init())
         .manage(Arc::new(Mutex::new(TrayState::default())))
         .manage(Arc::new(AtomicBool::new(false)))

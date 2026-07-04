@@ -12,7 +12,9 @@ All notable changes to this project are documented here. The format follows
   compression savings, a per-agent breakdown, and a savings trend, refreshed on a
   configurable interval. It reads the same ledger the proxy writes and exposes only
   aggregate numbers. Start and stop the proxy and enable launch-at-login from the
-  tray or from the CLI (`llmtrim tray`, `llmtrim setup`). It ships in the Homebrew,
+  tray or from the CLI (`llmtrim tray`, `llmtrim setup`). Launching it again — from the
+  dashboard, the CLI, or autostart — focuses the running instance instead of opening a
+  second icon. It ships in the Homebrew,
   Scoop, and npm packages alongside the CLI; the Linux build is a separate download
   on the GitHub Release and needs `libwebkit2gtk-4.1` and `libayatana-appindicator3`.
 - **`llmtrim setup` offers to install the tray** and to enable launch-at-login for it.

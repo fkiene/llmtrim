@@ -21,6 +21,7 @@ llmtrim-ledger = { path = "../llmtrim-ledger", version = "0.5.0-dev" }
 # image-png: required for Image::from_bytes to decode the embedded PNG tray icon.
 tauri = { version = "2", features = ["tray-icon", "image-png"] }
 tauri-plugin-positioner = { version = "2", features = ["tray-icon"] }
+tauri-plugin-single-instance = "2"
 anyhow = "1"
 chrono = "0.4"
 # Parse the CLI's `status --json` to read the authoritative `daemon.running` flag.
