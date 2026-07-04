@@ -371,6 +371,15 @@ fn main() {
                 .get_webview_window("popover")
                 .expect("popover window not found — check tauri.conf.json");
 
+            // Debug builds: open DevTools and show the window on start so the
+            // webview console is visible for diagnosing render failures. Compiled
+            // out of release builds.
+            #[cfg(debug_assertions)]
+            {
+                popover.open_devtools();
+                let _ = popover.show();
+            }
+
             // Auto-hide on blur (works on both macOS and Windows). Record the
             // dismiss time so the tray click that caused this blur doesn't
             // immediately re-open the window (see `toggle_popover`).
