@@ -3120,7 +3120,7 @@ dependencies = [
 
 [[package]]
 name = "llmtrim"
-version = "0.6.3-dev"
+version = "0.6.3"
 dependencies = [
  "anyhow",
  "async-openai",
@@ -3160,7 +3160,7 @@ dependencies = [
 
 [[package]]
 name = "llmtrim-core"
-version = "0.6.3-dev"
+version = "0.6.3"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -3201,7 +3201,7 @@ dependencies = [
 
 [[package]]
 name = "llmtrim-ledger"
-version = "0.6.3-dev"
+version = "0.6.3"
 dependencies = [
  "anyhow",
  "chrono",
@@ -3214,7 +3214,7 @@ dependencies = [
 
 [[package]]
 name = "llmtrim-tray"
-version = "0.6.3-dev"
+version = "0.6.3"
 dependencies = [
  "anyhow",
  "chrono",
@@ -3228,7 +3228,7 @@ dependencies = [
 
 [[package]]
 name = "llmtrim-uniffi"
-version = "0.6.3-dev"
+version = "0.6.3"
 dependencies = [
  "llmtrim-core",
  "serde_json",
@@ -3237,7 +3237,7 @@ dependencies = [
 
 [[package]]
 name = "llmtrim-wasm"
-version = "0.6.3-dev"
+version = "0.6.3"
 dependencies = [
  "llmtrim-core",
  "serde",

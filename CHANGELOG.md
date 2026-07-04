@@ -6,6 +6,8 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.6.3] - 2026-07-04
+
 ### Fixed
 - **The `llmtrim` and `llmtrim-ledger` crates on crates.io catch up to the current
   version.** The 0.6.2 crates.io publish stopped after `llmtrim-core` because
@@ -728,7 +730,8 @@ bill, never a broken call.
   (6 targets with SLSA build provenance), CI on Linux/macOS/Windows with secret
   scanning, license compliance, and MSRV gates.
 
-[Unreleased]: https://github.com/fkiene/llmtrim/compare/v0.6.2...HEAD
+[Unreleased]: https://github.com/fkiene/llmtrim/compare/v0.6.3...HEAD
+[0.6.3]: https://github.com/fkiene/llmtrim/compare/v0.6.2...v0.6.3
 [0.6.2]: https://github.com/fkiene/llmtrim/compare/v0.6.1...v0.6.2
 [0.6.1]: https://github.com/fkiene/llmtrim/compare/v0.6.0...v0.6.1
 [0.6.0]: https://github.com/fkiene/llmtrim/compare/v0.5.0...v0.6.0
