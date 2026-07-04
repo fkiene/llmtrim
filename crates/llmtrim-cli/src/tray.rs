@@ -52,6 +52,31 @@ pub fn run() -> Result<()> {
     Ok(())
 }
 
+/// Launch the tray as a detached background process, discarding its stdio. Meant
+/// for launching from inside the status dashboard: the terminal is in raw-mode
+/// alt-screen there, so any inherited child output would corrupt the display.
+/// A no-op (still `Ok`) when the tray isn't installed.
+pub fn launch_detached() -> Result<()> {
+    launch_detached_from(tray_binary())
+}
+
+/// Inner seam for [`launch_detached`], tested with an explicit path: given the resolved
+/// tray binary (or `None`), launch it detached or no-op.
+fn launch_detached_from(bin: Option<PathBuf>) -> Result<()> {
+    let Some(bin) = bin else {
+        return Ok(());
+    };
+    std::process::Command::new(&bin)
+        // Fully detach from the dashboard's terminal: a background GUI has no use for the
+        // parent's stdin, and inheriting it would leave a child holding the raw-mode TTY.
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .with_context(|| format!("failed to launch the tray app at {}", bin.display()))?;
+    Ok(())
+}
+
 /// Marker recording that the one-time "desktop tray is available" hint has been
 /// shown, so it appears at most once per install.
 const NUDGE_MARKER: &str = "tray-nudged";
@@ -125,6 +150,12 @@ mod tests {
         let dir = TempDir::new("dir-named-bin");
         std::fs::create_dir_all(dir.path().join(TRAY_BIN)).expect("create dir");
         assert!(resolve_tray_binary(dir.path()).is_none());
+    }
+
+    #[test]
+    fn launch_detached_is_a_no_op_when_not_installed() {
+        // No resolved binary: returns Ok without spawning anything.
+        assert!(launch_detached_from(None).is_ok());
     }
 
     #[test]

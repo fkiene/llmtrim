@@ -22,7 +22,8 @@ All notable changes to this project are documented here. The format follows
   the CLI, the first start prints a one-time hint to run `llmtrim tray`. Installs without
   the tray binary (a plain `cargo install`) stay silent.
 - **The `llmtrim status` dashboard opens the tray with `y`.** When the tray is installed, the
-  live dashboard shows a `y tray` action (in the footer and the `?` help) that launches it.
+  live dashboard shows a `y tray` action (in the footer and the `?` help) that launches it in
+  the background while the dashboard stays open.
 
 ### Changed
 - **`llmtrim status` opens the live dashboard directly on a TTY.** The `--watch` flag is now a hidden no-op, kept so existing scripts keep working.

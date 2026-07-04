@@ -2028,7 +2028,6 @@ fn run_monitor(
                         std::process::exit(1);
                     }
                 }
-                PostAction::Tray => llmtrim::tray::run()?,
                 PostAction::None => {}
             }
             return Ok(());

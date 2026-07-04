@@ -339,8 +339,6 @@ pub enum PostAction {
     Update,
     /// `u` on a stale daemon — restart it (`llmtrim start --force`) to load the new binary.
     Restart,
-    /// `y` — launch the desktop tray (`llmtrim tray`); only offered when it's installed.
-    Tray,
 }
 
 struct App {
@@ -467,11 +465,12 @@ impl App {
             KeyCode::Char('c') if self.tab == Tab::Overview => {
                 self.whole_prompt = !self.whole_prompt;
             }
-            // `y` launches the desktop tray after teardown (like `d`/`u`), only when it's
-            // installed — otherwise the key is inert and the hint is hidden.
+            // `y` launches the desktop tray, only when it's installed — otherwise the key is
+            // inert and the hint is hidden. The tray is its own window, so we launch it in the
+            // background and stay on the dashboard (best-effort: a failed spawn is swallowed
+            // rather than corrupting the alt-screen). Unlike `d`/`u`, this does not quit.
             KeyCode::Char('y') if self.tray_available => {
-                self.action = PostAction::Tray;
-                return true;
+                let _ = crate::tray::launch_detached();
             }
             KeyCode::Char('1') => self.tab = Tab::Overview,
             KeyCode::Char('2') => self.tab = Tab::Sessions,
@@ -2326,17 +2325,19 @@ mod tests {
     }
 
     #[test]
-    fn y_key_launches_the_tray_only_when_installed() {
-        // Not installed: `y` is inert and queues nothing.
+    fn y_key_opens_the_tray_without_quitting_when_installed() {
+        // Not installed: `y` is inert — no quit, no action.
         let mut app = App::new(None, Duration::from_secs(2));
         app.tray_available = false;
         assert!(!app.handle_key(KeyCode::Char('y')));
         assert_eq!(app.action, PostAction::None);
 
-        // Installed: `y` queues the tray launch and quits the TUI to run it.
+        // Installed: `y` launches the tray in the background and stays on the dashboard
+        // (returns false = no quit) without queuing a post-teardown action. The launch is
+        // best-effort — no sibling binary exists in tests, so it no-ops.
         app.tray_available = true;
-        assert!(app.handle_key(KeyCode::Char('y')));
-        assert_eq!(app.action, PostAction::Tray);
+        assert!(!app.handle_key(KeyCode::Char('y')));
+        assert_eq!(app.action, PostAction::None);
     }
 
     #[test]
