@@ -1,4 +1,20 @@
-import { defineConfig } from "vite";
+import { defineConfig, type Plugin } from "vite";
+
+// Strip the `crossorigin` attribute Vite stamps onto the emitted <script> and
+// <link rel=stylesheet> tags. On Windows the webview serves the app from
+// `http://tauri.localhost`, and the asset-protocol response carries no
+// `Access-Control-Allow-Origin`, so a `crossorigin` tag fails the CORS check and
+// the JS/CSS never load — a black window. macOS/Linux use the `tauri://`
+// opaque-origin scheme, which skips the check, so the attribute only breaks
+// Windows. The assets are same-origin and local, so dropping it is safe.
+function stripCrossorigin(): Plugin {
+  return {
+    name: "strip-crossorigin",
+    transformIndexHtml(html) {
+      return html.replace(/ crossorigin/g, "");
+    },
+  };
+}
 
 // Frontend for the llmtrim tray popover.
 //
@@ -12,6 +28,7 @@ import { defineConfig } from "vite";
 export default defineConfig({
   root: __dirname,
   base: "./",
+  plugins: [stripCrossorigin()],
   build: {
     outDir: "dist",
     emptyOutDir: true,

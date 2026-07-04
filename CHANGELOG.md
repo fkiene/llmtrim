@@ -6,6 +6,22 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+- **The Windows tray now ships as an installer.** The release attaches a `-setup.exe`
+  NSIS installer for the desktop tray that bootstraps the Edge WebView2 runtime on
+  install (preinstalled on Windows 11 and recent Windows 10, absent on older setups).
+
+### Fixed
+- **The Windows tray no longer shows a black window.** Vite stamped a `crossorigin`
+  attribute on the tray's bundled `<script>` and `<link>` tags. On Windows the webview
+  serves the app from `http://tauri.localhost` with no `Access-Control-Allow-Origin`, so
+  the CORS check blocked the JS and CSS and nothing rendered (macOS/Linux use the
+  `tauri://` scheme, which is unaffected). The build now strips the attribute.
+- **The Windows tray no longer flashes a console window every few seconds.** The tray
+  polls the `llmtrim` CLI (`status --json`) on each refresh; on Windows those subprocess
+  spawns opened a console window each tick. The tray now spawns the CLI with
+  `CREATE_NO_WINDOW`, so no terminal appears.
+
 ## [0.6.1] - 2026-07-04
 
 ### Fixed

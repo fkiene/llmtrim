@@ -223,6 +223,58 @@ jobs:
         with:
           subject-path: ${{ steps.traybin.outputs.path }}
 
+  # The Windows desktop tray, as a proper NSIS installer. The other jobs ship the bare
+  # llmtrim-tray.exe, which renders a black window on any Windows without the Edge WebView2
+  # runtime already installed (preinstalled on Win11 / recent Win10, absent otherwise). This
+  # job runs `tauri build` to produce an installer whose `webviewInstallMode` bootstraps
+  # WebView2 on setup, so the tray always has an engine to render into. Independent of the
+  # CLI release — a tray build failure never blocks it.
+  build-tray-windows:
+    needs: [create-release, license-notice]
+    runs-on: windows-latest
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+    steps:
+      - uses: actions/checkout@v7
+      # aws-lc-rs (pulled in transitively) assembles its x86 asm with NASM on Windows x64.
+      - name: Install NASM
+        uses: ilammy/setup-nasm@v1
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: Install the tray frontend deps
+        working-directory: crates/llmtrim-tray
+        run: npm ci
+      - uses: dtolnay/rust-toolchain@stable
+      # `tauri build` runs the frontend build (beforeBuildCommand) then bundles the NSIS
+      # installer with the WebView2 download bootstrapper. Output lands in the workspace
+      # target dir (target/release/bundle/nsis/), not the crate dir.
+      - name: Build the NSIS installer
+        working-directory: crates/llmtrim-tray
+        run: npx --yes @tauri-apps/cli@^2 build --bundles nsis
+      - name: Locate and checksum the installer
+        id: installer
+        shell: bash
+        run: |
+          path=$(ls target/release/bundle/nsis/*-setup.exe)
+          sha256sum "$path" > "$path.sha256"
+          echo "path=$path" >> "$GITHUB_OUTPUT"
+          echo "found $path"
+      - name: Upload the installer to the release
+        shell: bash
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release upload "${{ github.ref_name }}" \
+            "${{ steps.installer.outputs.path }}" \
+            "${{ steps.installer.outputs.path }}.sha256" --clobber
+      - name: Attest build provenance
+        uses: actions/attest-build-provenance@v4
+        with:
+          subject-path: ${{ steps.installer.outputs.path }}
+
   # The release verifies itself: run the real installers against the assets just uploaded,
   # on the same three OSes users have. LLMTRIM_VERSION pins to this tag so the test can't
   # race `releases/latest`. Catches what unit tests can't: asset naming, checksum sidecars,
