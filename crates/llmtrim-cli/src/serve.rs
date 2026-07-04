@@ -106,6 +106,7 @@ mod imp {
         "inference.baseten.co",
         "api.studio.nebius.ai",
         "ai-gateway.vercel.sh",
+        "chatgpt.com", // Codex CLI with ChatGPT sign-in (OpenAI Responses shape)
     ];
 
     /// User-configured extra hosts (env `LLMTRIM_EXTRA_HOSTS` / file `extra_hosts`), already
@@ -2304,6 +2305,8 @@ mod imp {
                 provider_for_host("ai-gateway.vercel.sh"),
                 Some(ProviderKind::OpenAi)
             );
+            // Codex CLI with ChatGPT sign-in posts to chatgpt.com, not api.openai.com.
+            assert_eq!(provider_for_host("chatgpt.com"), Some(ProviderKind::OpenAi));
             // Non-LLM hosts are not intercepted.
             assert_eq!(provider_for_host("github.com"), None);
             assert_eq!(provider_for_host("example.com"), None);
@@ -2396,10 +2399,16 @@ mod imp {
             let d = intercept_domains();
             assert!(d.contains(&"api.openai.com".to_string())); // exact registry endpoint host
             assert!(d.contains(&"opencode.ai".to_string())); // from EXTRA_HOSTS
+            assert!(d.contains(&"chatgpt.com".to_string())); // Codex CLI, ChatGPT sign-in
             assert!(
                 d.windows(2).all(|w| w[0] <= w[1]),
                 "must be sorted for sidecar compare"
             );
+        }
+
+        #[test]
+        fn codex_responses_path_is_compressible() {
+            assert!(is_compressible_path("/backend-api/codex/responses"));
         }
 
         #[test]
