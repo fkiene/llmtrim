@@ -6,6 +6,14 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Fixed
+- **The `llmtrim` and `llmtrim-ledger` crates on crates.io catch up to the current
+  version.** The 0.6.2 crates.io publish stopped after `llmtrim-core` because
+  `llmtrim-ledger` was missing its Trusted Publisher, leaving `llmtrim` and
+  `llmtrim-ledger` stuck at 0.6.1 on crates.io (the binaries, installers, npm, Homebrew,
+  Scoop, and Docker image all shipped 0.6.2 normally). This release completes the
+  crates.io publish so `cargo install llmtrim` serves the current version again.
+
 ## [0.6.2] - 2026-07-04
 
 ### Added
