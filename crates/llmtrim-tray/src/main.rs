@@ -200,17 +200,31 @@ fn llmtrim_binary() -> std::path::PathBuf {
     std::path::PathBuf::from(name)
 }
 
+/// Build a `Command` for the `llmtrim` CLI with `args`.
+///
+/// On Windows the tray is a GUI (`windows_subsystem = "windows"`) process, so
+/// spawning a console subprocess flashes a console window each call. Since the
+/// poll loop shells out to `status --json` every interval, that window would pop
+/// up repeatedly. `CREATE_NO_WINDOW` (0x0800_0000) suppresses it. No-op elsewhere.
+fn llmtrim_command(args: &[&str]) -> std::process::Command {
+    let mut cmd = std::process::Command::new(llmtrim_binary());
+    cmd.args(args);
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        cmd.creation_flags(CREATE_NO_WINDOW);
+    }
+    cmd
+}
+
 /// Run `llmtrim <args>` to completion, mapping any failure to a sanitised string
 /// (full detail logged to stderr, never surfaced to JS).
 fn run_llmtrim(args: &[&str]) -> Result<(), String> {
-    let bin = llmtrim_binary();
-    let output = std::process::Command::new(&bin)
-        .args(args)
-        .output()
-        .map_err(|e| {
-            eprintln!("llmtrim-tray: failed to run llmtrim {args:?}: {e}");
-            "could not run the llmtrim CLI — is it installed?".to_string()
-        })?;
+    let output = llmtrim_command(args).output().map_err(|e| {
+        eprintln!("llmtrim-tray: failed to run llmtrim {args:?}: {e}");
+        "could not run the llmtrim CLI — is it installed?".to_string()
+    })?;
     if output.status.success() {
         Ok(())
     } else {
@@ -244,11 +258,7 @@ fn stop_proxy() -> Result<(), String> {
 /// `degraded` for a stopped-but-still-wired proxy, so it can't tell running from stopped.)
 /// Any failure reads as "not running" so the menu offers Start, the safe default.
 fn proxy_running() -> bool {
-    let bin = llmtrim_binary();
-    let Ok(output) = std::process::Command::new(&bin)
-        .args(["status", "--json"])
-        .output()
-    else {
+    let Ok(output) = llmtrim_command(&["status", "--json"]).output() else {
         return false;
     };
     serde_json::from_slice::<serde_json::Value>(&output.stdout)
@@ -278,9 +288,7 @@ fn refresh_proxy_menu(app: &AppHandle) {
 /// any failure reads as "off" so the toggle defaults to a safe state.
 #[tauri::command]
 fn get_tray_autostart() -> bool {
-    let bin = llmtrim_binary();
-    std::process::Command::new(&bin)
-        .args(["autostart", "--tray", "--status"])
+    llmtrim_command(&["autostart", "--tray", "--status"])
         .output()
         .ok()
         .filter(|o| o.status.success())
@@ -302,9 +310,7 @@ fn set_tray_autostart(enable: bool) -> Result<(), String> {
 /// (`autostart` vs `autostart --tray`); any failure reads as "off".
 #[tauri::command]
 fn get_proxy_autostart() -> bool {
-    let bin = llmtrim_binary();
-    std::process::Command::new(&bin)
-        .args(["autostart", "--status"])
+    llmtrim_command(&["autostart", "--status"])
         .output()
         .ok()
         .filter(|o| o.status.success())
