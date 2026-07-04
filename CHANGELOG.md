@@ -6,6 +6,8 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.6.2] - 2026-07-04
+
 ### Added
 - **The Windows tray now ships as an installer.** The release attaches a `-setup.exe`
   NSIS installer for the desktop tray that bootstraps the Edge WebView2 runtime on
@@ -718,7 +720,8 @@ bill, never a broken call.
   (6 targets with SLSA build provenance), CI on Linux/macOS/Windows with secret
   scanning, license compliance, and MSRV gates.
 
-[Unreleased]: https://github.com/fkiene/llmtrim/compare/v0.6.1...HEAD
+[Unreleased]: https://github.com/fkiene/llmtrim/compare/v0.6.2...HEAD
+[0.6.2]: https://github.com/fkiene/llmtrim/compare/v0.6.1...v0.6.2
 [0.6.1]: https://github.com/fkiene/llmtrim/compare/v0.6.0...v0.6.1
 [0.6.0]: https://github.com/fkiene/llmtrim/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/fkiene/llmtrim/compare/v0.4.0...v0.5.0
