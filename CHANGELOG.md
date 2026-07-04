@@ -6,6 +6,13 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Fixed
+- **The Windows tray no longer shows a black window.** Vite stamped a `crossorigin`
+  attribute on the tray's bundled `<script>` and `<link>` tags. On Windows the webview
+  serves the app from `http://tauri.localhost` with no `Access-Control-Allow-Origin`, so
+  the CORS check blocked the JS and CSS and nothing rendered (macOS/Linux use the
+  `tauri://` scheme, which is unaffected). The build now strips the attribute.
+
 ## [0.6.1] - 2026-07-04
 
 ### Fixed
