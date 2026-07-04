@@ -6,6 +6,11 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+- **The Windows tray now ships as an installer.** The release attaches a `-setup.exe`
+  NSIS installer for the desktop tray that bootstraps the Edge WebView2 runtime on
+  install (preinstalled on Windows 11 and recent Windows 10, absent on older setups).
+
 ### Fixed
 - **The Windows tray no longer shows a black window.** Vite stamped a `crossorigin`
   attribute on the tray's bundled `<script>` and `<link>` tags. On Windows the webview

@@ -40,6 +40,11 @@
     "resources": [],
     "copyright": "",
     "category": "Utility",
+    "windows": {
+      "webviewInstallMode": {
+        "type": "downloadBootstrapper"
+      }
+    },
     "macOS": {
       "entitlements": null,
       "exceptionDomain": "",
