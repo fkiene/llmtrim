@@ -131,6 +131,12 @@ jobs:
       - uses: taiki-e/upload-rust-binary-action@v1
         with:
           bin: ${{ matrix.tray && 'llmtrim,llmtrim-tray' || 'llmtrim' }}
+          # llmtrim-tray is deliberately excluded from `default-members` (bare `cargo
+          # build` on Linux CI must skip Tauri), so `--bin llmtrim-tray` alone can't
+          # resolve it. Naming the packages makes the action pass `--package llmtrim
+          # --package llmtrim-tray`, which selects both crates so both bins build into
+          # the one archive.
+          package: ${{ matrix.tray && 'llmtrim,llmtrim-tray' || 'llmtrim' }}
           target: ${{ matrix.target }}
           archive: llmtrim-$target
           checksum: sha256
@@ -194,6 +200,9 @@ jobs:
       - uses: taiki-e/upload-rust-binary-action@v1
         with:
           bin: llmtrim-tray
+          # llmtrim-tray is not in `default-members`, so `--bin llmtrim-tray` needs an
+          # explicit `--package llmtrim-tray` to resolve (see the main build job).
+          package: llmtrim-tray
           target: x86_64-unknown-linux-gnu
           archive: llmtrim-tray-$target
           checksum: sha256

@@ -6,6 +6,14 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Fixed
+- **Prebuilt binaries and the desktop tray downloads ship again.** The 0.6.0 release
+  built each archive with `--bin llmtrim-tray` but no matching `--package`, and the tray
+  crate sits outside the workspace `default-members`, so every tray target failed. No
+  prebuilt binaries, npm / Homebrew / Scoop packages, Docker image, or tray downloads
+  were published for 0.6.0 (installing from crates.io with `cargo install llmtrim` still
+  worked). This restores the full binary and tray distribution.
+
 ## [0.6.0] - 2026-07-04
 
 ### Added
