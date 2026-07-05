@@ -1,6 +1,6 @@
 {
   "input": {
-    "model": "claude-3-5-sonnet-20241022",
+    "model": "claude-sonnet-4-6",
     "tools": [
       {
         "name": "run",
@@ -35,7 +35,7 @@
     "provider": "anthropic",
     "output_shaped": false,
     "request_json": {
-      "model": "claude-3-5-sonnet-20241022",
+      "model": "claude-sonnet-4-6",
       "tools": [
         {
           "description": "run a shell command",

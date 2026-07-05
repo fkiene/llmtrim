@@ -39,6 +39,7 @@ use serde_json::Value;
 
 pub mod attribution;
 pub mod cache_zone;
+pub(crate) mod capability;
 pub mod config;
 pub mod gate;
 pub mod ir;
@@ -251,6 +252,19 @@ pub fn compress_with_config(
     provider: Option<ProviderKind>,
     config: &config::DenseConfig,
 ) -> Result<CompressResult> {
+    compress_with_config_model(input, provider, config, None)
+}
+
+/// Like [`compress_with_config`], but with an out-of-band model id for providers that don't
+/// carry it in the body (Gemini puts the model in the URL path). The override feeds only the
+/// model-capability gate; it is not serialized and does not change
+/// [`CompressResult::model`], so pricing and tokenizer selection are unaffected.
+pub fn compress_with_config_model(
+    input: &str,
+    provider: Option<ProviderKind>,
+    config: &config::DenseConfig,
+    model_override: Option<&str>,
+) -> Result<CompressResult> {
     let value: Value = serde_json::from_str(input).context("request body is not valid JSON")?;
     let kind = match provider {
         Some(k) => k,
@@ -266,6 +280,7 @@ pub fn compress_with_config(
     let counter = tokenizer::counter_for(kind, model.as_deref())?;
     let adapter = provider::for_kind(kind);
     let mut req = Request::from_value(kind, value);
+    req.set_model_hint(model_override);
 
     // `auto` resolves the preset from the request shape (structural, zero-model).
     let routed;

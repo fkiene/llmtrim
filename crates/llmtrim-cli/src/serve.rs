@@ -743,8 +743,17 @@ mod imp {
             let config = self.config.clone();
             let memo = self.memo.clone();
             let body_for_compress = bytes.clone();
+            // Gemini/Vertex carry the model in the URL, not the body; capture it so the
+            // capability gate can see it (the body-only lookup returns nothing for them).
+            let model_override = model_from_path(parts.uri.path()).map(str::to_string);
             let compressed = tokio::task::spawn_blocking(move || {
-                compress_blocking(&config, &body_for_compress, provider, &memo)
+                compress_blocking(
+                    &config,
+                    &body_for_compress,
+                    provider,
+                    model_override.as_deref(),
+                    &memo,
+                )
             })
             .await
             .ok()
@@ -874,10 +883,21 @@ mod imp {
     /// I/O: takes the request body + config + the turn-stability memo, returns the compressed
     /// JSON paired with the per-request `Pending` (its `original` left unset — the caller fills
     /// it). `None` to forward verbatim (not UTF-8/JSON, errored, or no net token win).
+    /// Extract the model id from a Vertex/Gemini request path (`.../models/{model}:{method}`),
+    /// which — unlike OpenAI/Anthropic — carries the model in the URL, not the body. OpenAI
+    /// (`/v1/chat/completions`) and Anthropic (`/v1/messages`) paths have no `/models/` segment
+    /// and return `None`, so the body's `model` is used for them.
+    fn model_from_path(path: &str) -> Option<&str> {
+        let after = path.rsplit_once("/models/")?.1;
+        let model = after.split(':').next().unwrap_or(after);
+        (!model.is_empty()).then_some(model)
+    }
+
     fn compress_blocking(
         config: &DenseConfig,
         body: &[u8],
         provider: ProviderKind,
+        model_override: Option<&str>,
         memo: &Memo,
     ) -> Option<(String, Pending)> {
         let text = std::str::from_utf8(body).ok()?;
@@ -892,7 +912,9 @@ mod imp {
             .and_then(|v| llmtrim_core::provider::detect(&v))
             .unwrap_or(provider);
         let started = std::time::Instant::now();
-        let mut result = llmtrim_core::compress_with_config(text, Some(kind), config).ok()?;
+        let mut result =
+            llmtrim_core::compress_with_config_model(text, Some(kind), config, model_override)
+                .ok()?;
         // Never forward a request larger than we received. On tiny or non-chat bodies (e.g.
         // token-count / auxiliary calls) the input-side stages can't offset the output-control
         // instruction's fixed cost, so the compressed form is a net token *increase*. Forward
@@ -2535,6 +2557,28 @@ mod imp {
         }
 
         #[test]
+        fn model_from_path_extracts_gemini_and_vertex_only() {
+            // Gemini/Vertex put the model in the URL; OpenAI/Anthropic paths have no
+            // `/models/` segment so the body's `model` is used instead.
+            assert_eq!(
+                model_from_path("/v1beta/models/gemini-2.0-flash:generateContent"),
+                Some("gemini-2.0-flash")
+            );
+            assert_eq!(
+                model_from_path("/v1beta/models/gemini-2.5-pro:streamGenerateContent"),
+                Some("gemini-2.5-pro")
+            );
+            assert_eq!(
+                model_from_path(
+                    "/v1/projects/p/locations/l/publishers/google/models/gemini-3-pro:streamGenerateContent"
+                ),
+                Some("gemini-3-pro")
+            );
+            assert_eq!(model_from_path("/v1/chat/completions"), None);
+            assert_eq!(model_from_path("/v1/messages"), None);
+        }
+
+        #[test]
         fn host_covered_matches_exact_and_subdomains_only() {
             let domains: std::collections::HashSet<String> =
                 ["openai.com".to_string(), "opencode.ai".to_string()]
@@ -2561,8 +2605,10 @@ mod imp {
             use llmtrim_core::ir::ProviderKind;
             let cfg = DenseConfig::default();
             let memo = Memo::with_capacity(llmtrim_core::memo::DEFAULT_CAPACITY);
-            assert!(compress_blocking(&cfg, b"not json", ProviderKind::OpenAi, &memo).is_none());
-            assert!(compress_blocking(&cfg, b"", ProviderKind::OpenAi, &memo).is_none());
+            assert!(
+                compress_blocking(&cfg, b"not json", ProviderKind::OpenAi, None, &memo).is_none()
+            );
+            assert!(compress_blocking(&cfg, b"", ProviderKind::OpenAi, None, &memo).is_none());
         }
 
         #[test]
@@ -2576,7 +2622,7 @@ mod imp {
             // May return None (net loss) or Some (net win); both are valid.
             // The important assertion: when Some, the compressed form must have fewer input tokens.
             if let Some((compressed, pending)) =
-                compress_blocking(&cfg, body.as_bytes(), ProviderKind::OpenAi, &memo)
+                compress_blocking(&cfg, body.as_bytes(), ProviderKind::OpenAi, None, &memo)
             {
                 assert!(
                     pending.input_after <= pending.input_before,
@@ -2604,7 +2650,7 @@ mod imp {
             // Dedup is default-on and the spam is contiguous: this must compress, so a
             // `None` here is a regression (the test must not pass vacuously).
             let (compressed, pending) =
-                compress_blocking(&cfg, body.as_bytes(), ProviderKind::OpenAi, &memo)
+                compress_blocking(&cfg, body.as_bytes(), ProviderKind::OpenAi, None, &memo)
                     .expect("50 identical log lines must produce a net token win");
             assert!(
                 pending.input_after < pending.input_before,
@@ -2661,7 +2707,7 @@ mod imp {
             let cfg = DenseConfig::default();
             let memo = Memo::with_capacity(llmtrim_core::memo::DEFAULT_CAPACITY);
             if let Some((compressed_json, pending)) =
-                compress_blocking(&cfg, body.as_bytes(), ProviderKind::OpenAi, &memo)
+                compress_blocking(&cfg, body.as_bytes(), ProviderKind::OpenAi, None, &memo)
             {
                 // compress_blocking now always returns Some for valid JSON, even on zero-savings
                 // inputs (the caller records the row; `input_after == input_before` means

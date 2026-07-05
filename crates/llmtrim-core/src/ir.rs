@@ -49,22 +49,48 @@ impl FromStr for ProviderKind {
 pub struct Request {
     kind: ProviderKind,
     raw: Value,
+    /// Out-of-band model id for providers that don't carry it in the body (Gemini puts the
+    /// model in the URL path). Never serialized — `to_json_string` emits only `raw`.
+    model_hint: Option<String>,
 }
 
 impl Request {
     /// Parse a request body string.
     pub fn parse(kind: ProviderKind, body: &str) -> Result<Self> {
         let raw: Value = serde_json::from_str(body).context("request body is not valid JSON")?;
-        Ok(Self { kind, raw })
+        Ok(Self {
+            kind,
+            raw,
+            model_hint: None,
+        })
     }
 
     /// Build a request from an already-parsed value (avoids a re-parse).
     pub fn from_value(kind: ProviderKind, raw: Value) -> Self {
-        Self { kind, raw }
+        Self {
+            kind,
+            raw,
+            model_hint: None,
+        }
     }
 
     pub fn kind(&self) -> ProviderKind {
         self.kind
+    }
+
+    /// Record an out-of-band model id (e.g. Gemini's, which lives in the URL path, not the
+    /// body). Never affects serialization; only [`Request::model_id`] reads it.
+    pub fn set_model_hint(&mut self, model: Option<&str>) {
+        self.model_hint = model.map(str::to_string);
+    }
+
+    /// The request's model id: the body's `model` field if present, else the out-of-band hint.
+    /// `None` when neither is set.
+    pub fn model_id(&self) -> Option<&str> {
+        self.raw
+            .get("model")
+            .and_then(Value::as_str)
+            .or(self.model_hint.as_deref())
     }
 
     pub fn raw(&self) -> &Value {
@@ -151,6 +177,30 @@ mod tests {
         let a: Value = serde_json::from_str(body).unwrap();
         let b: Value = serde_json::from_str(&out).unwrap();
         assert_eq!(a, b, "unknown fields must survive round-trip");
+    }
+
+    #[test]
+    fn model_id_prefers_body_then_hint_and_never_serializes() {
+        // Body model wins when present (OpenAI/Anthropic).
+        let mut req = Request::parse(ProviderKind::OpenAi, r#"{"model":"gpt-4o"}"#).unwrap();
+        assert_eq!(req.model_id(), Some("gpt-4o"));
+        req.set_model_hint(Some("ignored"));
+        assert_eq!(
+            req.model_id(),
+            Some("gpt-4o"),
+            "body model outranks the hint"
+        );
+
+        // No body model (Gemini): the out-of-band hint is used, and never serialized.
+        let mut g = Request::parse(ProviderKind::Google, r#"{"contents":[]}"#).unwrap();
+        assert_eq!(g.model_id(), None);
+        g.set_model_hint(Some("gemini-3-pro"));
+        assert_eq!(g.model_id(), Some("gemini-3-pro"));
+        assert_eq!(
+            g.to_json_string().unwrap(),
+            r#"{"contents":[]}"#,
+            "the hint must not leak into the forwarded body"
+        );
     }
 
     #[test]

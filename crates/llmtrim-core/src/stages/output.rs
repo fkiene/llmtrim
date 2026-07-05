@@ -195,6 +195,7 @@ impl Transform for OutputControlStage {
             }
         } else if self.frugal_tools
             && is_first_turn(req)
+            && crate::capability::model_honors_steering(req.model_id().unwrap_or(""))
             && !frugal_directive_present(req, provider)
         {
             // Tool-call-shaped (agent loop): prose shaping is skipped above because it can't
@@ -209,6 +210,10 @@ impl Transform for OutputControlStage {
             // inject captures the steer at a fraction of the cost. `is_first_turn` treats any
             // already-invoked tool as a live loop; the presence check stops a double-inject if
             // the client's history already carries the directive.
+            //
+            // Model-gated (`model_honors_steering`): only capable models act on the steer; cheap
+            // models ignore it and just pay the directive's input cost, so they are skipped. See
+            // `crate::capability`. Opt-out: an unknown model id still injects.
             provider.add_system_instruction(req, TOOLS_FRUGAL_INSTRUCTION);
         }
         if let Some(cap) = self.max_tokens
@@ -459,6 +464,66 @@ mod tests {
         assert!(
             pj.contains("concise") && !pj.contains("fewest tool-use turns"),
             "no frugal directive on a prose request: {pj}"
+        );
+    }
+
+    #[test]
+    fn frugal_tools_gated_by_model_capability() {
+        // Same first-turn tool-call request, two models: a weak model (below the LMArena bar)
+        // must NOT get the directive — it ignores the steer and would only pay the input cost —
+        // while a capable model does. Wires `crate::capability` into the stage.
+        let body = |model: &str| {
+            json!({"model": model,
+                   "messages":[{"role":"user","content":"find the bug"}],
+                   "tools":[{"type":"function","function":{"name":"grep","parameters":{}}}],
+                   "tool_choice":"auto"})
+        };
+        let weak = run_one(body("gpt-4o-mini"), frugal_stage());
+        assert!(
+            !joined_content(&weak).contains("fewest tool-use turns"),
+            "weak model is gated out of the frugal directive: {}",
+            joined_content(&weak)
+        );
+        let capable = run_one(body("claude-opus-4-8"), frugal_stage());
+        assert!(
+            joined_content(&capable).contains("fewest tool-use turns"),
+            "capable model still gets the directive: {}",
+            joined_content(&capable)
+        );
+    }
+
+    #[test]
+    fn frugal_gate_reads_gemini_model_from_url_hint() {
+        // Gemini carries the model in the URL, not the body, so the gate reads it from the
+        // out-of-band hint the proxy sets. A weak Gemini tier must be gated out; a capable one
+        // still gets the directive. Guards the provider whose body-only lookup would otherwise
+        // return "" and wrongly inject for every model.
+        use crate::provider::GoogleProvider;
+        let run_gemini = |model: &str| -> Request {
+            let mut req = Request::from_value(
+                ProviderKind::Google,
+                json!({"contents":[{"role":"user","parts":[{"text":"find the bug"}]}],
+                       "tools":[{"functionDeclarations":[{"name":"grep"}]}]}),
+            );
+            req.set_model_hint(Some(model));
+            let counter = counter_for(ProviderKind::OpenAi, Some("gpt-4o")).unwrap();
+            let stages: Vec<Box<dyn Transform>> = vec![Box::new(frugal_stage())];
+            let _ = pipeline::run(&mut req, &GoogleProvider, counter.as_ref(), &stages);
+            req
+        };
+        let has_directive = |req: &Request| {
+            GoogleProvider.content_text_pointers(req).iter().any(|p| {
+                req.get_str(p)
+                    .is_some_and(|t| t.contains(TOOLS_FRUGAL_MARKER))
+            })
+        };
+        assert!(
+            !has_directive(&run_gemini("gemini-2.0-flash")),
+            "weak Gemini tier (URL model, below the bar) is gated out"
+        );
+        assert!(
+            has_directive(&run_gemini("gemini-3-pro")),
+            "capable Gemini tier still gets the directive via the URL-model hint"
         );
     }
 

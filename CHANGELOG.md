@@ -12,8 +12,11 @@ All notable changes to this project are documented here. The format follows
   toward the fewest tool-use turns (batch independent calls into one turn, don't repeat a call).
   On in the `agent` preset, so `auto` applies it to tool-call traffic; `safe`/`lossless` stay
   untouched. It fires only on the first tool-call turn of a task (first-turn-only, idempotent),
-  so it costs about one short injection with no per-turn cache churn. The effect is tail
-  insurance, not a median saver: the agent A/B is a median wash but it caps the worst-case
+  so it costs about one short injection with no per-turn cache churn. It is also model-gated:
+  only models capable enough to act on the steer get it (measured against an embedded LMArena
+  leaderboard snapshot, threshold just below Claude Sonnet 5); cheaper models that ignore it are
+  skipped so they don't pay the directive's cost, and an unknown model still gets it. The effect
+  is tail insurance, not a median saver: the agent A/B is a median wash but it caps the worst-case
   exploration blow-ups, with no task-success regression. Set `output_frugal_tools = false` to
   opt out. Preset `frugal` isolates the directive alone (no compression) for benchmarking.
 
