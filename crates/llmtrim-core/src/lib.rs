@@ -176,12 +176,14 @@ fn stages_for(_provider: ProviderKind, config: &config::DenseConfig) -> Vec<Box<
         }));
     }
     // Stage F (output-side): request-shaping output controls (terse / Chain-of-Draft / budget).
-    if config.output_control || config.output_compact_code {
+    if config.output_control || config.output_compact_code || config.output_frugal_tools {
         stages.push(Box::new(stages::OutputControlStage {
+            output_control: config.output_control,
             level: stages::output::OutputLevel::parse(&config.output_level),
             max_tokens: config.output_max_tokens,
             token_budget: config.output_token_budget,
             compact_code: config.output_compact_code,
+            frugal_tools: config.output_frugal_tools,
         }));
     }
     // Stage A (lossless, latent payoff): mark the final prefix for provider caching.

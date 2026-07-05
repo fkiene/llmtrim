@@ -533,7 +533,7 @@ fn bm25f_scores(docs: &[ToolDoc], query: &HashSet<&str>) -> Vec<f64> {
 /// Cross-wire-shape: counts non-system turns in `messages` / `input` / `contents` (Anthropic
 /// keeps `system` out of the array, so its first turn is one `user` message; OpenAI's is
 /// `system` + `user`), and treats any already-invoked tool as proof of a live loop.
-fn is_first_turn(req: &Request) -> bool {
+pub(crate) fn is_first_turn(req: &Request) -> bool {
     if !tools_used_in_history(req).is_empty() {
         return false;
     }
