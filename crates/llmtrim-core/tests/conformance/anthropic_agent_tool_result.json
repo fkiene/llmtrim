@@ -65,7 +65,16 @@
           ]
         }
       ],
-      "max_tokens": 1024
+      "max_tokens": 1024,
+      "system": [
+        {
+          "type": "text",
+          "text": "Use the fewest tool-use turns: run independent tool calls together in one turn, take all you need from each result, and never repeat a call you've already made.\n",
+          "cache_control": {
+            "type": "ephemeral"
+          }
+        }
+      ]
     }
   }
 }

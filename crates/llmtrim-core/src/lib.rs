@@ -403,10 +403,16 @@ mod tests {
     #[test]
     fn auto_routes_at_compress_time() {
         use serde_json::json;
-        // auto on a tools request → agent preset → its long description gets trimmed.
+        // auto on a tools request → agent preset → its long description gets trimmed. Use a
+        // realistic varied description (not a single repeated char, which BPE collapses to a few
+        // tokens): the 300-char trim then saves far more than the agent preset's first-turn
+        // frugality directive adds, so the net token delta stays negative.
+        let desc = "This tool searches the project for the given pattern and returns matching \
+                    lines with their file paths and line numbers so the caller can navigate. "
+            .repeat(6);
         let input = json!({"model":"gpt-4o",
             "messages":[{"role":"user","content":"hi"}],
-            "tools":[{"type":"function","function":{"name":"f","description":"x".repeat(500)}}]})
+            "tools":[{"type":"function","function":{"name":"f","description":desc}}]})
         .to_string();
         let r = compress_with_config(
             &input,

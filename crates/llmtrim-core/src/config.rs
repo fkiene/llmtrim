@@ -396,6 +396,13 @@ impl DenseConfig {
                 // CI ±5.2 — the n=12 -8pp was noise; see bench/README).
                 c.multimodal = true; // downscale images to the provider cap (see `rag` note)
                 c.strip_base64 = true; // elide base64 blobs (measured +0.0pp, see `rag` note)
+                // Agent-loop frugality directive: fires only on the FIRST tool-call turn of a
+                // task (first-turn-only + idempotent), so it costs ~one ~50-tok injection with no
+                // per-turn cache churn. It's tail insurance, not a median saver — the real-CC A/B
+                // is a median wash but caps the exploration blow-ups (search-heavy loops thrashing
+                // into many narrow probes), with no task-success regression. Model-gated: capable
+                // harnesses batch as asked, weaker ones ignore it harmlessly.
+                c.output_frugal_tools = true;
                 // ngram dropped: ~10–106 tok on agent traffic (bench) for an injected
                 // glossary that mutates the prompt — not worth it. Opt in explicitly.
             }
@@ -954,6 +961,23 @@ mod tests {
             agent.tool_select && agent.tool_trim_desc && agent.tool_minify_schema,
             "agent shrinks the tool block (selection is first-turn-only; trim/minify are cache-stable)"
         );
+    }
+
+    #[test]
+    fn agent_enables_frugal_directive_but_safe_stays_lossless() {
+        // Auto routes tool-call traffic to `agent`, so the agent-loop frugality directive rides
+        // there (first-turn-only tail insurance). `safe`/`lossless` is the clean baseline and must
+        // never carry a behavioral directive — it's the reference the A/B measures against.
+        assert!(
+            DenseConfig::preset("agent").unwrap().output_frugal_tools,
+            "agent (auto tool-call route) enables the frugality directive"
+        );
+        for p in ["safe", "lossless"] {
+            assert!(
+                !DenseConfig::preset(p).unwrap().output_frugal_tools,
+                "{p} stays lossless — no behavioral directive"
+            );
+        }
     }
 
     #[test]
