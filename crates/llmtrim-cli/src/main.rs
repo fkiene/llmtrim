@@ -434,6 +434,12 @@ struct BenchArgs {
     /// (e.g. `groq`). Empty = let OpenRouter choose.
     #[arg(long, default_value = "groq")]
     route: String,
+    /// Request a reasoning pass at this effort (`low`/`medium`/`high`), sent as OpenRouter's
+    /// `reasoning.effort`. Empty = no reasoning field (default). Needed to exercise
+    /// reasoning-gated levers (e.g. the anti-overthink directive), which key off this field
+    /// being present on the wire, not the model id.
+    #[arg(long, default_value = "")]
+    reasoning_effort: String,
     /// Limit the number of cases run.
     #[arg(long)]
     n: Option<usize>,
@@ -941,9 +947,9 @@ fn dotenv_get(key: &str) -> Option<String> {
 }
 
 /// Pin the request to the chosen model and (optionally) a single OpenRouter upstream
-/// provider. Both fields are top-level passthrough, so compression preserves them and
-/// the original and compressed sends route identically.
-fn prepare_request(request_json: &str, model: &str, route: &str) -> String {
+/// provider and/or a reasoning pass. All three fields are top-level passthrough, so
+/// compression preserves them and the original and compressed sends route identically.
+fn prepare_request(request_json: &str, model: &str, route: &str, reasoning_effort: &str) -> String {
     match serde_json::from_str::<serde_json::Value>(request_json) {
         Ok(mut v) => {
             if let Some(obj) = v.as_object_mut() {
@@ -961,6 +967,12 @@ fn prepare_request(request_json: &str, model: &str, route: &str) -> String {
                         routing["quantizations"] = serde_json::json!([q]);
                     }
                     obj.insert("provider".to_string(), routing);
+                }
+                if !reasoning_effort.is_empty() {
+                    obj.insert(
+                        "reasoning".to_string(),
+                        serde_json::json!({"effort": reasoning_effort}),
+                    );
                 }
                 // Ask OpenRouter for the detailed usage breakdown (incl. cached_tokens).
                 obj.insert("usage".to_string(), serde_json::json!({"include": true}));
@@ -982,7 +994,7 @@ fn run_bench(args: BenchArgs) -> Result<()> {
     // Pin every case to the chosen model + upstream provider so the orig/compressed
     // sends are comparable and route identically.
     for c in &mut cases {
-        c.request = prepare_request(&c.request, &args.model, &args.route);
+        c.request = prepare_request(&c.request, &args.model, &args.route, &args.reasoning_effort);
     }
     // `--config FILE` overrides the preset with an explicit config (isolates a single flag
     // for measurement); otherwise resolve the named preset.
@@ -1072,6 +1084,7 @@ fn run_bench_suite(args: SuiteArgs) -> Result<()> {
             model: args.model.clone(),
             judge_model: args.judge_model.clone(),
             route: args.route.clone(),
+            reasoning_effort: String::new(),
             n,
             config: None,
             pricing: args.pricing.clone(),
@@ -1450,6 +1463,7 @@ fn quality_meta(args: &BenchArgs, config: &DenseConfig) -> serde_json::Value {
         "model": args.model,
         "judge_model": args.judge_model,
         "route": args.route,
+        "reasoning_effort": args.reasoning_effort,
         "corpus": args.corpus.display().to_string(),
     })
 }
@@ -2169,6 +2183,26 @@ mod tests {
         }
     }
 
+    #[test]
+    fn prepare_request_pins_model_route_and_reasoning() {
+        let base = r#"{"messages":[{"role":"user","content":"hi"}]}"#;
+        let out = prepare_request(base, "openai/gpt-oss-20b", "wandb/fp4", "medium");
+        let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(v["model"], "openai/gpt-oss-20b");
+        assert_eq!(v["provider"]["order"], serde_json::json!(["wandb"]));
+        assert_eq!(v["provider"]["quantizations"], serde_json::json!(["fp4"]));
+        assert_eq!(v["reasoning"]["effort"], "medium");
+    }
+
+    #[test]
+    fn prepare_request_omits_reasoning_when_effort_is_empty() {
+        let base = r#"{"messages":[{"role":"user","content":"hi"}]}"#;
+        let out = prepare_request(base, "openai/gpt-4o-mini", "", "");
+        let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+        assert!(v.get("reasoning").is_none(), "no reasoning field: {v}");
+        assert!(v.get("provider").is_none(), "no provider field: {v}");
+    }
+
     const CORPUS_LINE: &str = r#"{"context":"The cat sat on the red mat.","question":"What color was the mat?","gold":"red","scorer":"token_f1"}"#;
 
     fn offline_args(corpus: PathBuf, json_out: Option<PathBuf>) -> BenchArgs {
@@ -2179,6 +2213,7 @@ mod tests {
             model: "openai/gpt-4o-mini".to_string(),
             judge_model: "openai/gpt-4o-mini".to_string(),
             route: String::new(),
+            reasoning_effort: String::new(),
             n: Some(1),
             config: None,
             pricing: PathBuf::new(), // unused: offline never reads pricing
