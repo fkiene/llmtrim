@@ -53,6 +53,10 @@ pub struct DenseConfig {
     /// (steer trajectory toward info-per-call). Opt-in, model-gated; not in any preset until
     /// a full agent bench confirms it.
     pub output_frugal_tools: bool,
+    /// Stage F — inject the anti-overthinking directive (arXiv:2606.00206) on prose requests
+    /// that declare BOTH a quantized serving tier and a reasoning pass. Bench: gpt-oss-20b,
+    /// n=40, −62.0% output tokens, quality retention +0.0pp. See `stages::output`.
+    pub output_anti_overthink: bool,
     /// Stage D — also encode uniform arrays nested inside content JSON, not only
     /// when the whole content is an array.
     pub serialize_nested: bool,
@@ -217,6 +221,7 @@ impl DenseConfig {
             output_token_budget: None,
             output_compact_code: false,
             output_frugal_tools: false,
+            output_anti_overthink: false,
             serialize_nested: true,
             serialize_csv: false,
             serialize_flatten: false,
@@ -374,6 +379,11 @@ impl DenseConfig {
                 // marker) — measured quality-neutral (+0.0pp on bench/data/base64.jsonl):
                 // such blobs are noise the model can't use. Lossy, so `safe` keeps them.
                 c.strip_base64 = true;
+                // Anti-overthinking directive: fires only when the request explicitly declares
+                // BOTH a quantized serving tier and a reasoning pass (see `stages::output`), so
+                // it is a no-op on the vast majority of RAG traffic and only ever adds an
+                // instruction, never removes one.
+                c.output_anti_overthink = true;
             }
             "agent" => {
                 // Tool selection is first-turn-only (see `stages::tools::select_tools`): pruning
@@ -405,6 +415,10 @@ impl DenseConfig {
                 c.output_frugal_tools = true;
                 // ngram dropped: ~10–106 tok on agent traffic (bench) for an injected
                 // glossary that mutates the prompt — not worth it. Opt in explicitly.
+                // Anti-overthinking: only fires on the final non-tool-call turn of a loop
+                // (the branch `frugal_tools` doesn't touch), same quantized+reasoning gate
+                // as `rag`/`code`/`aggressive` below.
+                c.output_anti_overthink = true;
             }
             "code" => {
                 c.skeletonize = true;
@@ -420,6 +434,7 @@ impl DenseConfig {
                 // the bench confirmed it costs pass@1 (humaneval −21.6pp, CI ±14.5 at
                 // n=37). The −36% lever (arXiv:2508.13666) holds only via fine-tuning,
                 // not a raw instruction to a small model. Opt in explicitly if wanted.
+                c.output_anti_overthink = true; // quantized+reasoning gated, see `rag` note
             }
             "aggressive" => {
                 c.retrieve = true;
@@ -450,6 +465,7 @@ impl DenseConfig {
                 c.output_control = true;
                 c.multimodal = true; // downscale images to the provider cap (see `rag` note)
                 c.strip_base64 = true; // elide base64 blobs (measured +0.0pp, see `rag` note)
+                c.output_anti_overthink = true; // quantized+reasoning gated, see `rag` note
             }
             // Cache-first: lossless input only (no retrieve/reorder that *varies* the
             // prefix per request) + Stage A cache discipline, so a repeated long prefix

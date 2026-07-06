@@ -88,6 +88,22 @@ pub const TOOLS_FRUGAL_INSTRUCTION: &str = include_str!("../../prompts/tools_fru
 /// sitting in the system block, so a repeated inject is a no-op (idempotent guard).
 const TOOLS_FRUGAL_MARKER: &str = "fewest tool-use turns";
 
+/// Anti-overthinking directive for quantized reasoning models (arXiv:2606.00206): post-training
+/// quantization amplifies a tendency to reach a correct answer mid-reasoning and then restart
+/// ("Wait", "But", "Actually…") instead of committing to it — up to 52% of quantized-model
+/// failures are this "overthinking" pattern, not a capability loss. Live bench, this lever in
+/// isolation (`llmtrim bench quality --corpus bench/data/gsm8k.jsonl --config <anti_overthink-
+/// only.toml> --model openai/gpt-oss-20b --route wandb/fp4 --reasoning-effort medium`, n=40):
+/// output tokens cut 62.0%, quality retention +0.0pp (unchanged, paired 95% CI ±10.2).
+pub const ANTI_OVERTHINK_INSTRUCTION: &str =
+    include_str!("../../prompts/output_anti_overthink.txt");
+
+/// Stable substring of [`ANTI_OVERTHINK_INSTRUCTION`] for the idempotent guard. Deliberately NOT
+/// one of the restart words the instruction names ("Wait"/"But"/"Actually") — those are common
+/// enough to appear verbatim in an unrelated system prompt, which would falsely match and skip
+/// injection. "commit to it immediately" is specific to this directive.
+const ANTI_OVERTHINK_MARKER: &str = "commit to it immediately";
+
 /// Output-control intensity.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OutputLevel {
@@ -130,6 +146,10 @@ pub struct OutputControlStage {
     /// request shape prose shaping skips. Opt-in, model-gated; ship only behind a full
     /// agent-bench that confirms total tokens fall AND task success holds.
     pub frugal_tools: bool,
+    /// Inject the anti-overthinking directive (see [`ANTI_OVERTHINK_INSTRUCTION`]) on prose
+    /// requests that explicitly declare BOTH a quantized serving tier and a reasoning pass.
+    /// Gated on wire fields, not a model-name list — same policy as `reasoning_model_request`.
+    pub anti_overthink: bool,
 }
 
 impl Transform for OutputControlStage {
@@ -193,6 +213,21 @@ impl Transform for OutputControlStage {
             if self.compact_code {
                 provider.add_system_instruction(req, COMPACT_CODE_INSTRUCTION);
             }
+            // Anti-overthinking directive: targets the specific failure mode this was benched
+            // on — a quantized reasoning pass restarting mid-CoT (arXiv:2606.00206) — so it
+            // requires BOTH signals, not quantization alone (a quantized non-reasoning model has
+            // no CoT to restart) and not reasoning alone (the effect is unproven on full-
+            // precision flagships). No capability floor is applied here (unlike `frugal_tools`):
+            // the benched model (gpt-oss-20b, Elo 1288) sits below that bar, so reusing it would
+            // exclude the only validated case. Known gap, accepted: an even weaker quantized
+            // reasoning tier gets the same "don't reconsider" instruction with no floor under it.
+            if self.anti_overthink
+                && quantized_model_request(req)
+                && reasoning_model_request(req)
+                && !anti_overthink_present(req, provider)
+            {
+                provider.add_system_instruction(req, ANTI_OVERTHINK_INSTRUCTION);
+            }
         } else if self.frugal_tools
             && is_first_turn(req)
             && crate::capability::model_honors_steering(req.model_id().unwrap_or(""))
@@ -250,6 +285,35 @@ fn frugal_directive_present(req: &Request, provider: &dyn Provider) -> bool {
             && req
                 .get_str(ptr)
                 .is_some_and(|t| t.contains(TOOLS_FRUGAL_MARKER))
+    })
+}
+
+/// True when the request explicitly pins a quantized serving tier (OpenRouter
+/// `provider.quantizations: [...]`). This is one half of the anti-overthink gate — the failure
+/// mode (arXiv:2606.00206) is caused by post-training quantization noise, not by "being a
+/// reasoning model" in general, so this is checked alongside [`reasoning_model_request`], never
+/// alone. Explicit request field, not a model-name table — same policy as that function.
+///
+/// Known gap, accepted: a quantized model called WITHOUT this field (a self-hosted quantized
+/// endpoint, or OpenRouter left to auto-pick a quantized upstream) is invisible to this gate and
+/// gets no directive. This only ever adds an instruction, never removes one, so the failure mode
+/// of a false negative is "no help," not "wrong behavior."
+fn quantized_model_request(req: &Request) -> bool {
+    req.raw()
+        .get("provider")
+        .and_then(|p| p.get("quantizations"))
+        .and_then(Value::as_array)
+        .is_some_and(|a| !a.is_empty())
+}
+
+/// True when the anti-overthink directive is already present in the request's system prose —
+/// mirrors [`frugal_directive_present`]'s idempotent guard and its both-shapes rationale.
+fn anti_overthink_present(req: &Request, provider: &dyn Provider) -> bool {
+    provider.content_text_pointers(req).iter().any(|ptr| {
+        matches!(provider.role_at(req, ptr), Some(Role::System) | None)
+            && req
+                .get_str(ptr)
+                .is_some_and(|t| t.contains(ANTI_OVERTHINK_MARKER))
     })
 }
 
@@ -314,6 +378,7 @@ mod tests {
             token_budget: None,
             compact_code: false,
             frugal_tools: true,
+            anti_overthink: false,
         }
     }
 
@@ -336,6 +401,7 @@ mod tests {
                 token_budget: None,
                 compact_code: false,
                 frugal_tools: false,
+                anti_overthink: false,
             },
         );
         let sys = req.get_str("/messages/0/content").unwrap();
@@ -353,6 +419,7 @@ mod tests {
                 token_budget: Some(120),
                 compact_code: false,
                 frugal_tools: false,
+                anti_overthink: false,
             },
         );
         let joined: String = req
@@ -382,6 +449,7 @@ mod tests {
                 token_budget: Some(120),
                 compact_code: true,
                 frugal_tools: false,
+                anti_overthink: false,
             },
         );
         let joined: String = req
@@ -419,6 +487,7 @@ mod tests {
                 token_budget: None,
                 compact_code: false,
                 frugal_tools: false,
+                anti_overthink: false,
             },
         );
         let sys = req.get_str("/messages/0/content").unwrap();
@@ -440,6 +509,7 @@ mod tests {
                 token_budget: None,
                 compact_code: false,
                 frugal_tools: true,
+                anti_overthink: false,
             },
         );
         let joined = joined_content(&req);
@@ -458,6 +528,7 @@ mod tests {
                 token_budget: None,
                 compact_code: false,
                 frugal_tools: true,
+                anti_overthink: false,
             },
         );
         let pj = joined_content(&prose);
@@ -547,6 +618,7 @@ mod tests {
                 token_budget: None,
                 compact_code: false,
                 frugal_tools: true,
+                anti_overthink: false,
             },
         );
         assert!(
@@ -573,6 +645,7 @@ mod tests {
                 token_budget: None,
                 compact_code: false,
                 frugal_tools: true,
+                anti_overthink: false,
             },
         );
         let hits = joined_content(&req)
@@ -689,6 +762,7 @@ mod tests {
                 token_budget: None,
                 compact_code: false,
                 frugal_tools: false,
+                anti_overthink: false,
             },
         );
         let sys = req.get_str("/messages/0/content").unwrap();
@@ -717,6 +791,7 @@ mod tests {
                 token_budget: None,
                 compact_code: false,
                 frugal_tools: false,
+                anti_overthink: false,
             },
         );
         let sys = req.get_str("/messages/0/content").unwrap();
@@ -738,6 +813,7 @@ mod tests {
                 token_budget: None,
                 compact_code: false,
                 frugal_tools: false,
+                anti_overthink: false,
             },
         );
         let sys = req.get_str("/messages/0/content").unwrap();
@@ -776,6 +852,7 @@ mod tests {
                 token_budget: None,
                 compact_code: false,
                 frugal_tools: false,
+                anti_overthink: false,
             },
         );
         assert_eq!(OpenAiProvider.max_tokens(&req), Some(256));
@@ -789,6 +866,7 @@ mod tests {
                 token_budget: None,
                 compact_code: false,
                 frugal_tools: false,
+                anti_overthink: false,
             },
         );
         assert_eq!(
@@ -824,6 +902,7 @@ mod tests {
                 token_budget: Some(120),
                 compact_code: false,
                 frugal_tools: false,
+                anti_overthink: false,
             },
         );
         let joined = joined_content(&req);
@@ -851,6 +930,7 @@ mod tests {
                 token_budget: Some(120),
                 compact_code: false,
                 frugal_tools: false,
+                anti_overthink: false,
             },
         );
         assert!(!joined_content(&req).contains("120 tokens"));
@@ -869,6 +949,7 @@ mod tests {
                 token_budget: Some(120),
                 compact_code: false,
                 frugal_tools: false,
+                anti_overthink: false,
             },
         );
         assert!(
@@ -930,6 +1011,7 @@ mod tests {
                 token_budget: None,
                 compact_code: true,
                 frugal_tools: false,
+                anti_overthink: false,
             },
         );
         let joined: String = req
@@ -944,5 +1026,127 @@ mod tests {
             joined.contains("minified"),
             "compact-code instruction injected"
         );
+    }
+
+    fn anti_overthink_stage() -> OutputControlStage {
+        OutputControlStage {
+            output_control: false,
+            level: OutputLevel::Terse,
+            max_tokens: None,
+            token_budget: None,
+            compact_code: false,
+            frugal_tools: false,
+            anti_overthink: true,
+        }
+    }
+
+    #[test]
+    fn anti_overthink_marker_is_substring_of_the_prompt() {
+        // Same invariant as `frugal_marker_is_substring_of_the_prompt`: if the prompt is
+        // reworded and the marker isn't, the idempotent guard silently no-ops and double-injects.
+        assert!(
+            ANTI_OVERTHINK_INSTRUCTION.contains(ANTI_OVERTHINK_MARKER),
+            "marker {ANTI_OVERTHINK_MARKER:?} must be a substring of the prompt {ANTI_OVERTHINK_INSTRUCTION:?}"
+        );
+    }
+
+    #[test]
+    fn detects_quantized_provider_request() {
+        assert!(quantized_model_request(&req_with(
+            json!({"provider":{"quantizations":["fp4"]}})
+        )));
+        assert!(!quantized_model_request(&req_with(
+            json!({"provider":{"quantizations":[]}})
+        )));
+        assert!(!quantized_model_request(&req_with(json!({"provider":{}}))));
+        assert!(!quantized_model_request(&req_with(json!({}))));
+    }
+
+    #[test]
+    fn anti_overthink_injects_only_when_quantized_and_reasoning() {
+        let quantized_reasoning = json!({"provider":{"quantizations":["fp4"]},
+               "reasoning":{"effort":"medium"},
+               "messages":[{"role":"user","content":"what is 2+2?"}]});
+        let req = run_one(quantized_reasoning, anti_overthink_stage());
+        assert!(
+            joined_content(&req).contains(ANTI_OVERTHINK_MARKER),
+            "quantized + reasoning prose request gets the directive: {}",
+            joined_content(&req)
+        );
+
+        // Quantized alone (no reasoning field): the model has no CoT to restart, so the
+        // directive must NOT fire.
+        let quantized_only = json!({"provider":{"quantizations":["fp4"]},
+               "messages":[{"role":"user","content":"what is 2+2?"}]});
+        let req = run_one(quantized_only, anti_overthink_stage());
+        assert!(
+            !joined_content(&req).contains(ANTI_OVERTHINK_MARKER),
+            "quantized-only request stays silent (no reasoning field): {}",
+            joined_content(&req)
+        );
+
+        // Reasoning alone (no quantization declared): unproven on full-precision models, so
+        // the directive must NOT fire.
+        let reasoning_only = json!({"reasoning":{"effort":"medium"},
+               "messages":[{"role":"user","content":"what is 2+2?"}]});
+        let req = run_one(reasoning_only, anti_overthink_stage());
+        assert!(
+            !joined_content(&req).contains(ANTI_OVERTHINK_MARKER),
+            "reasoning-only request stays silent (no quantization field): {}",
+            joined_content(&req)
+        );
+    }
+
+    #[test]
+    fn anti_overthink_skips_tool_call_shaped_requests() {
+        // The directive targets CoT-then-prose, not tool-call args; it must stay silent on the
+        // tool-call-shaped branch even when both gate signals are present.
+        let req = run_one(
+            json!({"provider":{"quantizations":["fp4"]},
+                   "reasoning":{"effort":"medium"},
+                   "messages":[{"role":"user","content":"find the bug"}],
+                   "tools":[{"type":"function","function":{"name":"grep","parameters":{}}}],
+                   "tool_choice":"auto"}),
+            anti_overthink_stage(),
+        );
+        assert!(
+            !joined_content(&req).contains(ANTI_OVERTHINK_MARKER),
+            "no anti-overthink directive on a tool-call-shaped request: {}",
+            joined_content(&req)
+        );
+    }
+
+    #[test]
+    fn anti_overthink_idempotent_when_already_present() {
+        let req = run_one(
+            json!({"provider":{"quantizations":["fp4"]},
+                   "reasoning":{"effort":"medium"},
+                   "messages":[
+                       {"role":"system","content":ANTI_OVERTHINK_INSTRUCTION},
+                       {"role":"user","content":"what is 2+2?"}]}),
+            anti_overthink_stage(),
+        );
+        let hits = joined_content(&req).matches(ANTI_OVERTHINK_MARKER).count();
+        assert_eq!(hits, 1, "directive present exactly once, not duplicated");
+    }
+
+    #[test]
+    fn agent_rag_code_aggressive_presets_enable_anti_overthink() {
+        for p in ["agent", "rag", "code", "aggressive"] {
+            assert!(
+                crate::config::DenseConfig::preset(p)
+                    .unwrap()
+                    .output_anti_overthink,
+                "{p} should enable the anti-overthink lever"
+            );
+        }
+        for p in ["safe", "lossless", "frugal"] {
+            assert!(
+                !crate::config::DenseConfig::preset(p)
+                    .unwrap()
+                    .output_anti_overthink,
+                "{p} must stay silent — no behavioral directive"
+            );
+        }
     }
 }
