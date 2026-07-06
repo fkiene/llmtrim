@@ -11,7 +11,7 @@ keywords = ["llm", "sqlite", "tokens", "compression", "tracking"]
 categories = ["database", "development-tools"]
 
 [dependencies]
-llmtrim-core = { path = "../llmtrim-core", version = "0.7.1-dev" }
+llmtrim-core = { path = "../llmtrim-core", version = "0.8.0-dev" }
 anyhow.workspace = true
 chrono = "0.4.45"
 rusqlite = { version = "0.39", features = ["bundled"] }
