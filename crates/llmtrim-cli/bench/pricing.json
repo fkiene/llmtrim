@@ -1,5 +1,5 @@
 {
-"fetched": "2026-07-05",
+"fetched": "2026-07-06",
 "models": {
 "ai21/jamba-large-1.7": {
 "cache_read": 0.0,
@@ -2252,9 +2252,9 @@
 "output": 3.036
 },
 "z-ai/glm-5.2": {
-"cache_read": 0.1,
-"input": 0.18,
-"output": 2.95
+"cache_read": 0.1274,
+"input": 0.686,
+"output": 2.156
 },
 "z-ai/glm-5v-turbo": {
 "cache_read": 0.24,
