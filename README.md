@@ -140,7 +140,7 @@ Stages run in savings order. Nothing under a `cache_control` marker is ever rewr
 | **serialize + hygiene** | Minify JSON, encode record arrays to [TOON](https://crates.io/crates/toon-format) or CSV, Unicode-normalize | always · lossless |
 | **json sample** | Down-sample huge record arrays: first/last + outliers + a query-biased diverse sample | big JSON |
 | **dedup** | Collapse duplicate + near-duplicate lines (prose only) | always |
-| **output control** | Terse instruction · Chain-of-Draft · token budget · native JSON schema | auto |
+| **output control** | Terse instruction · Chain-of-Draft · token budget · native JSON schema · anti-overthink directive (quantized reasoning) · agent-loop frugality directive | auto |
 | **tool layer** | Static tool selection + description trimming | tools |
 | **multimodal** | Downscale images to the provider's resolution cap | images |
 
@@ -341,6 +341,7 @@ Three tiers cover almost everyone. To force one, set `LLMTRIM_PRESET=<name>` or 
 | `rag` | long context with a question: sentence-level retrieval |
 | `cache` | a fixed prefix reused across many calls |
 | `reasoning` | math and step-by-step workloads |
+| `frugal` | isolates the agent-loop frugality directive alone, for clean benchmarking |
 
 </details>
 
@@ -357,6 +358,8 @@ Every stage is individually tunable via config flags; `preset` wins over individ
 | `serialize` | `true` | TOON / CSV encoding of record arrays |
 | `json_crush` | on in `agent`/`aggressive` | sample huge record arrays |
 | `output_control` | `false` | terse-output instruction + cap |
+| `output_anti_overthink` | on in `aggressive`/`rag`/`code`/`agent` | commit-to-answer directive for quantized reasoning traffic |
+| `output_frugal_tools` | on in `agent` | steers agent loops toward fewer tool-call turns (batch, don't repeat) |
 | `cache` | `false` | `cache_control` breakpoints (lossless) |
 | `dedup` | `true` | collapse duplicate lines (lossless) |
 | `quality_gate` | `true` | revert any lossy cut whose query-relevant coverage drops too far |
