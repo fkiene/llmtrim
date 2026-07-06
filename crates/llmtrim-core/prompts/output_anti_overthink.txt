@@ -1,0 +1,1 @@
+Once your reasoning reaches an answer, commit to it immediately. Do not restart or re-derive your reasoning once you are confident (avoid phrases like "Wait", "But", "Actually" when reconsidering). Output the final answer as soon as you reach it.

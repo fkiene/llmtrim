@@ -17,7 +17,7 @@ path = "src/main.rs"
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
-llmtrim-ledger = { path = "../llmtrim-ledger", version = "0.7.1-dev" }
+llmtrim-ledger = { path = "../llmtrim-ledger", version = "0.8.0-dev" }
 # image-png: required for Image::from_bytes to decode the embedded PNG tray icon.
 tauri = { version = "2", features = ["tray-icon", "image-png"] }
 tauri-plugin-positioner = { version = "2", features = ["tray-icon"] }

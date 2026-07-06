@@ -6,6 +6,16 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+- **Anti-overthinking directive (`output_anti_overthink`).** On prose requests that explicitly
+  declare both a quantized serving tier (OpenRouter `provider.quantizations`) and a reasoning
+  pass, `auto` now asks the model to commit to its answer instead of restarting mid-reasoning
+  ("Wait", "But", "Actually…") — the failure mode quantization amplifies in reasoning models
+  (arXiv:2606.00206). On in `aggressive`/`rag`/`code`/`agent`; `safe`/`lossless`/`frugal` stay
+  untouched. Bench (`llmtrim bench quality`, this lever isolated, `openai/gpt-oss-20b` via
+  OpenRouter, n=40 real GSM8K problems): −62.0% output tokens, quality retention +0.0pp
+  (unchanged).
+
 ### Fixed
 - **`RetrieveStage` no longer mistakes a tool result for the live question.** On
   Anthropic and Gemini requests, tool output (`tool_result` / `functionResponse`)
