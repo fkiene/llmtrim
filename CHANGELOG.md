@@ -6,6 +6,16 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Fixed
+- **`RetrieveStage` no longer mistakes a tool result for the live question.** On
+  Anthropic and Gemini requests, tool output (`tool_result` / `functionResponse`)
+  rides on a synthetic `role: "user"` message (neither provider has a distinct tool
+  role). When it landed on the newest turn — e.g. right after a large Skill
+  invocation or function call — retrieval treated it as the live question: folded
+  into the BM25 query (self-referential, near-zero pruning) and pinned verbatim
+  instead of pruned. It's now excluded from that classification on both providers, so
+  large tool results are pruned like any other bulk context.
+
 ## [0.7.0] - 2026-07-05
 
 ### Added

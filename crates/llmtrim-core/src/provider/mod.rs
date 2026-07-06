@@ -144,6 +144,42 @@ pub trait Provider {
     fn downscale_images(&self, req: &mut Request);
 }
 
+/// Whether `pointer` addresses text inside a tool-output block — Anthropic
+/// `tool_result` (`/messages/{i}/content/{j}/...`) or Gemini `functionResponse`
+/// (`/contents/{i}/parts/{j}/...`). Both carry a synthetic `role: "user"` message on
+/// the wire (neither provider has a distinct tool role), so role-aware stages must not
+/// mistake the newest tool-output turn for the live human question — this is the seam
+/// that tells them apart, structurally rather than by content. OpenAI needs no such
+/// seam: its tool messages already get a real `Role::Tool` via `role_at`.
+pub(crate) fn is_tool_result_ptr(req: &Request, pointer: &str) -> bool {
+    if let Some(rest) = pointer.strip_prefix("/messages/") {
+        let mut parts = rest.split('/');
+        let Some(i) = parts.next() else { return false };
+        if parts.next() != Some("content") {
+            return false;
+        }
+        let Some(j) = parts.next() else { return false };
+        return req
+            .raw()
+            .pointer(&format!("/messages/{i}/content/{j}/type"))
+            .and_then(Value::as_str)
+            == Some("tool_result");
+    }
+    if let Some(rest) = pointer.strip_prefix("/contents/") {
+        let mut parts = rest.split('/');
+        let Some(i) = parts.next() else { return false };
+        if parts.next() != Some("parts") {
+            return false;
+        }
+        let Some(j) = parts.next() else { return false };
+        return req
+            .raw()
+            .pointer(&format!("/contents/{i}/parts/{j}/functionResponse"))
+            .is_some();
+    }
+    false
+}
+
 /// JSON pointer to a content block's text, when it is a `{"type":"text","text":"…"}`
 /// block (`prefix` is the block's own address, e.g. `/messages/0/content/2`). The
 /// single text-block predicate, shared by both providers' pointer scans.
@@ -1008,7 +1044,54 @@ pub(crate) fn append_stop(root: &mut Value, key: &str, stop: &str) {
 
 #[cfg(test)]
 mod tests {
-    use super::truncate_chars;
+    use super::{is_tool_result_ptr, truncate_chars};
+    use crate::ir::{ProviderKind, Request};
+    use serde_json::json;
+
+    #[test]
+    fn is_tool_result_ptr_rejects_malformed_pointers() {
+        let req = Request::from_value(
+            ProviderKind::Anthropic,
+            json!({"messages":[{"role":"user","content":[
+                {"type":"tool_result","tool_use_id":"t1","content":"x"}]}]}),
+        );
+        assert!(is_tool_result_ptr(&req, "/messages/0/content/0/content"));
+        assert!(!is_tool_result_ptr(&req, "/system"), "no /messages/ prefix");
+        assert!(
+            !is_tool_result_ptr(&req, "/messages/0"),
+            "no content segment"
+        );
+        assert!(
+            !is_tool_result_ptr(&req, "/messages/0/role"),
+            "segment after index isn't \"content\""
+        );
+        assert!(
+            !is_tool_result_ptr(&req, "/messages/0/content"),
+            "no block index"
+        );
+    }
+
+    #[test]
+    fn is_tool_result_ptr_recognizes_gemini_function_response() {
+        let req = Request::from_value(
+            ProviderKind::Google,
+            json!({"contents":[{"role":"user","parts":[
+                {"text":"hi"},
+                {"functionResponse":{"name":"read","response":{"result":"x"}}}]}]}),
+        );
+        assert!(is_tool_result_ptr(
+            &req,
+            "/contents/0/parts/1/functionResponse/response/result"
+        ));
+        assert!(
+            !is_tool_result_ptr(&req, "/contents/0/parts/0/text"),
+            "plain text part isn't a function response"
+        );
+        assert!(
+            !is_tool_result_ptr(&req, "/contents/0/parts"),
+            "no part index"
+        );
+    }
 
     fn trunc(s: &str, max: usize) -> String {
         let mut s = s.to_string();

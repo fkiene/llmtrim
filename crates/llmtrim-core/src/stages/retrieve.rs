@@ -77,18 +77,23 @@ impl Transform for RetrieveStage {
                 idx: crate::provider::turn_index(p),
                 role: provider.role_at(req, p),
                 len: req.get_str(p).map(|s| s.chars().count()).unwrap_or(0),
+                is_tool_result: crate::provider::is_tool_result_ptr(req, p),
                 ptr: p.clone(),
             })
             .collect();
         // Top-level text (`role_at` → None, e.g. Anthropic `system`) or an explicit
         // System role is instruction.
         let is_system = |s: &Seg| s.role.is_none() || s.role == Some(Role::System);
+        // The live question is the newest turn genuinely authored by the user — a
+        // tool_result never qualifies, even though it rides on a `role: "user"`
+        // message, or it would get folded into the BM25 query (self-referential,
+        // near-zero pruning) and pinned verbatim as if it were the human's ask.
         let last_user = segs
             .iter()
-            .filter(|s| s.role == Some(Role::User))
+            .filter(|s| s.role == Some(Role::User) && !s.is_tool_result)
             .filter_map(|s| s.idx)
             .max();
-        let is_last_user = |s: &Seg| s.idx.is_some() && s.idx == last_user;
+        let is_last_user = |s: &Seg| s.idx.is_some() && s.idx == last_user && !s.is_tool_result;
         // Only pin the final user turn when there is *other* long context to prune
         // instead — otherwise a single monolithic prompt would never compress (the
         // within-segment boundary pin in `select` still protects its edges).
@@ -365,6 +370,10 @@ struct Seg {
     idx: Option<usize>,
     role: Option<crate::provider::Role>,
     len: usize,
+    /// True when `ptr` addresses a `tool_result` block riding on a synthetic
+    /// `role: "user"` message (Anthropic has no distinct tool role). Never the live
+    /// human question, regardless of turn recency — see `is_last_user`.
+    is_tool_result: bool,
 }
 
 /// Split text into sentence chunks (terminal punctuation followed by space/newline),
@@ -1729,6 +1738,219 @@ mod tests {
                 .unwrap()
                 .contains("omitted"),
             "bulk context is pruned"
+        );
+    }
+
+    #[test]
+    fn tool_result_on_final_turn_is_not_mistaken_for_the_live_question() {
+        // Anthropic wire shape: the newest message is a `tool_result` (e.g. a Skill
+        // dump), not user prose. It must not be pinned verbatim or folded into the
+        // BM25 query as if it were the live question — the real question is the
+        // earlier user turn, and the tool_result is just more prunable bulk context.
+        use crate::provider::AnthropicProvider;
+        let earlier_question =
+            "what does the claude-api skill say about streaming responses?".to_string();
+        let skill_dump = (0..20)
+            .map(|i| {
+                format!(
+                    "Section {i}: unrelated reference material about topic {i} \
+                     with lots of filler prose that has nothing to do with streaming."
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("\n\n");
+        let body = json!({"model":"claude-3-5-sonnet-20241022","messages":[
+            {"role":"user","content":earlier_question},
+            {"role":"assistant","content":[{"type":"tool_use","id":"t1","name":"Skill","input":{}}]},
+            {"role":"user","content":[{"type":"tool_result","tool_use_id":"t1","content":skill_dump}]}]});
+        let mut req = Request::from_value(ProviderKind::Anthropic, body);
+        let counter = counter_for(ProviderKind::Anthropic, None).unwrap();
+        let stages: Vec<Box<dyn Transform>> = vec![Box::new(RetrieveStage {
+            keep_ratio: 0.3,
+            min_segment_chars: 120,
+            reorder: false,
+            mmr: false,
+            mmr_lambda: 0.5,
+            sentence: false,
+        })];
+        let out = pipeline::run(&mut req, &AnthropicProvider, counter.as_ref(), &stages);
+        assert!(
+            out.stages[0].applied,
+            "tool_result dump pruned -> tokens cut"
+        );
+        assert_eq!(
+            req.get_str("/messages/0/content").unwrap(),
+            earlier_question,
+            "earlier user turn untouched (too short to prune)"
+        );
+        assert!(
+            req.get_str("/messages/2/content/0/content")
+                .unwrap()
+                .contains("omitted"),
+            "tool_result on the newest turn is pruned like any other bulk context, not pinned"
+        );
+    }
+
+    #[test]
+    fn mixed_message_pins_only_the_text_block_not_the_tool_result_riding_with_it() {
+        // A single turn can carry both a tool_result and trailing prose in the same
+        // message (e.g. "here's the tool output; also, <question>"). Only the text
+        // block is the live question — the tool_result riding alongside it in the
+        // same message must still be treated as prunable bulk context.
+        use crate::provider::AnthropicProvider;
+        let follow_up_question = "Question: based on the tool output above, summarize the key \
+                                   financial figure for the logistics division and explain the \
+                                   quarterly trend in detail with full reasoning and context."
+            .to_string();
+        assert!(
+            follow_up_question.len() >= 120,
+            "question must exceed the prune threshold"
+        );
+        let skill_dump = (0..20)
+            .map(|i| {
+                format!(
+                    "Section {i}: unrelated reference material about topic {i} \
+                     with lots of filler prose that has nothing to do with the question."
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("\n\n");
+        let body = json!({"model":"claude-3-5-sonnet-20241022","messages":[
+            {"role":"assistant","content":[{"type":"tool_use","id":"t1","name":"Skill","input":{}}]},
+            {"role":"user","content":[
+                {"type":"tool_result","tool_use_id":"t1","content":skill_dump},
+                {"type":"text","text":follow_up_question}]}]});
+        let mut req = Request::from_value(ProviderKind::Anthropic, body);
+        let counter = counter_for(ProviderKind::Anthropic, None).unwrap();
+        let stages: Vec<Box<dyn Transform>> = vec![Box::new(RetrieveStage {
+            keep_ratio: 0.3,
+            min_segment_chars: 120,
+            reorder: false,
+            mmr: false,
+            mmr_lambda: 0.5,
+            sentence: false,
+        })];
+        let out = pipeline::run(&mut req, &AnthropicProvider, counter.as_ref(), &stages);
+        assert!(
+            out.stages[0].applied,
+            "tool_result riding with the question is pruned -> tokens cut"
+        );
+        assert_eq!(
+            req.get_str("/messages/1/content/1/text").unwrap(),
+            follow_up_question,
+            "trailing question text pinned verbatim even though it shares a turn with the tool_result"
+        );
+        assert!(
+            req.get_str("/messages/1/content/0/content")
+                .unwrap()
+                .contains("omitted"),
+            "tool_result sharing the final turn with the question is still pruned"
+        );
+    }
+
+    #[test]
+    fn tool_result_mid_conversation_is_unaffected_by_the_pin_fix() {
+        // Regression guard: a tool_result that is *not* on the newest turn was never
+        // misclassified by the old `is_last_user` logic either (its idx already didn't
+        // match `last_user`). Confirms adding `is_tool_result` didn't change that path —
+        // the mid-conversation dump is pruned as ordinary bulk context and the later,
+        // genuinely final user question is still pinned.
+        use crate::provider::AnthropicProvider;
+        let final_question = "Question: based on everything above, summarize the key financial \
+                               figure for the logistics division and explain the quarterly \
+                               trend in detail with full reasoning and supporting context."
+            .to_string();
+        assert!(
+            final_question.len() >= 120,
+            "question must exceed the prune threshold"
+        );
+        let skill_dump = (0..20)
+            .map(|i| {
+                format!(
+                    "Section {i}: unrelated reference material about topic {i} \
+                     with lots of filler prose that has nothing to do with the question."
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("\n\n");
+        let body = json!({"model":"claude-3-5-sonnet-20241022","messages":[
+            {"role":"assistant","content":[{"type":"tool_use","id":"t1","name":"Skill","input":{}}]},
+            {"role":"user","content":[{"type":"tool_result","tool_use_id":"t1","content":skill_dump}]},
+            {"role":"assistant","content":"Here's a summary of the skill docs."},
+            {"role":"user","content":final_question}]});
+        let mut req = Request::from_value(ProviderKind::Anthropic, body);
+        let counter = counter_for(ProviderKind::Anthropic, None).unwrap();
+        let stages: Vec<Box<dyn Transform>> = vec![Box::new(RetrieveStage {
+            keep_ratio: 0.3,
+            min_segment_chars: 120,
+            reorder: false,
+            mmr: false,
+            mmr_lambda: 0.5,
+            sentence: false,
+        })];
+        let out = pipeline::run(&mut req, &AnthropicProvider, counter.as_ref(), &stages);
+        assert!(
+            out.stages[0].applied,
+            "mid-conversation tool_result pruned -> tokens cut"
+        );
+        assert_eq!(
+            req.get_str("/messages/3/content").unwrap(),
+            final_question,
+            "the genuinely final user turn is still pinned verbatim"
+        );
+        assert!(
+            req.get_str("/messages/1/content/0/content")
+                .unwrap()
+                .contains("omitted"),
+            "mid-conversation tool_result is pruned like any other bulk context"
+        );
+    }
+
+    #[test]
+    fn gemini_function_response_on_final_turn_is_not_mistaken_for_the_live_question() {
+        // Same bug, Gemini shape: `functionResponse` rides on a synthetic `role: "user"`
+        // content item (Gemini has no distinct tool role either).
+        use crate::provider::GoogleProvider;
+        let earlier_question =
+            "what does the claude-api skill say about streaming responses?".to_string();
+        let skill_dump = (0..20)
+            .map(|i| {
+                format!(
+                    "Section {i}: unrelated reference material about topic {i} \
+                     with lots of filler prose that has nothing to do with streaming."
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("\n\n");
+        let body = json!({"contents":[
+            {"role":"user","parts":[{"text":earlier_question}]},
+            {"role":"model","parts":[{"functionCall":{"name":"Skill","args":{}}}]},
+            {"role":"user","parts":[{"functionResponse":{"name":"Skill","response":{"result":skill_dump}}}]}]});
+        let mut req = Request::from_value(ProviderKind::Google, body);
+        let counter = counter_for(ProviderKind::Google, Some("gemini-1.5-pro")).unwrap();
+        let stages: Vec<Box<dyn Transform>> = vec![Box::new(RetrieveStage {
+            keep_ratio: 0.3,
+            min_segment_chars: 120,
+            reorder: false,
+            mmr: false,
+            mmr_lambda: 0.5,
+            sentence: false,
+        })];
+        let out = pipeline::run(&mut req, &GoogleProvider, counter.as_ref(), &stages);
+        assert!(
+            out.stages[0].applied,
+            "functionResponse dump pruned -> tokens cut"
+        );
+        assert_eq!(
+            req.get_str("/contents/0/parts/0/text").unwrap(),
+            earlier_question,
+            "earlier user turn untouched (too short to prune)"
+        );
+        assert!(
+            req.get_str("/contents/2/parts/0/functionResponse/response/result")
+                .unwrap()
+                .contains("omitted"),
+            "functionResponse on the newest turn is pruned like any other bulk context, not pinned"
         );
     }
 
