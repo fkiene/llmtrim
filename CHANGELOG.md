@@ -9,6 +9,7 @@ All notable changes to this project are documented here. The format follows
 ### Changed
 
 - The anti-overthinking directive now reaches Claude Code and other agent harnesses. It fires for any model the models.dev registry marks as a reasoning model, detected from the model id so it works even when the client sends no `thinking`/`reasoning` field on the wire. It also rides tool-call-shaped agent turns now, not just prose, since a thinking model runs a chain of thought before its tool calls too. On the agent path it injects first-turn-only, so it shares the loop's cached prefix without churning it.
+- Terse output shaping now applies to the first turn of an agent loop (Claude Code and other tool-using harnesses), where the model still emits real prose to shape. Later tool-call turns stay unshaped, so the cached prefix is untouched. The reply-language clause that keeps answers in the user's language now rides any injected directive, not only terse, so a non-English conversation is preserved even when only the frugality or anti-overthink directive fires.
 
 ## [0.8.0] - 2026-07-06
 

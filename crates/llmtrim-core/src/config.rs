@@ -401,9 +401,13 @@ impl DenseConfig {
                 c.serialize_flatten = true; // dot-flatten nested tool-result JSON
                 c.serialize_buckets = true; // bucket heterogeneous record arrays
                 c.json_crush = true; // sample huge record arrays to representatives
-                // No terse output here: short tool-call replies leave nothing to trim, so it
-                // gave ~no cost benefit (glaive cost 5%) at neutral quality (n=39 +0.0pp,
-                // CI ±5.2 — the n=12 -8pp was noise; see bench/README).
+                // Terse output, FIRST TURN ONLY (gated in `stages::output`): later tool-call
+                // replies leave nothing to trim, so terse across the whole loop gave ~no cost
+                // benefit (glaive cost 5%) at neutral quality (n=39 +0.0pp, CI ±5.2 — the n=12
+                // -8pp was noise; see bench/README). The opening turn is the one that emits real
+                // prose (planning, explanation), so shape only that. Pending a first-turn-scoped
+                // bench to confirm it beats the whole-loop 0.0%.
+                c.output_control = true;
                 c.multimodal = true; // downscale images to the provider cap (see `rag` note)
                 c.strip_base64 = true; // elide base64 blobs (measured +0.0pp, see `rag` note)
                 // Agent-loop frugality directive: fires only on the FIRST tool-call turn of a
@@ -892,17 +896,14 @@ mod tests {
         // The metric is cost-at-no-quality-loss, not losslessness: every shape `auto`
         // routes to (agent / code / rag / aggressive) enables output control by default.
         // Lossless-only lives in `safe`, the opt-in mode.
-        for p in ["code", "rag", "aggressive", "reasoning"] {
+        for p in ["code", "rag", "aggressive", "reasoning", "agent"] {
             assert!(
                 DenseConfig::preset(p).unwrap().output_control,
                 "preset `{p}` enables output control by default"
             );
         }
-        // `agent` (tool-calling): terse gives ~no cost benefit + a noisy quality dip, so off.
-        assert!(
-            !DenseConfig::preset("agent").unwrap().output_control,
-            "agent leaves output unshaped — terse doesn't help tool-calls"
-        );
+        // `agent` enables it, but the terse injection is first-turn-only there (see
+        // `stages::output`): later tool-call turns leave nothing to shape.
         assert!(
             !DenseConfig::preset("safe").unwrap().output_control,
             "`safe` is the lossless mode — no output shaping"

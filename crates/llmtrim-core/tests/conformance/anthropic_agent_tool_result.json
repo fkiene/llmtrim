@@ -33,7 +33,7 @@
   "preset": "agent",
   "expect": {
     "provider": "anthropic",
-    "output_shaped": false,
+    "output_shaped": true,
     "request_json": {
       "model": "claude-sonnet-4-6",
       "tools": [
@@ -69,7 +69,7 @@
       "system": [
         {
           "type": "text",
-          "text": "Use the fewest tool-use turns: run independent tool calls together in one turn, take all you need from each result, and never repeat a call you've already made.\n\n\nOnce your reasoning reaches an answer, commit to it immediately. Do not restart or re-derive your reasoning once you are confident (avoid phrases like \"Wait\", \"But\", \"Actually\" when reconsidering). Output the final answer as soon as you reach it.\n",
+          "text": "Be concise: no preamble, no restating the question, no filler. Answer directly.\n\nUse the fewest tool-use turns: run independent tool calls together in one turn, take all you need from each result, and never repeat a call you've already made.\n\n\nOnce your reasoning reaches an answer, commit to it immediately. Do not restart or re-derive your reasoning once you are confident (avoid phrases like \"Wait\", \"But\", \"Actually\" when reconsidering). Output the final answer as soon as you reach it.\n\n\nReply in the user's language.",
           "cache_control": {
             "type": "ephemeral"
           }

@@ -35,7 +35,11 @@
         },
         {
           "type": "text",
-          "text": "Be concise: no preamble, no restating the question, no filler. Answer directly. Reply in the user's language."
+          "text": "Be concise: no preamble, no restating the question, no filler. Answer directly."
+        },
+        {
+          "type": "text",
+          "text": "Reply in the user's language."
         }
       ],
       "messages": [

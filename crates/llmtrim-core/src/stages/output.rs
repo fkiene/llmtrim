@@ -167,31 +167,27 @@ impl Transform for OutputControlStage {
         provider: &dyn Provider,
         _plan: &mut Vec<PlanEntry>,
     ) -> Result<()> {
-        // Tool-call-shaped request: the expected answer is a function-call payload, not
-        // prose. Prose-shaping instructions can't shrink call arguments — the live A/B's
-        // agent corpus saves 0.0% output tokens with them — so on the most-resent request
-        // shape (agent loops) they are pure input cost. Skip them; the hard `max_tokens`
-        // cap below stays (it costs nothing). `tool_choice: "none"` means the model is
-        // told NOT to call, so the answer is prose again and shaping applies.
+        // Track whether this stage injected any (English) directive, so the reply-language clause
+        // below rides exactly once when the conversation is non-English — every directive we add
+        // (terse, token budget, compact_code, frugality, anti-overthink) could otherwise nudge the
+        // reply into English.
+        let mut injected_any = false;
+
+        // Terse/draft prose shaping. Fires on prose requests, and on the FIRST turn of a tool-call
+        // (agent) loop: the opening turn is where the model emits real prose (planning, an
+        // explanation) that terse can shrink, while later tool-call turns leave nothing to trim and
+        // shaping them is pure input cost (see the `agent` preset note). First-turn-only keeps it
+        // in lockstep with the other agent-path directives so the cached prefix stays stable.
+        // Gated on `output_control`, which the sibling levers (`compact_code`, `frugal_tools`)
+        // leave off, so preset `frugal` still isolates the agent-loop directive.
+        if self.output_control && (!tool_call_shaped(req) || is_first_turn(req)) {
+            provider.add_system_instruction(req, self.level.instruction());
+            injected_any = true;
+        }
+        // `tool_choice: "none"` means the model is told NOT to call, so the answer is prose again
+        // and shaping applies. The soft budget / compact_code below stay prose-only: unlike terse
+        // they can't shape a tool-call turn at all.
         if !tool_call_shaped(req) {
-            // Only inject the prose-shaping instruction when output control is actually on. The
-            // stage also runs for the sibling levers (`compact_code`, `frugal_tools`), and those
-            // must NOT drag terse/draft prose in with them — preset `frugal` isolates the
-            // agent-loop directive, so forcing terse on non-tool requests would confound it.
-            if self.output_control {
-                // The clause only earns its tokens when the user wrote in a non-English language;
-                // an English (or too-short-to-detect) prompt already answers in English, so skip
-                // it there and add nothing. `detect_lang` returns `Some` only on a reliable
-                // detection, so ambiguous/short prose keeps the clause (cheap, safe).
-                let non_english =
-                    detect_lang(&user_prose(req, provider)) != Some(whatlang::Lang::Eng);
-                let instruction = if non_english {
-                    format!("{}{}", self.level.instruction(), REPLY_LANGUAGE_CLAUSE)
-                } else {
-                    self.level.instruction().to_string()
-                };
-                provider.add_system_instruction(req, &instruction);
-            }
             // Soft numeric token budgets ("answer within N tokens") FAIL on reasoning
             // models: the batch-prompting overthinking study (arXiv:2511.04108, 2025)
             // found explicit thinking-budget instructions are ignored on DeepSeek-R1 /
@@ -209,9 +205,11 @@ impl Transform for OutputControlStage {
                     req,
                     &TOKEN_BUDGET_TMPL.replace("{budget}", &budget.to_string()),
                 );
+                injected_any = true;
             }
             if self.compact_code {
                 provider.add_system_instruction(req, COMPACT_CODE_INSTRUCTION);
+                injected_any = true;
             }
         }
         // Independent of the prose branch above (its own gate on `tool_call_shaped`), so it and the
@@ -239,6 +237,7 @@ impl Transform for OutputControlStage {
             // models ignore it and just pay the directive's input cost, so they are skipped. See
             // `crate::capability`. Opt-out: an unknown model id still injects.
             provider.add_system_instruction(req, TOOLS_FRUGAL_INSTRUCTION);
+            injected_any = true;
         }
         // Anti-overthinking directive (arXiv:2606.00206): a reasoning pass restarting mid-CoT
         // ("Wait", "Actually…") after it already had the answer. Runs on BOTH request shapes,
@@ -268,6 +267,15 @@ impl Transform for OutputControlStage {
             && !anti_overthink_present(req, provider)
         {
             provider.add_system_instruction(req, ANTI_OVERTHINK_INSTRUCTION);
+            injected_any = true;
+        }
+        // Reply-language clause, injected exactly once when we added any (English) directive above
+        // and the user wrote in a non-English language — otherwise our directives could nudge the
+        // reply into English. Skipped when nothing was injected (no clause to hang off) and for
+        // English / too-short-to-detect prose (already answers in English). `detect_lang` returns
+        // `Some` only on a reliable detection, so ambiguous/short prose keeps the clause.
+        if injected_any && detect_lang(&user_prose(req, provider)) != Some(whatlang::Lang::Eng) {
+            provider.add_system_instruction(req, REPLY_LANGUAGE_CLAUSE.trim());
         }
         if let Some(cap) = self.max_tokens
             && provider.max_tokens(req).is_none()
@@ -434,10 +442,10 @@ mod tests {
     }
 
     #[test]
-    fn tool_call_request_skips_prose_shaping_but_keeps_cap() {
-        // tools present + tool_choice auto ⇒ the answer is a function call: no terse/budget
-        // instruction (pure input cost, 0% output saving on the agent corpus), but the free
-        // hard cap still applies.
+    fn first_turn_tool_call_gets_terse_but_not_budget_or_compact() {
+        // First turn of an agent loop: the model still emits real prose (planning), so terse
+        // rides. The soft token budget and compact_code stay prose-only (they can't shape a
+        // tool-call turn), and the free hard cap still applies.
         let req = run_one(
             json!({"messages":[{"role":"user","content":"book a flight"}],
                    "tools":[{"type":"function","function":{"name":"book","parameters":{}}}],
@@ -461,8 +469,12 @@ mod tests {
             .filter_map(|m| m.get("content").and_then(Value::as_str))
             .collect();
         assert!(
-            !joined.contains("concise") && !joined.contains("120 tokens"),
-            "no prose-shaping instructions on a tool-call request: {joined}"
+            joined.contains("concise"),
+            "first-turn terse injected: {joined}"
+        );
+        assert!(
+            !joined.contains("120 tokens"),
+            "soft budget stays prose-only: {joined}"
         );
         assert_eq!(
             req.raw()
@@ -470,6 +482,42 @@ mod tests {
                 .and_then(Value::as_u64),
             Some(900),
             "hard cap still set (free)"
+        );
+    }
+
+    #[test]
+    fn later_tool_call_turn_skips_terse() {
+        // A tool already invoked ⇒ not the first turn: terse must NOT ride (later tool-call
+        // replies leave nothing to shape, and re-injecting churns the agent-loop cache prefix).
+        let req = run_one(
+            json!({"messages":[
+                       {"role":"user","content":"book a flight"},
+                       {"role":"assistant","tool_calls":[
+                           {"id":"c1","type":"function","function":{"name":"book","arguments":"{}"}}]},
+                       {"role":"tool","tool_call_id":"c1","content":"no seats"}],
+                   "tools":[{"type":"function","function":{"name":"book","parameters":{}}}],
+                   "tool_choice":"auto"}),
+            OutputControlStage {
+                output_control: true,
+                level: OutputLevel::Terse,
+                max_tokens: None,
+                token_budget: None,
+                compact_code: false,
+                frugal_tools: false,
+                anti_overthink: false,
+            },
+        );
+        let joined: String = req
+            .raw()
+            .pointer("/messages")
+            .and_then(Value::as_array)
+            .unwrap()
+            .iter()
+            .filter_map(|m| m.get("content").and_then(Value::as_str))
+            .collect();
+        assert!(
+            !joined.contains("concise"),
+            "no terse on a later tool-call turn: {joined}"
         );
     }
 
@@ -496,8 +544,9 @@ mod tests {
 
     #[test]
     fn frugal_tools_injects_on_tool_call_request_only() {
-        // On a tool-call-shaped request, prose shaping is skipped but the frugality directive
-        // fires — it targets the agent trajectory, not response prose.
+        // On the FIRST turn of a tool-call-shaped request, the frugality directive fires and terse
+        // rides too (the opening turn still emits prose); the directive targets the agent
+        // trajectory, terse the opening prose.
         let req = run_one(
             json!({"messages":[{"role":"user","content":"find the bug"}],
                    "tools":[{"type":"function","function":{"name":"grep","parameters":{}}}],
@@ -514,8 +563,8 @@ mod tests {
         );
         let joined = joined_content(&req);
         assert!(
-            joined.contains("fewest tool-use turns") && !joined.contains("concise"),
-            "frugal directive fires on tool-call shape, prose shaping stays skipped: {joined}"
+            joined.contains("fewest tool-use turns") && joined.contains("concise"),
+            "frugal directive and first-turn terse both fire on tool-call shape: {joined}"
         );
 
         // On a plain prose request, frugal_tools stays silent (prose shaping owns that shape).
