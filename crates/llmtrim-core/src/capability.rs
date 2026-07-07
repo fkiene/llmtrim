@@ -1,4 +1,9 @@
-//! Model-capability gate for the agent-loop frugality directive.
+//! Model-capability gates for the output-steering directives.
+//!
+//! Two independent signals, both data-driven snapshots (not hand-maintained model tables):
+//! [`model_honors_steering`] gates the agent-loop frugality directive on an LMArena Elo bar, and
+//! [`model_is_reasoning_capable`] gates the anti-overthink directive on the models.dev `reasoning`
+//! flag. The frugality half is documented below; the reasoning half is on its own function.
 //!
 //! The frugality directive (see [`crate::stages::output`]) steers a tool-using agent toward the
 //! fewest tool-use turns. Benches show only *capable* harnesses act on that system-level steer:
@@ -24,6 +29,22 @@ use serde_json::Value;
 
 /// LMArena text leaderboard (overall), 2026-07-02 snapshot. See module docs for provenance.
 const LMARENA_SNAPSHOT: &str = include_str!("../data/lmarena_text.json");
+
+/// Per-model `reasoning` flag from models.dev, embedded at compile time. Backs the
+/// anti-overthink gate: refreshed by `tools/refresh_reasoning.py` on release.
+const REASONING_SNAPSHOT: &str = include_str!("../data/model_reasoning.json");
+
+/// `model_id` (lowercased) -> whether the model has a reasoning mode, from [`REASONING_SNAPSHOT`].
+static REASONING: Lazy<HashMap<String, bool>> = Lazy::new(|| {
+    let parsed: Value = serde_json::from_str(REASONING_SNAPSHOT)
+        .expect("embedded reasoning snapshot is valid json");
+    parsed["models"]
+        .as_object()
+        .expect("snapshot has a `models` object")
+        .iter()
+        .filter_map(|(name, flag)| Some((name.to_ascii_lowercase(), flag.as_bool()?)))
+        .collect()
+});
 
 /// Elo bar: models rated strictly above obey the trajectory steer in our benches; the models
 /// proven to ignore it sit well below (gpt-4o-mini 1287, gpt-oss-20b 1288, claude-haiku-4-5 1393),
@@ -79,6 +100,33 @@ pub(crate) fn model_honors_steering(model_id: &str) -> bool {
     rating_for(model_id).is_none_or(|r| r > CAPABILITY_THRESHOLD)
 }
 
+/// True when the wire model id names a model with a reasoning mode, per the embedded models.dev
+/// `reasoning` flag ([`REASONING_SNAPSHOT`]). This is the authoritative registry signal — a bare
+/// id the harness sends (Claude Code sends `claude-sonnet-5`) resolves directly, no `-thinking`
+/// guessing. Normalizes like [`rating_for`]: lowercase, drop a `provider/` prefix, then a
+/// date-suffix fallback for a dated registry entry behind a bare wire id.
+///
+/// Semantics are **opt-in** (the opposite of [`model_honors_steering`]): a genuine miss returns
+/// `false`. The anti-overthink directive should ride only models known to reason — injecting it on
+/// a non-reasoning model is the wrong-behavior case, so an unlisted model gets no directive
+/// ("no help", never "misapplied").
+pub(crate) fn model_is_reasoning_capable(model_id: &str) -> bool {
+    let id = model_id.to_ascii_lowercase();
+    let id = id.split_once('/').map_or(id.as_str(), |(_, rest)| rest);
+
+    if let Some(&flag) = REASONING.get(id) {
+        return flag;
+    }
+    let prefix = format!("{id}-");
+    REASONING
+        .iter()
+        .filter(|(k, _)| {
+            k.strip_prefix(&prefix)
+                .is_some_and(|rest| rest.starts_with(|c: char| c.is_ascii_digit()))
+        })
+        .any(|(_, &flag)| flag)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -111,6 +159,37 @@ mod tests {
             "anthropic/claude-opus-4-6",
         ] {
             assert!(model_honors_steering(id), "{id} should be injected");
+        }
+    }
+
+    #[test]
+    fn reasoning_capability_read_from_models_dev_snapshot() {
+        // Bare ids the harness sends (Claude Code sends `claude-sonnet-5`) resolve directly against
+        // the models.dev `reasoning` flag — no `-thinking` guessing.
+        for id in [
+            "claude-sonnet-5",
+            "anthropic/claude-sonnet-5", // provider prefix stripped
+            "claude-opus-4-8",
+            "gpt-5",
+            "o3",
+        ] {
+            assert!(
+                model_is_reasoning_capable(id),
+                "{id} should read as reasoning-capable"
+            );
+        }
+        // Registry says reasoning=false, or a genuine miss (opt-in) -> false.
+        for id in [
+            "gpt-4o-mini",
+            "gpt-4o",
+            "claude-3-5-haiku",
+            "",
+            "totally-unknown-model",
+        ] {
+            assert!(
+                !model_is_reasoning_capable(id),
+                "{id} must not read as reasoning-capable"
+            );
         }
     }
 

@@ -6,6 +6,10 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Changed
+
+- The anti-overthinking directive now reaches Claude Code and other agent harnesses. It fires for any model the models.dev registry marks as a reasoning model, detected from the model id so it works even when the client sends no `thinking`/`reasoning` field on the wire. It also rides tool-call-shaped agent turns now, not just prose, since a thinking model runs a chain of thought before its tool calls too. On the agent path it injects first-turn-only, so it shares the loop's cached prefix without churning it.
+
 ## [0.8.0] - 2026-07-06
 
 ### Added

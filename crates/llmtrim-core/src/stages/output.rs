@@ -213,22 +213,11 @@ impl Transform for OutputControlStage {
             if self.compact_code {
                 provider.add_system_instruction(req, COMPACT_CODE_INSTRUCTION);
             }
-            // Anti-overthinking directive: targets the specific failure mode this was benched
-            // on — a quantized reasoning pass restarting mid-CoT (arXiv:2606.00206) — so it
-            // requires BOTH signals, not quantization alone (a quantized non-reasoning model has
-            // no CoT to restart) and not reasoning alone (the effect is unproven on full-
-            // precision flagships). No capability floor is applied here (unlike `frugal_tools`):
-            // the benched model (gpt-oss-20b, Elo 1288) sits below that bar, so reusing it would
-            // exclude the only validated case. Known gap, accepted: an even weaker quantized
-            // reasoning tier gets the same "don't reconsider" instruction with no floor under it.
-            if self.anti_overthink
-                && quantized_model_request(req)
-                && reasoning_model_request(req)
-                && !anti_overthink_present(req, provider)
-            {
-                provider.add_system_instruction(req, ANTI_OVERTHINK_INSTRUCTION);
-            }
-        } else if self.frugal_tools
+        }
+        // Independent of the prose branch above (its own gate on `tool_call_shaped`), so it and the
+        // anti-overthink block below both get a clean shot at a tool-shaped request.
+        if self.frugal_tools
+            && tool_call_shaped(req)
             && is_first_turn(req)
             && crate::capability::model_honors_steering(req.model_id().unwrap_or(""))
             && !frugal_directive_present(req, provider)
@@ -250,6 +239,35 @@ impl Transform for OutputControlStage {
             // models ignore it and just pay the directive's input cost, so they are skipped. See
             // `crate::capability`. Opt-out: an unknown model id still injects.
             provider.add_system_instruction(req, TOOLS_FRUGAL_INSTRUCTION);
+        }
+        // Anti-overthinking directive (arXiv:2606.00206): a reasoning pass restarting mid-CoT
+        // ("Wait", "Actually…") after it already had the answer. Runs on BOTH request shapes,
+        // outside the prose/tool branch above: a thinking model runs a CoT before it emits tool
+        // calls too, so an agent turn overthinks the same way a prose turn does — and Claude Code
+        // turns are always tool-shaped, so a prose-only gate would never reach them.
+        //
+        // The trigger is reasoning *capability*, not a wire field: Claude Code sends the bare id
+        // (`claude-sonnet-5`) with no `thinking`/`reasoning` on the wire, so `reasoning_model_request`
+        // alone can't see it. `model_is_reasoning_capable` reads the models.dev `reasoning` flag
+        // from the embedded snapshot — opt-in, so a non-reasoning model gets nothing. Either
+        // signal qualifies: an explicit wire reasoning field OR a known reasoning-mode model.
+        //
+        // First-turn-only ON THE AGENT PATH, like the frugality directive above: there the two
+        // share the system block, so injecting anti-overthink on later turns (when frugal is
+        // already gone) would diverge the cached prefix turn-to-turn and churn the provider cache.
+        // On the prose path there is no frugal to stay in lockstep with and no agent-loop cache to
+        // protect, so let every reasoning turn (incl. a multi-turn chat) get the steer.
+        //
+        // Accepted risk, pending a quality bench: benched only on a quantized reasoning model
+        // (gpt-oss-20b); on full-precision flagships the "commit, don't reconsider" steer is
+        // unproven and reconsideration can be productive. Kept armed by choice.
+        if self.anti_overthink
+            && (!tool_call_shaped(req) || is_first_turn(req))
+            && (reasoning_model_request(req)
+                || crate::capability::model_is_reasoning_capable(req.model_id().unwrap_or("")))
+            && !anti_overthink_present(req, provider)
+        {
+            provider.add_system_instruction(req, ANTI_OVERTHINK_INSTRUCTION);
         }
         if let Some(cap) = self.max_tokens
             && provider.max_tokens(req).is_none()
@@ -286,24 +304,6 @@ fn frugal_directive_present(req: &Request, provider: &dyn Provider) -> bool {
                 .get_str(ptr)
                 .is_some_and(|t| t.contains(TOOLS_FRUGAL_MARKER))
     })
-}
-
-/// True when the request explicitly pins a quantized serving tier (OpenRouter
-/// `provider.quantizations: [...]`). This is one half of the anti-overthink gate — the failure
-/// mode (arXiv:2606.00206) is caused by post-training quantization noise, not by "being a
-/// reasoning model" in general, so this is checked alongside [`reasoning_model_request`], never
-/// alone. Explicit request field, not a model-name table — same policy as that function.
-///
-/// Known gap, accepted: a quantized model called WITHOUT this field (a self-hosted quantized
-/// endpoint, or OpenRouter left to auto-pick a quantized upstream) is invisible to this gate and
-/// gets no directive. This only ever adds an instruction, never removes one, so the failure mode
-/// of a false negative is "no help," not "wrong behavior."
-fn quantized_model_request(req: &Request) -> bool {
-    req.raw()
-        .get("provider")
-        .and_then(|p| p.get("quantizations"))
-        .and_then(Value::as_array)
-        .is_some_and(|a| !a.is_empty())
 }
 
 /// True when the anti-overthink directive is already present in the request's system prose —
@@ -1051,59 +1051,77 @@ mod tests {
     }
 
     #[test]
-    fn detects_quantized_provider_request() {
-        assert!(quantized_model_request(&req_with(
-            json!({"provider":{"quantizations":["fp4"]}})
-        )));
-        assert!(!quantized_model_request(&req_with(
-            json!({"provider":{"quantizations":[]}})
-        )));
-        assert!(!quantized_model_request(&req_with(json!({"provider":{}}))));
-        assert!(!quantized_model_request(&req_with(json!({}))));
-    }
-
-    #[test]
-    fn anti_overthink_injects_only_when_quantized_and_reasoning() {
-        let quantized_reasoning = json!({"provider":{"quantizations":["fp4"]},
-               "reasoning":{"effort":"medium"},
-               "messages":[{"role":"user","content":"what is 2+2?"}]});
-        let req = run_one(quantized_reasoning, anti_overthink_stage());
-        assert!(
-            joined_content(&req).contains(ANTI_OVERTHINK_MARKER),
-            "quantized + reasoning prose request gets the directive: {}",
-            joined_content(&req)
-        );
-
-        // Quantized alone (no reasoning field): the model has no CoT to restart, so the
-        // directive must NOT fire.
-        let quantized_only = json!({"provider":{"quantizations":["fp4"]},
-               "messages":[{"role":"user","content":"what is 2+2?"}]});
-        let req = run_one(quantized_only, anti_overthink_stage());
-        assert!(
-            !joined_content(&req).contains(ANTI_OVERTHINK_MARKER),
-            "quantized-only request stays silent (no reasoning field): {}",
-            joined_content(&req)
-        );
-
-        // Reasoning alone (no quantization declared): unproven on full-precision models, so
-        // the directive must NOT fire.
-        let reasoning_only = json!({"reasoning":{"effort":"medium"},
-               "messages":[{"role":"user","content":"what is 2+2?"}]});
-        let req = run_one(reasoning_only, anti_overthink_stage());
-        assert!(
-            !joined_content(&req).contains(ANTI_OVERTHINK_MARKER),
-            "reasoning-only request stays silent (no quantization field): {}",
-            joined_content(&req)
-        );
-    }
-
-    #[test]
-    fn anti_overthink_skips_tool_call_shaped_requests() {
-        // The directive targets CoT-then-prose, not tool-call args; it must stay silent on the
-        // tool-call-shaped branch even when both gate signals are present.
-        let req = run_one(
+    fn anti_overthink_injects_on_any_reasoning_pass() {
+        // Reasoning declared (with or without a quantized tier) → the directive fires. The gate
+        // is the reasoning signal alone, so full-precision reasoning passes (e.g. sonnet with
+        // `thinking`) get it too.
+        for req in [
             json!({"provider":{"quantizations":["fp4"]},
                    "reasoning":{"effort":"medium"},
+                   "messages":[{"role":"user","content":"what is 2+2?"}]}),
+            json!({"reasoning":{"effort":"medium"},
+                   "messages":[{"role":"user","content":"what is 2+2?"}]}),
+            json!({"thinking":{"type":"enabled","budget_tokens":1024},
+                   "messages":[{"role":"user","content":"what is 2+2?"}]}),
+        ] {
+            let out = run_one(req, anti_overthink_stage());
+            assert!(
+                joined_content(&out).contains(ANTI_OVERTHINK_MARKER),
+                "reasoning pass gets the directive: {}",
+                joined_content(&out)
+            );
+        }
+
+        // No reasoning field: the model has no CoT to restart, so the directive must NOT fire.
+        let no_reasoning = json!({"provider":{"quantizations":["fp4"]},
+               "messages":[{"role":"user","content":"what is 2+2?"}]});
+        let req = run_one(no_reasoning, anti_overthink_stage());
+        assert!(
+            !joined_content(&req).contains(ANTI_OVERTHINK_MARKER),
+            "non-reasoning request stays silent: {}",
+            joined_content(&req)
+        );
+    }
+
+    #[test]
+    fn anti_overthink_fires_on_tool_call_shaped_reasoning_requests() {
+        // A thinking model runs a CoT before it emits tool calls, so an agent turn overthinks the
+        // same way a prose turn does — and Claude Code turns are always tool-shaped. The directive
+        // must ride the tool-call branch too (it did NOT before this change).
+        let req = run_one(
+            json!({"reasoning":{"effort":"medium"},
+                   "messages":[{"role":"user","content":"find the bug"}],
+                   "tools":[{"type":"function","function":{"name":"grep","parameters":{}}}],
+                   "tool_choice":"auto"}),
+            anti_overthink_stage(),
+        );
+        assert!(
+            joined_content(&req).contains(ANTI_OVERTHINK_MARKER),
+            "anti-overthink directive rides a tool-call-shaped reasoning request: {}",
+            joined_content(&req)
+        );
+    }
+
+    #[test]
+    fn anti_overthink_detects_reasoning_model_by_id_without_a_wire_field() {
+        // The Claude Code case: bare model id, no `thinking`/`reasoning` on the wire. The directive
+        // must still fire (model-capability signal), on a tool-shaped agent turn.
+        let req = run_one(
+            json!({"model":"claude-sonnet-5",
+                   "messages":[{"role":"user","content":"find the bug"}],
+                   "tools":[{"type":"function","function":{"name":"grep","parameters":{}}}],
+                   "tool_choice":"auto"}),
+            anti_overthink_stage(),
+        );
+        assert!(
+            joined_content(&req).contains(ANTI_OVERTHINK_MARKER),
+            "anti-overthink fires on a known reasoning model with no wire field: {}",
+            joined_content(&req)
+        );
+
+        // A non-reasoning model with no wire field must stay silent (opt-in, no misapplication).
+        let req = run_one(
+            json!({"model":"gpt-4o-mini",
                    "messages":[{"role":"user","content":"find the bug"}],
                    "tools":[{"type":"function","function":{"name":"grep","parameters":{}}}],
                    "tool_choice":"auto"}),
@@ -1111,8 +1129,46 @@ mod tests {
         );
         assert!(
             !joined_content(&req).contains(ANTI_OVERTHINK_MARKER),
-            "no anti-overthink directive on a tool-call-shaped request: {}",
+            "non-reasoning model stays silent: {}",
             joined_content(&req)
+        );
+    }
+
+    #[test]
+    fn anti_overthink_first_turn_gate_applies_only_to_the_agent_path() {
+        // Multi-turn PROSE chat on a reasoning model (no tools, so not first-turn): still injects —
+        // no agent-loop cache to protect, every reasoning turn gets the steer.
+        let chat = run_one(
+            json!({"model":"claude-sonnet-5",
+                   "messages":[
+                       {"role":"user","content":"hi"},
+                       {"role":"assistant","content":"hello"},
+                       {"role":"user","content":"what is 17*23?"}]}),
+            anti_overthink_stage(),
+        );
+        assert!(
+            joined_content(&chat).contains(ANTI_OVERTHINK_MARKER),
+            "multi-turn prose chat keeps the directive: {}",
+            joined_content(&chat)
+        );
+
+        // Tool-shaped LATER turn (a tool already invoked): suppressed, to keep the agent loop's
+        // cached prefix byte-stable in lockstep with the first-turn-only frugality directive.
+        let later_agent_turn = run_one(
+            json!({"model":"claude-sonnet-5",
+                   "messages":[
+                       {"role":"user","content":"find the bug"},
+                       {"role":"assistant","tool_calls":[
+                           {"id":"c1","type":"function","function":{"name":"grep","arguments":"{}"}}]},
+                       {"role":"tool","tool_call_id":"c1","content":"no match"}],
+                   "tools":[{"type":"function","function":{"name":"grep","parameters":{}}}],
+                   "tool_choice":"auto"}),
+            anti_overthink_stage(),
+        );
+        assert!(
+            !joined_content(&later_agent_turn).contains(ANTI_OVERTHINK_MARKER),
+            "later agent turn stays silent (first-turn-only on the tool path): {}",
+            joined_content(&later_agent_turn)
         );
     }
 
