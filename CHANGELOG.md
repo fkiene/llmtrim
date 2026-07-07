@@ -6,6 +6,10 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Fixed
+
+- The Python package build was broken on Linux (`No UniFFI metadata found`), so `pip install llmtrim` had no Linux wheel.
+
 ## [0.8.1] - 2026-07-07
 
 ### Changed
