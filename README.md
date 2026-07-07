@@ -230,7 +230,7 @@ The same compression runs with no proxy and no setup, as a one-shot CLI, an embe
 | Rust | `cargo add llmtrim-core` |
 | Python | `pip install llmtrim` |
 | Ruby | `gem install llmtrim` |
-| Kotlin | `implementation("io.github.fkiene:llmtrim:0.8.0")` (Maven Central) |
+| Kotlin | `implementation("io.github.fkiene:llmtrim:0.8.1")` (Maven Central) |
 | Swift | `.package(url: "https://github.com/fkiene/llmtrim-swift", from: "0.1.8")` (SwiftPM) |
 
 **CLI.** Pipe a request in, get a compressed one out:

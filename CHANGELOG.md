@@ -6,6 +6,8 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.8.1] - 2026-07-07
+
 ### Changed
 
 - The anti-overthinking directive now reaches Claude Code and other agent harnesses. It fires for any model the models.dev registry marks as a reasoning model, detected from the model id so it works even when the client sends no `thinking`/`reasoning` field on the wire. It also rides tool-call-shaped agent turns now, not just prose, since a thinking model runs a chain of thought before its tool calls too. On the agent path it injects first-turn-only, so it shares the loop's cached prefix without churning it.
@@ -773,7 +775,8 @@ bill, never a broken call.
   (6 targets with SLSA build provenance), CI on Linux/macOS/Windows with secret
   scanning, license compliance, and MSRV gates.
 
-[Unreleased]: https://github.com/fkiene/llmtrim/compare/v0.8.0...HEAD
+[Unreleased]: https://github.com/fkiene/llmtrim/compare/v0.8.1...HEAD
+[0.8.1]: https://github.com/fkiene/llmtrim/compare/v0.8.0...v0.8.1
 [0.8.0]: https://github.com/fkiene/llmtrim/compare/v0.7.0...v0.8.0
 [0.7.0]: https://github.com/fkiene/llmtrim/compare/v0.6.3...v0.7.0
 [0.6.3]: https://github.com/fkiene/llmtrim/compare/v0.6.2...v0.6.3
