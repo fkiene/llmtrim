@@ -11,6 +11,7 @@ All notable changes to this project are documented here. The format follows
 - The Python package build was broken on Linux (`No UniFFI metadata found`), so `pip install llmtrim` had no Linux wheel.
 - The reply-language clause no longer misfires when a non-English prompt carries pasted code. Code is stripped from the language-detection sample, and the sample now favors the most recent question over an earlier pasted context, so a large code block ahead of a short non-English question no longer causes the model to answer in English.
 - Native TLS tools that ignore `NODE_EXTRA_CA_CERTS` (curl, git, Python, and rustls-based agents like OpenAI Codex) failed with `invalid peer certificate: UnknownIssuer` against the proxy. `setup` now also builds `~/.llmtrim/ca-bundle.pem` (the OS root bundle plus the llmtrim CA) and exports `SSL_CERT_FILE`/`CURL_CA_BUNDLE` on POSIX, so those clients trust the interceptor out of the box.
+- OpenAI Codex hung for several seconds retrying a WebSocket connection through the proxy before falling back to plain HTTPS. The proxy now refuses WebSocket upgrades to intercepted hosts with an immediate `426`, so the client drops straight to the HTTPS transport — which, unlike a WebSocket, carries the prompt as a request body llmtrim can compress.
 
 ## [0.8.1] - 2026-07-07
 

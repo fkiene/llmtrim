@@ -263,6 +263,25 @@ mod imp {
             .unwrap_or(false)
     }
 
+    /// True if `req` is a WebSocket upgrade attempt — either an HTTP/1.1 `Upgrade: websocket`
+    /// handshake or an HTTP/2 Extended CONNECT (RFC 8441, the `:protocol` pseudo-header set to
+    /// `websocket`). We refuse these on intercepted LLM hosts (see `handle_request_inner`): a
+    /// WebSocket carries the prompt as frames, not an HTTP body, so llmtrim can't compress it,
+    /// and hudsucker can't forward an h2 Extended CONNECT anyway — it stalls until the client
+    /// times out. Refusing fast makes the client fall back to the plain-HTTPS transport, which
+    /// is a normal POST body llmtrim *does* compress. OpenAI's Codex is the motivating client.
+    fn is_websocket_upgrade(req: &Request<Body>) -> bool {
+        if req.method() == Method::CONNECT
+            && let Some(p) = req.extensions().get::<hudsucker::hyper::ext::Protocol>()
+        {
+            return p.as_str().eq_ignore_ascii_case("websocket");
+        }
+        req.headers()
+            .get(header::UPGRADE)
+            .and_then(|v| v.to_str().ok())
+            .is_some_and(|v| v.eq_ignore_ascii_case("websocket"))
+    }
+
     /// Host of a request: the URI authority, else the `Host` header (port stripped).
     fn host_of<B>(req: &Request<B>) -> Option<String> {
         if let Some(h) = req.uri().host() {
@@ -697,6 +716,17 @@ mod imp {
         /// constructing a `hudsucker::HttpContext` (which is `#[non_exhaustive]` and
         /// cannot be instantiated outside the hudsucker crate).
         async fn handle_request_inner(&mut self, req: Request<Body>) -> RequestOrResponse {
+            // Refuse WebSocket upgrades on intercepted hosts so the client drops to the
+            // compressible plain-HTTPS transport (see `is_websocket_upgrade`). 426 Upgrade
+            // Required is a clean, immediate handshake failure — no body, no hang — so the
+            // client falls back at once instead of retrying the dead upgrade for seconds.
+            if is_websocket_upgrade(&req) {
+                let res = Response::builder()
+                    .status(hudsucker::hyper::StatusCode::UPGRADE_REQUIRED)
+                    .body(Body::empty())
+                    .expect("static 426 response is always valid");
+                return RequestOrResponse::Response(res);
+            }
             // Lowercase the host once: every host comparison below (Vertex suffix, provider
             // lookup, exclusion match) is case-insensitive.
             let host = host_of(&req).map(|h| h.to_ascii_lowercase());
@@ -2970,6 +3000,47 @@ mod imp {
                 rx.try_recv().is_err(),
                 "no ledger record must be emitted from handle_request_inner alone"
             );
+        }
+
+        // Test 1b: WebSocket refusal ──────────────────────────────────────────
+
+        #[test]
+        fn is_websocket_upgrade_detects_h1_upgrade_header() {
+            let ws = Request::builder()
+                .method(Method::GET)
+                .uri("https://chatgpt.com/backend-api/codex/responses")
+                .header(header::UPGRADE, "websocket")
+                .header(header::CONNECTION, "Upgrade")
+                .body(Body::empty())
+                .expect("valid request");
+            assert!(is_websocket_upgrade(&ws));
+
+            let plain = post_request("https://api.openai.com/v1/chat/completions", "{}");
+            assert!(!is_websocket_upgrade(&plain));
+        }
+
+        /// A WebSocket upgrade on an intercepted host is short-circuited with 426 so the client
+        /// falls back to the compressible HTTPS transport — never forwarded, never compressed.
+        #[tokio::test]
+        async fn handle_request_inner_refuses_websocket_upgrade_with_426() {
+            let (mut handler, rx) = make_interceptor();
+            let req = Request::builder()
+                .method(Method::GET)
+                .uri("https://chatgpt.com/backend-api/codex/responses")
+                .header(header::UPGRADE, "websocket")
+                .header(header::CONNECTION, "Upgrade")
+                .body(Body::empty())
+                .expect("valid request");
+
+            let result = handler.handle_request_inner(req).await;
+
+            let RequestOrResponse::Response(res) = result else {
+                panic!("a WebSocket upgrade must be refused with a Response, not forwarded");
+            };
+            assert_eq!(res.status(), hudsucker::hyper::StatusCode::UPGRADE_REQUIRED);
+            // Refusal is not a compressed request: no pending state, no ledger record.
+            assert!(handler.pending.is_none());
+            assert!(rx.try_recv().is_err());
         }
 
         // Test 2: non-compressible path ───────────────────────────────────────
