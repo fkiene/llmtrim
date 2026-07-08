@@ -6,6 +6,10 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Changed
+
+- `llmtrim stop` no longer breaks tools in new terminals. On POSIX the shell-profile block now exports `HTTPS_PROXY` only while the interceptor is running, so a terminal opened after `stop` talks to LLM hosts directly instead of failing at a dead proxy, and new terminals re-wire on their own once you `start` again. On Windows, `stop` clears the interceptor values from `HKCU\Environment` and `start` re-sets them, so newly-launched terminals and apps stay in sync. The shell you run `stop` in keeps the vars it already inherited (a process can't rewrite its parent shell), so `stop` prints the one-line `unset` for it. Existing installs pick up the new behavior the next time the daemon starts, with no `setup` re-run.
+
 ### Fixed
 
 - The Python package build was broken on Linux (`No UniFFI metadata found`), so `pip install llmtrim` had no Linux wheel.

@@ -190,6 +190,12 @@ enum Commands {
     },
     /// Stop the background interceptor daemon
     Stop,
+    /// Fast liveness probe for the shell-profile block (hidden): exit 0 if the daemon is up,
+    /// 1 if not. Reads the pidfile + `kill -0` only (no network), so it's cheap enough to run
+    /// on every new shell — the managed env block calls it to wire HTTPS_PROXY only while the
+    /// interceptor is actually running.
+    #[command(name = "_alive", hide = true)]
+    Alive,
     /// Update llmtrim to the latest release
     ///
     /// Channel-aware: a binary install self-updates via the installer; cargo and
@@ -624,6 +630,13 @@ fn run() -> Result<()> {
                 // a foreground `llmtrim serve` must not rewrite the user's shell profiles.
                 // Best-effort: never let it stop the proxy coming up.
                 let _ = llmtrim::setup::heal_managed_env();
+                // Windows: the daemon is up, so wire the interceptor env into the registry now.
+                // POSIX self-gates via the shell block's `_alive` probe, but Windows env is read
+                // at process launch with no per-shell hook, so we set it here (the one process
+                // both `start` and login autostart bring the daemon up through) and clear it in
+                // `stop`. Best-effort: never block the proxy coming up.
+                #[cfg(windows)]
+                let _ = llmtrim::setup::wire_env_windows(port);
                 llmtrim::serve::run_supervised(port, force)?;
             } else {
                 llmtrim::serve::run(port, force)?;
@@ -703,6 +716,14 @@ fn run() -> Result<()> {
             }
         }
         Commands::Wrap { args } => llmtrim::wrap::run(args)?,
+        Commands::Alive => {
+            // The shell-profile block runs this on every new shell to decide whether to wire
+            // HTTPS_PROXY. Keep it silent and pidfile-only (no TCP probe) so shell startup
+            // stays cheap. Exit 0 = daemon up, 1 = down.
+            if llmtrim::daemon::running().is_none() {
+                std::process::exit(1);
+            }
+        }
         Commands::Stop => match llmtrim::daemon::stop()? {
             Some(pid) => {
                 println!(
@@ -712,16 +733,48 @@ fn run() -> Result<()> {
                         &format!("Stopped interceptor (pid {pid}).")
                     )
                 );
-                if llmtrim::setup::profile_has_block() {
+                // New shells self-heal: the managed block only wires HTTPS_PROXY while the
+                // daemon is up, so a fresh terminal now talks to LLM hosts directly. But this
+                // shell already exported the vars at launch and a child can't unset them in its
+                // parent — so hand the user the one-liner. Only when HTTPS_PROXY actually points at
+                // the local interceptor, so we never tell someone to strip an unrelated corporate
+                // proxy they happen to have set.
+                #[cfg(not(windows))]
+                if llmtrim::wrap::https_proxy_is_local() {
                     eprintln!(
                         "{}",
                         ui::warn(
                             ui::color_stderr(),
-                            "HTTPS_PROXY still points at llmtrim in your environment — \
-                             new HTTPS to LLM hosts will fail until you start it again \
-                             (llmtrim start) or run llmtrim uninstall."
+                            &format!(
+                                "This shell still points at the stopped interceptor. New \
+                                 terminals are already clear; to fix this one, run:\n    {}",
+                                llmtrim::setup::UNSET_HINT
+                            )
                         )
                     );
+                }
+                // Windows has no per-shell gate (env lives in HKCU\Environment, read at process
+                // launch), so clear the registry values now: newly-launched terminals and apps
+                // come up clear. `start` re-wires them when the daemon is back up.
+                #[cfg(windows)]
+                match llmtrim::setup::unwire_env_windows() {
+                    Ok(true) => eprintln!(
+                        "{}",
+                        ui::note(
+                            ui::color_stderr(),
+                            "Cleared HTTPS_PROXY from your user environment — new terminals and \
+                             apps are clear. Apps already running keep the old proxy until you \
+                             restart them."
+                        )
+                    ),
+                    Ok(false) => {}
+                    Err(e) => eprintln!(
+                        "{}",
+                        ui::warn(
+                            ui::color_stderr(),
+                            &format!("could not clear the interceptor env: {e}")
+                        )
+                    ),
                 }
             }
             None => println!(
@@ -2103,6 +2156,25 @@ mod tests {
     fn breakdown_section_is_omitted_unless_requested() {
         let base = r#"{"daemon":{"running":true}}"#.to_string();
         assert_eq!(merge_breakdown_json(base.clone(), false), base);
+    }
+
+    // `_alive` is baked verbatim into every user's shell profile (setup.rs `env_block`), so its
+    // name is a forever-contract: a rename silently breaks proxy wiring for every new shell. Pin
+    // it here so CI catches an accidental rename, and confirm it stays hidden from help.
+    #[test]
+    fn alive_subcommand_name_is_stable_and_hidden() {
+        let cli = Cli::try_parse_from(["llmtrim", "_alive"]).expect("`_alive` must parse");
+        assert!(matches!(cli.command, Commands::Alive));
+        let help = {
+            use clap::CommandFactory;
+            let mut out = Vec::new();
+            Cli::command().write_long_help(&mut out).unwrap();
+            String::from_utf8(out).unwrap()
+        };
+        assert!(
+            !help.contains("_alive"),
+            "`_alive` must stay hidden from help"
+        );
     }
 
     // The flag only makes sense with `--json`; clap must reject it on its own.

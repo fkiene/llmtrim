@@ -1,9 +1,11 @@
 //! `llmtrim setup` — the one-command bootstrap. llmtrim is *only* a MITM proxy, so
 //! integration is purely at the environment level: it ensures the local CA, then sets
 //! `HTTPS_PROXY` + `NODE_EXTRA_CA_CERTS` for the user (POSIX: a managed shell-profile
-//! block; Windows: `HKCU\Environment`) so every newly-launched tool routes through the
-//! interceptor and trusts the CA — **no IDE settings touched, no sudo** — enables
-//! run-at-login, and starts the daemon.
+//! block; Windows: `HKCU\Environment`) so newly-launched tools route through the
+//! interceptor and trust the CA — **no IDE settings touched, no sudo** — enables
+//! run-at-login, and starts the daemon. On POSIX the block wires the vars only while the
+//! daemon is up (gated on `llmtrim _alive`), so a shell opened after `stop` routes directly
+//! instead of at a dead proxy; Windows syncs the registry on daemon start/stop instead.
 //!
 //! Best-effort and idempotent: a step that fails warns and the rest proceeds.
 
@@ -16,6 +18,12 @@ use crate::ui::{self, Tone};
 
 const BEGIN: &str = "# >>> llmtrim >>>";
 const END: &str = "# <<< llmtrim <<<";
+
+/// The shell command that clears the interceptor env vars from the *current* shell. A running
+/// process can't rewrite its parent shell's environment, so `stop`/`uninstall` print this for
+/// the user to run (or they open a new shell, which self-heals via the daemon-gated block).
+/// Single source of truth for the five managed vars, in both `NO_PROXY` casings.
+pub const UNSET_HINT: &str = "unset HTTPS_PROXY HTTP_PROXY NO_PROXY no_proxy NODE_EXTRA_CA_CERTS SSL_CERT_FILE CURL_CA_BUNDLE";
 
 /// Hosts/ranges that must bypass the interceptor: loopback, link-local, and the private LAN
 /// ranges (RFC-1918 + IPv6 ULA). llmtrim only MITMs a fixed set of public LLM API hosts (the
@@ -248,16 +256,20 @@ pub fn heal_managed_env() -> Result<Vec<PathBuf>> {
 }
 
 /// Inner seam for [`heal_managed_env`] (POSIX), against `base` as the home dir so tests stay
-/// hermetic. Rewrites the managed block only in profiles that already contain it AND lack the
-/// `NO_PROXY` bypass; returns the paths actually rewritten.
-/// Does `s` contain a *well-formed* managed block (`BEGIN`…`END`) that lacks the `NO_PROXY`
-/// bypass? Only such a block is healable: a malformed BEGIN-without-END is skipped (rewriting it
-/// would stack a duplicate), an already-current block is skipped, and a `NO_PROXY` the user set
-/// *outside* the markers does not count (it must be inside the block we manage). Pure/testable.
+/// hermetic. Rewrites the managed block only in profiles that already contain a healable one (see
+/// [`managed_block_needs_heal`]); returns the paths actually rewritten.
+/// Does `s` contain a *well-formed* managed block (`BEGIN`…`END`) that predates the current block
+/// shape and should be rewritten? A block is healable when it lacks either the `NO_PROXY` bypass
+/// or the daemon-liveness gate (`llmtrim _alive`) — both are silent rewrites into the current
+/// form, and the second is what migrates every pre-gate install so `stop` unwires new shells
+/// without the user re-running `setup`. Only a well-formed block qualifies: a malformed
+/// BEGIN-without-END is skipped (rewriting it would stack a duplicate), an already-current block
+/// (both markers present inside it) is skipped, and a `NO_PROXY`/guard the user placed *outside*
+/// the markers does not count — it must be inside the block we manage. Pure/testable.
 #[cfg(not(windows))]
 fn managed_block_needs_heal(s: &str) -> bool {
-    let (mut in_block, mut saw_begin, mut saw_end, mut bypass_in_block) =
-        (false, false, false, false);
+    let (mut in_block, mut saw_begin, mut saw_end, mut bypass_in_block, mut gate_in_block) =
+        (false, false, false, false, false);
     for line in s.lines() {
         match line.trim() {
             BEGIN => {
@@ -270,11 +282,12 @@ fn managed_block_needs_heal(s: &str) -> bool {
                 }
                 in_block = false;
             }
+            l if in_block && l.contains("llmtrim _alive") => gate_in_block = true,
             l if in_block && l.contains("NO_PROXY") => bypass_in_block = true,
             _ => {}
         }
     }
-    saw_begin && saw_end && !bypass_in_block
+    saw_begin && saw_end && (!bypass_in_block || !gate_in_block)
 }
 
 #[cfg(not(windows))]
@@ -970,9 +983,10 @@ pub fn uninstall(purge: bool, keep_binary: bool) -> Result<()> {
         ui::paint(
             color,
             Tone::Bold,
-            "Done. Your current shell still has HTTPS_PROXY, HTTP_PROXY, NO_PROXY, and \
-             NODE_EXTRA_CA_CERTS exported. Open a new shell to clear them, or run: \
-             unset HTTPS_PROXY HTTP_PROXY NO_PROXY no_proxy NODE_EXTRA_CA_CERTS"
+            &format!(
+                "Done. Your current shell still has HTTPS_PROXY, HTTP_PROXY, NO_PROXY, and \
+                 NODE_EXTRA_CA_CERTS exported. Open a new shell to clear them, or run: {UNSET_HINT}"
+            )
         )
     );
     // The env is gone from disk, but processes that were already running inherited it at
@@ -1082,10 +1096,11 @@ fn remove_profile_block() -> Result<Vec<PathBuf>> {
     }
 }
 
-/// Is the interceptor env still wired up? Used to warn that stopping the daemon while
-/// `HTTPS_PROXY` still points at it will break the client's HTTPS. Windows reads the
-/// `HKCU\Environment` value; POSIX checks **all three candidate shell profiles** —
-/// a stale block in any of them means the env may still be wired for that shell.
+/// Has `setup` wired the interceptor env for this user? Windows reads the `HKCU\Environment`
+/// value; POSIX reports whether the managed block exists in any candidate shell profile. Note
+/// that on POSIX block *presence* no longer implies the env is actively exported: the block is
+/// gated on `llmtrim _alive`, so it can be present yet inert while the daemon is down. Callers
+/// (`start`, `wrap`) use this only as a "has setup run" signal, not a liveness check.
 pub fn profile_has_block() -> bool {
     #[cfg(windows)]
     {
@@ -1155,6 +1170,34 @@ fn clear_user_env() -> Result<bool> {
 #[cfg(windows)]
 fn user_env_has_proxy() -> bool {
     user_env_key().is_ok_and(|env| has_proxy_in(&env))
+}
+
+/// Windows: wire the interceptor env into `HKCU\Environment` (and broadcast the change) when the
+/// daemon comes up. The registry is read at process launch, so unlike POSIX there is no per-shell
+/// liveness gate — the env is set on daemon start and cleared on `stop`, keeping newly-launched
+/// processes in sync with whether the interceptor is actually running. Called from the supervised
+/// `serve` path, which is the single process `start` and login autostart both bring the daemon up
+/// through. Best-effort; ensures the CA exists so `NODE_EXTRA_CA_CERTS` points at a real file.
+#[cfg(windows)]
+pub fn wire_env_windows(port: u16) -> Result<()> {
+    crate::serve::ensure_ca()?;
+    let ca = crate::serve::ca_cert_path()?.to_string_lossy().to_string();
+    let proxy = format!("http://127.0.0.1:{port}");
+    set_user_env(&proxy, &ca)?;
+    broadcast_env_change();
+    Ok(())
+}
+
+/// Windows: clear the interceptor env from `HKCU\Environment` (and broadcast) when the daemon
+/// stops, so a terminal or app launched afterwards doesn't route at the now-dead proxy. Returns
+/// true if anything was set. Idempotent: clearing an already-clear env is not an error.
+#[cfg(windows)]
+pub fn unwire_env_windows() -> Result<bool> {
+    let cleared = clear_user_env()?;
+    if cleared {
+        broadcast_env_change();
+    }
+    Ok(cleared)
 }
 
 /// Broadcast `WM_SETTINGCHANGE("Environment")` so Explorer (and through it, newly-launched
@@ -1498,25 +1541,34 @@ fn env_block(proxy: &str, ca: &str, bundle: Option<&str>, syntax: Syntax) -> Str
     match syntax {
         // NO_PROXY is set in both cases (lowercase too on POSIX: curl/libcurl, Go, and others
         // only honor `no_proxy`). Windows env vars are case-insensitive, so one suffices there.
+        // Wire the env only while the daemon is actually up. A new shell opened after
+        // `llmtrim stop` must not route at a now-dead proxy — so the block gates every export
+        // behind `llmtrim _alive`, a fast pidfile check (no network, no TCP connect). Daemon
+        // down → the vars stay unset → tools talk to the LLM host directly and just work.
+        // The current shell can't be fixed this way (a child can't rewrite its parent's env);
+        // that's what `stop`'s printed `unset` line and `uninstall` handle.
         Syntax::Posix => {
             // Node trusts the CA via NODE_EXTRA_CA_CERTS; native OpenSSL/rustls clients don't
             // read it, so point their bundle vars at the full combined bundle when we have one.
+            // Indented to sit inside the liveness guard alongside the other exports.
             let native = bundle
                 .map(|b| {
                     format!(
-                        "export SSL_CERT_FILE=\"{b}\"\n\
-                         export CURL_CA_BUNDLE=\"{b}\"\n"
+                        "\x20   export SSL_CERT_FILE=\"{b}\"\n\
+                         \x20   export CURL_CA_BUNDLE=\"{b}\"\n"
                     )
                 })
                 .unwrap_or_default();
             format!(
                 "{BEGIN}\n\
-                 export HTTPS_PROXY=\"{proxy}\"\n\
-                 export HTTP_PROXY=\"{proxy}\"\n\
-                 export NO_PROXY=\"{NO_PROXY}\"\n\
-                 export no_proxy=\"{NO_PROXY}\"\n\
-                 export NODE_EXTRA_CA_CERTS=\"{ca}\"\n\
-                 {native}{END}\n"
+                 if command -v llmtrim >/dev/null 2>&1 && llmtrim _alive 2>/dev/null; then\n\
+                 \x20   export HTTPS_PROXY=\"{proxy}\"\n\
+                 \x20   export HTTP_PROXY=\"{proxy}\"\n\
+                 \x20   export NO_PROXY=\"{NO_PROXY}\"\n\
+                 \x20   export no_proxy=\"{NO_PROXY}\"\n\
+                 \x20   export NODE_EXTRA_CA_CERTS=\"{ca}\"\n\
+                 {native}fi\n\
+                 {END}\n"
             )
         }
         Syntax::PowerShell => format!(
@@ -1718,7 +1770,22 @@ mod tests {
         let old = format!("{BEGIN}\nexport HTTPS_PROXY=\"x\"\n{END}\n");
         assert!(managed_block_needs_heal(&old), "old block needs heal");
 
-        let current = format!("{BEGIN}\nexport NO_PROXY=\"y\"\n{END}\n");
+        // Pre-gate block: has the NO_PROXY bypass but not the `llmtrim _alive` liveness gate. It
+        // must still heal so existing installs migrate to the daemon-gated form (the fix that lets
+        // `stop` unwire new shells) without the user re-running `setup`.
+        let pre_gate = format!("{BEGIN}\nexport NO_PROXY=\"y\"\n{END}\n");
+        assert!(
+            managed_block_needs_heal(&pre_gate),
+            "block missing the _alive gate needs heal"
+        );
+
+        // The actually-current block carries both the bypass and the gate, so it is skipped.
+        let current = env_block(
+            "http://127.0.0.1:8787",
+            "/home/u/ca.pem",
+            None,
+            Syntax::Posix,
+        );
         assert!(!managed_block_needs_heal(&current), "current block skipped");
 
         let malformed = format!("{BEGIN}\nexport HTTPS_PROXY=\"x\"\n"); // no END
@@ -1971,6 +2038,83 @@ mod tests {
         assert!(contents.contains("LLMTRIMFAKE"));
 
         std::fs::remove_dir_all(&tmp).ok();
+    }
+
+    // The block is sourced into every user's .bashrc/.zshrc, so a shell-syntax error breaks their
+    // terminal startup — worse than a wrong var. `sh -n`/`bash -n` parse without executing, so
+    // this catches an unbalanced if/fi or a bad quote that string-offset checks can't.
+    #[cfg(unix)]
+    #[test]
+    fn env_block_posix_is_syntactically_valid_shell() {
+        use std::io::Write;
+        use std::process::{Command, Stdio};
+        let block = env_block(
+            "http://127.0.0.1:8787",
+            "/home/u/ca.pem",
+            None,
+            Syntax::Posix,
+        );
+        for shell in ["sh", "bash"] {
+            let mut child = match Command::new(shell)
+                .arg("-n")
+                .stdin(Stdio::piped())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .spawn()
+            {
+                Ok(c) => c,
+                Err(_) => continue, // shell not on this runner — skip
+            };
+            child
+                .stdin
+                .take()
+                .unwrap()
+                .write_all(block.as_bytes())
+                .unwrap();
+            let status = child.wait().unwrap();
+            assert!(status.success(), "{shell} -n rejected the block:\n{block}");
+        }
+    }
+
+    #[test]
+    fn env_block_posix_gates_exports_on_daemon_liveness() {
+        // The exports must be guarded by the `_alive` probe so a new shell opened after
+        // `stop` doesn't wire itself at a dead proxy. Both the guard and a `fi` must be present,
+        // and every export must sit inside the conditional (i.e. after the `if` line).
+        let b = env_block(
+            "http://127.0.0.1:8787",
+            "/home/u/ca.pem",
+            None,
+            Syntax::Posix,
+        );
+        assert!(
+            b.contains("llmtrim _alive"),
+            "block must probe daemon liveness"
+        );
+        let if_at = b.find("if command -v llmtrim").expect("guard present");
+        let fi_at = b.find("\nfi\n").expect("guard closed with fi");
+        let export_at = b.find("export HTTPS_PROXY").expect("export present");
+        assert!(
+            if_at < export_at && export_at < fi_at,
+            "exports must live inside the liveness guard"
+        );
+
+        // The native-TLS bundle exports (added for curl/git/rustls clients) must be gated too,
+        // so a new shell after `stop` doesn't keep trusting the interceptor CA at a dead proxy.
+        let with_bundle = env_block(
+            "http://127.0.0.1:8787",
+            "/home/u/ca.pem",
+            Some("/home/u/.llmtrim/ca-bundle.pem"),
+            Syntax::Posix,
+        );
+        let fi_at = with_bundle.find("\nfi\n").expect("guard closed with fi");
+        let ssl_at = with_bundle
+            .find("export SSL_CERT_FILE")
+            .expect("bundle exports present");
+        assert!(
+            ssl_at < fi_at,
+            "native-TLS exports must sit inside the guard"
+        );
     }
 
     #[test]
@@ -2411,7 +2555,9 @@ mod tests {
 
     // ── env_block syntax verification ───────────────────────────────────────────────
 
-    /// POSIX block: every line between the markers is a valid `export KEY="value"` line.
+    /// POSIX block: the env lines are valid `export KEY="value"` lines, wrapped in the daemon
+    /// liveness guard (`if … ; then` / `fi`). Every non-marker line is either the guard, the
+    /// closing `fi`, or an export.
     #[test]
     fn env_block_posix_all_lines_are_valid_exports() {
         let proxy = "http://127.0.0.1:8787";
@@ -2422,9 +2568,12 @@ mod tests {
         let inner: Vec<&str> = block.lines().filter(|l| *l != BEGIN && *l != END).collect();
         assert!(!inner.is_empty(), "no inner lines in POSIX block");
         for line in &inner {
+            let trimmed = line.trim_start();
+            let is_guard = trimmed.starts_with("if ") || trimmed == "fi";
+            let is_export = trimmed.starts_with("export ") && trimmed.contains("=\"");
             assert!(
-                line.starts_with("export ") && line.contains("=\""),
-                "line is not a valid POSIX export: {line:?}"
+                is_guard || is_export,
+                "line is neither the liveness guard nor a valid export: {line:?}"
             );
         }
     }
