@@ -10,6 +10,8 @@
 //! output cut in a live test. (`draft` below is a separate reasoning-scaffold tier.)
 
 use anyhow::Result;
+use once_cell::sync::Lazy;
+use regex::Regex;
 use serde_json::Value;
 
 use crate::gate::{GateKind, PlanEntry, Transform};
@@ -23,27 +25,79 @@ use crate::stages::tools::{detect_lang, is_first_turn};
 const PROSE_SAMPLE_MAX_BYTES: usize = 4096;
 
 /// Concatenate the request's user-turn text — the language signal for the reply-language
-/// decision — up to [`PROSE_SAMPLE_MAX_BYTES`].
+/// decision — up to [`PROSE_SAMPLE_MAX_BYTES`]. Two adjustments keep the sample
+/// representative of what the user is actually asking right now:
+///
+/// - Turns are walked **newest-first**: agent requests often carry a large pasted
+///   context (files, logs, earlier turns) ahead of the live question, and filling the
+///   budget front-to-back would exhaust it before reaching that question. The most
+///   recent user turn dominates the sample; earlier turns only fill leftover budget.
+/// - Each turn's text is run through [`strip_code`] first, so pasted code (fenced
+///   blocks, inline spans, indented/symbol-dense lines) doesn't skew detection toward
+///   whatever language its identifiers happen to look like.
 fn user_prose(req: &Request, provider: &dyn Provider) -> String {
+    let user_texts: Vec<&str> = provider
+        .content_text_pointers(req)
+        .into_iter()
+        .filter(|ptr| provider.role_at(req, ptr) == Some(Role::User))
+        .filter_map(|ptr| req.get_str(&ptr))
+        .collect();
+
     let mut prose = String::new();
-    for ptr in provider.content_text_pointers(req) {
-        if provider.role_at(req, &ptr) == Some(Role::User)
-            && let Some(text) = req.get_str(&ptr)
-        {
-            let mut take = PROSE_SAMPLE_MAX_BYTES
-                .saturating_sub(prose.len())
-                .min(text.len());
-            while take > 0 && !text.is_char_boundary(take) {
-                take -= 1;
-            }
-            prose.push_str(&text[..take]);
-            prose.push(' ');
-            if prose.len() >= PROSE_SAMPLE_MAX_BYTES {
-                break;
-            }
+    for text in user_texts.iter().rev() {
+        let stripped = strip_code(text);
+        let mut take = PROSE_SAMPLE_MAX_BYTES
+            .saturating_sub(prose.len())
+            .min(stripped.len());
+        while take > 0 && !stripped.is_char_boundary(take) {
+            take -= 1;
+        }
+        prose.push_str(&stripped[..take]);
+        prose.push(' ');
+        if prose.len() >= PROSE_SAMPLE_MAX_BYTES {
+            break;
         }
     }
     prose
+}
+
+/// Fenced code blocks (` ``` `/`~~~`, multi-line).
+static FENCED_CODE_RE: Lazy<Regex> = Lazy::new(|| Regex::new(r"(?s)```.*?```|~~~.*?~~~").unwrap());
+
+/// Inline code spans (`` `...` ``), kept single-line so an unterminated backtick
+/// doesn't swallow the rest of the prose.
+static INLINE_CODE_RE: Lazy<Regex> = Lazy::new(|| Regex::new(r"`[^`\n]*`").unwrap());
+
+/// Strip code from prose before language detection: fenced/inline code spans are cut
+/// outright, and remaining lines that look like code (4+ leading spaces or a tab, or a
+/// symbol-heavy line where `{}();=<>|&/\[]` characters outnumber letters) are dropped.
+/// Structural, not language-specific — no English word lists involved.
+fn strip_code(text: &str) -> String {
+    let no_fenced = FENCED_CODE_RE.replace_all(text, " ");
+    let no_inline = INLINE_CODE_RE.replace_all(&no_fenced, " ");
+    no_inline
+        .lines()
+        .filter(|line| !looks_like_code_line(line))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// True when a line is more likely code than prose: indented (4+ spaces / a tab), or
+/// symbol-heavy (structural symbols outnumber letters among non-whitespace chars).
+fn looks_like_code_line(line: &str) -> bool {
+    if line.starts_with("    ") || line.starts_with('\t') {
+        return true;
+    }
+    let trimmed = line.trim();
+    if trimmed.is_empty() {
+        return false;
+    }
+    let symbol_count = trimmed
+        .chars()
+        .filter(|c| "{}();=<>|&/\\[]".contains(*c))
+        .count();
+    let letter_count = trimmed.chars().filter(|c| c.is_alphabetic()).count();
+    symbol_count > 0 && symbol_count >= letter_count
 }
 
 /// `terse` tier: a small, fixed input cost for a real output-token reduction
@@ -887,6 +941,130 @@ mod tests {
             sample.len() <= PROSE_SAMPLE_MAX_BYTES + 1,
             "sample bounded: {}",
             sample.len()
+        );
+    }
+
+    #[test]
+    fn non_english_prompt_with_leading_code_still_gets_language_clause() {
+        // A large English-ish code block ahead of the live French question must not
+        // starve the detection sample or bias it toward English.
+        let code_block = format!(
+            "```rust\n{}\n```",
+            "fn compress(input: &str) -> String { input.to_string() }\n".repeat(200)
+        );
+        let req = run_one(
+            json!({"messages":[
+                {"role":"user","content": code_block},
+                {"role":"user",
+                 "content":"Peux-tu m'expliquer comment fonctionne ce module de compression ?"}
+            ]}),
+            OutputControlStage {
+                output_control: true,
+                level: OutputLevel::Terse,
+                max_tokens: None,
+                token_budget: None,
+                compact_code: false,
+                frugal_tools: false,
+                anti_overthink: false,
+            },
+        );
+        let sys = req.get_str("/messages/0/content").unwrap();
+        assert!(
+            sys.contains("Reply in the user's language."),
+            "leading pasted code must not hide the live French question: {sys}"
+        );
+    }
+
+    #[test]
+    fn strip_code_removes_fenced_inline_and_indented_code() {
+        let text = "Explique-moi ce code:\n\
+                     ```rust\n\
+                     fn main() { println!(\"hi\"); }\n\
+                     ```\n\
+                     Utilise la fonction `foo()` pour ça.\n\
+                     Et cette ligne indentée:\n\
+                     \x20\x20\x20\x20let x = 1 + 2;\n\
+                     Merci beaucoup pour ton aide !";
+        let stripped = strip_code(text);
+        assert!(
+            !stripped.contains("println"),
+            "fenced block removed: {stripped}"
+        );
+        assert!(
+            !stripped.contains("foo()"),
+            "inline span removed: {stripped}"
+        );
+        assert!(
+            !stripped.contains("let x = 1"),
+            "indented code removed: {stripped}"
+        );
+        assert!(
+            stripped.contains("Explique-moi ce code"),
+            "surrounding prose kept: {stripped}"
+        );
+        assert!(
+            stripped.contains("Merci beaucoup pour ton aide"),
+            "surrounding prose kept: {stripped}"
+        );
+    }
+
+    #[test]
+    fn user_prose_prefers_last_turn_over_earlier_huge_paste() {
+        // A huge pasted code context in an earlier user turn, followed by a short
+        // French question in the last turn: the last turn must win the budget.
+        let huge_code = format!(
+            "```\n{}\n```",
+            "const x = { a: 1, b: 2 }; y = (a || b) && c;\n".repeat(5000)
+        );
+        let req = Request::from_value(
+            ProviderKind::OpenAi,
+            json!({"messages": [
+                {"role": "user", "content": huge_code},
+                {"role": "user",
+                 "content": "Peux-tu m'expliquer comment fonctionne ce module de compression ?"}
+            ]}),
+        );
+        let sample = user_prose(&req, &OpenAiProvider);
+        assert!(
+            sample.contains("Peux-tu"),
+            "last turn's French prose must survive the budget cap: {sample}"
+        );
+        assert_eq!(
+            detect_lang(&sample),
+            Some(whatlang::Lang::Fra),
+            "sample must detect as French: {sample}"
+        );
+    }
+
+    #[test]
+    fn user_prose_prefers_last_turn_over_earlier_huge_non_code_prose() {
+        // Isolates the newest-first ordering fix from code stripping: the earlier
+        // turn is plain prose (no code symbols, no indentation), so `strip_code`
+        // keeps it whole. It alone exceeds PROSE_SAMPLE_MAX_BYTES, so only turn
+        // order — not stripping — determines whether the last turn's short French
+        // question survives into the sample.
+        let huge_prose = "This is a filler sentence about nothing in particular. ".repeat(200);
+        assert!(
+            huge_prose.len() > PROSE_SAMPLE_MAX_BYTES,
+            "filler prose must exceed the budget on its own"
+        );
+        let req = Request::from_value(
+            ProviderKind::OpenAi,
+            json!({"messages": [
+                {"role": "user", "content": huge_prose},
+                {"role": "user",
+                 "content": "Peux-tu m'expliquer comment fonctionne ce module de compression ?"}
+            ]}),
+        );
+        let sample = user_prose(&req, &OpenAiProvider);
+        assert!(
+            sample.contains("Peux-tu"),
+            "last turn's French prose must survive the budget cap: {sample}"
+        );
+        assert_eq!(
+            detect_lang(&sample),
+            Some(whatlang::Lang::Fra),
+            "sample must detect as French: {sample}"
         );
     }
 

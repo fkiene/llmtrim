@@ -9,6 +9,7 @@ All notable changes to this project are documented here. The format follows
 ### Fixed
 
 - The Python package build was broken on Linux (`No UniFFI metadata found`), so `pip install llmtrim` had no Linux wheel.
+- The reply-language clause no longer misfires when a non-English prompt carries pasted code. Code is stripped from the language-detection sample, and the sample now favors the most recent question over an earlier pasted context, so a large code block ahead of a short non-English question no longer causes the model to answer in English.
 
 ## [0.8.1] - 2026-07-07
 
