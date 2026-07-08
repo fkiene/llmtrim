@@ -29,6 +29,15 @@ export default defineConfig({
   root: __dirname,
   base: "./",
   plugins: [stripCrossorigin()],
+  // Dev server only (production embeds `dist/` via the Tauri asset protocol, so no
+  // port is opened at runtime). Vite's default 5173 is a crowded, well-known port —
+  // pick one far up in the IANA-unassigned range, adjacent to llmtrim's own 43117
+  // (`DEFAULT_PORT` in the CLI) but distinct so the two never collide. `strictPort:
+  // true` fails fast if 43217 is taken instead of silently binding another port:
+  // Tauri's `devUrl` (in `tauri.conf.json`) is a static string, so a silent Vite
+  // fallback would leave `tauri dev` loading a dead URL. A loud "port in use" error
+  // is the actionable outcome. Keep `tauri.conf.json`'s `devUrl` on this same port.
+  server: { port: 43217, strictPort: true },
   build: {
     outDir: "dist",
     emptyOutDir: true,
