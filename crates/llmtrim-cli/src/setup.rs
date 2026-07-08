@@ -233,8 +233,17 @@ pub fn heal_managed_env() -> Result<Vec<PathBuf>> {
             return Ok(vec![]); // nothing wired → nothing to heal
         };
         let proxy = format!("http://127.0.0.1:{port}");
-        let ca = crate::serve::ca_cert_path()?.to_string_lossy().into_owned();
-        heal_profiles_in(std::path::Path::new(&home), &proxy, &ca)
+        let ca_path = crate::serve::ca_cert_path()?;
+        let ca = ca_path.to_string_lossy().into_owned();
+        // Best-effort: a bundle build failure just means the heal keeps the Node-only trust.
+        let bundle = ensure_ca_bundle(&ca_path).ok().flatten();
+        let bundle_str = bundle.as_ref().map(|p| p.to_string_lossy().into_owned());
+        heal_profiles_in(
+            std::path::Path::new(&home),
+            &proxy,
+            &ca,
+            bundle_str.as_deref(),
+        )
     }
 }
 
@@ -269,8 +278,13 @@ fn managed_block_needs_heal(s: &str) -> bool {
 }
 
 #[cfg(not(windows))]
-fn heal_profiles_in(base: &std::path::Path, proxy: &str, ca: &str) -> Result<Vec<PathBuf>> {
-    let block = env_block(proxy, ca, Syntax::Posix);
+fn heal_profiles_in(
+    base: &std::path::Path,
+    proxy: &str,
+    ca: &str,
+    bundle: Option<&str>,
+) -> Result<Vec<PathBuf>> {
+    let block = env_block(proxy, ca, bundle, Syntax::Posix);
     let mut healed = Vec::new();
     for path in candidate_profiles(base) {
         let existing = match std::fs::read_to_string(&path) {
@@ -377,9 +391,33 @@ pub fn run(requested: Option<u16>, force: bool) -> Result<()> {
 
     // 1. Local CA (generated on first run, name-constrained to LLM domains).
     crate::serve::ensure_ca()?;
-    let ca = crate::serve::ca_cert_path()?.to_string_lossy().to_string();
+    let ca_path = crate::serve::ca_cert_path()?;
+    let ca = ca_path.to_string_lossy().to_string();
     let proxy = format!("http://127.0.0.1:{port}");
     rows.push((ui::OK, "Local CA".into(), ca.clone()));
+
+    // 1b. Combined bundle (OS roots + CA) for native TLS clients that ignore NODE_EXTRA_CA_CERTS
+    //     (curl, git, Python, rustls tools like OpenAI Codex). POSIX only; Windows uses the OS
+    //     cert store. Best-effort: a missing OS root bundle just skips SSL_CERT_FILE.
+    #[cfg(not(windows))]
+    let bundle = match ensure_ca_bundle(&ca_path) {
+        Ok(Some(p)) => {
+            rows.push((ui::OK, "CA bundle".into(), p.to_string_lossy().into_owned()));
+            Some(p.to_string_lossy().into_owned())
+        }
+        Ok(None) => {
+            rows.push((
+                ui::NOTE,
+                "CA bundle".into(),
+                "no OS root bundle found — native TLS clients use the OS trust store".into(),
+            ));
+            None
+        }
+        Err(e) => {
+            rows.push((ui::WARN, "CA bundle".into(), format!("not built: {e}")));
+            None
+        }
+    };
 
     // 2. Route + trust at the environment level.
     //
@@ -415,7 +453,7 @@ pub fn run(requested: Option<u16>, force: bool) -> Result<()> {
     }
     #[cfg(not(windows))]
     let manual_env = {
-        let paths = write_profile_block(&proxy, &ca)?;
+        let paths = write_profile_block(&proxy, &ca, bundle.as_deref())?;
         if paths.is_empty() {
             rows.push((
                 ui::NOTE,
@@ -522,6 +560,10 @@ pub fn run(requested: Option<u16>, force: bool) -> Result<()> {
         println!("    export HTTPS_PROXY={proxy}");
         println!("    export NO_PROXY={NO_PROXY}");
         println!("    export NODE_EXTRA_CA_CERTS={ca}");
+        if let Some(b) = bundle.as_deref() {
+            println!("    export SSL_CERT_FILE={b}");
+            println!("    export CURL_CA_BUNDLE={b}");
+        }
     }
 
     // The env only reaches *future* processes — already-running tools (editors, Claude
@@ -1396,22 +1438,87 @@ fn powershell_profile() -> Option<PathBuf> {
     )
 }
 
+/// Candidate paths to the OS's PEM bundle of trusted root CAs, in probe order — the same list
+/// OpenSSL, Go's `crypto/x509`, and `openssl-probe` use. The first that exists is the platform's
+/// trust anchor set. POSIX-only: Windows keeps its roots in the schannel cert store, not a file.
+#[cfg(not(windows))]
+const SYSTEM_CA_CANDIDATES: [&str; 6] = [
+    "/etc/ssl/certs/ca-certificates.crt", // Debian, Ubuntu, Arch, Gentoo
+    "/etc/pki/tls/certs/ca-bundle.crt",   // Fedora, RHEL, CentOS
+    "/etc/ssl/ca-bundle.pem",             // openSUSE
+    "/etc/pki/tls/cacert.pem",            // OpenELEC
+    "/etc/ssl/cert.pem",                  // Alpine, macOS (Homebrew OpenSSL), *BSD
+    "/usr/local/etc/openssl/cert.pem",    // macOS Homebrew openssl@1.1
+];
+
+/// First existing OS root bundle, or `None` when none of the well-known paths exist (e.g. a
+/// stock macOS with no OpenSSL PEM on disk — trust lives only in the keychain there).
+#[cfg(not(windows))]
+fn system_ca_bundle() -> Option<PathBuf> {
+    SYSTEM_CA_CANDIDATES
+        .iter()
+        .map(PathBuf::from)
+        .find(|p| p.exists())
+}
+
+/// Build (or refresh) `~/.llmtrim/ca-bundle.pem` = the OS root bundle **plus** the llmtrim CA,
+/// returning its path. Native TLS clients (curl, git, Python, and rustls tools like OpenAI's
+/// Codex) don't read `NODE_EXTRA_CA_CERTS` — that's Node-only — they take a full bundle via
+/// `SSL_CERT_FILE`/`CURL_CA_BUNDLE`. Because llmtrim MITMs only a fixed host set and
+/// blind-tunnels everything else, the bundle MUST carry the real OS roots too, or every
+/// non-intercepted HTTPS call would fail to verify — hence a concatenation, not the CA alone.
+/// Returns `None` (caller then omits the native vars, since a CA-only file would break tunneled
+/// hosts) when no OS bundle can be located.
+#[cfg(not(windows))]
+fn ensure_ca_bundle(ca_path: &std::path::Path) -> Result<Option<PathBuf>> {
+    let Some(system) = system_ca_bundle() else {
+        return Ok(None);
+    };
+    let system_pem = std::fs::read_to_string(&system)
+        .with_context(|| format!("failed to read {}", system.display()))?;
+    let ca_pem = std::fs::read_to_string(ca_path)
+        .with_context(|| format!("failed to read {}", ca_path.display()))?;
+    let mut combined = system_pem;
+    if !combined.ends_with('\n') {
+        combined.push('\n');
+    }
+    combined.push_str(&ca_pem);
+    let bundle_path = ca_path.with_file_name("ca-bundle.pem");
+    std::fs::write(&bundle_path, combined)
+        .with_context(|| format!("failed to write {}", bundle_path.display()))?;
+    Ok(Some(bundle_path))
+}
+
 /// The managed env block, in the profile's native syntax. Both variants are unit-tested on
 /// every platform; on Windows the live env path is the registry, so this is test-only there.
+/// `bundle` (POSIX only) is the combined OS-roots + CA bundle for native TLS clients; when
+/// `Some`, it also exports `SSL_CERT_FILE`/`CURL_CA_BUNDLE`.
 #[allow(dead_code)]
-fn env_block(proxy: &str, ca: &str, syntax: Syntax) -> String {
+fn env_block(proxy: &str, ca: &str, bundle: Option<&str>, syntax: Syntax) -> String {
     match syntax {
         // NO_PROXY is set in both cases (lowercase too on POSIX: curl/libcurl, Go, and others
         // only honor `no_proxy`). Windows env vars are case-insensitive, so one suffices there.
-        Syntax::Posix => format!(
-            "{BEGIN}\n\
-             export HTTPS_PROXY=\"{proxy}\"\n\
-             export HTTP_PROXY=\"{proxy}\"\n\
-             export NO_PROXY=\"{NO_PROXY}\"\n\
-             export no_proxy=\"{NO_PROXY}\"\n\
-             export NODE_EXTRA_CA_CERTS=\"{ca}\"\n\
-             {END}\n"
-        ),
+        Syntax::Posix => {
+            // Node trusts the CA via NODE_EXTRA_CA_CERTS; native OpenSSL/rustls clients don't
+            // read it, so point their bundle vars at the full combined bundle when we have one.
+            let native = bundle
+                .map(|b| {
+                    format!(
+                        "export SSL_CERT_FILE=\"{b}\"\n\
+                         export CURL_CA_BUNDLE=\"{b}\"\n"
+                    )
+                })
+                .unwrap_or_default();
+            format!(
+                "{BEGIN}\n\
+                 export HTTPS_PROXY=\"{proxy}\"\n\
+                 export HTTP_PROXY=\"{proxy}\"\n\
+                 export NO_PROXY=\"{NO_PROXY}\"\n\
+                 export no_proxy=\"{NO_PROXY}\"\n\
+                 export NODE_EXTRA_CA_CERTS=\"{ca}\"\n\
+                 {native}{END}\n"
+            )
+        }
         Syntax::PowerShell => format!(
             "{BEGIN}\n\
              $env:HTTPS_PROXY = \"{proxy}\"\n\
@@ -1434,6 +1541,7 @@ fn write_profile_block_in(
     shell: &str,
     proxy: &str,
     ca: &str,
+    bundle: Option<&str>,
 ) -> Result<Vec<PathBuf>> {
     // Refresh, never accumulate: strip any prior managed block from EVERY candidate first,
     // so a re-run (or a proxy/port change) leaves no stale block behind. Best-effort - a
@@ -1456,7 +1564,7 @@ fn write_profile_block_in(
         targets.push(shell_default); // guarantee the running shell's rc gets it, even if absent
     }
 
-    let block = env_block(proxy, ca, Syntax::Posix);
+    let block = env_block(proxy, ca, bundle, Syntax::Posix);
     let mut written = Vec::with_capacity(targets.len());
     for path in targets {
         // strip_block is a safety net in case remove_profile_block_in skipped a file with a
@@ -1479,7 +1587,7 @@ fn write_profile_block_in(
 /// so re-setup under a different shell does not leave a dead proxy block behind.
 /// POSIX-only: on Windows the env lives in the registry, so `run()` never calls this there.
 #[allow(dead_code)]
-fn write_profile_block(proxy: &str, ca: &str) -> Result<Vec<PathBuf>> {
+fn write_profile_block(proxy: &str, ca: &str, bundle: Option<&str>) -> Result<Vec<PathBuf>> {
     #[cfg(not(windows))]
     {
         // Delegate to the seam so production and tests run the same code path.
@@ -1487,7 +1595,7 @@ fn write_profile_block(proxy: &str, ca: &str) -> Result<Vec<PathBuf>> {
             return Ok(Vec::new());
         };
         let shell = std::env::var("SHELL").unwrap_or_default();
-        write_profile_block_in(std::path::Path::new(&home), &shell, proxy, ca)
+        write_profile_block_in(std::path::Path::new(&home), &shell, proxy, ca, bundle)
     }
     #[cfg(windows)]
     {
@@ -1504,7 +1612,7 @@ fn write_profile_block(proxy: &str, ca: &str) -> Result<Vec<PathBuf>> {
         if !base_content.is_empty() && !base_content.ends_with('\n') {
             base_content.push('\n');
         }
-        let block = env_block(proxy, ca, syntax);
+        let block = env_block(proxy, ca, bundle, syntax);
         std::fs::write(&path, format!("{base_content}{block}"))
             .with_context(|| format!("failed to write {}", path.display()))?;
         Ok(vec![path])
@@ -1586,8 +1694,8 @@ mod tests {
         let rc = tmp.join(".bashrc");
         std::fs::write(&rc, &old).expect("write rc");
 
-        let healed =
-            heal_profiles_in(&tmp, "http://127.0.0.1:43117", "/home/u/ca.pem").expect("heal runs");
+        let healed = heal_profiles_in(&tmp, "http://127.0.0.1:43117", "/home/u/ca.pem", None)
+            .expect("heal runs");
         assert_eq!(healed, vec![rc.clone()], "the old block is healed");
 
         let after = std::fs::read_to_string(&rc).expect("read back");
@@ -1597,7 +1705,7 @@ mod tests {
         assert_eq!(after.matches(BEGIN).count(), 1, "block not duplicated");
 
         // Idempotent: a second pass sees the bypass and does nothing.
-        let again = heal_profiles_in(&tmp, "http://127.0.0.1:43117", "/home/u/ca.pem")
+        let again = heal_profiles_in(&tmp, "http://127.0.0.1:43117", "/home/u/ca.pem", None)
             .expect("second heal");
         assert!(again.is_empty(), "already-current block is left alone");
 
@@ -1641,7 +1749,7 @@ mod tests {
         std::fs::write(tmp.join(".bashrc"), &bad).expect("write");
 
         let healed =
-            heal_profiles_in(&tmp, "http://127.0.0.1:43117", "/home/u/ca.pem").expect("heal");
+            heal_profiles_in(&tmp, "http://127.0.0.1:43117", "/home/u/ca.pem", None).expect("heal");
         assert!(healed.is_empty(), "malformed block is not healed");
         assert_eq!(
             std::fs::read_to_string(tmp.join(".bashrc")).expect("read"),
@@ -1659,12 +1767,17 @@ mod tests {
         std::fs::create_dir_all(&tmp).expect("mkdir");
         // .bashrc carries an old block; .zshrc already has the current (NO_PROXY) block.
         let old = format!("{BEGIN}\nexport HTTPS_PROXY=\"http://127.0.0.1:43117\"\n{END}\n");
-        let current = env_block("http://127.0.0.1:43117", "/home/u/ca.pem", Syntax::Posix);
+        let current = env_block(
+            "http://127.0.0.1:43117",
+            "/home/u/ca.pem",
+            None,
+            Syntax::Posix,
+        );
         std::fs::write(tmp.join(".bashrc"), &old).expect("write bashrc");
         std::fs::write(tmp.join(".zshrc"), &current).expect("write zshrc");
 
         let healed =
-            heal_profiles_in(&tmp, "http://127.0.0.1:43117", "/home/u/ca.pem").expect("heal");
+            heal_profiles_in(&tmp, "http://127.0.0.1:43117", "/home/u/ca.pem", None).expect("heal");
         assert_eq!(
             healed,
             vec![tmp.join(".bashrc")],
@@ -1693,7 +1806,7 @@ mod tests {
         std::fs::write(tmp.join(".zshrc"), "export FOO=bar\n").expect("write");
 
         let healed =
-            heal_profiles_in(&tmp, "http://127.0.0.1:43117", "/home/u/ca.pem").expect("heal");
+            heal_profiles_in(&tmp, "http://127.0.0.1:43117", "/home/u/ca.pem", None).expect("heal");
         assert!(
             healed.is_empty(),
             "a file with no block is never created/touched"
@@ -1798,13 +1911,66 @@ mod tests {
 
     #[test]
     fn env_block_posix_uses_export() {
-        let b = env_block("http://127.0.0.1:8787", "/home/u/ca.pem", Syntax::Posix);
+        let b = env_block(
+            "http://127.0.0.1:8787",
+            "/home/u/ca.pem",
+            None,
+            Syntax::Posix,
+        );
         assert!(b.contains("export HTTPS_PROXY=\"http://127.0.0.1:8787\""));
         assert!(b.contains("export NODE_EXTRA_CA_CERTS=\"/home/u/ca.pem\""));
         // LAN/local bypass travels with the proxy, in both casings tools read.
         assert!(b.contains(&format!("export NO_PROXY=\"{NO_PROXY}\"")));
         assert!(b.contains(&format!("export no_proxy=\"{NO_PROXY}\"")));
         assert!(b.starts_with(BEGIN) && b.trim_end().ends_with(END));
+        // No bundle → native TLS vars are omitted (a CA-only file would break tunneled hosts).
+        assert!(!b.contains("SSL_CERT_FILE"));
+        assert!(!b.contains("CURL_CA_BUNDLE"));
+    }
+
+    #[test]
+    fn env_block_posix_with_bundle_exports_native_tls_vars() {
+        let b = env_block(
+            "http://127.0.0.1:8787",
+            "/home/u/.llmtrim/ca.pem",
+            Some("/home/u/.llmtrim/ca-bundle.pem"),
+            Syntax::Posix,
+        );
+        // Node keeps NODE_EXTRA_CA_CERTS; native clients (curl, rustls) get the full bundle.
+        assert!(b.contains("export NODE_EXTRA_CA_CERTS=\"/home/u/.llmtrim/ca.pem\""));
+        assert!(b.contains("export SSL_CERT_FILE=\"/home/u/.llmtrim/ca-bundle.pem\""));
+        assert!(b.contains("export CURL_CA_BUNDLE=\"/home/u/.llmtrim/ca-bundle.pem\""));
+        assert!(b.trim_end().ends_with(END));
+    }
+
+    #[cfg(not(windows))] // system_ca_bundle/ensure_ca_bundle are POSIX-only (Windows uses the cert store)
+    #[test]
+    fn ensure_ca_bundle_concats_roots_and_ca() {
+        // Only meaningful where the OS ships a PEM root bundle (Linux CI, some macOS). Where it
+        // doesn't (stock macOS), the builder correctly returns None and there is nothing to check.
+        let Some(system) = system_ca_bundle() else {
+            return;
+        };
+        let tmp = std::env::temp_dir().join(format!("llmtrim-catest-{}", std::process::id()));
+        std::fs::create_dir_all(&tmp).expect("mkdir");
+        let ca_path = tmp.join("ca.pem");
+        std::fs::write(
+            &ca_path,
+            "-----BEGIN CERTIFICATE-----\nLLMTRIMFAKE\n-----END CERTIFICATE-----\n",
+        )
+        .expect("write ca");
+
+        let bundle = ensure_ca_bundle(&ca_path)
+            .expect("build")
+            .expect("some bundle");
+        assert_eq!(bundle, tmp.join("ca-bundle.pem"));
+        let contents = std::fs::read_to_string(&bundle).expect("read bundle");
+        // Carries both the OS roots (so tunneled hosts still verify) and our CA (so MITM'd ones do).
+        let roots = std::fs::read_to_string(&system).expect("read system");
+        assert!(contents.contains(roots.trim()));
+        assert!(contents.contains("LLMTRIMFAKE"));
+
+        std::fs::remove_dir_all(&tmp).ok();
     }
 
     #[test]
@@ -1812,6 +1978,7 @@ mod tests {
         let b = env_block(
             "http://127.0.0.1:8787",
             "C:\\Users\\u\\ca.pem",
+            None,
             Syntax::PowerShell,
         );
         assert!(b.contains("$env:HTTPS_PROXY = \"http://127.0.0.1:8787\""));
@@ -1822,7 +1989,7 @@ mod tests {
 
     #[test]
     fn strip_block_reverses_powershell_block() {
-        let withblock = format!("keep\n{}", env_block("p", "c", Syntax::PowerShell));
+        let withblock = format!("keep\n{}", env_block("p", "c", None, Syntax::PowerShell));
         assert_eq!(strip_block(&withblock), "keep\n");
     }
 
@@ -1832,7 +1999,7 @@ mod tests {
         let original = "export FOO=bar\n";
         let proxy = "http://127.0.0.1:8787";
         let ca = "/home/user/.llmtrim/ca.crt";
-        let block = env_block(proxy, ca, Syntax::Posix);
+        let block = env_block(proxy, ca, None, Syntax::Posix);
         let written = format!("{original}{block}");
         let stripped = strip_block(&written);
         assert_eq!(
@@ -1848,7 +2015,7 @@ mod tests {
         let proxy = "http://127.0.0.1:8787";
         let ca = "/home/user/.llmtrim/ca.crt";
         let original = "export FOO=bar\n";
-        let block = env_block(proxy, ca, Syntax::Posix);
+        let block = env_block(proxy, ca, None, Syntax::Posix);
         let after_first = format!("{original}{block}");
         // Simulate a second write: strip then re-add (the real setup flow)
         let after_second = format!("{}{}", strip_block(&after_first), block);
@@ -2057,7 +2224,7 @@ mod tests {
             .expect("write pre-existing .bashrc");
 
         let paths =
-            write_profile_block_in(base, "bash", proxy, ca).expect("write_profile_block_in");
+            write_profile_block_in(base, "bash", proxy, ca, None).expect("write_profile_block_in");
         // Only `.bashrc` exists and it is the bash default -> that's the sole target.
         assert_eq!(paths, vec![base.join(".bashrc")]);
 
@@ -2093,8 +2260,8 @@ mod tests {
 
         std::fs::write(base.join(".bashrc"), "# user config\n").expect("write .bashrc");
 
-        write_profile_block_in(base, "bash", proxy, ca).expect("first write");
-        write_profile_block_in(base, "bash", proxy, ca).expect("second write");
+        write_profile_block_in(base, "bash", proxy, ca, None).expect("first write");
+        write_profile_block_in(base, "bash", proxy, ca, None).expect("second write");
 
         let content = std::fs::read_to_string(base.join(".bashrc")).expect("read back");
         let begin_count = content.matches(BEGIN).count();
@@ -2124,7 +2291,8 @@ mod tests {
 
         // Re-setup under zsh, NEW port.
         let new_proxy = "http://127.0.0.1:9999";
-        let paths = write_profile_block_in(base, "zsh", new_proxy, ca).expect("write for zsh");
+        let paths =
+            write_profile_block_in(base, "zsh", new_proxy, ca, None).expect("write for zsh");
         // Both the existing `.bashrc` and the freshly-created zsh default are written.
         assert!(
             paths.contains(&base.join(".bashrc")),
@@ -2153,8 +2321,9 @@ mod tests {
     fn write_profile_block_in_creates_only_the_shell_default_when_none_exist() {
         let dir = TempDir::new("wpb-none");
         let base = dir.path();
-        let paths = write_profile_block_in(base, "/bin/zsh", "http://127.0.0.1:8788", "/tmp/ca")
-            .expect("write");
+        let paths =
+            write_profile_block_in(base, "/bin/zsh", "http://127.0.0.1:8788", "/tmp/ca", None)
+                .expect("write");
         assert_eq!(
             paths,
             vec![base.join(".zshrc")],
@@ -2176,8 +2345,9 @@ mod tests {
         for f in [".zshrc", ".bashrc", ".profile"] {
             std::fs::write(base.join(f), "# pre-existing\n").expect("seed rc");
         }
-        let paths = write_profile_block_in(base, "/bin/bash", "http://127.0.0.1:8788", "/tmp/ca")
-            .expect("write");
+        let paths =
+            write_profile_block_in(base, "/bin/bash", "http://127.0.0.1:8788", "/tmp/ca", None)
+                .expect("write");
         for f in [".zshrc", ".bashrc", ".profile"] {
             assert!(paths.contains(&base.join(f)), "{f} written: {paths:?}");
             let body = std::fs::read_to_string(base.join(f)).expect("read");
@@ -2246,7 +2416,7 @@ mod tests {
     fn env_block_posix_all_lines_are_valid_exports() {
         let proxy = "http://127.0.0.1:8787";
         let ca = "/home/user/.llmtrim/ca.crt";
-        let block = env_block(proxy, ca, Syntax::Posix);
+        let block = env_block(proxy, ca, None, Syntax::Posix);
 
         // Collect non-marker, non-empty lines inside the block.
         let inner: Vec<&str> = block.lines().filter(|l| *l != BEGIN && *l != END).collect();
@@ -2265,7 +2435,7 @@ mod tests {
     fn env_block_powershell_all_lines_use_dollar_env() {
         let proxy = "http://127.0.0.1:8787";
         let ca = "C:\\Users\\u\\ca.pem";
-        let block = env_block(proxy, ca, Syntax::PowerShell);
+        let block = env_block(proxy, ca, None, Syntax::PowerShell);
 
         let inner: Vec<&str> = block.lines().filter(|l| *l != BEGIN && *l != END).collect();
         assert!(!inner.is_empty(), "no inner lines in PowerShell block");
