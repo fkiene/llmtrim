@@ -160,10 +160,27 @@ pub fn build(s: &State) -> Report {
                 s.port
             ),
         )),
+        // POSIX self-gates (the shell block only wires while the daemon is up), so a stopped
+        // daemon means new shells route directly — informational, not a failure. Windows env
+        // lives in the registry and is only cleared by an explicit `stop`; if the daemon died
+        // without one, new terminals still hit the dead proxy and fail — a real problem.
+        #[cfg(not(windows))]
+        (Some(p), false) => rows.push((
+            ui::NOTE,
+            "env".into(),
+            format!(
+                "persisted (:{p}) but the daemon is stopped — new shells route directly \
+                 (uncompressed, untracked); run: llmtrim start to resume interception"
+            ),
+        )),
+        #[cfg(windows)]
         (Some(p), false) => rows.push((
             ui::WARN,
             "env".into(),
-            format!("wired to :{p} but the daemon is stopped — LLM calls fail; run: llmtrim start"),
+            format!(
+                "wired to :{p} but the daemon is stopped — new terminals fail until you run \
+                 llmtrim start (or llmtrim stop to clear the env)"
+            ),
         )),
         (None, _) => rows.push((
             ui::WARN,
@@ -172,9 +189,16 @@ pub fn build(s: &State) -> Report {
         )),
     }
 
-    // env (this shell) — the env can be persisted yet absent from this terminal.
+    // env (this shell) — the env can be persisted yet absent from this terminal, either because
+    // the terminal predates setup or because the daemon is stopped (the managed block only wires
+    // HTTPS_PROXY while the daemon is up, so a stopped daemon correctly leaves new shells clear).
     match (s.shell_proxy_port, s.env_port) {
         (Some(p), _) => rows.push((ui::OK, "this shell".into(), format!("HTTPS_PROXY=:{p}"))),
+        (None, Some(_)) if !s.running => rows.push((
+            ui::NOTE,
+            "this shell".into(),
+            "HTTPS_PROXY not set here — the daemon is stopped, so shells route directly".into(),
+        )),
         (None, Some(_)) => rows.push((
             ui::NOTE,
             "this shell".into(),
@@ -322,17 +346,26 @@ mod tests {
     }
 
     #[test]
-    fn stopped_but_wired_is_a_problem() {
+    fn stopped_but_wired_flags_the_daemon_and_explains_direct_routing() {
         let r = build(&State {
             running: false,
             port_accepting: false,
             ..healthy()
         });
-        assert!(r.problems >= 2, "daemon down + env wired are both problems");
+        // The stopped daemon is always the actionable problem. The persisted-env row differs by
+        // platform: POSIX self-gates (new shells route directly — a note, not a second problem),
+        // while Windows env lives in the registry and stays wired at a dead proxy until an
+        // explicit `stop`, so it's a real warning.
+        assert!(r.problems >= 1, "daemon down is a problem");
         let out = render(false, &r);
         assert!(out.contains("not running — start: llmtrim start"));
-        assert!(out.contains("LLM calls fail"));
-        assert!(out.contains("problems found"));
+        #[cfg(not(windows))]
+        {
+            assert!(out.contains("route directly"));
+            assert!(out.contains("resume interception"));
+        }
+        #[cfg(windows)]
+        assert!(out.contains("new terminals fail"));
     }
 
     #[test]

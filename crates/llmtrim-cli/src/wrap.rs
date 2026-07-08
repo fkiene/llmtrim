@@ -78,7 +78,7 @@ fn readiness(daemon_running: bool, env_wired: bool) -> Readiness {
 /// This is what matters: the child inherits our live environment, not the shell profile on
 /// disk. Checking `profile_has_block()` would pass when `setup` has run but the current
 /// shell predates it, launching the agent with no proxy and silently skipping compression.
-fn https_proxy_is_local() -> bool {
+pub fn https_proxy_is_local() -> bool {
     std::env::var("HTTPS_PROXY")
         .or_else(|_| std::env::var("https_proxy"))
         .map(|v| v.contains("127.0.0.1") || v.contains("localhost"))
