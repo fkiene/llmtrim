@@ -25,11 +25,11 @@ All notable changes to this project are documented here. The format follows
   emits a `Read` with an absurd `offset` (millions of lines) or an empty `pages`, which made Claude
   Code's Read fail. Those args are now stripped before the call reaches the client, and the next
   turn is told the offset was ignored so the model stops re-issuing it.
-- **Codex reasoning effort (`llmtrim sub effort <level>`).** The Codex backend only reasons when
-  asked, and Claude Code doesn't request it on the wire, so this is a proxy-side switch:
-  `none`/`low`/`medium`/`high`/`xhigh` (env `LLMTRIM_CODEX_EFFORT` or `sub.codex.effort`) makes
-  every rerouted Codex turn reason and stream a summary back, translated into Anthropic `thinking`
-  blocks. Off by default; Kimi ignores it.
+- **Codex reasoning effort.** Codex reasoning on the reroute now follows the effort Claude Code
+  requests per turn (its `output_config.effort`), streamed back as Anthropic `thinking` blocks, so
+  reasoning is adaptive by default. `llmtrim sub effort <none|low|medium|high|xhigh>` (env
+  `LLMTRIM_CODEX_EFFORT` or `sub.codex.effort`) is an optional override that forces one effort on
+  every rerouted turn. Kimi ignores it.
 - **On-error reroute mode (`llmtrim sub mode on-error`).** Instead of rerouting every turn, the
   proxy can forward to Anthropic as usual and only fall back to the subscription provider when
   Anthropic answers with a usage-limit or overload status (402/403/429/529). `always` (the

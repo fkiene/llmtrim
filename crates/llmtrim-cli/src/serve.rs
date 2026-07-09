@@ -432,10 +432,11 @@ mod imp {
         json_response(status, &body)
     }
 
-    /// Force the Codex reasoning effort on a to-be-translated Anthropic body by writing
-    /// `output_config.effort` — the field the Codex translator reads. This is a proxy-side override
-    /// (real Claude Code doesn't request reasoning on the wire), so it wins over anything the client
-    /// sent. No-op when `effort` is `None` or the body isn't a JSON object. Kimi ignores it.
+    /// Override the Codex reasoning effort on a to-be-translated Anthropic body by writing
+    /// `output_config.effort`, the field the Codex translator reads. By default the reroute honors
+    /// the client's own `output_config.effort` (Claude Code sets it per turn); this overwrites it
+    /// with the operator's forced value, so it wins over what the client sent. No-op when `effort`
+    /// is `None` (adaptive default) or the body isn't a JSON object. Kimi ignores it.
     fn apply_sub_effort(value: &mut serde_json::Value, effort: Option<&str>) {
         if let Some(effort) = effort
             && let Some(obj) = value.as_object_mut()

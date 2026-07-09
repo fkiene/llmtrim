@@ -403,8 +403,8 @@ enum SubCmd {
         /// `always` or `on-error`.
         mode: String,
     },
-    /// Set the Codex reasoning effort applied to every rerouted request. Codex only reasons when
-    /// asked and Claude Code doesn't request it, so this is a proxy-side switch (Kimi ignores it).
+    /// Override the Codex reasoning effort on every rerouted request. By default the reroute honors
+    /// the effort Claude Code asks for per turn; this forces one level instead (Kimi ignores it).
     Effort {
         /// `none` | `low` | `medium` | `high` | `xhigh` (`max` = `xhigh`).
         level: String,

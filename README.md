@@ -391,7 +391,8 @@ These knobs are orthogonal to compression. Each resolves env-first, then from th
 
 </details>
 
-### Route Claude Code to another subscription
+<details>
+<summary><b>Route Claude Code to another subscription</b> (opt-in; a ChatGPT/Codex or Kimi plan, gray-area on the provider's terms)</summary>
 
 llmtrim can serve Claude Code from a different subscription's backend instead of Anthropic.
 It intercepts the Anthropic `/v1/messages` call, rewrites it to the provider's wire format,
@@ -426,17 +427,15 @@ tool can be routed model by model; `llmtrim sub unmap` removes an entry, and `ll
 codex` lists the candidate provider models. `llmtrim sub status --json` and `llmtrim sub auth
 <codex|kimi> status --json` expose the state for scripts and the tray.
 
-On Codex, `llmtrim sub effort <low|medium|high|xhigh>` turns on the model's reasoning for every
-rerouted turn. It is off by default: Claude Code doesn't ask for reasoning on the wire, so this is
-a proxy-side switch. Two other Codex quirks are handled for you: the hosted web-search tool works
-through the reroute, and a Codex model's occasional out-of-range `Read` calls are corrected so
-Claude Code's Read tool doesn't fail.
-
 | env var | config key | meaning |
 | --- | --- | --- |
 | `LLMTRIM_SUB` | `sub` | active reroute provider (`codex`, `kimi`, or `off`) |
 | `LLMTRIM_SUB_MODE` | `sub.mode` | `always` (default) or `on-error` |
-| `LLMTRIM_CODEX_EFFORT` | `sub.codex.effort` | Codex reasoning effort (`low`/`medium`/`high`/`xhigh`; off by default) |
+
+Codex reasoning is adaptive by default; `llmtrim sub effort <none|low|medium|high|xhigh>` (env
+`LLMTRIM_CODEX_EFFORT`) pins one effort on every rerouted turn instead.
+
+</details>
 
 ### Chaining through an upstream proxy
 

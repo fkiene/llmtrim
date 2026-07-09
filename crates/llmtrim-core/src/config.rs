@@ -756,10 +756,11 @@ pub struct RuntimeConfig {
     /// fills any missing tier from the built-in default preset. File-only (the reroute mapping
     /// editor writes this table); there is no env form.
     pub sub_tiers: std::collections::BTreeMap<String, String>,
-    /// Codex reasoning effort applied to every rerouted request (`low`/`medium`/`high`/`xhigh`,
-    /// or `none`/unset to disable). The Codex backend only reasons when asked, and real Claude Code
-    /// doesn't request it on the wire, so this is a proxy-side knob (env `LLMTRIM_CODEX_EFFORT` or
-    /// file `sub.codex.effort`). Ignored by Kimi (single model, no reasoning knob).
+    /// Optional proxy-side override of the Codex reasoning effort (`low`/`medium`/`high`/`xhigh`,
+    /// or `none`/unset). When unset, the reroute honors the client's own per-turn effort (Claude
+    /// Code sends `output_config.effort`); when set, this forces one effort on every rerouted
+    /// request. Env `LLMTRIM_CODEX_EFFORT` or file `sub.codex.effort`. Ignored by Kimi (single
+    /// model, no reasoning knob).
     pub sub_effort: Option<String>,
     /// Reroute only when Anthropic itself fails (usage limit / overload). When `true`, the proxy
     /// forwards to Anthropic as usual and only replays the turn to the `sub` provider if Anthropic
