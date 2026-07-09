@@ -17,6 +17,11 @@ All notable changes to this project are documented here. The format follows
   context window). The failure now comes back with a real status code and the provider's
   message, including when a rate-limited plan resets, so `--resume` and normal turns report
   what actually went wrong.
+- **Breakdown occupancy uses each model's real context window.** The context-occupancy view
+  guessed the window by model family (1M for anything gpt-5/codex, 200k for Claude), which was
+  wrong for many models. It now reads the per-model window from a curated models.dev snapshot
+  (`tools/refresh_context.py`, refreshed at release), so the occupancy percentage is accurate.
+  `LLMTRIM_BREAKDOWN_WINDOW` still overrides, and the Claude `[1m]` beta still reports 1M.
 
 ### Added
 

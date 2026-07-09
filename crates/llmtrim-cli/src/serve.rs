@@ -667,21 +667,21 @@ mod imp {
         blocks: Vec<crate::tracking::BreakdownBlock>,
     }
 
-    /// Context window for a model id, for occupancy %:
-    /// 1M for the long-context / gpt-5 / codex tiers, 200k for the Claude family, 128k
-    /// default. `LLMTRIM_BREAKDOWN_WINDOW` overrides for unusual deployments.
+    /// Context window (tokens) for a model id, for occupancy %. Looks the model up in the curated
+    /// models.dev snapshot (`llmtrim_core::context_window`) for a real per-model window, rather than
+    /// guessing per family. Two cases the registry can't answer: `LLMTRIM_BREAKDOWN_WINDOW` overrides
+    /// everything (unusual deployments), and the `[1m]` suffix is Anthropic's opt-in 1M-context beta
+    /// (a per-request capability, not a registry property). Unknown models fall back to 128k; the
+    /// caller clamps the window up to the real prompt size, so an under-shoot never shows over 100%.
     fn window_for(model: Option<&str>) -> i64 {
         if let Some(n) = RuntimeConfig::get().breakdown_window {
             return n;
         }
-        let m = model.unwrap_or("").to_ascii_lowercase();
-        if m.contains("[1m]") || m.contains("gpt-5") || m.contains("codex") {
-            1_000_000
-        } else if m.contains("claude") || m.contains("opus") || m.contains("sonnet") {
-            200_000
-        } else {
-            128_000
+        let m = model.unwrap_or("");
+        if m.to_ascii_lowercase().contains("[1m]") {
+            return 1_000_000;
         }
+        llmtrim_core::context_window(m).map_or(128_000, i64::from)
     }
 
     /// Parse a forwarded request body into its breakdown attribution (blocks + identity + window).
@@ -3053,6 +3053,19 @@ mod imp {
                 "carries the upstream detail: {msg}"
             );
             assert!(msg.contains("resets in ~1h55m"), "shows reset time: {msg}");
+        }
+
+        #[test]
+        fn window_for_uses_curated_registry_beta_and_default() {
+            // Real per-model windows from the models.dev snapshot, not a per-family guess.
+            assert_eq!(window_for(Some("gpt-5")), 400_000);
+            assert_eq!(window_for(Some("gpt-5.6-terra")), 1_050_000);
+            assert_eq!(window_for(Some("claude-opus-4-5")), 200_000);
+            // `[1m]` is Anthropic's opt-in 1M beta, not a registry property.
+            assert_eq!(window_for(Some("claude-opus-4-8[1m]")), 1_000_000);
+            // Unknown model / no model -> generic fallback.
+            assert_eq!(window_for(Some("model-shipped-tomorrow")), 128_000);
+            assert_eq!(window_for(None), 128_000);
         }
 
         #[test]

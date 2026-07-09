@@ -202,6 +202,13 @@ fn stages_for(_provider: ProviderKind, config: &config::DenseConfig) -> Vec<Box<
     stages
 }
 
+/// Context window (tokens) for a model id, from the embedded models.dev snapshot (refreshed by
+/// `tools/refresh_context.py`). `None` when the model is not in the registry, so callers keep
+/// their own default. Used by the CLI's breakdown occupancy view.
+pub fn context_window(model_id: &str) -> Option<u32> {
+    capability::context_window_for(model_id)
+}
+
 /// Pick the workload preset for a request from its structure alone (no model): tool
 /// calls → `agent`; fenced code → `code`; a long context segment alongside a question
 /// (≥2 messages) → `rag` (sentence pruning, not blanket-`aggressive`, which misfires on

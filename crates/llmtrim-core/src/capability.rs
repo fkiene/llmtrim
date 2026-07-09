@@ -46,6 +46,27 @@ static REASONING: Lazy<HashMap<String, bool>> = Lazy::new(|| {
         .collect()
 });
 
+/// Per-model context window (tokens) from models.dev, embedded at compile time. Backs the breakdown
+/// occupancy view: refreshed by `tools/refresh_context.py` on release.
+const CONTEXT_SNAPSHOT: &str = include_str!("../data/model_context.json");
+
+/// `model_id` (lowercased) -> context window in tokens, from [`CONTEXT_SNAPSHOT`].
+static CONTEXT: Lazy<HashMap<String, u32>> = Lazy::new(|| {
+    let parsed: Value =
+        serde_json::from_str(CONTEXT_SNAPSHOT).expect("embedded context snapshot is valid json");
+    parsed["models"]
+        .as_object()
+        .expect("snapshot has a `models` object")
+        .iter()
+        .filter_map(|(name, window)| {
+            Some((
+                name.to_ascii_lowercase(),
+                u32::try_from(window.as_u64()?).ok()?,
+            ))
+        })
+        .collect()
+});
+
 /// Elo bar: models rated strictly above obey the trajectory steer in our benches; the models
 /// proven to ignore it sit well below (gpt-4o-mini 1287, gpt-oss-20b 1288, claude-haiku-4-5 1393),
 /// so the bar has margin on the weak side while still admitting the GPT-5-high class (1405).
@@ -127,6 +148,17 @@ pub(crate) fn model_is_reasoning_capable(model_id: &str) -> bool {
         .any(|(_, &flag)| flag)
 }
 
+/// Context window (tokens) for a wire model id, from the embedded models.dev snapshot
+/// ([`CONTEXT_SNAPSHOT`]). Normalizes the id (lowercase, drop a `provider/` prefix) and looks it up
+/// directly — models.dev keys the registry by the bare ids the wire sends (`gpt-5.6-terra`,
+/// `claude-opus-4-8`), so no date-suffix fallback is needed here (unlike the dated LMArena board).
+/// `None` on a genuine miss, so the caller keeps its own default.
+pub(crate) fn context_window_for(model_id: &str) -> Option<u32> {
+    let id = model_id.to_ascii_lowercase();
+    let id = id.split_once('/').map_or(id.as_str(), |(_, rest)| rest);
+    CONTEXT.get(id).copied()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -190,6 +222,24 @@ mod tests {
                 !model_is_reasoning_capable(id),
                 "{id} must not read as reasoning-capable"
             );
+        }
+    }
+
+    #[test]
+    fn context_window_read_from_models_dev_snapshot() {
+        // Real per-model windows, resolved from the id shapes the wire actually sends.
+        for (id, window) in [
+            ("gpt-5", 400_000),
+            ("gpt-5-codex", 400_000),
+            ("gpt-5.6-terra", 1_050_000),
+            ("openai/gpt-5", 400_000), // provider prefix stripped
+            ("gpt-4o", 128_000),
+        ] {
+            assert_eq!(context_window_for(id), Some(window), "{id}");
+        }
+        // A genuine miss returns None so the caller keeps its own default.
+        for id in ["totally-unknown-model", ""] {
+            assert_eq!(context_window_for(id), None, "{id}");
         }
     }
 
