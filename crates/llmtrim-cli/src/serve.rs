@@ -338,6 +338,19 @@ mod imp {
     struct RerouteInfo {
         provider: crate::reroute::SubProvider,
         model: String,
+        /// The rewritten upstream request, retained so `reroute_response` can re-issue it on a
+        /// retryable failure (429/5xx). `None` on paths that never retry (the on-error fallback).
+        replay: Option<RerouteReplay>,
+    }
+
+    /// Enough of the rewritten upstream request to re-issue it on a retryable failure. The body is
+    /// shared (`Arc`) so retaining it for retries costs one copy of the compressed body, not one
+    /// per attempt.
+    #[derive(Clone)]
+    struct RerouteReplay {
+        url: String,
+        headers: Vec<(String, String)>,
+        body: Arc<Vec<u8>>,
     }
 
     /// On-error fallback marker attached to a [`Pending`] (see its `fallback` field). Holds what
@@ -424,12 +437,106 @@ mod imp {
     /// An Anthropic-shaped error the client (Claude Code) renders, for reroute pre-flight failures
     /// (no auth, unparseable body, translation error). `status` is the HTTP status.
     fn anthropic_error(status: u16, message: &str) -> Response<Body> {
+        anthropic_error_typed(status, "api_error", message, None)
+    }
+
+    /// Like [`anthropic_error`] but with an explicit error `kind` (so a rate limit renders as
+    /// `rate_limit_error`, not a generic `api_error`) and an optional `Retry-After` header
+    /// (seconds) so the client backs off sensibly instead of tight-retrying.
+    fn anthropic_error_typed(
+        status: u16,
+        kind: &str,
+        message: &str,
+        retry_after_secs: Option<u64>,
+    ) -> Response<Body> {
         let body = serde_json::json!({
             "type": "error",
-            "error": { "type": "api_error", "message": message },
+            "error": { "type": kind, "message": message },
         })
         .to_string();
-        json_response(status, &body)
+        let mut builder = Response::builder()
+            .status(status)
+            .header(header::CONTENT_TYPE, "application/json");
+        if let Some(secs) = retry_after_secs {
+            builder = builder.header(header::RETRY_AFTER, secs.to_string());
+        }
+        builder
+            .body(Body::from(Full::new(Bytes::from(body))))
+            .unwrap_or_else(|_| Response::new(Body::empty()))
+    }
+
+    /// Anthropic error `type` for an upstream status, so Claude Code renders rate limits and
+    /// auth failures as their own error classes instead of a generic `api_error`.
+    fn reroute_error_kind(status: u16) -> &'static str {
+        match status {
+            401 | 403 => "authentication_error",
+            429 => "rate_limit_error",
+            529 => "overloaded_error",
+            _ => "api_error",
+        }
+    }
+
+    /// Statuses worth re-issuing against the subscription backend: transient server/overload
+    /// errors and rate limits. A rate limit is only actually retried when its backoff fits the
+    /// budget (see [`reroute_backoff_ms`]); a multi-hour usage-limit reset is surfaced at once.
+    fn reroute_should_retry(status: u16) -> bool {
+        matches!(status, 429 | 500 | 502 | 503 | 504 | 529)
+    }
+
+    const REROUTE_RETRY_MAX: u32 = 3;
+    const REROUTE_RETRY_BASE_MS: u64 = 1_000;
+    const REROUTE_RETRY_CAP_MS: u64 = 20_000;
+
+    /// Backoff before retry `attempt` (0-based). Honors an upstream reset hint (`retry_after_secs`)
+    /// when present, otherwise jittered-free exponential backoff. Returns `None` when the wait
+    /// would exceed the cap — e.g. a usage-limit reset hours away — so the caller stops retrying
+    /// and surfaces the error immediately instead of stalling.
+    fn reroute_backoff_ms(attempt: u32, retry_after_secs: Option<u64>) -> Option<u64> {
+        if let Some(secs) = retry_after_secs {
+            let ms = secs.saturating_mul(1_000);
+            return (ms <= REROUTE_RETRY_CAP_MS).then_some(ms);
+        }
+        let ms = REROUTE_RETRY_BASE_MS
+            .saturating_mul(1u64 << attempt.min(5))
+            .min(REROUTE_RETRY_CAP_MS);
+        Some(ms)
+    }
+
+    /// Extract a rate-limit reset hint (seconds) from an upstream response: the standard
+    /// `Retry-After`, a Codex `x-codex-primary-reset-after-seconds` header, or the JSON body's
+    /// `error.resets_in_seconds`. `None` when the response carries no usable hint.
+    fn reroute_retry_after_secs(
+        retry_after_header: Option<&str>,
+        codex_reset_header: Option<&str>,
+        body: &[u8],
+    ) -> Option<u64> {
+        let parse = |s: &str| s.trim().parse::<f64>().ok().filter(|v| *v >= 0.0);
+        if let Some(v) = retry_after_header.and_then(parse) {
+            return Some(v.ceil() as u64);
+        }
+        if let Some(v) = codex_reset_header.and_then(parse) {
+            return Some(v.ceil() as u64);
+        }
+        serde_json::from_slice::<serde_json::Value>(body)
+            .ok()
+            .and_then(|j| {
+                j.get("error")
+                    .and_then(|e| e.get("resets_in_seconds"))
+                    .and_then(serde_json::Value::as_i64)
+            })
+            .filter(|s| *s > 0)
+            .map(|s| s as u64)
+    }
+
+    /// [`reroute_retry_after_secs`] over a response header map (the first, hudsucker-fetched
+    /// attempt, which still carries the provider's headers).
+    fn reroute_retry_after_from_headers(headers: &header::HeaderMap, body: &[u8]) -> Option<u64> {
+        let get = |n: &str| headers.get(n).and_then(|v| v.to_str().ok());
+        reroute_retry_after_secs(
+            get("retry-after"),
+            get("x-codex-primary-reset-after-seconds"),
+            body,
+        )
     }
 
     /// Build the client-facing message for a non-2xx subscription-backend response. Pulls the
@@ -1143,6 +1250,11 @@ mod imp {
                 reroute: Some(RerouteInfo {
                     provider: sub,
                     model: rewrite.model.clone(),
+                    replay: Some(RerouteReplay {
+                        url: format!("https://{}{}", rewrite.host, rewrite.path),
+                        headers: rewrite.headers.clone(),
+                        body: Arc::new(rewrite.body.clone()),
+                    }),
                 }),
                 fallback: None,
             });
@@ -1192,19 +1304,46 @@ mod imp {
         ) -> Response<Body> {
             use crate::reroute::sse::{AnthropicSseEncoder, ReduceEvent};
             let status = res.status();
-            let (_parts, body) = res.into_parts();
+            let (parts, body) = res.into_parts();
 
             if !status.is_success() {
-                let raw = body
+                let mut cur_status = status.as_u16();
+                let mut cur_body = body
                     .collect()
                     .await
                     .map(|c| c.to_bytes().to_vec())
                     .unwrap_or_default();
+                let mut retry_after = reroute_retry_after_from_headers(&parts.headers, &cur_body);
+
+                // Server-side retry for transient / rate-limit failures (mirrors what a native
+                // Anthropic client does): re-issue the same upstream request with backoff, honoring
+                // the reset hint. A multi-hour usage-limit reset exceeds the budget and is surfaced
+                // at once rather than burning pointless retries.
+                if let Some(replay) = info.replay.as_ref() {
+                    let mut attempt = 0;
+                    while attempt < REROUTE_RETRY_MAX && reroute_should_retry(cur_status) {
+                        let Some(wait_ms) = reroute_backoff_ms(attempt, retry_after) else {
+                            break;
+                        };
+                        tokio::time::sleep(std::time::Duration::from_millis(wait_ms)).await;
+                        attempt += 1;
+                        let Some((s, raw, ra)) = self.reissue_reroute(replay).await else {
+                            break;
+                        };
+                        if (200..300).contains(&s) {
+                            return self.finish_buffered_reroute(pending, &info, raw);
+                        }
+                        cur_status = s;
+                        cur_body = raw;
+                        retry_after = ra;
+                    }
+                }
+
                 // Surface the upstream failure as a real non-2xx Anthropic error (like the reroute
                 // pre-flight failures), not a 200 SSE `error` frame: Claude Code renders a bare
                 // in-stream error event that never had a `message_start` as "empty or malformed
                 // response (HTTP 200)", hiding the actual cause (e.g. a rate-limited subscription).
-                let message = reroute_upstream_error_message(info.provider, status.as_u16(), &raw);
+                let message = reroute_upstream_error_message(info.provider, cur_status, &cur_body);
                 let acc = Arc::new(Mutex::new(message.clone().into_bytes()));
                 // Record the row (output 0) as this Finalize drops.
                 let _finalize = Finalize {
@@ -1213,7 +1352,19 @@ mod imp {
                     ledger: self.ledger.clone(),
                     breakdown_ledger: self.breakdown_ledger.clone(),
                 };
-                return anthropic_error(status.as_u16(), &message);
+                // Emit `Retry-After` for a rate limit, capped so the client backs off without
+                // stalling for the full (possibly multi-hour) reset — the true reset is in the
+                // message. Type the error by status so it renders as a rate limit / auth failure.
+                let retry_after_header = (cur_status == 429)
+                    .then_some(retry_after)
+                    .flatten()
+                    .map(|s| s.min(60));
+                return anthropic_error_typed(
+                    cur_status,
+                    reroute_error_kind(cur_status),
+                    &message,
+                    retry_after_header,
+                );
             }
 
             let acc = Arc::new(Mutex::new(Vec::<u8>::new()));
@@ -1324,6 +1475,65 @@ mod imp {
                 .unwrap_or_else(|_| Response::new(Body::empty()))
         }
 
+        /// Re-issue a rerouted upstream request (blocking, buffered `forward_post` like the replay
+        /// net) for a retry attempt. Returns `(status, body, reset-hint-seconds)`, or `None` if the
+        /// round-trip or its task failed (the caller stops retrying and surfaces the last error).
+        async fn reissue_reroute(
+            &self,
+            replay: &RerouteReplay,
+        ) -> Option<(u16, Vec<u8>, Option<u64>)> {
+            let url = replay.url.clone();
+            let headers = replay.headers.clone();
+            let body = replay.body.clone();
+            let proxy = self.upstream_proxy.clone();
+            // `forward_post` exposes no response headers, so a retried attempt's reset hint comes
+            // from the body (`resets_in_seconds`) — enough for the Codex/Kimi usage-limit shape.
+            let (status, raw) = tokio::task::spawn_blocking(move || {
+                use std::io::Read;
+                let body_str = String::from_utf8_lossy(&body);
+                let mut up =
+                    crate::transport::forward_post(&url, &headers, &body_str, proxy.as_deref())
+                        .map_err(|e| e.to_string())?;
+                let mut buf = Vec::new();
+                up.reader.read_to_end(&mut buf).map_err(|e| e.to_string())?;
+                Ok::<(u16, Vec<u8>), String>((up.status, buf))
+            })
+            .await
+            .ok()?
+            .ok()?;
+            let retry_after = reroute_retry_after_secs(None, None, &raw);
+            Some((status, raw, retry_after))
+        }
+
+        /// Translate a buffered, successful retry response into Anthropic SSE in one shot (the rare
+        /// retry path, not the streaming hot path) and record the row on `Finalize` drop.
+        fn finish_buffered_reroute(
+            &self,
+            pending: Pending,
+            info: &RerouteInfo,
+            raw: Vec<u8>,
+        ) -> Response<Body> {
+            use crate::reroute::sse::AnthropicSseEncoder;
+            let mut enc = AnthropicSseEncoder::new(&info.model);
+            let mut out = String::new();
+            let mut reducer = crate::reroute::StreamReducer::new(info.provider, &info.model);
+            for ev in reducer.push(&raw) {
+                enc.encode(&ev, &mut out);
+            }
+            for ev in reducer.finish() {
+                enc.encode(&ev, &mut out);
+            }
+            enc.finish_if_open(&mut out);
+            let acc = Arc::new(Mutex::new(out.clone().into_bytes()));
+            let _finalize = Finalize {
+                acc,
+                pending: Some(pending),
+                ledger: self.ledger.clone(),
+                breakdown_ledger: self.breakdown_ledger.clone(),
+            };
+            sse_response(out)
+        }
+
         /// On-error reroute: Anthropic returned a quota/overload status, so replay the (stashed
         /// original) turn to the subscription provider and hand the client the provider's answer as
         /// Anthropic SSE. Uses a blocking provider round-trip (`transport::forward_post`, like the
@@ -1394,6 +1604,7 @@ mod imp {
             pending.reroute = Some(RerouteInfo {
                 provider,
                 model: model.clone(),
+                replay: None,
             });
 
             let url = format!("https://{}{}", rewrite.host, rewrite.path);
@@ -2758,6 +2969,55 @@ mod imp {
                 "carries the upstream detail: {msg}"
             );
             assert!(msg.contains("resets in ~1h55m"), "shows reset time: {msg}");
+        }
+
+        #[test]
+        fn reroute_error_kind_maps_status_to_anthropic_type() {
+            assert_eq!(reroute_error_kind(429), "rate_limit_error");
+            assert_eq!(reroute_error_kind(401), "authentication_error");
+            assert_eq!(reroute_error_kind(403), "authentication_error");
+            assert_eq!(reroute_error_kind(529), "overloaded_error");
+            assert_eq!(reroute_error_kind(500), "api_error");
+        }
+
+        #[test]
+        fn reroute_should_retry_covers_transient_and_rate_limit() {
+            for s in [429, 500, 502, 503, 504, 529] {
+                assert!(reroute_should_retry(s), "{s} should retry");
+            }
+            for s in [200, 400, 401, 403, 404, 422] {
+                assert!(!reroute_should_retry(s), "{s} should not retry");
+            }
+        }
+
+        #[test]
+        fn reroute_backoff_grows_and_respects_budget() {
+            // No hint: exponential from the base, capped.
+            assert_eq!(reroute_backoff_ms(0, None), Some(REROUTE_RETRY_BASE_MS));
+            assert_eq!(reroute_backoff_ms(1, None), Some(REROUTE_RETRY_BASE_MS * 2));
+            assert_eq!(reroute_backoff_ms(9, None), Some(REROUTE_RETRY_CAP_MS));
+            // A short reset hint is honored; a multi-hour one exceeds the budget -> stop retrying.
+            assert_eq!(reroute_backoff_ms(0, Some(3)), Some(3_000));
+            assert_eq!(reroute_backoff_ms(0, Some(6_922)), None);
+        }
+
+        #[test]
+        fn reroute_retry_after_prefers_header_then_body() {
+            // Retry-After header wins.
+            assert_eq!(
+                reroute_retry_after_secs(Some("12"), Some("999"), b"{}"),
+                Some(12)
+            );
+            // Codex reset header when no Retry-After.
+            assert_eq!(
+                reroute_retry_after_secs(None, Some("300"), b"{}"),
+                Some(300)
+            );
+            // Body fallback.
+            let body = br#"{"error":{"resets_in_seconds":6922}}"#;
+            assert_eq!(reroute_retry_after_secs(None, None, body), Some(6922));
+            // Nothing usable.
+            assert_eq!(reroute_retry_after_secs(None, None, b"nope"), None);
         }
 
         #[test]

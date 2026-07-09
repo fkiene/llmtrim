@@ -15,6 +15,16 @@ All notable changes to this project are documented here. The format follows
   back with the upstream status code and the provider's message, including when a
   rate-limited plan resets, so `--resume` and normal turns report what actually went wrong.
 
+### Added
+
+- **Subscription reroute retries transient failures.** A rerouted turn that hits a transient
+  upstream failure (HTTP 500/502/503/504/529) or a short rate limit is now re-issued with
+  exponential backoff (up to 3 attempts), honoring the provider's reset hint. A usage-limit
+  reset that is hours away is surfaced at once rather than burning pointless retries. The
+  surfaced error is also typed by status (`rate_limit_error` / `authentication_error` /
+  `overloaded_error`) and, for rate limits, carries a capped `Retry-After` header so the
+  client backs off instead of tight-retrying a large resumed request.
+
 ## [0.9.0] - 2026-07-09
 
 ### Added
