@@ -16,6 +16,8 @@ pub mod doctor;
 pub mod mcp;
 pub mod monitor;
 pub mod quality;
+#[cfg(feature = "intercept")]
+pub mod reroute;
 pub mod serve;
 pub mod setup;
 pub mod tracking;

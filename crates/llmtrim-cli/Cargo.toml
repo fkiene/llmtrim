@@ -91,6 +91,14 @@ hyper-util = { version = "0.1", default-features = false, features = [
 http-body-util = { version = "0.1", optional = true }
 bytes = { version = "1", optional = true }
 llm_providers = { version = "0.14", optional = true }
+# Subscription reroute (`sub` = codex|kimi): OAuth (PKCE/device) + provider request/response
+# translation. base64/sha2/rand build the PKCE verifier+challenge; uuid mints session/message
+# ids + the persistent Kimi device id. All small, pure, no new TLS stack (the reroute forwards
+# over hudsucker's existing aws-lc client via a URI-authority rewrite).
+base64 = { workspace = true, optional = true }
+sha2 = { version = "0.10", optional = true }
+rand = { version = "0.8", optional = true }
+uuid = { version = "1", features = ["v4"], optional = true }
 # Not used directly — caps the transitive `time` (via hudsucker → rcgen) below 0.3.48,
 # whose new blanket impl collides with rcgen 0.14's `impl<T: Into<String>> From<T>`
 # (E0119), breaking un-`--locked` `cargo install`. Drop when rcgen ships a fix.
@@ -141,6 +149,10 @@ intercept = [
   "dep:time",
   "dep:hyper-http-proxy",
   "dep:hyper-util",
+  "dep:base64",
+  "dep:sha2",
+  "dep:rand",
+  "dep:uuid",
 ]
 mcp = ["dep:rmcp", "dep:schemars", "dep:tokio"]
 
