@@ -432,6 +432,48 @@ mod imp {
         json_response(status, &body)
     }
 
+    /// Build the client-facing message for a non-2xx subscription-backend response. Pulls the
+    /// upstream `error.message` out of the JSON body when present (falling back to a raw snippet),
+    /// and adds a hint for the common rate-limit case so the user sees "usage limit reached" and
+    /// when it resets instead of an opaque HTTP code.
+    fn reroute_upstream_error_message(
+        provider: crate::reroute::SubProvider,
+        status: u16,
+        raw: &[u8],
+    ) -> String {
+        let json: Option<serde_json::Value> = serde_json::from_slice(raw).ok();
+        let err = json.as_ref().and_then(|v| v.get("error"));
+        let detail = err
+            .and_then(|e| e.get("message"))
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_string)
+            .unwrap_or_else(|| {
+                String::from_utf8_lossy(raw)
+                    .trim()
+                    .chars()
+                    .take(200)
+                    .collect()
+            });
+
+        let mut msg = format!(
+            "llmtrim: {} subscription backend returned HTTP {status}: {detail}",
+            provider.as_str(),
+        );
+        if let Some(secs) = err
+            .and_then(|e| e.get("resets_in_seconds"))
+            .and_then(serde_json::Value::as_i64)
+            .filter(|s| *s > 0)
+        {
+            let mins = secs / 60;
+            if mins >= 60 {
+                msg.push_str(&format!(" (resets in ~{}h{:02}m)", mins / 60, mins % 60));
+            } else {
+                msg.push_str(&format!(" (resets in ~{mins}m)"));
+            }
+        }
+        msg
+    }
+
     /// Override the Codex reasoning effort on a to-be-translated Anthropic body by writing
     /// `output_config.effort`, the field the Codex translator reads. By default the reroute honors
     /// the client's own `output_config.effort` (Claude Code sets it per turn); this overwrites it
@@ -1158,21 +1200,12 @@ mod imp {
                     .await
                     .map(|c| c.to_bytes().to_vec())
                     .unwrap_or_default();
-                let snippet: String = String::from_utf8_lossy(&raw).chars().take(400).collect();
-                let mut enc = AnthropicSseEncoder::new(&info.model);
-                let mut out = String::new();
-                enc.encode(
-                    &ReduceEvent::Error {
-                        message: format!(
-                            "llmtrim: {} upstream HTTP {}: {}",
-                            info.provider.as_str(),
-                            status.as_u16(),
-                            snippet
-                        ),
-                    },
-                    &mut out,
-                );
-                let acc = Arc::new(Mutex::new(out.clone().into_bytes()));
+                // Surface the upstream failure as a real non-2xx Anthropic error (like the reroute
+                // pre-flight failures), not a 200 SSE `error` frame: Claude Code renders a bare
+                // in-stream error event that never had a `message_start` as "empty or malformed
+                // response (HTTP 200)", hiding the actual cause (e.g. a rate-limited subscription).
+                let message = reroute_upstream_error_message(info.provider, status.as_u16(), &raw);
+                let acc = Arc::new(Mutex::new(message.clone().into_bytes()));
                 // Record the row (output 0) as this Finalize drops.
                 let _finalize = Finalize {
                     acc,
@@ -1180,7 +1213,7 @@ mod imp {
                     ledger: self.ledger.clone(),
                     breakdown_ledger: self.breakdown_ledger.clone(),
                 };
-                return sse_response(out);
+                return anthropic_error(status.as_u16(), &message);
             }
 
             let acc = Arc::new(Mutex::new(Vec::<u8>::new()));
@@ -2713,6 +2746,42 @@ mod imp {
     #[cfg(test)]
     mod tests {
         use super::*;
+
+        #[test]
+        fn reroute_error_message_surfaces_rate_limit_and_reset() {
+            // The ChatGPT/Codex backend returns this exact shape when the plan is exhausted.
+            let raw = br#"{"error":{"type":"usage_limit_reached","message":"The usage limit has been reached","plan_type":"plus","resets_in_seconds":6922}}"#;
+            let msg = reroute_upstream_error_message(crate::reroute::SubProvider::Codex, 429, raw);
+            assert!(msg.contains("HTTP 429"), "names the status: {msg}");
+            assert!(
+                msg.contains("The usage limit has been reached"),
+                "carries the upstream detail: {msg}"
+            );
+            assert!(msg.contains("resets in ~1h55m"), "shows reset time: {msg}");
+        }
+
+        #[test]
+        fn reroute_error_message_formats_sub_hour_reset() {
+            let raw = br#"{"error":{"message":"slow down","resets_in_seconds":300}}"#;
+            let msg = reroute_upstream_error_message(crate::reroute::SubProvider::Kimi, 429, raw);
+            assert!(msg.contains("resets in ~5m"), "shows minute reset: {msg}");
+            assert!(msg.contains("kimi"), "names the provider: {msg}");
+        }
+
+        #[test]
+        fn reroute_error_message_falls_back_to_body_snippet() {
+            // Non-JSON / unexpected body: still surface something, never an empty message.
+            let msg = reroute_upstream_error_message(
+                crate::reroute::SubProvider::Codex,
+                502,
+                b"Bad Gateway",
+            );
+            assert!(msg.contains("HTTP 502"), "names the status: {msg}");
+            assert!(
+                msg.contains("Bad Gateway"),
+                "carries the raw snippet: {msg}"
+            );
+        }
 
         #[test]
         fn port_in_use_message_points_to_force_when_llmtrim_owns_it() {
