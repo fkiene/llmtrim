@@ -469,10 +469,26 @@ mod imp {
     /// auth failures as their own error classes instead of a generic `api_error`.
     fn reroute_error_kind(status: u16) -> &'static str {
         match status {
+            400 | 422 => "invalid_request_error",
             401 | 403 => "authentication_error",
             429 => "rate_limit_error",
             529 => "overloaded_error",
             _ => "api_error",
+        }
+    }
+
+    /// Best-effort HTTP status for an error surfaced *inside* an HTTP 200 upstream stream (the
+    /// reducer keeps only the message text, not the upstream code). Context-window overflow is a
+    /// client input error (400); an explicit rate/usage limit is 429; anything else is treated as a
+    /// bad gateway (502).
+    fn reroute_stream_error_status(message: &str) -> u16 {
+        let m = message.to_lowercase();
+        if m.contains("context") && (m.contains("window") || m.contains("length")) {
+            400
+        } else if m.contains("rate limit") || m.contains("usage limit") {
+            429
+        } else {
+            502
         }
     }
 
@@ -1367,6 +1383,57 @@ mod imp {
                 );
             }
 
+            // Peek the head of the 2xx stream: drive the reducer until its first content event or a
+            // terminal. An upstream that fails the whole turn on an HTTP 200 stream (e.g.
+            // `context_length_exceeded` as an `error`/`response.failed`) is surfaced as a real typed
+            // error instead of a 200 stream Claude Code rejects as empty/malformed.
+            use hudsucker::futures::StreamExt;
+            let mut inner = BodyStream::new(body);
+            let mut reducer = crate::reroute::StreamReducer::new(info.provider, &info.model);
+            let mut encoder = AnthropicSseEncoder::new(&info.model);
+            let mut prelude = String::new();
+            let mut committed = false;
+            let mut fatal: Option<String> = None;
+            while !committed && fatal.is_none() {
+                match inner.next().await {
+                    Some(Ok(frame)) => {
+                        let Ok(chunk) = frame.into_data() else {
+                            continue;
+                        };
+                        for ev in reducer.push(&chunk) {
+                            match &ev {
+                                ReduceEvent::Error { message } => {
+                                    fatal.get_or_insert_with(|| message.clone());
+                                }
+                                ReduceEvent::Finish { .. } => {}
+                                _ => committed = true,
+                            }
+                            encoder.encode(&ev, &mut prelude);
+                        }
+                    }
+                    Some(Err(_)) => {
+                        fatal.get_or_insert_with(|| "llmtrim: upstream stream error".to_string());
+                    }
+                    None => break,
+                }
+            }
+
+            if let Some(detail) = fatal {
+                let status = reroute_stream_error_status(&detail);
+                let message = format!(
+                    "llmtrim: {} subscription backend: {detail}",
+                    info.provider.as_str()
+                );
+                let acc = Arc::new(Mutex::new(message.clone().into_bytes()));
+                let _finalize = Finalize {
+                    acc,
+                    pending: Some(pending),
+                    ledger: self.ledger.clone(),
+                    breakdown_ledger: self.breakdown_ledger.clone(),
+                };
+                return anthropic_error_typed(status, reroute_error_kind(status), &message, None);
+            }
+
             let acc = Arc::new(Mutex::new(Vec::<u8>::new()));
             let finalize = Finalize {
                 acc: acc.clone(),
@@ -1376,6 +1443,7 @@ mod imp {
             };
 
             enum Phase {
+                Prelude,
                 Body,
                 Flush,
                 Done,
@@ -1387,21 +1455,37 @@ mod imp {
                 acc: Arc<Mutex<Vec<u8>>>,
                 finalize: Finalize,
                 phase: Phase,
+                prelude: String,
             }
             let st = St {
-                inner: BodyStream::new(body),
-                reducer: crate::reroute::StreamReducer::new(info.provider, &info.model),
-                encoder: AnthropicSseEncoder::new(&info.model),
+                inner,
+                reducer,
+                encoder,
                 acc: acc.clone(),
                 finalize,
-                phase: Phase::Body,
+                phase: Phase::Prelude,
+                prelude,
             };
 
-            use hudsucker::futures::StreamExt;
             let stream = hudsucker::futures::stream::unfold(st, |mut st| async move {
                 loop {
                     match st.phase {
                         Phase::Done => return None,
+                        Phase::Prelude => {
+                            // Emit the bytes buffered while peeking, then stream the rest.
+                            st.phase = Phase::Body;
+                            if st.prelude.is_empty() {
+                                continue;
+                            }
+                            let out = std::mem::take(&mut st.prelude);
+                            if let Ok(mut buf) = st.acc.lock() {
+                                buf.extend_from_slice(out.as_bytes());
+                            }
+                            return Some((
+                                Ok::<Bytes, std::io::Error>(Bytes::from(out.into_bytes())),
+                                st,
+                            ));
+                        }
                         Phase::Flush => {
                             let mut out = String::new();
                             for ev in st.reducer.finish() {
@@ -2972,7 +3056,24 @@ mod imp {
         }
 
         #[test]
+        fn reroute_stream_error_status_infers_from_message() {
+            assert_eq!(
+                reroute_stream_error_status("Your input exceeds the context window of this model."),
+                400
+            );
+            assert_eq!(reroute_stream_error_status("context_length_exceeded"), 400);
+            assert_eq!(reroute_stream_error_status("rate limit reached"), 429);
+            assert_eq!(
+                reroute_stream_error_status("The usage limit has been reached"),
+                429
+            );
+            assert_eq!(reroute_stream_error_status("something else broke"), 502);
+        }
+
+        #[test]
         fn reroute_error_kind_maps_status_to_anthropic_type() {
+            assert_eq!(reroute_error_kind(400), "invalid_request_error");
+            assert_eq!(reroute_error_kind(422), "invalid_request_error");
             assert_eq!(reroute_error_kind(429), "rate_limit_error");
             assert_eq!(reroute_error_kind(401), "authentication_error");
             assert_eq!(reroute_error_kind(403), "authentication_error");

@@ -9,11 +9,14 @@ All notable changes to this project are documented here. The format follows
 ### Fixed
 
 - **Subscription reroute now surfaces the real upstream error.** When the ChatGPT/Codex or
-  Kimi backend rejected a rerouted turn (e.g. the plan hit its usage limit, HTTP 429),
-  llmtrim wrapped the failure in a `200 OK` SSE `error` frame, which Claude Code showed as
-  the opaque "API returned an empty or malformed response (HTTP 200)". The failure now comes
-  back with the upstream status code and the provider's message, including when a
-  rate-limited plan resets, so `--resume` and normal turns report what actually went wrong.
+  Kimi backend rejected a rerouted turn, llmtrim wrapped the failure in a `200 OK` SSE `error`
+  frame, which Claude Code showed as the opaque "API returned an empty or malformed response
+  (HTTP 200)". This covered both a non-2xx response (e.g. the plan hit its usage limit, HTTP
+  429) and a turn that failed mid-stream on an HTTP 200 response (e.g.
+  `context_length_exceeded` when a resumed transcript is larger than the target model's
+  context window). The failure now comes back with a real status code and the provider's
+  message, including when a rate-limited plan resets, so `--resume` and normal turns report
+  what actually went wrong.
 
 ### Added
 
