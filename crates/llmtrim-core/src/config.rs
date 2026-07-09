@@ -526,7 +526,165 @@ pub(crate) const RUNTIME_ONLY_KEYS: &[&str] = &[
     "max_rows",
     "max_breakdown_turns",
     "theme",
+    "sub",
 ];
+
+/// The resolved config-file path (`LLMTRIM_CONFIG`, else `$XDG_CONFIG_HOME`/`$HOME/.config` +
+/// `llmtrim/config.toml`), or `None` if HOME/XDG are unset. Public so the CLI can show it and the
+/// reroute mapping editor can persist to it.
+pub fn config_file_path() -> Option<PathBuf> {
+    config_path()
+}
+
+/// Persist the subscription reroute selection: set the top-level `sub` key to `provider` and write
+/// the tier→model table under `[sub.<provider>.tiers]`. Other config keys/values are preserved
+/// (the file is parsed as TOML, mutated, and re-serialized — comments and key order are not
+/// preserved, matching a structured rewrite rather than [`save_theme`]'s surgical line edit).
+/// Creates the file and its parent directory if absent.
+pub fn write_sub_mapping(
+    provider: &str,
+    tiers: &std::collections::BTreeMap<String, String>,
+) -> Result<()> {
+    let path = config_path().ok_or_else(|| anyhow::anyhow!("no config path (HOME/XDG unset)"))?;
+    write_sub_mapping_at(&path, provider, tiers)
+}
+
+/// Disable subscription reroute: set `sub.active = "off"` (the reader filters `off` to unset),
+/// preserving the saved `[sub.<provider>.tiers]` mapping and `mode` so re-enabling with
+/// `sub use <provider>` restores them. Goes through `edit_sub_table_at` like the other editors.
+pub fn disable_sub() -> Result<()> {
+    let path = config_path().ok_or_else(|| anyhow::anyhow!("no config path (HOME/XDG unset)"))?;
+    edit_sub_table_at(&path, |t| {
+        t.insert("active".to_string(), toml::Value::String("off".to_string()));
+    })
+}
+
+fn write_sub_mapping_at(
+    path: &std::path::Path,
+    provider: &str,
+    tiers: &std::collections::BTreeMap<String, String>,
+) -> Result<()> {
+    // `sub` is stored as a table with `active` + per-provider `tiers` (the reader also accepts a
+    // bare `sub = "codex"` string). Editing through `edit_sub_table_at` preserves any existing
+    // `mode` and other providers' entries when the selection or preset is (re)written.
+    let mut tiers_tbl = toml::Table::new();
+    for (k, v) in tiers {
+        tiers_tbl.insert(k.clone(), toml::Value::String(v.clone()));
+    }
+    let provider = provider.to_string();
+    edit_sub_table_at(path, |t| {
+        t.insert("active".to_string(), toml::Value::String(provider.clone()));
+        let mut prov_tbl = toml::Table::new();
+        prov_tbl.insert("tiers".to_string(), toml::Value::Table(tiers_tbl));
+        t.insert(provider, toml::Value::Table(prov_tbl));
+    })
+}
+
+/// Load the config doc, coerce `sub` into a table (migrating a bare `sub = "codex"` string to
+/// `{ active = "codex" }`, and `"off"` to an empty table), hand that table to `edit`, then write
+/// the whole doc back. Shared by the granular sub editors so each preserves the rest of the sub
+/// table (active provider, mode, other map entries) and the rest of the config file.
+fn edit_sub_table_at(path: &std::path::Path, edit: impl FnOnce(&mut toml::Table)) -> Result<()> {
+    use anyhow::Context;
+    let existing = std::fs::read_to_string(path).unwrap_or_default();
+    let mut doc: toml::Table = if existing.trim().is_empty() {
+        toml::Table::new()
+    } else {
+        existing
+            .parse()
+            .context("existing config is not valid TOML")?
+    };
+    let mut sub_tbl = match doc.remove("sub") {
+        Some(toml::Value::Table(t)) => t,
+        Some(toml::Value::String(s)) if s != "off" && !s.is_empty() => {
+            let mut t = toml::Table::new();
+            t.insert("active".to_string(), toml::Value::String(s));
+            t
+        }
+        _ => toml::Table::new(),
+    };
+    edit(&mut sub_tbl);
+    doc.insert("sub".to_string(), toml::Value::Table(sub_tbl));
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("creating config dir {}", parent.display()))?;
+    }
+    let serialized = toml::to_string_pretty(&doc).context("serializing config")?;
+    std::fs::write(path, serialized).with_context(|| format!("writing {}", path.display()))?;
+    Ok(())
+}
+
+/// Set the reroute mode: `on_error` = reroute only when Anthropic fails, anything else = always.
+/// Preserves the active provider and every `[sub.<provider>.tiers]` entry.
+pub fn write_sub_mode(on_error: bool) -> Result<()> {
+    let path = config_path().ok_or_else(|| anyhow::anyhow!("no config path (HOME/XDG unset)"))?;
+    let mode = if on_error { "on_error" } else { "always" };
+    edit_sub_table_at(&path, |t| {
+        t.insert("mode".to_string(), toml::Value::String(mode.to_string()));
+    })
+}
+
+/// Set the Codex reasoning effort under `[sub.<provider>].effort` (or remove it for `none`),
+/// preserving the mapping/mode. `level` is `none`/`low`/`medium`/`high`/`xhigh`.
+pub fn write_sub_effort(provider: &str, level: &str) -> Result<()> {
+    let path = config_path().ok_or_else(|| anyhow::anyhow!("no config path (HOME/XDG unset)"))?;
+    let (provider, level) = (provider.to_string(), level.to_ascii_lowercase());
+    edit_sub_table_at(&path, |t| {
+        let prov = t
+            .entry(provider)
+            .or_insert_with(|| toml::Value::Table(toml::Table::new()));
+        let Some(prov) = prov.as_table_mut() else {
+            return;
+        };
+        if level == "none" || level.is_empty() {
+            prov.remove("effort");
+        } else {
+            prov.insert("effort".to_string(), toml::Value::String(level));
+        }
+    })
+}
+
+/// Set a single `from → to` mapping entry under `[sub.<provider>.tiers]`, preserving the other
+/// entries, the active provider, and the mode. `from` is a Claude tier name (`opus`/…) or an exact
+/// incoming model id; both are lowercased to match the reader.
+pub fn write_sub_map_entry(provider: &str, from: &str, to: &str) -> Result<()> {
+    let path = config_path().ok_or_else(|| anyhow::anyhow!("no config path (HOME/XDG unset)"))?;
+    let (provider, from, to) = (
+        provider.to_string(),
+        from.to_ascii_lowercase(),
+        to.to_string(),
+    );
+    edit_sub_table_at(&path, |t| {
+        let prov = t
+            .entry(provider)
+            .or_insert_with(|| toml::Value::Table(toml::Table::new()));
+        let Some(prov) = prov.as_table_mut() else {
+            return;
+        };
+        let tiers = prov
+            .entry("tiers".to_string())
+            .or_insert_with(|| toml::Value::Table(toml::Table::new()));
+        if let Some(tiers) = tiers.as_table_mut() {
+            tiers.insert(from, toml::Value::String(to));
+        }
+    })
+}
+
+/// Remove a single `from` mapping entry under `[sub.<provider>.tiers]` (no-op if absent).
+pub fn remove_sub_map_entry(provider: &str, from: &str) -> Result<()> {
+    let path = config_path().ok_or_else(|| anyhow::anyhow!("no config path (HOME/XDG unset)"))?;
+    let (provider, from) = (provider.to_string(), from.to_ascii_lowercase());
+    edit_sub_table_at(&path, |t| {
+        if let Some(tiers) = t
+            .get_mut(&provider)
+            .and_then(toml::Value::as_table_mut)
+            .and_then(|p| p.get_mut("tiers"))
+            .and_then(toml::Value::as_table_mut)
+        {
+            tiers.remove(&from);
+        }
+    })
+}
 
 /// Runtime settings orthogonal to the compression pipeline ([`DenseConfig`]). Each value
 /// resolves **env-first, then a top-level key in the same config TOML, then a default** — the
@@ -585,6 +743,31 @@ pub struct RuntimeConfig {
     /// name (`mocha`/`macchiato`/`frappe`/`latte`). The `t` key persists the user's choice
     /// here via [`save_theme`]. The TUI validates the name and falls back to its default.
     pub theme: Option<String>,
+    /// Subscription reroute target (env `LLMTRIM_SUB` / file `sub`): `codex` or `kimi` reroutes
+    /// intercepted Anthropic `/v1/messages` traffic to that subscription's backend instead of
+    /// Anthropic (translating the request/response wire shapes). `off`/unset keeps the
+    /// transparent compress-and-forward behavior. Lowercased; an unknown value is left as-is
+    /// for the serve layer to reject with a clear error.
+    pub sub: Option<String>,
+    /// Tier→model overrides for the active `sub` provider, read from the config file table
+    /// `[sub.<provider>.tiers]` (e.g. `[sub.codex.tiers]` with `opus = "gpt-5.5"`). Keys are the
+    /// Claude tier names (`opus`/`sonnet`/`haiku`/`fable`) or exact incoming model ids; values are
+    /// the upstream provider model id to route that tier to. Empty when unset — the serve layer
+    /// fills any missing tier from the built-in default preset. File-only (the reroute mapping
+    /// editor writes this table); there is no env form.
+    pub sub_tiers: std::collections::BTreeMap<String, String>,
+    /// Optional proxy-side override of the Codex reasoning effort (`low`/`medium`/`high`/`xhigh`,
+    /// or `none`/unset). When unset, the reroute honors the client's own per-turn effort (Claude
+    /// Code sends `output_config.effort`); when set, this forces one effort on every rerouted
+    /// request. Env `LLMTRIM_CODEX_EFFORT` or file `sub.codex.effort`. Ignored by Kimi (single
+    /// model, no reasoning knob).
+    pub sub_effort: Option<String>,
+    /// Reroute only when Anthropic itself fails (usage limit / overload). When `true`, the proxy
+    /// forwards to Anthropic as usual and only replays the turn to the `sub` provider if Anthropic
+    /// answers with a quota/overload status (402/403/429/529); when `false` (default), a set `sub`
+    /// reroutes every matching turn. Env `LLMTRIM_SUB_MODE` (`always`/`on_error`) or the file key
+    /// `sub.mode`.
+    pub sub_on_error: bool,
 }
 
 impl RuntimeConfig {
@@ -663,8 +846,101 @@ impl RuntimeConfig {
                     .or_else(|| fint("max_breakdown_turns")),
             ),
             theme: env_set("LLMTRIM_THEME").or_else(|| fstr("theme")),
+            sub: {
+                let active = resolve_sub_provider(&env, file);
+                active.filter(|s| s != "off" && !s.is_empty())
+            },
+            sub_tiers: resolve_sub_tiers(&env, file),
+            sub_on_error: resolve_sub_on_error(&env, file),
+            sub_effort: resolve_sub_effort(&env, file),
         }
     }
+}
+
+/// The active reroute provider from env (`LLMTRIM_SUB`) or the config `sub` key. The file form is
+/// either a bare string (`sub = "codex"`) or a table with an `active`/`provider` key
+/// (`[sub]` \n `active = "codex"`), the latter being what [`write_sub_mapping`] emits so it can
+/// also carry `[sub.<provider>.tiers]`. Lowercased.
+fn resolve_sub_provider(
+    env: &impl Fn(&str) -> Option<String>,
+    file: Option<&toml::Value>,
+) -> Option<String> {
+    if let Some(v) = env("LLMTRIM_SUB").filter(|s| !s.is_empty()) {
+        return Some(v.trim().to_ascii_lowercase());
+    }
+    let sub = file?.get("sub")?;
+    let s = sub.as_str().or_else(|| {
+        sub.get("active")
+            .or_else(|| sub.get("provider"))
+            .and_then(toml::Value::as_str)
+    })?;
+    Some(s.trim().to_ascii_lowercase())
+}
+
+/// The `[sub.<provider>.tiers]` overrides for the active provider (empty if none). Keys lowercased.
+fn resolve_sub_tiers(
+    env: &impl Fn(&str) -> Option<String>,
+    file: Option<&toml::Value>,
+) -> std::collections::BTreeMap<String, String> {
+    let mut map = std::collections::BTreeMap::new();
+    let (Some(provider), Some(file)) = (resolve_sub_provider(env, file), file) else {
+        return map;
+    };
+    if let Some(tiers) = file
+        .get("sub")
+        .and_then(|v| v.get(&provider))
+        .and_then(|v| v.get("tiers"))
+        .and_then(toml::Value::as_table)
+    {
+        for (k, v) in tiers {
+            if let Some(model) = v.as_str() {
+                map.insert(k.to_ascii_lowercase(), model.to_string());
+            }
+        }
+    }
+    map
+}
+
+/// Codex reasoning effort for the active provider: env `LLMTRIM_CODEX_EFFORT` wins, else the file
+/// key `sub.<provider>.effort`. Lowercased; `none`/empty resolves to `None` (no reasoning).
+fn resolve_sub_effort(
+    env: &impl Fn(&str) -> Option<String>,
+    file: Option<&toml::Value>,
+) -> Option<String> {
+    let clean = |s: String| {
+        let s = s.trim().to_ascii_lowercase();
+        (!s.is_empty() && s != "none").then_some(s)
+    };
+    if let Some(v) = env("LLMTRIM_CODEX_EFFORT").filter(|s| !s.is_empty()) {
+        return clean(v);
+    }
+    let provider = resolve_sub_provider(env, file)?;
+    file?
+        .get("sub")
+        .and_then(|v| v.get(&provider))
+        .and_then(|v| v.get("effort"))
+        .and_then(toml::Value::as_str)
+        .map(str::to_string)
+        .and_then(clean)
+}
+
+/// Whether reroute runs in `on_error` mode: env `LLMTRIM_SUB_MODE` (`on_error`/`on-error` → true,
+/// `always` → false) wins, else the `sub.mode` table key. Default `false` (reroute always).
+fn resolve_sub_on_error(env: &impl Fn(&str) -> Option<String>, file: Option<&toml::Value>) -> bool {
+    let is_on_error = |s: &str| {
+        matches!(
+            s.trim().to_ascii_lowercase().as_str(),
+            "on_error" | "on-error" | "onerror"
+        )
+    };
+    if let Some(v) = env("LLMTRIM_SUB_MODE").filter(|s| !s.is_empty()) {
+        return is_on_error(&v);
+    }
+    file.and_then(|v| v.get("sub"))
+        .and_then(|v| v.get("mode"))
+        .and_then(toml::Value::as_str)
+        .map(is_on_error)
+        .unwrap_or(false)
 }
 
 /// Persist the breakdown-TUI `theme` choice to the config file's top-level `theme` key,
@@ -861,6 +1137,221 @@ mod tests {
     fn legend_is_embedded_and_nonempty() {
         assert!(!FORMAT_LEGEND.trim().is_empty());
         assert!(FORMAT_LEGEND.contains("TOON"));
+    }
+
+    #[test]
+    fn sub_reads_bare_string_and_env_wins() {
+        let file: toml::Value = toml::from_str("sub = \"codex\"").unwrap();
+        let no_env = |_: &str| None;
+        assert_eq!(
+            resolve_sub_provider(&no_env, Some(&file)).as_deref(),
+            Some("codex")
+        );
+        // env overrides the file, and `off` is normalized by the caller (resolve()).
+        let env = |k: &str| (k == "LLMTRIM_SUB").then(|| "kimi".to_string());
+        assert_eq!(
+            resolve_sub_provider(&env, Some(&file)).as_deref(),
+            Some("kimi")
+        );
+    }
+
+    #[test]
+    fn sub_reads_table_form_and_tiers() {
+        let file: toml::Value = toml::from_str(
+            "[sub]\nactive = \"codex\"\n[sub.codex.tiers]\nopus = \"gpt-5.5\"\nsonnet = \"gpt-5.4\"\n",
+        )
+        .unwrap();
+        let no_env = |_: &str| None;
+        assert_eq!(
+            resolve_sub_provider(&no_env, Some(&file)).as_deref(),
+            Some("codex")
+        );
+        let tiers = resolve_sub_tiers(&no_env, Some(&file));
+        assert_eq!(tiers.get("opus").map(String::as_str), Some("gpt-5.5"));
+        assert_eq!(tiers.get("sonnet").map(String::as_str), Some("gpt-5.4"));
+    }
+
+    #[test]
+    fn write_then_read_sub_mapping_round_trips() {
+        let dir = std::env::temp_dir().join(format!("llmtrim-sub-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("config.toml");
+        std::fs::write(&path, "preset = \"auto\"\n").unwrap();
+        let mut tiers = std::collections::BTreeMap::new();
+        tiers.insert("opus".to_string(), "gpt-5.5".to_string());
+        tiers.insert("haiku".to_string(), "gpt-5.4-mini".to_string());
+        write_sub_mapping_at(&path, "codex", &tiers).unwrap();
+
+        let text = std::fs::read_to_string(&path).unwrap();
+        let file: toml::Value = toml::from_str(&text).unwrap();
+        let no_env = |_: &str| None;
+        assert_eq!(
+            resolve_sub_provider(&no_env, Some(&file)).as_deref(),
+            Some("codex")
+        );
+        let read = resolve_sub_tiers(&no_env, Some(&file));
+        assert_eq!(read.get("opus").map(String::as_str), Some("gpt-5.5"));
+        assert_eq!(read.get("haiku").map(String::as_str), Some("gpt-5.4-mini"));
+        // The pre-existing key survives the structured rewrite.
+        assert_eq!(
+            file.get("preset").and_then(toml::Value::as_str),
+            Some("auto")
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn sub_on_error_env_wins_over_file_mode() {
+        let file: toml::Value =
+            toml::from_str("[sub]\nactive = \"codex\"\nmode = \"on_error\"\n").unwrap();
+        let no_env = |_: &str| None;
+        assert!(resolve_sub_on_error(&no_env, Some(&file)));
+        // Default is always (false) when no mode key.
+        let plain: toml::Value = toml::from_str("sub = \"codex\"").unwrap();
+        assert!(!resolve_sub_on_error(&no_env, Some(&plain)));
+        // Env overrides the file both ways.
+        let env_always = |k: &str| (k == "LLMTRIM_SUB_MODE").then(|| "always".to_string());
+        assert!(!resolve_sub_on_error(&env_always, Some(&file)));
+        let env_err = |k: &str| (k == "LLMTRIM_SUB_MODE").then(|| "on-error".to_string());
+        assert!(resolve_sub_on_error(&env_err, Some(&plain)));
+    }
+
+    #[test]
+    fn granular_sub_editors_preserve_active_mode_and_entries() {
+        let dir = std::env::temp_dir().join(format!("llmtrim-sub-edit-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("config.toml");
+        // Seed a full mapping + on-error mode.
+        let mut tiers = std::collections::BTreeMap::new();
+        tiers.insert("opus".to_string(), "gpt-5.5".to_string());
+        write_sub_mapping_at(&path, "codex", &tiers).unwrap();
+        edit_sub_table_at(&path, |t| {
+            t.insert(
+                "mode".to_string(),
+                toml::Value::String("on_error".to_string()),
+            );
+        })
+        .unwrap();
+
+        // Add a free-form model→model entry via the granular editor.
+        let (provider, from, to) = ("codex", "claude-sonnet-4", "gpt-5.4");
+        let mut tt = std::collections::BTreeMap::new();
+        tt.insert(from.to_string(), to.to_string());
+        edit_sub_table_at(&path, |t| {
+            let prov = t
+                .entry(provider.to_string())
+                .or_insert_with(|| toml::Value::Table(toml::Table::new()));
+            let tiers = prov
+                .as_table_mut()
+                .unwrap()
+                .entry("tiers".to_string())
+                .or_insert_with(|| toml::Value::Table(toml::Table::new()));
+            tiers
+                .as_table_mut()
+                .unwrap()
+                .insert(from.to_string(), toml::Value::String(to.to_string()));
+        })
+        .unwrap();
+
+        let file: toml::Value = toml::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        let no_env = |_: &str| None;
+        // Active provider, mode, the seeded tier, and the new free-form id all coexist.
+        assert_eq!(
+            resolve_sub_provider(&no_env, Some(&file)).as_deref(),
+            Some("codex")
+        );
+        assert!(resolve_sub_on_error(&no_env, Some(&file)));
+        let read = resolve_sub_tiers(&no_env, Some(&file));
+        assert_eq!(read.get("opus").map(String::as_str), Some("gpt-5.5"));
+        assert_eq!(
+            read.get("claude-sonnet-4").map(String::as_str),
+            Some("gpt-5.4")
+        );
+
+        // Disabling reroute (active = "off", what `disable_sub` writes) must NOT wipe the mapping
+        // or mode: re-enabling with the provider restores everything.
+        edit_sub_table_at(&path, |t| {
+            t.insert("active".to_string(), toml::Value::String("off".to_string()));
+        })
+        .unwrap();
+        let off_file: toml::Value =
+            toml::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        // `off` resolves to None once RuntimeConfig filters it, but the table is still there.
+        assert_eq!(
+            resolve_sub_provider(&no_env, Some(&off_file)).as_deref(),
+            Some("off")
+        );
+        edit_sub_table_at(&path, |t| {
+            t.insert(
+                "active".to_string(),
+                toml::Value::String("codex".to_string()),
+            );
+        })
+        .unwrap();
+        let back: toml::Value = toml::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert!(
+            resolve_sub_on_error(&no_env, Some(&back)),
+            "mode survived off/on"
+        );
+        let restored = resolve_sub_tiers(&no_env, Some(&back));
+        assert_eq!(restored.get("opus").map(String::as_str), Some("gpt-5.5"));
+        assert_eq!(
+            restored.get("claude-sonnet-4").map(String::as_str),
+            Some("gpt-5.4"),
+            "free-form entry survived off/on"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn sub_effort_env_wins_and_write_round_trips() {
+        // Env override wins over file.
+        let file: toml::Value =
+            toml::from_str("[sub]\nactive = \"codex\"\n[sub.codex]\neffort = \"low\"\n").unwrap();
+        let no_env = |_: &str| None;
+        assert_eq!(
+            resolve_sub_effort(&no_env, Some(&file)).as_deref(),
+            Some("low")
+        );
+        let env_high = |k: &str| (k == "LLMTRIM_CODEX_EFFORT").then(|| "high".to_string());
+        assert_eq!(
+            resolve_sub_effort(&env_high, Some(&file)).as_deref(),
+            Some("high")
+        );
+        // `none` resolves to None (off).
+        let none_env = |k: &str| (k == "LLMTRIM_CODEX_EFFORT").then(|| "none".to_string());
+        assert_eq!(resolve_sub_effort(&none_env, Some(&file)), None);
+
+        // Writer round-trips and preserves the mapping; writing `none` clears it.
+        let dir = std::env::temp_dir().join(format!("llmtrim-effort-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("config.toml");
+        let mut tiers = std::collections::BTreeMap::new();
+        tiers.insert("opus".to_string(), "gpt-5.5".to_string());
+        write_sub_mapping_at(&path, "codex", &tiers).unwrap();
+        edit_sub_table_at(&path, |t| {
+            let prov = t
+                .entry("codex".to_string())
+                .or_insert_with(|| toml::Value::Table(toml::Table::new()));
+            prov.as_table_mut().unwrap().insert(
+                "effort".to_string(),
+                toml::Value::String("medium".to_string()),
+            );
+        })
+        .unwrap();
+        let f: toml::Value = toml::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(
+            resolve_sub_effort(&no_env, Some(&f)).as_deref(),
+            Some("medium")
+        );
+        assert_eq!(
+            resolve_sub_tiers(&no_env, Some(&f))
+                .get("opus")
+                .map(String::as_str),
+            Some("gpt-5.5"),
+            "effort write preserved the mapping"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

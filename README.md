@@ -391,6 +391,52 @@ These knobs are orthogonal to compression. Each resolves env-first, then from th
 
 </details>
 
+<details>
+<summary><b>Route Claude Code to another subscription</b> (opt-in; a ChatGPT/Codex or Kimi plan, gray-area on the provider's terms)</summary>
+
+llmtrim can serve Claude Code from a different subscription's backend instead of Anthropic.
+It intercepts the Anthropic `/v1/messages` call, rewrites it to the provider's wire format,
+streams the reply back as Anthropic SSE, and maps the Claude model tiers to provider models.
+Two providers are supported: a ChatGPT plan through the Codex Responses API, and a Kimi
+coding plan.
+
+> **Warning:** using a subscription this way may violate the provider's terms of service. The
+> login command prints this warning before it stores a token. Decide for yourself whether your
+> plan permits it.
+
+Sign in once, then turn it on:
+
+```bash
+llmtrim sub auth codex login   # or: llmtrim sub auth kimi login
+llmtrim sub use codex         # apply the built-in tier mapping
+```
+
+Tokens are stored under `~/.llmtrim/<provider>/auth.json` (mode 0600) and refreshed
+automatically. `llmtrim sub setup codex` opens an interactive editor to change which provider model
+each Claude tier (opus / sonnet / haiku / fable) maps to; `llmtrim sub status` shows the
+current mapping; `llmtrim sub off` disables rerouting and sends traffic back to Anthropic.
+
+By default a set provider reroutes every turn. To use the subscription only as a backup, switch
+to on-error mode: `llmtrim sub mode on-error` forwards to Anthropic as usual and falls back to the
+provider only when Anthropic hits a usage limit or overload (402/403/429/529). `llmtrim sub mode
+always` restores the default.
+
+The mapping is not limited to the four Claude tiers. `llmtrim sub map codex <from> <to>` remaps
+one model, where `from` is a tier name or an exact incoming model id, so any Anthropic-speaking
+tool can be routed model by model; `llmtrim sub unmap` removes an entry, and `llmtrim sub models
+codex` lists the candidate provider models. `llmtrim sub status --json` and `llmtrim sub auth
+<codex|kimi> status --json` expose the state for scripts and the tray.
+
+| env var | config key | meaning |
+| --- | --- | --- |
+| `LLMTRIM_SUB` | `sub` | active reroute provider (`codex`, `kimi`, or `off`) |
+| `LLMTRIM_SUB_MODE` | `sub.mode` | `always` (default) or `on-error` |
+
+Codex reasoning is adaptive by default; `llmtrim sub effort <none|low|medium|high|xhigh>` (env
+`LLMTRIM_CODEX_EFFORT`) pins one effort on every rerouted turn instead.
+
+</details>
+
 ### Chaining through an upstream proxy
 
 Set `LLMTRIM_UPSTREAM_PROXY=http://host:port` to make llmtrim send its outbound

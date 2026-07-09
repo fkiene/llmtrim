@@ -110,6 +110,15 @@ enum Commands {
         #[arg(long)]
         provider: Option<String>,
     },
+    /// Subscription reroute: use another subscription's backend for Claude Code
+    ///
+    /// With `sub` enabled, intercepted Anthropic traffic is translated and sent to your
+    /// ChatGPT (codex) or Kimi subscription instead of Anthropic. Authenticate first with
+    /// `llmtrim sub auth codex login` / `llmtrim sub auth kimi login`.
+    Sub {
+        #[command(subcommand)]
+        action: SubCmd,
+    },
     /// Run the HTTPS interceptor in the foreground
     ///
     /// A local MITM proxy covering every tool and provider: set HTTPS_PROXY to it
@@ -373,6 +382,90 @@ enum BenchCmd {
     Compare(CompareArgs),
 }
 
+/// Subscription reroute: send Claude Code traffic to another subscription's backend.
+#[derive(Subcommand)]
+enum SubCmd {
+    /// Open the interactive tier→model mapping editor for a provider (codex|kimi).
+    Setup {
+        /// Provider to edit: codex|kimi.
+        provider: String,
+    },
+    /// Enable reroute to a provider (writes `sub = <provider>` to the config).
+    Use {
+        /// Provider to route to: codex|kimi.
+        provider: String,
+    },
+    /// Disable reroute (sets `sub = off`); traffic goes back to Anthropic with compression only.
+    Off,
+    /// Set the reroute mode: `always` (reroute every turn) or `on-error` (only when Anthropic
+    /// hits a usage/overload limit).
+    Mode {
+        /// `always` or `on-error`.
+        mode: String,
+    },
+    /// Override the Codex reasoning effort on every rerouted request. By default the reroute honors
+    /// the effort Claude Code asks for per turn; this forces one level instead (Kimi ignores it).
+    Effort {
+        /// `none` | `low` | `medium` | `high` | `xhigh` (`max` = `xhigh`).
+        level: String,
+    },
+    /// Map one incoming model (a Claude tier `opus|sonnet|haiku|fable`, or an exact model id) to a
+    /// provider model. Non-interactive form of `setup`, for scripts and the tray.
+    Map {
+        /// Provider whose mapping to edit: codex|kimi.
+        provider: String,
+        /// Incoming model or tier name to map from.
+        from: String,
+        /// Provider model to route it to.
+        to: String,
+    },
+    /// Remove one mapping entry (falls back to the preset default for that model).
+    Unmap {
+        /// Provider whose mapping to edit: codex|kimi.
+        provider: String,
+        /// Incoming model or tier name to unmap.
+        from: String,
+    },
+    /// List the provider's candidate models (for autocompletion). `--json` for machine output.
+    Models {
+        /// Provider: codex|kimi.
+        provider: String,
+        /// Emit a JSON array of model ids.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Print the active reroute selection and tier→model mapping. `--json` for machine output.
+    Status {
+        /// Emit the full reroute state (provider, mode, mapping, auth) as JSON.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Sign in / out of a subscription (`llmtrim sub auth codex login`).
+    Auth {
+        /// Provider: codex|kimi.
+        provider: String,
+        #[command(subcommand)]
+        action: AuthAction,
+    },
+}
+
+/// OAuth management for a subscription provider (codex / kimi).
+#[derive(Subcommand)]
+enum AuthAction {
+    /// Sign in (browser OAuth for codex; device-code for kimi).
+    Login,
+    /// Device-code sign-in for headless machines (codex only).
+    Device,
+    /// Show stored credentials + token expiry. `--json` for machine output.
+    Status {
+        /// Emit `{ logged_in, expires_at }` as JSON.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Delete stored credentials.
+    Logout,
+}
+
 #[derive(Subcommand)]
 enum McpAction {
     /// Register the llmtrim MCP server with your MCP client
@@ -533,6 +626,253 @@ fn main() {
         eprint!("{}", ui::render_error(ui::color_stderr(), &e));
         std::process::exit(1);
     }
+}
+
+/// Handle `llmtrim <codex|kimi> auth <action>`.
+#[cfg(feature = "intercept")]
+fn run_auth(provider: &str, action: AuthAction) -> Result<()> {
+    use llmtrim::reroute::{SubProvider, auth};
+    // `auth status --json` is provider-agnostic (reads the stored credential file).
+    if let AuthAction::Status { json: true } = action {
+        let p = SubProvider::parse(provider).ok_or_else(|| anyhow::anyhow!("unknown provider"))?;
+        println!("{}", auth::auth_status_json(p));
+        return Ok(());
+    }
+    match (provider, action) {
+        ("codex", AuthAction::Login) => auth::codex_login(),
+        ("codex", AuthAction::Device) => auth::codex_device(),
+        ("codex", AuthAction::Status { .. }) => auth::codex_status(),
+        ("codex", AuthAction::Logout) => auth::codex_logout(),
+        ("kimi", AuthAction::Login) => auth::kimi_login(),
+        ("kimi", AuthAction::Device) => {
+            anyhow::bail!("kimi sign-in is device-code already — use `llmtrim sub auth kimi login`")
+        }
+        ("kimi", AuthAction::Status { .. }) => auth::kimi_status(),
+        ("kimi", AuthAction::Logout) => auth::kimi_logout(),
+        (other, _) => anyhow::bail!("unknown provider '{other}' (codex|kimi)"),
+    }
+}
+
+// No non-intercept `run_auth` stub: auth is only dispatched from `run_sub`'s `Auth` arm, which is
+// itself `#[cfg(feature = "intercept")]`, so a non-intercept build never references it.
+
+/// Handle `llmtrim sub <setup|use|off|status>`.
+#[cfg(feature = "intercept")]
+fn run_sub(action: SubCmd) -> Result<()> {
+    use llmtrim::reroute::{SubProvider, Tier, default_codex_tier_model};
+    let parse = |p: &str| {
+        SubProvider::parse(p).ok_or_else(|| anyhow::anyhow!("unknown provider '{p}' (codex|kimi)"))
+    };
+    match action {
+        SubCmd::Setup { provider } => {
+            let p = parse(&provider)?;
+            #[cfg(feature = "breakdown")]
+            {
+                llmtrim::reroute::tui::run(p)
+            }
+            #[cfg(not(feature = "breakdown"))]
+            {
+                let _ = p;
+                anyhow::bail!("the mapping editor needs the `breakdown` feature")
+            }
+        }
+        SubCmd::Use { provider } => {
+            let p = parse(&provider)?;
+            let mut map = std::collections::BTreeMap::new();
+            if p == SubProvider::Codex {
+                for t in Tier::ALL {
+                    map.insert(
+                        t.as_str().to_string(),
+                        default_codex_tier_model(t).to_string(),
+                    );
+                }
+            }
+            llmtrim_core::config::write_sub_mapping(p.as_str(), &map)?;
+            // Only nudge to sign in when there's no stored token — don't tell an already
+            // authenticated user to authenticate.
+            let logged_in =
+                llmtrim::reroute::auth::auth_status_json(p)["logged_in"].as_bool() == Some(true);
+            if logged_in {
+                println!(
+                    "Reroute enabled: {}. Restart the proxy (`llmtrim start`) to apply.",
+                    p.as_str()
+                );
+            } else {
+                println!(
+                    "Reroute enabled: {}. Sign in with `llmtrim sub auth {} login`, then restart \
+                     the proxy (`llmtrim start`).",
+                    p.as_str(),
+                    p.as_str()
+                );
+            }
+            Ok(())
+        }
+        SubCmd::Off => {
+            llmtrim_core::config::disable_sub()?;
+            println!("Reroute disabled — traffic goes to Anthropic (compression only).");
+            Ok(())
+        }
+        SubCmd::Mode { mode } => {
+            let on_error = match mode.trim().to_ascii_lowercase().as_str() {
+                "on-error" | "on_error" | "onerror" | "error" => true,
+                "always" | "all" => false,
+                other => anyhow::bail!("unknown mode '{other}' (always|on-error)"),
+            };
+            llmtrim_core::config::write_sub_mode(on_error)?;
+            println!(
+                "Reroute mode: {}. Restart the proxy (`llmtrim start`) to apply.",
+                if on_error { "on-error" } else { "always" }
+            );
+            Ok(())
+        }
+        SubCmd::Effort { level } => {
+            let level = match level.trim().to_ascii_lowercase().as_str() {
+                "max" => "xhigh".to_string(),
+                l @ ("none" | "low" | "medium" | "high" | "xhigh") => l.to_string(),
+                other => anyhow::bail!("unknown effort '{other}' (none|low|medium|high|xhigh)"),
+            };
+            llmtrim_core::config::write_sub_effort(SubProvider::Codex.as_str(), &level)?;
+            println!(
+                "Codex reasoning effort: {level}. Restart the proxy (`llmtrim start`) to apply."
+            );
+            // Effort is Codex-only; if the active provider isn't Codex it's inert until you switch.
+            let active = llmtrim_core::config::RuntimeConfig::get()
+                .sub
+                .as_deref()
+                .and_then(SubProvider::parse);
+            if active != Some(SubProvider::Codex) {
+                eprintln!(
+                    "note: reroute is not on codex right now, so this effort has no effect until \
+                     `llmtrim sub use codex`."
+                );
+            }
+            Ok(())
+        }
+        SubCmd::Map { provider, from, to } => {
+            let p = parse(&provider)?;
+            llmtrim_core::config::write_sub_map_entry(p.as_str(), &from, &to)?;
+            println!(
+                "Mapped {from} -> {to} for {}. Restart the proxy (`llmtrim start`) to apply.",
+                p.as_str()
+            );
+            Ok(())
+        }
+        SubCmd::Unmap { provider, from } => {
+            let p = parse(&provider)?;
+            llmtrim_core::config::remove_sub_map_entry(p.as_str(), &from)?;
+            println!(
+                "Unmapped {from} for {} (back to the preset default). Restart the proxy \
+                 (`llmtrim start`) to apply.",
+                p.as_str()
+            );
+            Ok(())
+        }
+        SubCmd::Models { provider, json } => {
+            let p = parse(&provider)?;
+            let ids: Vec<String> = llmtrim::reroute::catalog::models_for(p)
+                .into_iter()
+                .map(|e| e.id)
+                .collect();
+            if json {
+                println!("{}", serde_json::to_string(&ids)?);
+            } else {
+                for id in ids {
+                    println!("{id}");
+                }
+            }
+            Ok(())
+        }
+        SubCmd::Status { json } => {
+            let cfg = llmtrim_core::config::RuntimeConfig::get();
+            let active = cfg.sub.as_deref().and_then(SubProvider::parse);
+            if json {
+                // One effective map: the four resolved Codex tiers, then every configured entry
+                // laid over them (a configured tier wins, a free-form `model-id -> model` adds a
+                // row). One key, not a resolved/raw pair the caller has to reconcile.
+                let mut mapping: std::collections::BTreeMap<String, String> = match active {
+                    Some(SubProvider::Codex) => Tier::ALL
+                        .iter()
+                        .map(|t| {
+                            (
+                                t.as_str().to_string(),
+                                default_codex_tier_model(*t).to_string(),
+                            )
+                        })
+                        .collect(),
+                    _ => std::collections::BTreeMap::new(),
+                };
+                for (k, v) in &cfg.sub_tiers {
+                    mapping.insert(k.clone(), v.clone());
+                }
+                let out = serde_json::json!({
+                    "provider": active.map(|p| p.as_str()),
+                    "mode": if cfg.sub_on_error { "on_error" } else { "always" },
+                    "effort": cfg.sub_effort,
+                    "mapping": mapping,
+                    "auth": {
+                        "codex": llmtrim::reroute::auth::auth_status_json(SubProvider::Codex),
+                        "kimi": llmtrim::reroute::auth::auth_status_json(SubProvider::Kimi),
+                    },
+                });
+                println!("{}", serde_json::to_string_pretty(&out)?);
+                return Ok(());
+            }
+            match active {
+                None => println!("Reroute: off"),
+                Some(p) => {
+                    println!(
+                        "Reroute: {} ({})",
+                        p.as_str(),
+                        if cfg.sub_on_error {
+                            "on-error"
+                        } else {
+                            "always"
+                        }
+                    );
+                    if p == SubProvider::Codex {
+                        println!(
+                            "  effort  -> {}",
+                            cfg.sub_effort.as_deref().unwrap_or("none")
+                        );
+                        for t in Tier::ALL {
+                            let model = cfg
+                                .sub_tiers
+                                .get(t.as_str())
+                                .cloned()
+                                .unwrap_or_else(|| default_codex_tier_model(t).to_string());
+                            println!("  {:<7} -> {model}", t.as_str());
+                        }
+                        // Free-form model→model overrides (keys that aren't one of the four tiers).
+                        let tier_keys: [&str; 4] = Tier::ALL.map(|t| t.as_str());
+                        for (from, to) in &cfg.sub_tiers {
+                            if !tier_keys.contains(&from.as_str()) {
+                                println!("  {from} -> {to}");
+                            }
+                        }
+                    } else {
+                        println!("  all tiers -> {}", llmtrim::reroute::KIMI_MODEL);
+                    }
+                    // Auth is what makes reroute actually work — surface it here, not just in JSON.
+                    let auth = llmtrim::reroute::auth::auth_status_json(p);
+                    if auth["logged_in"].as_bool().unwrap_or(false) {
+                        println!("  auth: logged in");
+                    } else {
+                        println!(
+                            "  auth: NOT logged in — run `llmtrim sub auth {} login`",
+                            p.as_str()
+                        );
+                    }
+                }
+            }
+            Ok(())
+        }
+        SubCmd::Auth { provider, action } => run_auth(&provider, action),
+    }
+}
+
+#[cfg(not(feature = "intercept"))]
+fn run_sub(_action: SubCmd) -> Result<()> {
+    anyhow::bail!("this build has no interceptor; rebuild with `--features intercept`")
 }
 
 fn run() -> Result<()> {
@@ -782,6 +1122,7 @@ fn run() -> Result<()> {
                 ui::note(ui::color_stdout(), "No interceptor daemon was running.")
             ),
         },
+        Commands::Sub { action } => run_sub(action)?,
         Commands::Update => llmtrim::update::run()?,
         Commands::Mcp { action } => match action {
             None => llmtrim::mcp::run()?,

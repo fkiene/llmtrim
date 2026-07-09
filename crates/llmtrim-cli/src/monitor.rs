@@ -315,6 +315,32 @@ fn render_header(color: bool, d: &DaemonView) -> String {
         if d.autostart {
             meta.push_str(" · autostart on");
         }
+        // Subscription reroute is a wire-behavior change worth surfacing on the health strip.
+        let rc = llmtrim_core::config::RuntimeConfig::get();
+        if let Some(p) = rc.sub.as_deref() {
+            meta.push_str(&format!(
+                " · reroute {p} ({})",
+                if rc.sub_on_error {
+                    "on-error"
+                } else {
+                    "always"
+                }
+            ));
+            // A reroute with no stored token looks live but fails every turn on auth — flag it.
+            // The reroute module (and its auth) exist only in an `intercept` build.
+            #[cfg(feature = "intercept")]
+            {
+                let authed = crate::reroute::SubProvider::parse(p)
+                    .map(|sp| {
+                        crate::reroute::auth::auth_status_json(sp)["logged_in"].as_bool()
+                            == Some(true)
+                    })
+                    .unwrap_or(false);
+                if !authed {
+                    meta.push_str(" (no auth)");
+                }
+            }
+        }
         // One calm strip: wordmark, the live dot + meta, and the overall health word. The
         // per-check detail collapses into that word; broken links still get their own warn
         // lines below (and `llmtrim doctor` carries the full chain).
@@ -785,6 +811,16 @@ pub fn export_json(
     periods: &[PeriodRow],
     daemon: Option<&DaemonView>,
 ) -> String {
+    let reroute = {
+        let cfg = llmtrim_core::config::RuntimeConfig::get();
+        match cfg.sub.as_deref() {
+            Some(p) => json!({
+                "provider": p,
+                "mode": if cfg.sub_on_error { "on_error" } else { "always" },
+            }),
+            None => serde_json::Value::Null,
+        }
+    };
     let v = json!({
         "daemon": daemon.map(|d| json!({
             "running": d.running,
@@ -799,6 +835,7 @@ pub fn export_json(
             "version": d.version,
             "binary_version": d.binary_version,
         })),
+        "reroute": reroute,
         "last_request_ts": s.last_ts,
         "requests": s.events,
         "input": { "before": s.input_before, "after": s.input_after, "saved_pct": s.saved_pct() },

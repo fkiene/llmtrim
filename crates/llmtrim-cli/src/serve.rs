@@ -321,6 +321,40 @@ mod imp {
         /// Per-source attribution of the forwarded request (breakdown view). `None` on bodies we
         /// couldn't attribute; never affects proxying.
         breakdown: Option<BreakdownPending>,
+        /// Set when this request was rerouted to a subscription backend (`sub = codex|kimi`): the
+        /// target provider + resolved upstream model. `handle_response` uses it to translate the
+        /// provider's SSE back into Anthropic SSE. `provider` above is kept `Anthropic` so the
+        /// output-usage parser and ledger see the Anthropic-shaped reply we emit to the client.
+        reroute: Option<RerouteInfo>,
+        /// Set in `sub` on-error mode: the turn was forwarded to Anthropic normally, but if
+        /// Anthropic answers with a quota/overload status, `handle_response` replays it to this
+        /// subscription provider instead. Mutually exclusive with `reroute` (which reroutes up
+        /// front). See [`FallbackInfo`].
+        fallback: Option<FallbackInfo>,
+    }
+
+    /// Reroute marker attached to a [`Pending`] (see its `reroute` field).
+    #[derive(Clone)]
+    struct RerouteInfo {
+        provider: crate::reroute::SubProvider,
+        model: String,
+    }
+
+    /// On-error fallback marker attached to a [`Pending`] (see its `fallback` field). Holds what
+    /// `handle_response` needs to replay the turn to the subscription provider: the provider, the
+    /// original Anthropic request body to translate, and the Claude Code session id (for the
+    /// provider's session header).
+    #[derive(Clone)]
+    struct FallbackInfo {
+        provider: crate::reroute::SubProvider,
+        anthropic_body: Vec<u8>,
+        session_id: Option<String>,
+    }
+
+    /// Anthropic statuses that mean "Anthropic can't serve this turn" (usage limit / payment /
+    /// forbidden / overload) and so trigger the on-error reroute to the subscription provider.
+    fn is_sub_fallback_status(status: u16) -> bool {
+        matches!(status, 402 | 403 | 429 | 529)
     }
 
     /// A verbatim copy of the client's request, for replay-on-error.
@@ -366,6 +400,54 @@ mod imp {
             builder = builder.header(header::CONTENT_TYPE, ct);
         }
         builder.body(Body::from(Full::new(Bytes::from(buf)))).ok()
+    }
+
+    /// A JSON body response (used for the local `count_tokens` answer on the reroute path).
+    fn json_response(status: u16, body: &str) -> Response<Body> {
+        Response::builder()
+            .status(status)
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(Full::new(Bytes::from(body.to_string()))))
+            .unwrap_or_else(|_| Response::new(Body::empty()))
+    }
+
+    /// A single-frame Anthropic SSE response (used for reroute error/short-circuit replies).
+    fn sse_response(body: String) -> Response<Body> {
+        Response::builder()
+            .status(200)
+            .header(header::CONTENT_TYPE, "text/event-stream")
+            .header(header::CACHE_CONTROL, "no-cache")
+            .body(Body::from(Full::new(Bytes::from(body))))
+            .unwrap_or_else(|_| Response::new(Body::empty()))
+    }
+
+    /// An Anthropic-shaped error the client (Claude Code) renders, for reroute pre-flight failures
+    /// (no auth, unparseable body, translation error). `status` is the HTTP status.
+    fn anthropic_error(status: u16, message: &str) -> Response<Body> {
+        let body = serde_json::json!({
+            "type": "error",
+            "error": { "type": "api_error", "message": message },
+        })
+        .to_string();
+        json_response(status, &body)
+    }
+
+    /// Override the Codex reasoning effort on a to-be-translated Anthropic body by writing
+    /// `output_config.effort`, the field the Codex translator reads. By default the reroute honors
+    /// the client's own `output_config.effort` (Claude Code sets it per turn); this overwrites it
+    /// with the operator's forced value, so it wins over what the client sent. No-op when `effort`
+    /// is `None` (adaptive default) or the body isn't a JSON object. Kimi ignores it.
+    fn apply_sub_effort(value: &mut serde_json::Value, effort: Option<&str>) {
+        if let Some(effort) = effort
+            && let Some(obj) = value.as_object_mut()
+        {
+            let oc = obj
+                .entry("output_config")
+                .or_insert_with(|| serde_json::json!({}));
+            if let Some(oc) = oc.as_object_mut() {
+                oc.insert("effort".to_string(), serde_json::json!(effort));
+            }
+        }
     }
 
     /// Does the plan carry a reversible *output* transform? No output-side transform ships
@@ -667,6 +749,18 @@ mod imp {
         /// forwarded verbatim (still intercepted, just not compressed).
         exclude_hosts: Arc<Vec<String>>,
         exclude_providers: Arc<Vec<String>>,
+        /// Subscription reroute target (`sub = codex|kimi`), snapshotted from [`RuntimeConfig`] at
+        /// construction. `None` = normal transparent compress-and-forward. When set, intercepted
+        /// Anthropic `/v1/messages` traffic is translated and sent to that subscription's backend.
+        sub: Option<crate::reroute::SubProvider>,
+        /// Tier→model overrides for the active `sub` (from `[sub.<provider>.tiers]`); empty = use
+        /// the built-in preset. Shared across per-request handler clones.
+        sub_tiers: Arc<std::collections::BTreeMap<String, String>>,
+        /// On-error reroute mode: when `true`, a set `sub` only takes over after Anthropic itself
+        /// returns a quota/overload status; when `false`, `sub` reroutes every matching turn.
+        sub_on_error: bool,
+        /// Proxy-side Codex reasoning effort applied to every rerouted request (`None` = off).
+        sub_effort: Option<String>,
     }
 
     impl Drop for Interceptor {
@@ -740,6 +834,36 @@ mod imp {
                     provider_for_host(h)
                 }
             });
+            // Subscription reroute: if `sub` is configured and this is Anthropic `/v1/messages`
+            // traffic, translate it to the chosen provider's backend instead of forwarding to
+            // Anthropic. `count_tokens` is answered locally (it would otherwise be billed against
+            // the sub provider, so it can't be proxied to Anthropic). This runs before the normal
+            // compress/exclude path so a `sub` selection always takes effect.
+            // On-error mode arms a fallback instead of rerouting up front: the turn goes to
+            // Anthropic normally, and only replays to the sub provider if Anthropic fails (handled
+            // in the response phase). Captured here so we can read the session header and body.
+            let mut fallback_arm: Option<(crate::reroute::SubProvider, Option<String>)> = None;
+            if let Some(sub) = self.sub
+                && matches!(provider, Some(ProviderKind::Anthropic))
+                && req.method() == Method::POST
+            {
+                let path = req.uri().path();
+                if !self.sub_on_error {
+                    if path.ends_with("/v1/messages/count_tokens") {
+                        return self.reroute_count_tokens(req).await;
+                    }
+                    if path.ends_with("/v1/messages") {
+                        return self.reroute_messages(req, sub).await;
+                    }
+                } else if path.ends_with("/v1/messages") {
+                    let session_id = req
+                        .headers()
+                        .get("x-claude-code-session-id")
+                        .and_then(|v| v.to_str().ok())
+                        .map(str::to_string);
+                    fallback_arm = Some((sub, session_id));
+                }
+            }
             // Only compress POST bodies to a known provider; pass everything else through.
             let Some(provider) = provider.filter(|_| req.method() == Method::POST) else {
                 return req.into();
@@ -789,6 +913,10 @@ mod imp {
             .ok()
             .flatten();
 
+            // Capture the (uncompressed) body for the on-error fallback before the match may move
+            // `bytes`. The Anthropic call still goes out compressed; only a rare fallback replay
+            // re-translates this original body to the provider.
+            let fallback_body = fallback_arm.as_ref().map(|_| bytes.to_vec());
             let new_body = match compressed {
                 Some((json, mut pending)) => {
                     // We changed the body — remember the original so we can replay it verbatim
@@ -811,6 +939,22 @@ mod imp {
                 }
                 None => Body::from(Full::new(bytes)),
             };
+            // On-error mode: attach the provider fallback to the pending (creating a bare pending
+            // when compression produced one), so the response phase can replay to the provider on
+            // an Anthropic quota/overload status. We only arm the fallback on a *real* pending:
+            // when `compress_blocking` declined (malformed body → no pending), we leave it None so
+            // the request is forwarded verbatim and no phantom zero-token row is recorded. Such a
+            // body would fail at Anthropic anyway, so losing the fallback there is harmless.
+            if let Some((sub, session_id)) = fallback_arm
+                && let Some(body) = fallback_body
+                && let Some(pending) = self.pending.as_mut()
+            {
+                pending.fallback = Some(FallbackInfo {
+                    provider: sub,
+                    anthropic_body: body,
+                    session_id,
+                });
+            }
             let mut parts = parts;
             // Length changed; drop it so hyper recomputes (and never streams a stale value).
             parts.headers.remove(header::CONTENT_LENGTH);
@@ -823,12 +967,508 @@ mod imp {
             Request::from_parts(parts, new_body).into()
         }
 
+        /// Answer Claude Code's `/v1/messages/count_tokens` locally (see
+        /// [`crate::reroute::count_tokens_json`]). The request can't be proxied to Anthropic once a
+        /// `sub` is active (it would be billed against the sub), so short-circuit with a JSON reply.
+        async fn reroute_count_tokens(&mut self, req: Request<Body>) -> RequestOrResponse {
+            let (_parts, body) = req.into_parts();
+            let bytes = body
+                .collect()
+                .await
+                .map(|c| c.to_bytes())
+                .unwrap_or_default();
+            let json = std::str::from_utf8(&bytes)
+                .ok()
+                .and_then(|t| serde_json::from_str::<serde_json::Value>(t).ok())
+                .map(|v| crate::reroute::count_tokens_json(&v))
+                .unwrap_or_else(|| serde_json::json!({ "input_tokens": 0 }));
+            json_response(200, &json.to_string()).into()
+        }
+
+        /// Translate an intercepted Anthropic `/v1/messages` request onto the `sub` provider's
+        /// backend: optionally compress, translate the body, swap in the subscription auth, and
+        /// rewrite the URI authority so hudsucker forwards to the provider. `handle_response` then
+        /// translates the streamed reply back to Anthropic SSE. On any pre-flight failure (no auth,
+        /// bad body, translation error) returns a synthetic Anthropic error the client renders —
+        /// there is no Anthropic replay net here (replaying an Anthropic body to Codex is invalid).
+        async fn reroute_messages(
+            &mut self,
+            req: Request<Body>,
+            sub: crate::reroute::SubProvider,
+        ) -> RequestOrResponse {
+            let (mut parts, body) = req.into_parts();
+            let session_id = parts
+                .headers
+                .get("x-claude-code-session-id")
+                .and_then(|v| v.to_str().ok())
+                .map(str::to_string);
+            let Ok(collected) = body.collect().await else {
+                return anthropic_error(400, "llmtrim: could not read request body").into();
+            };
+            let bytes = collected.to_bytes();
+            let Ok(anthropic) = std::str::from_utf8(&bytes)
+                .ok()
+                .and_then(|t| serde_json::from_str::<serde_json::Value>(t).ok())
+                .ok_or(())
+            else {
+                return anthropic_error(400, "llmtrim: request body is not JSON").into();
+            };
+
+            // Compression stacks in front: compress the Anthropic body, then translate the
+            // compressed form. On no win, translate the original. Runs on the blocking pool.
+            let config = self.config.clone();
+            let memo = self.memo.clone();
+            let body_for_compress = bytes.clone();
+            let started = std::time::Instant::now();
+            let compressed = tokio::task::spawn_blocking(move || {
+                compress_blocking(
+                    &config,
+                    &body_for_compress,
+                    ProviderKind::Anthropic,
+                    None,
+                    &memo,
+                )
+            })
+            .await
+            .ok()
+            .flatten();
+            let (mut translate_value, input_before, input_after, tokenizer, exact) =
+                match &compressed {
+                    Some((json, pending)) => (
+                        serde_json::from_str::<serde_json::Value>(json)
+                            .unwrap_or_else(|_| anthropic.clone()),
+                        pending.input_before,
+                        pending.input_after,
+                        pending.tokenizer.clone(),
+                        pending.exact,
+                    ),
+                    None => (anthropic.clone(), 0, 0, String::new(), false),
+                };
+            apply_sub_effort(&mut translate_value, self.sub_effort.as_deref());
+
+            // Fetch the subscription token (OAuth refresh is blocking + single-flight).
+            let token = match tokio::task::spawn_blocking(move || {
+                crate::reroute::auth::get_token(sub)
+            })
+            .await
+            {
+                Ok(Ok(t)) => t,
+                Ok(Err(e)) => {
+                    return anthropic_error(
+                        401,
+                        &format!(
+                            "llmtrim: {p} not authenticated ({e}). Run `llmtrim sub auth {p} login`.",
+                            p = sub.as_str()
+                        ),
+                    )
+                    .into();
+                }
+                Err(_) => return anthropic_error(500, "llmtrim: auth task failed").into(),
+            };
+
+            let rewrite = match crate::reroute::build_upstream(
+                sub,
+                &translate_value,
+                &self.sub_tiers,
+                &token,
+                session_id.as_deref(),
+            ) {
+                Ok(r) => r,
+                Err(e) => {
+                    return anthropic_error(
+                        502,
+                        &format!("llmtrim: reroute translation failed: {e}"),
+                    )
+                    .into();
+                }
+            };
+
+            // Record intent: provider stays Anthropic (we emit Anthropic SSE, which `Finalize`
+            // measures); model is the resolved upstream model; `reroute` marks the response path.
+            self.pending = Some(Pending {
+                provider: ProviderKind::Anthropic,
+                model: Some(rewrite.model.clone()),
+                tokenizer,
+                exact,
+                input_before,
+                input_after,
+                compress_micros: started.elapsed().as_micros() as i64,
+                plan: String::new(),
+                original: None,
+                output_shaped: false,
+                frozen_input_tokens: None,
+                breakdown: None,
+                reroute: Some(RerouteInfo {
+                    provider: sub,
+                    model: rewrite.model.clone(),
+                }),
+                fallback: None,
+            });
+
+            // Retarget the request onto the provider host + path.
+            if let Ok(uri) =
+                format!("https://{}{}", rewrite.host, rewrite.path).parse::<hudsucker::hyper::Uri>()
+            {
+                parts.uri = uri;
+            }
+            // Strip the client's Anthropic auth + hop headers; hyper sets host/content-length.
+            parts.headers.remove(header::HOST);
+            parts.headers.remove(header::CONTENT_LENGTH);
+            parts.headers.remove(header::ACCEPT_ENCODING);
+            parts.headers.remove(header::AUTHORIZATION);
+            parts.headers.remove("x-api-key");
+            let anthropic_keys: Vec<_> = parts
+                .headers
+                .keys()
+                .filter(|k| k.as_str().starts_with("anthropic-"))
+                .cloned()
+                .collect();
+            for k in anthropic_keys {
+                parts.headers.remove(k);
+            }
+            // Apply the provider headers.
+            for (k, v) in &rewrite.headers {
+                if let (Ok(name), Ok(val)) = (
+                    header::HeaderName::from_bytes(k.as_bytes()),
+                    header::HeaderValue::from_str(v),
+                ) {
+                    parts.headers.insert(name, val);
+                }
+            }
+            Request::from_parts(parts, Body::from(rewrite.body)).into()
+        }
+
+        /// Stream a rerouted provider response back to the client as Anthropic SSE: feed each
+        /// upstream chunk through the provider reducer + shared encoder incrementally (no
+        /// buffering), accumulating the emitted Anthropic bytes so `Finalize` measures output. An
+        /// upstream non-2xx is surfaced as an Anthropic SSE `error` frame.
+        async fn reroute_response(
+            &mut self,
+            res: Response<Body>,
+            pending: Pending,
+            info: RerouteInfo,
+        ) -> Response<Body> {
+            use crate::reroute::sse::{AnthropicSseEncoder, ReduceEvent};
+            let status = res.status();
+            let (_parts, body) = res.into_parts();
+
+            if !status.is_success() {
+                let raw = body
+                    .collect()
+                    .await
+                    .map(|c| c.to_bytes().to_vec())
+                    .unwrap_or_default();
+                let snippet: String = String::from_utf8_lossy(&raw).chars().take(400).collect();
+                let mut enc = AnthropicSseEncoder::new(&info.model);
+                let mut out = String::new();
+                enc.encode(
+                    &ReduceEvent::Error {
+                        message: format!(
+                            "llmtrim: {} upstream HTTP {}: {}",
+                            info.provider.as_str(),
+                            status.as_u16(),
+                            snippet
+                        ),
+                    },
+                    &mut out,
+                );
+                let acc = Arc::new(Mutex::new(out.clone().into_bytes()));
+                // Record the row (output 0) as this Finalize drops.
+                let _finalize = Finalize {
+                    acc,
+                    pending: Some(pending),
+                    ledger: self.ledger.clone(),
+                    breakdown_ledger: self.breakdown_ledger.clone(),
+                };
+                return sse_response(out);
+            }
+
+            let acc = Arc::new(Mutex::new(Vec::<u8>::new()));
+            let finalize = Finalize {
+                acc: acc.clone(),
+                pending: Some(pending),
+                ledger: self.ledger.clone(),
+                breakdown_ledger: self.breakdown_ledger.clone(),
+            };
+
+            enum Phase {
+                Body,
+                Flush,
+                Done,
+            }
+            struct St {
+                inner: BodyStream<Body>,
+                reducer: crate::reroute::StreamReducer,
+                encoder: AnthropicSseEncoder,
+                acc: Arc<Mutex<Vec<u8>>>,
+                finalize: Finalize,
+                phase: Phase,
+            }
+            let st = St {
+                inner: BodyStream::new(body),
+                reducer: crate::reroute::StreamReducer::new(info.provider, &info.model),
+                encoder: AnthropicSseEncoder::new(&info.model),
+                acc: acc.clone(),
+                finalize,
+                phase: Phase::Body,
+            };
+
+            use hudsucker::futures::StreamExt;
+            let stream = hudsucker::futures::stream::unfold(st, |mut st| async move {
+                loop {
+                    match st.phase {
+                        Phase::Done => return None,
+                        Phase::Flush => {
+                            let mut out = String::new();
+                            for ev in st.reducer.finish() {
+                                st.encoder.encode(&ev, &mut out);
+                            }
+                            st.encoder.finish_if_open(&mut out);
+                            st.phase = Phase::Done;
+                            if out.is_empty() {
+                                // Keep `finalize` alive until the stream is fully drained.
+                                let _ = &st.finalize;
+                                return None;
+                            }
+                            if let Ok(mut buf) = st.acc.lock() {
+                                buf.extend_from_slice(out.as_bytes());
+                            }
+                            let bytes = Bytes::from(out.into_bytes());
+                            return Some((Ok::<Bytes, std::io::Error>(bytes), st));
+                        }
+                        Phase::Body => match st.inner.next().await {
+                            Some(Ok(frame)) => {
+                                let Ok(chunk) = frame.into_data() else {
+                                    continue;
+                                };
+                                let mut out = String::new();
+                                for ev in st.reducer.push(&chunk) {
+                                    st.encoder.encode(&ev, &mut out);
+                                }
+                                if out.is_empty() {
+                                    continue;
+                                }
+                                if let Ok(mut buf) = st.acc.lock() {
+                                    buf.extend_from_slice(out.as_bytes());
+                                }
+                                let bytes = Bytes::from(out.into_bytes());
+                                return Some((Ok(bytes), st));
+                            }
+                            Some(Err(_)) => {
+                                // Transport error mid-stream: surface it as an Anthropic `error`
+                                // frame so the client can tell a dropped provider connection from a
+                                // clean end-of-turn, instead of a silently truncated answer.
+                                let mut out = String::new();
+                                st.encoder.encode(
+                                    &ReduceEvent::Error {
+                                        message: "llmtrim: upstream stream error".to_string(),
+                                    },
+                                    &mut out,
+                                );
+                                st.phase = Phase::Flush;
+                                if out.is_empty() {
+                                    continue;
+                                }
+                                if let Ok(mut buf) = st.acc.lock() {
+                                    buf.extend_from_slice(out.as_bytes());
+                                }
+                                return Some((Ok(Bytes::from(out.into_bytes())), st));
+                            }
+                            None => {
+                                st.phase = Phase::Flush;
+                                continue;
+                            }
+                        },
+                    }
+                }
+            });
+
+            let mut builder = Response::builder().status(200);
+            builder = builder.header(header::CONTENT_TYPE, "text/event-stream");
+            builder = builder.header(header::CACHE_CONTROL, "no-cache");
+            builder
+                .body(Body::from_stream(stream))
+                .unwrap_or_else(|_| Response::new(Body::empty()))
+        }
+
+        /// On-error reroute: Anthropic returned a quota/overload status, so replay the (stashed
+        /// original) turn to the subscription provider and hand the client the provider's answer as
+        /// Anthropic SSE. Uses a blocking provider round-trip (`transport::forward_post`, like the
+        /// replay net) since hudsucker already consumed the request; buffers the provider reply (the
+        /// rare error path, not the hot path) and translates it in one shot. Records the row against
+        /// the provider model via `Finalize` on drop.
+        async fn fallback_to_provider(
+            &mut self,
+            mut pending: Pending,
+            fb: FallbackInfo,
+        ) -> Response<Body> {
+            use crate::reroute::sse::{AnthropicSseEncoder, ReduceEvent};
+            let provider = fb.provider;
+
+            let Some(mut anthropic) = std::str::from_utf8(&fb.anthropic_body)
+                .ok()
+                .and_then(|t| serde_json::from_str::<serde_json::Value>(t).ok())
+            else {
+                return self.fallback_error(
+                    pending,
+                    "unknown",
+                    "llmtrim: fallback body is not JSON",
+                );
+            };
+            apply_sub_effort(&mut anthropic, self.sub_effort.as_deref());
+
+            let token = match tokio::task::spawn_blocking(move || {
+                crate::reroute::auth::get_token(provider)
+            })
+            .await
+            {
+                Ok(Ok(t)) => t,
+                Ok(Err(e)) => {
+                    return self.fallback_error(
+                        pending,
+                        "unknown",
+                        &format!(
+                            "llmtrim: {p} not authenticated ({e}). Run `llmtrim sub auth {p} login`.",
+                            p = provider.as_str()
+                        ),
+                    );
+                }
+                Err(_) => {
+                    return self.fallback_error(pending, "unknown", "llmtrim: auth task failed");
+                }
+            };
+
+            let rewrite = match crate::reroute::build_upstream(
+                provider,
+                &anthropic,
+                &self.sub_tiers,
+                &token,
+                fb.session_id.as_deref(),
+            ) {
+                Ok(r) => r,
+                Err(e) => {
+                    return self.fallback_error(
+                        pending,
+                        "unknown",
+                        &format!("llmtrim: reroute translation failed: {e}"),
+                    );
+                }
+            };
+
+            let model = rewrite.model.clone();
+            // Record this row against the resolved provider model (marks it a reroute).
+            pending.model = Some(model.clone());
+            pending.reroute = Some(RerouteInfo {
+                provider,
+                model: model.clone(),
+            });
+
+            let url = format!("https://{}{}", rewrite.host, rewrite.path);
+            let headers = rewrite.headers.clone();
+            let body = String::from_utf8_lossy(&rewrite.body).into_owned();
+            let proxy = self.upstream_proxy.clone();
+            let result = tokio::task::spawn_blocking(move || {
+                use std::io::Read;
+                let mut up =
+                    crate::transport::forward_post(&url, &headers, &body, proxy.as_deref())
+                        .map_err(|e| e.to_string())?;
+                let mut buf = Vec::new();
+                up.reader.read_to_end(&mut buf).map_err(|e| e.to_string())?;
+                Ok::<(u16, Vec<u8>), String>((up.status, buf))
+            })
+            .await;
+
+            let (status, raw) = match result {
+                Ok(Ok(v)) => v,
+                Ok(Err(e)) => {
+                    return self.fallback_error(
+                        pending,
+                        &model,
+                        &format!("llmtrim: {} request failed: {e}", provider.as_str()),
+                    );
+                }
+                Err(_) => {
+                    return self.fallback_error(pending, &model, "llmtrim: fallback task failed");
+                }
+            };
+
+            let mut enc = AnthropicSseEncoder::new(&model);
+            let mut out = String::new();
+            if !(200..300).contains(&status) {
+                let snippet: String = String::from_utf8_lossy(&raw).chars().take(400).collect();
+                enc.encode(
+                    &ReduceEvent::Error {
+                        message: format!(
+                            "llmtrim: {} upstream HTTP {}: {}",
+                            provider.as_str(),
+                            status,
+                            snippet
+                        ),
+                    },
+                    &mut out,
+                );
+            } else {
+                let mut reducer = crate::reroute::StreamReducer::new(provider, &model);
+                for ev in reducer.push(&raw) {
+                    enc.encode(&ev, &mut out);
+                }
+                for ev in reducer.finish() {
+                    enc.encode(&ev, &mut out);
+                }
+                enc.finish_if_open(&mut out);
+            }
+
+            let acc = Arc::new(Mutex::new(out.clone().into_bytes()));
+            let _finalize = Finalize {
+                acc,
+                pending: Some(pending),
+                ledger: self.ledger.clone(),
+                breakdown_ledger: self.breakdown_ledger.clone(),
+            };
+            sse_response(out)
+        }
+
+        /// Emit an Anthropic SSE `error` frame for an on-error fallback that failed before/at the
+        /// provider round-trip, still recording the row (output 0) as the `Finalize` drops.
+        fn fallback_error(&self, pending: Pending, model: &str, message: &str) -> Response<Body> {
+            use crate::reroute::sse::{AnthropicSseEncoder, ReduceEvent};
+            let mut enc = AnthropicSseEncoder::new(model);
+            let mut out = String::new();
+            enc.encode(
+                &ReduceEvent::Error {
+                    message: message.to_string(),
+                },
+                &mut out,
+            );
+            let acc = Arc::new(Mutex::new(out.clone().into_bytes()));
+            let _finalize = Finalize {
+                acc,
+                pending: Some(pending),
+                ledger: self.ledger.clone(),
+                breakdown_ledger: self.breakdown_ledger.clone(),
+            };
+            sse_response(out)
+        }
+
         /// Body of `handle_response`, factored out so tests can call it directly without
         /// a `hudsucker::HttpContext`.
         async fn handle_response_inner(&mut self, res: Response<Body>) -> Response<Body> {
             let Some(pending) = self.pending.take() else {
                 return res;
             };
+            // Subscription reroute: the upstream reply is the provider's SSE — translate it back to
+            // Anthropic SSE (the normal compress/replay/tee path below is for verbatim-forwarded
+            // Anthropic responses).
+            if let Some(info) = pending.reroute.clone() {
+                return self.reroute_response(res, pending, info).await;
+            }
+            // On-error reroute: Anthropic answered with a quota/overload status, so replay the turn
+            // to the subscription provider instead of handing the client Anthropic's error.
+            if let Some(fb) = pending.fallback.clone()
+                && is_sub_fallback_status(res.status().as_u16())
+            {
+                return self.fallback_to_provider(pending, fb).await;
+            }
             // Safety net: if the upstream rejected our compressed request with a *validation*
             // error (400 Bad Request / 422 Unprocessable) — the failure class our body edits can
             // cause — replay the original verbatim and hand the client THAT. We deliberately do
@@ -972,6 +1612,8 @@ mod imp {
                 frozen_input_tokens: Some(result.frozen_input_tokens.0 as i64),
                 // Passthrough forwards the original verbatim — attribute that body.
                 breakdown: attribute_for_breakdown(text, kind, result.model.as_deref()),
+                reroute: None,
+                fallback: None,
             };
             return Some((text.to_string(), pending));
         }
@@ -999,6 +1641,8 @@ mod imp {
             // Attribute the compressed body we actually forward — its tokens are what the
             // provider bills, so it matches the usage we reconcile against.
             breakdown: attribute_for_breakdown(&result.request_json, kind, result.model.as_deref()),
+            reroute: None,
+            fallback: None,
         };
         capture_pair(text, &result.request_json, &pending, &result.stages);
         Some((result.request_json, pending))
@@ -1706,6 +2350,24 @@ mod imp {
             upstream_proxy: upstream_proxy.clone(),
             exclude_providers: Arc::new(exclusions.providers.clone()),
             exclude_hosts: Arc::new(exclusions.hosts.clone()),
+            sub: {
+                // `sub` here is already non-`off`/non-empty (RuntimeConfig filters those). A value
+                // that still doesn't parse is a typo (`sub = "codexx"`): warn once at startup so a
+                // misconfigured opt-in doesn't silently run with reroute disabled.
+                let raw = RuntimeConfig::get().sub.as_deref();
+                let parsed = raw.and_then(crate::reroute::SubProvider::parse);
+                if parsed.is_none()
+                    && let Some(r) = raw
+                {
+                    eprintln!(
+                        "llmtrim: unknown sub provider '{r}' — reroute disabled (expected codex|kimi)"
+                    );
+                }
+                parsed
+            },
+            sub_tiers: Arc::new(RuntimeConfig::get().sub_tiers.clone()),
+            sub_on_error: RuntimeConfig::get().sub_on_error,
+            sub_effort: RuntimeConfig::get().sub_effort.clone(),
         };
         // Pre-flight bind: hudsucker's `Proxy::start` collapses a bind failure to a bare
         // "io error", hiding whether the port is in use or OS-reserved. Bind once ourselves
@@ -2710,6 +3372,49 @@ mod imp {
             assert!(!should_replay(503), "503 must not trigger replay");
         }
 
+        #[test]
+        fn sub_fallback_triggers_on_quota_and_overload_only() {
+            // 402/403 (payment/forbidden), 429 (usage limit), 529 (overloaded) reroute to the sub.
+            for s in [402, 403, 429, 529] {
+                assert!(
+                    is_sub_fallback_status(s),
+                    "{s} must trigger the on-error fallback"
+                );
+            }
+            // A success, a validation error, and a generic 5xx do not — those are the replay net's
+            // or the client's to handle, not the subscription's.
+            for s in [200, 400, 422, 500, 503] {
+                assert!(
+                    !is_sub_fallback_status(s),
+                    "{s} must not trigger the fallback"
+                );
+            }
+        }
+
+        #[test]
+        fn apply_sub_effort_injects_output_config_and_no_ops_safely() {
+            // Injects into a fresh body.
+            let mut v = serde_json::json!({ "model": "x" });
+            apply_sub_effort(&mut v, Some("high"));
+            assert_eq!(v["output_config"]["effort"], "high");
+            // Overrides an existing output_config.effort (proxy-side override wins).
+            let mut v = serde_json::json!({ "output_config": { "effort": "low", "format": {} } });
+            apply_sub_effort(&mut v, Some("xhigh"));
+            assert_eq!(v["output_config"]["effort"], "xhigh");
+            assert!(
+                v["output_config"]["format"].is_object(),
+                "other keys preserved"
+            );
+            // None is a no-op.
+            let mut v = serde_json::json!({ "model": "x" });
+            apply_sub_effort(&mut v, None);
+            assert!(v.get("output_config").is_none());
+            // Non-object body is a safe no-op (no panic).
+            let mut v = serde_json::json!("not an object");
+            apply_sub_effort(&mut v, Some("high"));
+            assert!(v.is_string());
+        }
+
         // ── M0-2: compress_blocking actual-compression guarantee ─────────────
 
         #[test]
@@ -2785,6 +3490,10 @@ mod imp {
                 upstream_proxy: None,
                 exclude_hosts: Arc::new(Vec::new()),
                 exclude_providers: Arc::new(Vec::new()),
+                sub: None,
+                sub_tiers: Arc::new(std::collections::BTreeMap::new()),
+                sub_on_error: false,
+                sub_effort: None,
             };
             (handler, rx)
         }
@@ -2830,6 +3539,8 @@ mod imp {
                     },
                     window: 200_000,
                 }),
+                reroute: None,
+                fallback: None,
             };
             // Provider billed: 120 cached read, 30 cache write, 50 fresh (sum 200), 40 output.
             let usage = ResponseUsage {
@@ -3148,6 +3859,8 @@ mod imp {
                 output_shaped: false,
                 frozen_input_tokens: None,
                 breakdown: None,
+                reroute: None,
+                fallback: None,
             });
 
             let bad_resp = Response::builder()
@@ -3204,6 +3917,8 @@ mod imp {
                 output_shaped: false,
                 frozen_input_tokens: None,
                 breakdown: None,
+                reroute: None,
+                fallback: None,
             });
 
             let bad_resp = Response::builder()
@@ -3253,6 +3968,8 @@ mod imp {
                 output_shaped: false,
                 frozen_input_tokens: None,
                 breakdown: None,
+                reroute: None,
+                fallback: None,
             });
 
             let unprocessable = Response::builder()
@@ -3303,6 +4020,8 @@ mod imp {
                     output_shaped: false,
                     frozen_input_tokens: None,
                     breakdown: None,
+                    reroute: None,
+                    fallback: None,
                 });
 
                 let resp = Response::builder()
@@ -3357,6 +4076,8 @@ mod imp {
                 output_shaped: false,
                 frozen_input_tokens: None,
                 breakdown: None,
+                reroute: None,
+                fallback: None,
             });
 
             let sse_chunks = concat!(
@@ -3452,6 +4173,8 @@ mod imp {
                 output_shaped: false,
                 frozen_input_tokens: None,
                 breakdown: None,
+                reroute: None,
+                fallback: None,
             });
 
             // The complete SSE payload.
@@ -3554,6 +4277,8 @@ mod imp {
                 output_shaped: false,
                 frozen_input_tokens: None,
                 breakdown: None,
+                reroute: None,
+                fallback: None,
             });
 
             // Three chunks; the client will consume only the first then drop the body.
@@ -3629,6 +4354,8 @@ mod imp {
                 output_shaped: false,
                 frozen_input_tokens: None,
                 breakdown: None,
+                reroute: None,
+                fallback: None,
             });
 
             // Zero-chunk stream: body ends immediately.

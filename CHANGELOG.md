@@ -6,6 +6,43 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- **Subscription reroute (`llmtrim sub`).** The proxy can now serve Claude Code (and any
+  Anthropic `/v1/messages` client) from a different subscription's backend instead of
+  Anthropic: a ChatGPT plan through the Codex Responses API, or a Kimi coding plan. llmtrim
+  rewrites each request to the provider's wire format, streams the reply back as Anthropic
+  SSE, and maps the Claude model tiers (opus/sonnet/haiku/fable) to provider models per a
+  saved config. `llmtrim sub auth codex login` / `llmtrim sub auth kimi login` sign in (OAuth PKCE or
+  device code, tokens stored at `~/.llmtrim/<provider>/auth.json`, mode 0600); `llmtrim sub
+  setup` opens an interactive editor for the tier mapping; `llmtrim sub use codex` applies the
+  built-in preset; `llmtrim sub off` disables it. Using a subscription this way may violate
+  the provider's terms of service, so the login command warns before it stores a token.
+- **Web search works on the Codex reroute.** The hosted web-search tool was dropped from the
+  translated request, so a Claude Code turn that wanted to search silently couldn't. It now maps to
+  the Codex `web_search` tool (with any domain filters), and the results reach the answer.
+- **Hallucinated `Read` tool calls are sanitized on the Codex reroute.** A Codex model sometimes
+  emits a `Read` with an absurd `offset` (millions of lines) or an empty `pages`, which made Claude
+  Code's Read fail. Those args are now stripped before the call reaches the client, and the next
+  turn is told the offset was ignored so the model stops re-issuing it.
+- **Codex reasoning effort.** Codex reasoning on the reroute now follows the effort Claude Code
+  requests per turn (its `output_config.effort`), streamed back as Anthropic `thinking` blocks, so
+  reasoning is adaptive by default. `llmtrim sub effort <none|low|medium|high|xhigh>` (env
+  `LLMTRIM_CODEX_EFFORT` or `sub.codex.effort`) is an optional override that forces one effort on
+  every rerouted turn. Kimi ignores it.
+- **On-error reroute mode (`llmtrim sub mode on-error`).** Instead of rerouting every turn, the
+  proxy can forward to Anthropic as usual and only fall back to the subscription provider when
+  Anthropic answers with a usage-limit or overload status (402/403/429/529). `always` (the
+  default) keeps rerouting everything. Set it with `llmtrim sub mode <always|on-error>` or the
+  env var `LLMTRIM_SUB_MODE`.
+- **Non-interactive reroute controls for scripts and the tray.** `llmtrim sub map <provider>
+  <from> <to>` sets one mapping entry without the editor, where `from` is a Claude tier
+  (`opus`/`sonnet`/`haiku`/`fable`) or an exact incoming model id, so any Anthropic-speaking IDE
+  can be remapped model by model; `llmtrim sub unmap` removes one. `llmtrim sub models <provider>
+  --json` lists the candidate provider models, `llmtrim sub status --json` reports the full
+  reroute state (provider, mode, mapping, auth), and `llmtrim sub auth <codex|kimi> status --json`
+  reports login state. `llmtrim status` now shows the active reroute provider and mode.
+
 ### Changed
 
 - `llmtrim stop` no longer breaks tools in new terminals. On POSIX the shell-profile block now exports `HTTPS_PROXY` only while the interceptor is running, so a terminal opened after `stop` talks to LLM hosts directly instead of failing at a dead proxy, and new terminals re-wire on their own once you `start` again. On Windows, `stop` clears the interceptor values from `HKCU\Environment` and `start` re-sets them, so newly-launched terminals and apps stay in sync. The shell you run `stop` in keeps the vars it already inherited (a process can't rewrite its parent shell), so `stop` prints the one-line `unset` for it. Existing installs pick up the new behavior the next time the daemon starts, with no `setup` re-run.
