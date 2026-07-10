@@ -306,14 +306,17 @@ llmtrim statusline install --print  # or print the settings snippet to paste you
 ```
 
 ```text
-◆ Opus·high→codex   ▓▓▓▓▓░░░ 142k   ✂ 6.8%   ◔ 5h·24%   ♻ 63% cached
+◆ Opus·high→codex   ▓▓▓▓▓░░░ 142k   ✂ 6.8%   ◔ 5h·24% · 7d·12%   ♻ 63% cached
 ```
 
 The `✂` trim figure is scoped to the current Claude Code session; it reads `✂ –` until llmtrim
-has saved something this session. `◔ 5h·24%` is the share of your Claude.ai 5-hour limit
-used. The context gauge is anchored to a fixed 200k budget, not the model's raw window, so a heavy
-context still reads as heavy on a 1M-context model. Segments drop right-to-left on narrow
-terminals, and anything Claude Code doesn't report (no reroute, no rate limits) is simply left out.
+has saved something this session. `◔ 5h·24% · 7d·12%` is the share of your Claude.ai 5-hour and
+7-day limits used. The context gauge fills against the real window of the model serving
+the turn — the rerouted backend's window under `sub`, not Claude's — green below 40%, orange
+40–65%, red above. `♻` shows this turn's prompt-cache reuse, and turns into `♻ cold · /compact`
+once the session has been idle past the cache TTL, since the next message then pays a cold cache
+write. Segments drop right-to-left on narrow terminals, and anything Claude Code doesn't report
+(no reroute, no rate limits) is simply left out.
 
 ## Works with
 

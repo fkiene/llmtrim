@@ -9,15 +9,17 @@ All notable changes to this project are documented here. The format follows
 ### Added
 
 - **`llmtrim statusline`: a custom status line for Claude Code.** Reads Claude Code's JSON
-  session blob on stdin and prints one width-adaptive line: `◆ model·effort→backend`, a
-  context-health gauge, compression saved for the current session (`✂ –` until it has trimmed
-  anything), and (when present) 5-hour rate-limit usage (`◔ 5h·24%`) and this turn's prompt-cache
-  reuse. The context gauge is anchored to a fixed 200k
-  health budget rather than the model's raw window, so 200k reads as heavy even on a
-  1M-context model. The reroute arrow (`→codex`/`→kimi`) shows the subscription actually
-  serving the turn, and a `⚠` replaces the savings segment when the interceptor is degraded.
-  Extras shed right-to-left on narrow terminals. `llmtrim statusline install` wires it into
-  `~/.claude/settings.json` (`--print` emits the snippet instead); `uninstall` removes it.
+  session blob on stdin and prints one width-adaptive line: `◆ model·effort→backend`, a context
+  gauge, compression saved for the current session (`✂ –` until it has trimmed anything), and
+  (when present) 5-hour and 7-day rate-limit usage (`◔ 5h·24% · 7d·12%`) and this turn's
+  prompt-cache reuse. The context gauge fills and colours against the *real* window of the model
+  serving the turn — the rerouted backend's window from the model registry under a `sub` reroute,
+  not Claude's — green below 40%, orange 40–65%, red above. The cache segment turns into
+  `♻ cold · /compact` once the session has been idle past the cache TTL, since the next message
+  then pays a cold cache write. The reroute arrow (`→codex`/`→kimi`) shows the subscription
+  actually serving the turn, and a `⚠` replaces the savings segment when the interceptor is
+  degraded. Extras shed right-to-left on narrow terminals. `llmtrim statusline install` wires it
+  into `~/.claude/settings.json` (`--print` emits the snippet instead); `uninstall` removes it.
   `setup` points Claude Code users to it in its next-steps, but never writes the file itself
   (setup stays client-agnostic and touches no IDE config).
 
