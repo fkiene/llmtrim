@@ -3765,9 +3765,12 @@ mod imp {
             let cfg = DenseConfig::default();
             let memo = Memo::with_capacity(llmtrim_core::memo::DEFAULT_CAPACITY);
             assert!(
-                compress_blocking(&cfg, b"not json", ProviderKind::OpenAi, None, &memo, None).is_none()
+                compress_blocking(&cfg, b"not json", ProviderKind::OpenAi, None, &memo, None)
+                    .is_none()
             );
-            assert!(compress_blocking(&cfg, b"", ProviderKind::OpenAi, None, &memo, None).is_none());
+            assert!(
+                compress_blocking(&cfg, b"", ProviderKind::OpenAi, None, &memo, None).is_none()
+            );
         }
 
         #[test]
@@ -3780,9 +3783,14 @@ mod imp {
             let memo = Memo::with_capacity(llmtrim_core::memo::DEFAULT_CAPACITY);
             // May return None (net loss) or Some (net win); both are valid.
             // The important assertion: when Some, the compressed form must have fewer input tokens.
-            if let Some((compressed, pending)) =
-                compress_blocking(&cfg, body.as_bytes(), ProviderKind::OpenAi, None, &memo, None)
-            {
+            if let Some((compressed, pending)) = compress_blocking(
+                &cfg,
+                body.as_bytes(),
+                ProviderKind::OpenAi,
+                None,
+                &memo,
+                None,
+            ) {
                 assert!(
                     pending.input_after <= pending.input_before,
                     "net-win guard: compressed must not exceed original ({} vs {})",
@@ -3808,9 +3816,15 @@ mod imp {
             let memo = Memo::with_capacity(llmtrim_core::memo::DEFAULT_CAPACITY);
             // Dedup is default-on and the spam is contiguous: this must compress, so a
             // `None` here is a regression (the test must not pass vacuously).
-            let (compressed, pending) =
-                compress_blocking(&cfg, body.as_bytes(), ProviderKind::OpenAi, None, &memo, None)
-                    .expect("50 identical log lines must produce a net token win");
+            let (compressed, pending) = compress_blocking(
+                &cfg,
+                body.as_bytes(),
+                ProviderKind::OpenAi,
+                None,
+                &memo,
+                None,
+            )
+            .expect("50 identical log lines must produce a net token win");
             assert!(
                 pending.input_after < pending.input_before,
                 "50 identical log lines should compress: {} -> {}",
@@ -3908,9 +3922,14 @@ mod imp {
             .to_string();
             let cfg = DenseConfig::default();
             let memo = Memo::with_capacity(llmtrim_core::memo::DEFAULT_CAPACITY);
-            if let Some((compressed_json, pending)) =
-                compress_blocking(&cfg, body.as_bytes(), ProviderKind::OpenAi, None, &memo, None)
-            {
+            if let Some((compressed_json, pending)) = compress_blocking(
+                &cfg,
+                body.as_bytes(),
+                ProviderKind::OpenAi,
+                None,
+                &memo,
+                None,
+            ) {
                 // compress_blocking now always returns Some for valid JSON, even on zero-savings
                 // inputs (the caller records the row; `input_after == input_before` means
                 // passthrough). Assert that we never *increase* the token count.

@@ -7,17 +7,16 @@
 //! width-adaptive line:
 //!
 //! ```text
-//! ◆ Opus·high→codex   ▓▓▓▓▓░░░ 142k   ✂ 6.8%   ◔ 5h·24% · 7d·12%   ♻ 63% cached
+//! ◆ Opus→codex   ▓▓▓▓▓░░░ 142k   ✂ 6.8%   ◔ 5h·24% · 7d·12%   ♻ 63% cached
 //! ```
 //!
-//! The three left segments (model·effort→backend, context, ✂ trim) are core and never
+//! The three left segments (model→backend, context, ✂ trim) are core and never
 //! truncate; the extras (5h/7d quota, then this turn's prompt-cache reuse) shed right-to-left
 //! as the terminal narrows (`COLUMNS`). The context gauge fills and colours against the *real*
 //! window of the model serving the turn — the rerouted backend's window under `sub`, not
 //! Claude's — green below 40%, orange 40–65%, red above; and red whenever the prompt cache has
 //! gone cold, where the cache segment becomes `♻ cold · /compact`. Segments whose data is
-//! absent — no reroute, an API-key user with no rate limits, a non-reasoning model with no
-//! effort — simply don't render.
+//! absent — no reroute, an API-key user with no rate limits — simply don't render.
 //!
 //! `install` wires it into `~/.claude/settings.json`; rendering itself never touches the
 //! network or API tokens.
@@ -72,6 +71,10 @@ fn paint(color: bool, code: &str, s: &str) -> String {
 
 struct CcInput {
     model: String,
+    /// Claude Code's `effort.level`. Parsed but not currently rendered — the field doesn't track
+    /// the `/model` effort override, so showing it is misleading (see [`model_segment`]). Kept so
+    /// re-enabling is a one-liner once Claude Code fixes it.
+    #[allow(dead_code)]
     effort: Option<String>,
     /// Claude Code's own session id (the `x-claude-code-session-id` it also tags on every
     /// intercepted request), used to scope trim to *this* session's ledger rows. `None` if
@@ -209,10 +212,7 @@ fn proxy_health() -> Health {
 
 fn ledger_snapshot(cc: &CcInput) -> Led {
     let cfg = llmtrim_core::config::RuntimeConfig::get();
-    let reroute = cfg
-        .sub
-        .clone()
-        .filter(|s| !s.is_empty() && s != "off");
+    let reroute = cfg.sub.clone().filter(|s| !s.is_empty() && s != "off");
     let reroute_window = reroute
         .as_deref()
         .and_then(|p| reroute_real_window(p, &cc.model_id, &cfg.sub_tiers));
@@ -230,15 +230,16 @@ fn ledger_snapshot(cc: &CcInput) -> Led {
                     .find(|r| r.cc_session_id.as_deref() == Some(sid))
             })
     });
-    let trim_pct = match &row {
-        Some(r) => (r.input_before > 0)
-            .then(|| ui::saved_pct(r.input_before as f64, r.input_after as f64)),
-        None => Tracker::open()
+    // Lifetime figure, read only when we have no session to scope to.
+    let lifetime = || {
+        Tracker::open()
             .and_then(|t| t.summary())
             .ok()
             .filter(|s| s.input_before > 0)
-            .map(|s| ui::saved_pct(s.input_before as f64, s.input_after as f64)),
+            .map(|s| ui::saved_pct(s.input_before as f64, s.input_after as f64))
     };
+    let session_savings = row.as_ref().map(|r| (r.input_before, r.input_after));
+    let trim_pct = trim_for(cc.session_id.as_deref(), session_savings, lifetime);
     let cache_cold = row.as_ref().is_some_and(|r| cache_cold(&r.last_ts));
 
     Led {
@@ -247,6 +248,24 @@ fn ledger_snapshot(cc: &CcInput) -> Led {
         reroute,
         reroute_window,
         cache_cold,
+    }
+}
+
+/// Decide the trim figure: this session's own savings when we have its row; idle (`None`) for a
+/// known Claude Code session with no recorded turn yet — *not* the lifetime figure, which would
+/// flash a misleading number for a beat before the first turn lands; and only the lifetime figure
+/// (via `lifetime`) when there is no session id to scope to at all.
+fn trim_for(
+    session_id: Option<&str>,
+    session_savings: Option<(i64, i64)>,
+    lifetime: impl FnOnce() -> Option<f64>,
+) -> Option<f64> {
+    match (session_savings, session_id) {
+        (Some((before, after)), _) => {
+            (before > 0).then(|| ui::saved_pct(before as f64, after as f64))
+        }
+        (None, Some(_)) => None,
+        (None, None) => lifetime(),
     }
 }
 
@@ -286,29 +305,32 @@ fn cache_cold(last_ts: &str) -> bool {
 
 // ── rendering ─────────────────────────────────────────────────────────────────────
 
-/// Colour a value by threshold (`< warn` first colour, `< bad` second, else third).
-fn tier_color(v: f64, warn: f64, bad: f64) -> &'static str {
-    if v >= bad {
+/// Colour a rate-limit % with an extra orange step before red: green < 70, amber 70–80,
+/// orange 80–90, red ≥ 90 — so a filling quota escalates in visible stages, not one jump to red.
+fn quota_color(pct: f64) -> &'static str {
+    if pct >= 90.0 {
         RED
-    } else if v >= warn {
+    } else if pct >= 80.0 {
+        ORANGE
+    } else if pct >= 70.0 {
         AMBER
     } else {
         GREEN
     }
 }
 
-/// `◆ Opus·high→codex` — health-brand glyph, model, glued effort, reroute arrow. The arrow is
-/// suppressed when the proxy isn't healthy (traffic isn't being intercepted, so it isn't
-/// actually rerouting).
+/// `◆ Opus→codex` — health-brand glyph, model, reroute arrow. The arrow is suppressed when the
+/// proxy isn't healthy (traffic isn't being intercepted, so it isn't actually rerouting).
+///
+/// Effort is intentionally not shown: Claude Code's `effort.level` field doesn't track the
+/// `/model` effort override (it reports a stale/base level), so rendering it is misleading. The
+/// field is still parsed — re-append `·{effort}` here once Claude Code fixes the field.
 fn model_segment(cc: &CcInput, led: &Led, color: bool) -> String {
     let mut s = format!(
         "{} {}",
         paint(color, BRAND, "◆"),
         paint(color, BOLD, &cc.model)
     );
-    if let Some(effort) = &cc.effort {
-        s.push_str(&paint(color, DIM, &format!("·{effort}")));
-    }
     if let (Health::Healthy, Some(p)) = (led.health, &led.reroute) {
         let code = match p.as_str() {
             "kimi" => VIOLET,
@@ -378,16 +400,25 @@ fn trim_or_health_segment(led: &Led, color: bool) -> Option<String> {
 fn extra_segments(cc: &CcInput, led: &Led, color: bool) -> Vec<String> {
     let mut out = Vec::new();
     // One quota segment carrying both rolling windows: `◔ 5h·15% · 7d·12%`. `◔` = a window
-    // filling up; `·` keeps `5h`/`7d` from reading as durations. Each window is coloured on its
-    // own value, so a maxed 5h doesn't paint a comfortable 7d red (and vice-versa).
+    // filling up; `·` keeps `5h`/`7d` from reading as durations. Only the *percentage* is
+    // coloured on its own value (a maxed 5h doesn't paint a comfortable 7d) — the `5h`/`7d`
+    // labels are constant, so colouring them is noise; they stay dim.
     let quota = |label: &str, p: f64| {
-        paint(color, tier_color(p, 70.0, 90.0), &format!("{label}·{}%", p.floor() as i64))
+        format!(
+            "{}{}",
+            paint(color, DIM, &format!("{label}·")),
+            paint(color, quota_color(p), &format!("{}%", p.floor() as i64))
+        )
     };
     let glyph = paint(color, DIM, "◔");
     let sep = paint(color, DIM, "·");
     match (cc.five_hour_pct, cc.seven_day_pct) {
         (Some(h), Some(d)) => {
-            out.push(format!("{glyph} {} {sep} {}", quota("5h", h), quota("7d", d)));
+            out.push(format!(
+                "{glyph} {} {sep} {}",
+                quota("5h", h),
+                quota("7d", d)
+            ));
         }
         (Some(h), None) => out.push(format!("{glyph} {}", quota("5h", h))),
         (None, Some(d)) => out.push(format!("{glyph} {}", quota("7d", d))),
@@ -399,7 +430,11 @@ fn extra_segments(cc: &CcInput, led: &Led, color: bool) -> Vec<String> {
         out.push(paint(color, RED, "♻ cold · /compact"));
     } else if let Some(c) = cc.cache_pct {
         // Floor, not round: only a genuine 100% cache shows `100%` (99.9 stays `99%`).
-        out.push(paint(color, DIM, &format!("♻ {}% cached", c.floor() as i64)));
+        out.push(paint(
+            color,
+            DIM,
+            &format!("♻ {}% cached", c.floor() as i64),
+        ));
     }
     out
 }
@@ -412,7 +447,12 @@ const SEP: &str = "   ";
 fn render_line(cc: &CcInput, led: &Led, cols: usize, color: bool) -> String {
     let mut core = vec![
         model_segment(cc, led, color),
-        context_segment(cc.ctx_tokens, effective_window(cc, led), led.cache_cold, color),
+        context_segment(
+            cc.ctx_tokens,
+            effective_window(cc, led),
+            led.cache_cold,
+            color,
+        ),
     ];
     if let Some(seg) = trim_or_health_segment(led, color) {
         core.push(seg);
@@ -585,7 +625,7 @@ mod tests {
         let out = render_line(&cc(142_000), &led(Health::Healthy), 0, false);
         assert_eq!(
             out,
-            "◆ Opus·high→codex   ▓▓▓▓▓░░░ 142k   ✂ 6.8%   ◔ 5h·24% · 7d·12%   ♻ 63% cached"
+            "◆ Opus→codex   ▓▓▓▓▓░░░ 142k   ✂ 6.8%   ◔ 5h·24% · 7d·12%   ♻ 63% cached"
         );
     }
 
@@ -607,7 +647,10 @@ mod tests {
     #[test]
     fn context_gauge_pins_full_over_window() {
         let out = render_line(&cc(210_000), &led(Health::Healthy), 0, false);
-        assert!(out.contains("▓▓▓▓▓▓▓▓ 210k"), "over window pins full: {out}");
+        assert!(
+            out.contains("▓▓▓▓▓▓▓▓ 210k"),
+            "over window pins full: {out}"
+        );
     }
 
     #[test]
@@ -636,15 +679,14 @@ mod tests {
         let out = render_line(&cc(48_000), &l, 0, false);
         assert!(!out.contains('✂'), "no trim when off: {out}");
         assert!(!out.contains('⚠'), "clean off is not an error: {out}");
-        assert!(out.starts_with("◆ Opus·high"), "model still shown: {out}");
+        assert!(out.starts_with("◆ Opus"), "model still shown: {out}");
     }
 
     #[test]
     fn narrow_terminal_sheds_extras_right_to_left() {
         // Wide enough for core + quota, but not the cache extra.
         let full = render_line(&cc(142_000), &led(Health::Healthy), 0, false);
-        let width =
-            ui::visible_width("◆ Opus·high→codex   ▓▓▓▓▓░░░ 142k   ✂ 6.8%   ◔ 5h·24% · 7d·12%");
+        let width = ui::visible_width("◆ Opus→codex   ▓▓▓▓▓░░░ 142k   ✂ 6.8%   ◔ 5h·24% · 7d·12%");
         let out = render_line(&cc(142_000), &led(Health::Healthy), width, false);
         assert!(out.ends_with("7d·12%"), "keeps quota, sheds cache: {out}");
         assert!(!out.contains("cached"), "cache dropped first: {out}");
@@ -674,23 +716,55 @@ mod tests {
     }
 
     #[test]
+    fn quota_color_escalates_green_amber_orange_red() {
+        assert_eq!(quota_color(50.0), GREEN);
+        assert_eq!(quota_color(75.0), AMBER);
+        assert_eq!(quota_color(85.0), ORANGE); // the added 80%+ step
+        assert_eq!(quota_color(95.0), RED);
+    }
+
+    #[test]
     fn quota_windows_colour_independently() {
         // A maxed 5h next to a comfortable 7d: 5h red, 7d green — not both painted by the worse.
         let mut c = cc(48_000);
         c.five_hour_pct = Some(95.0);
         c.seven_day_pct = Some(12.0);
         let segs = extra_segments(&c, &led(Health::Healthy), true);
-        let quota = segs.iter().find(|s| s.contains("5h")).expect("quota segment");
-        assert!(quota.contains(&format!("\x1b[{RED}m5h·95%")), "5h red: {quota}");
-        assert!(quota.contains(&format!("\x1b[{GREEN}m7d·12%")), "7d green: {quota}");
+        let quota = segs
+            .iter()
+            .find(|s| s.contains("5h"))
+            .expect("quota segment");
+        // Only the percentage is coloured; the `5h`/`7d` labels stay dim.
+        assert!(
+            quota.contains(&format!("\x1b[{DIM}m5h·")),
+            "5h label dim: {quota}"
+        );
+        assert!(
+            quota.contains(&format!("\x1b[{RED}m95%")),
+            "5h pct red: {quota}"
+        );
+        assert!(
+            quota.contains(&format!("\x1b[{DIM}m7d·")),
+            "7d label dim: {quota}"
+        );
+        assert!(
+            quota.contains(&format!("\x1b[{GREEN}m12%")),
+            "7d pct green: {quota}"
+        );
     }
 
     #[test]
     fn trim_is_not_coloured_by_tier() {
         // The savings figure is dim, not green — colour is for state signals only.
         let seg = trim_or_health_segment(&led(Health::Healthy), true).unwrap();
-        assert!(seg.contains(&format!("\x1b[{DIM}m✂ 6.8%")), "trim dim: {seg}");
-        assert!(!seg.contains(&format!("\x1b[{GREEN}m✂")), "not green: {seg}");
+        assert!(
+            seg.contains(&format!("\x1b[{DIM}m✂ 6.8%")),
+            "trim dim: {seg}"
+        );
+        assert!(
+            !seg.contains(&format!("\x1b[{GREEN}m✂")),
+            "not green: {seg}"
+        );
     }
 
     #[test]
@@ -701,7 +775,10 @@ mod tests {
         let mut c = cc(48_000);
         c.seven_day_pct = None;
         let out = render_line(&c, &led(Health::Healthy), 0, false);
-        assert!(out.contains("◔ 5h·24%") && !out.contains("7d"), "5h only: {out}");
+        assert!(
+            out.contains("◔ 5h·24%") && !out.contains("7d"),
+            "5h only: {out}"
+        );
     }
 
     #[test]
@@ -710,6 +787,19 @@ mod tests {
         l.reroute = Some("kimi".to_string());
         let out = render_line(&cc(72_000), &l, 0, true);
         assert!(out.contains("→kimi"), "kimi arrow present: {out}");
+    }
+
+    #[test]
+    fn trim_for_does_not_flash_lifetime_on_a_fresh_session() {
+        let lifetime = || Some(6.8);
+        // A known session with no recorded turn yet ⇒ idle (None), NOT the lifetime figure —
+        // the "6.8% then flips to the real number" flash we're fixing.
+        assert_eq!(trim_for(Some("sess-uuid"), None, lifetime), None);
+        // Its own rows ⇒ the per-session figure (300→200 = 33.3%).
+        let own = trim_for(Some("sess-uuid"), Some((300, 200)), lifetime).unwrap();
+        assert!((own - 33.333).abs() < 0.01, "per-session figure: {own}");
+        // No session id at all (non-Claude-Code client) ⇒ lifetime is the only honest figure.
+        assert_eq!(trim_for(None, None, lifetime), Some(6.8));
     }
 
     #[test]
@@ -829,7 +919,8 @@ mod tests {
         assert!(!cache_cold("garbage"), "unparseable ⇒ not cold");
         let fresh = chrono::Utc::now().to_rfc3339();
         assert!(!cache_cold(&fresh), "just now ⇒ warm");
-        let stale = (chrono::Utc::now() - chrono::Duration::seconds(CACHE_TTL_SECS + 60)).to_rfc3339();
+        let stale =
+            (chrono::Utc::now() - chrono::Duration::seconds(CACHE_TTL_SECS + 60)).to_rfc3339();
         assert!(cache_cold(&stale), "past the TTL ⇒ cold");
     }
 

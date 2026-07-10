@@ -306,7 +306,7 @@ llmtrim statusline install --print  # or print the settings snippet to paste you
 ```
 
 ```text
-◆ Opus·high→codex   ▓▓▓▓▓░░░ 142k   ✂ 6.8%   ◔ 5h·24% · 7d·12%   ♻ 63% cached
+◆ Opus→codex   ▓▓▓▓▓░░░ 142k   ✂ 6.8%   ◔ 5h·24% · 7d·12%   ♻ 63% cached
 ```
 
 The `✂` trim figure is scoped to the current Claude Code session; it reads `✂ –` until llmtrim

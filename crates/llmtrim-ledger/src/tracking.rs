@@ -441,10 +441,10 @@ impl Tracker {
             }
         }
         // cc_session_id is TEXT, not INTEGER — additive ALTER kept separate from the loop above.
-        if let Err(e) = self
-            .conn
-            .execute("ALTER TABLE breakdown_turns ADD COLUMN cc_session_id TEXT", [])
-            && !is_duplicate_column(&e)
+        if let Err(e) = self.conn.execute(
+            "ALTER TABLE breakdown_turns ADD COLUMN cc_session_id TEXT",
+            [],
+        ) && !is_duplicate_column(&e)
         {
             return Err(e).context("failed to add breakdown column cc_session_id");
         }
