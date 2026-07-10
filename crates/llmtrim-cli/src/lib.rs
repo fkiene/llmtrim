@@ -20,6 +20,7 @@ pub mod quality;
 pub mod reroute;
 pub mod serve;
 pub mod setup;
+pub mod statusline;
 pub mod tracking;
 pub mod transport;
 pub mod tray;

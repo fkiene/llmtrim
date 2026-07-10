@@ -263,6 +263,16 @@ enum Commands {
         #[command(subcommand)]
         action: Option<McpAction>,
     },
+    /// Render Claude Code's custom status line (or `statusline install` to wire it up)
+    ///
+    /// With no subcommand, reads Claude Code's JSON session blob on stdin and prints one
+    /// elegant line — model·effort→backend, a context-health gauge, compression saved, and
+    /// (when present) rate-limit usage and this turn's prompt-cache reuse. `install` wires it
+    /// into `~/.claude/settings.json`; `install --print` just prints the settings snippet.
+    Statusline {
+        #[command(subcommand)]
+        action: Option<StatuslineCmd>,
+    },
     /// Check the install end-to-end and explain anything broken
     ///
     /// Read-only diagnosis: binary, daemon, port, env wiring (persisted + this shell),
@@ -507,6 +517,18 @@ enum McpAction {
         #[arg(long)]
         force: bool,
     },
+}
+
+#[derive(Subcommand)]
+enum StatuslineCmd {
+    /// Wire the status line into `~/.claude/settings.json`
+    Install {
+        /// Print the settings snippet instead of editing the file.
+        #[arg(long)]
+        print: bool,
+    },
+    /// Remove the status line from `~/.claude/settings.json`
+    Uninstall,
 }
 
 #[derive(clap::Args)]
@@ -1229,6 +1251,11 @@ fn run() -> Result<()> {
         Commands::Mcp { action } => match action {
             None => llmtrim::mcp::run()?,
             Some(McpAction::Install { print, force }) => llmtrim::mcp::install(print, force)?,
+        },
+        Commands::Statusline { action } => match action {
+            None => llmtrim::statusline::run()?,
+            Some(StatuslineCmd::Install { print }) => llmtrim::statusline::install(print)?,
+            Some(StatuslineCmd::Uninstall) => llmtrim::statusline::uninstall()?,
         },
         Commands::Monitor {
             // Deprecated no-op (see the field docs): accepted, then ignored.

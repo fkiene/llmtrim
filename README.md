@@ -207,14 +207,15 @@ If the service stops, your tools fail fast with a connection error rather than s
 <summary><b>Day-to-day commands</b></summary>
 
 ```bash
-llmtrim status      # health + savings dashboard (aliases: monitor, gain)
-llmtrim doctor      # something off? end-to-end diagnosis; each check names its fix
-llmtrim start       # start the background proxy
-llmtrim stop        # stop it
-llmtrim serve       # run in the foreground instead (Ctrl-C to quit)
-llmtrim wrap claude # run an agent, guaranteeing this session routes through llmtrim (fails fast if it can't)
-llmtrim update      # update to the latest release + restart
-llmtrim uninstall   # exact inverse of setup: removes all three changes
+llmtrim status              # health + savings dashboard (aliases: monitor, gain)
+llmtrim statusline install  # add a live status line to Claude Code
+llmtrim doctor              # something off? end-to-end diagnosis; each check names its fix
+llmtrim start               # start the background proxy
+llmtrim stop                # stop it
+llmtrim serve               # run in the foreground instead (Ctrl-C to quit)
+llmtrim wrap claude         # run an agent, guaranteeing this session routes through llmtrim (fails fast if it can't)
+llmtrim update              # update to the latest release + restart
+llmtrim uninstall           # exact inverse of setup: removes all three changes
 ```
 
 `llmtrim status --daily` (or `--weekly` / `--monthly`) gives a time-series report; add `--json` or `--csv` to export.
@@ -293,6 +294,24 @@ The printed block is the standard MCP config; for a client you edit by hand it l
   }
 }
 ```
+
+**Status line for Claude Code.** `llmtrim statusline` renders a single line for Claude Code's
+[custom status line](https://code.claude.com/docs/en/statusline): the model, the subscription
+actually serving the turn when you reroute (`→codex`/`→kimi`), a context-health gauge, and how
+much llmtrim is trimming, plus rate-limit and prompt-cache reuse when Claude Code reports them.
+
+```bash
+llmtrim statusline install          # wire it into ~/.claude/settings.json
+llmtrim statusline install --print  # or print the settings snippet to paste yourself
+```
+
+```text
+◆ Opus·high→codex   ▓▓▓▓▓░░░ 142k   ✂ 6.8%   5h 24%   ♻ 63% cached
+```
+
+The context gauge is anchored to a fixed 200k budget, not the model's raw window, so a heavy
+context still reads as heavy on a 1M-context model. Segments drop right-to-left on narrow
+terminals, and anything Claude Code doesn't report (no reroute, no rate limits) is simply left out.
 
 ## Works with
 

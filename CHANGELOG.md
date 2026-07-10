@@ -6,6 +6,18 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- **`llmtrim statusline`: a custom status line for Claude Code.** Reads Claude Code's JSON
+  session blob on stdin and prints one width-adaptive line: `◆ model·effort→backend`, a
+  context-health gauge, compression saved, and (when present) 5-hour rate-limit usage and
+  this turn's prompt-cache reuse. The context gauge is anchored to a fixed 200k
+  health budget rather than the model's raw window, so 200k reads as heavy even on a
+  1M-context model. The reroute arrow (`→codex`/`→kimi`) shows the subscription actually
+  serving the turn, and a `⚠` replaces the savings segment when the interceptor is degraded.
+  Extras shed right-to-left on narrow terminals. `llmtrim statusline install` wires it into
+  `~/.claude/settings.json` (`--print` emits the snippet instead); `uninstall` removes it.
+
 ### Changed
 
 - **`llmtrim sub` config changes apply immediately.** The interceptor reads its config once at
