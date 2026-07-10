@@ -220,16 +220,9 @@ fn ledger_snapshot(cc: &CcInput) -> Led {
 
     // One session-row read serves both trim and cache-cold. Match on `cc_session_id` — the real
     // Claude Code session id the proxy now records — not the ledger's `session_id`, which is a
-    // hash of the system prompt and never equals Claude Code's UUID.
-    let row = cc.session_id.as_deref().and_then(|sid| {
-        crate::breakdown::db::BreakdownDb::open()
-            .ok()
-            .and_then(|db| db.sessions().ok())
-            .and_then(|rows| {
-                rows.into_iter()
-                    .find(|r| r.cc_session_id.as_deref() == Some(sid))
-            })
-    });
+    // hash of the system prompt and never equals Claude Code's UUID. The per-session ledger view
+    // lives behind the `breakdown` feature; without it we scope nothing and fall back to lifetime.
+    let row = cc.session_id.as_deref().and_then(session_row);
     // Lifetime figure, read only when we have no session to scope to.
     let lifetime = || {
         Tracker::open()
@@ -249,6 +242,38 @@ fn ledger_snapshot(cc: &CcInput) -> Led {
         reroute_window,
         cache_cold,
     }
+}
+
+/// The ledger fields the status line needs from a session's row: its summed savings and the
+/// timestamp of its last turn (for the cold-cache check).
+struct SessionLedgerRow {
+    input_before: i64,
+    input_after: i64,
+    last_ts: String,
+}
+
+/// This Claude Code session's aggregated ledger row, matched on the real `cc_session_id`. Behind
+/// the `breakdown` feature (the per-session query lives there); `None` without it, so trim falls
+/// back to lifetime and cold-cache is never flagged.
+#[cfg(feature = "breakdown")]
+fn session_row(sid: &str) -> Option<SessionLedgerRow> {
+    crate::breakdown::db::BreakdownDb::open()
+        .ok()
+        .and_then(|db| db.sessions().ok())
+        .and_then(|rows| {
+            rows.into_iter()
+                .find(|r| r.cc_session_id.as_deref() == Some(sid))
+        })
+        .map(|r| SessionLedgerRow {
+            input_before: r.input_before,
+            input_after: r.input_after,
+            last_ts: r.last_ts,
+        })
+}
+
+#[cfg(not(feature = "breakdown"))]
+fn session_row(_sid: &str) -> Option<SessionLedgerRow> {
+    None
 }
 
 /// Decide the trim figure: this session's own savings when we have its row; idle (`None`) for a
@@ -273,6 +298,10 @@ fn trim_for(
 /// model registry. Claude Code reports its own Claude window on the wire, so under reroute we
 /// must resolve the backend model id and look *it* up. `None` if unknown (gauge keeps the blob
 /// window). Kimi's internal id isn't a registry key, so it's mapped to its public model id.
+///
+/// Reroute resolution lives behind the `intercept` feature; without it a `sub` reroute can't be
+/// active anyway, so the gauge just uses the blob's window.
+#[cfg(feature = "intercept")]
 fn reroute_real_window(
     provider: &str,
     incoming_model_id: &str,
@@ -292,6 +321,15 @@ fn reroute_real_window(
         resolved.as_str()
     };
     llmtrim_core::context_window(lookup).map(|w| w as i64)
+}
+
+#[cfg(not(feature = "intercept"))]
+fn reroute_real_window(
+    _provider: &str,
+    _incoming_model_id: &str,
+    _tiers: &std::collections::BTreeMap<String, String>,
+) -> Option<i64> {
+    None
 }
 
 /// Whether the prompt cache has gone cold: `last_ts` (rfc3339, the most recent intercepted
