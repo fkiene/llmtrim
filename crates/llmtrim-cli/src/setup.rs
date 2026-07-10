@@ -621,6 +621,14 @@ pub fn run(requested: Option<u16>, force: bool) -> Result<()> {
         "  {}  llmtrim status",
         ui::paint(color, Tone::Dim, "watch savings")
     );
+    // Claude Code users only: hint at the status line without writing their config (setup is
+    // client-agnostic and never touches IDE settings). No-op for users of other agents.
+    if crate::statusline::claude_code_present() {
+        println!(
+            "  {}  llmtrim statusline install",
+            ui::paint(color, Tone::Dim, "status line  ")
+        );
+    }
     #[cfg(windows)]
     println!(
         "{}",

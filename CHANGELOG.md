@@ -17,6 +17,8 @@ All notable changes to this project are documented here. The format follows
   serving the turn, and a `⚠` replaces the savings segment when the interceptor is degraded.
   Extras shed right-to-left on narrow terminals. `llmtrim statusline install` wires it into
   `~/.claude/settings.json` (`--print` emits the snippet instead); `uninstall` removes it.
+  `setup` points Claude Code users to it in its next-steps, but never writes the file itself
+  (setup stays client-agnostic and touches no IDE config).
 
 ### Changed
 

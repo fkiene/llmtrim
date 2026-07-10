@@ -292,6 +292,16 @@ pub fn run() -> Result<()> {
 
 // ── install / uninstall (wire ~/.claude/settings.json) ────────────────────────────
 
+/// Whether Claude Code appears to be installed (its `~/.claude` config dir exists). Used by
+/// `setup` to hint at the status line for Claude Code users only, not users of other agents —
+/// setup itself is client-agnostic and never writes this file.
+pub fn claude_code_present() -> bool {
+    claude_settings_path()
+        .ok()
+        .and_then(|p| p.parent().map(std::path::Path::is_dir))
+        .unwrap_or(false)
+}
+
 fn claude_settings_path() -> Result<PathBuf> {
     let home = std::env::var("HOME")
         .or_else(|_| std::env::var("USERPROFILE"))
