@@ -8,6 +8,10 @@ All notable changes to this project are documented here. The format follows
 
 ### Changed
 
+- **`llmtrim sub codex`: updated default tier models.** The balanced preset now maps Opus to
+  `gpt-5.5-terra`, Sonnet to `gpt-5.5-luna`, and Fable to `gpt-5.5-sol`; Haiku stays on the
+  cheap `gpt-5.4-mini`. Custom `[sub.codex.tiers]` overrides are unaffected.
+
 - **`llmtrim sub`: clearer on/off verbs.** Enabling a reroute is now `sub on <provider>`
   (with `sub use` and `sub start` accepted as aliases); disabling stays `sub off` (with
   `sub stop` as an alias). A bare `sub on` re-enables the last provider you used without

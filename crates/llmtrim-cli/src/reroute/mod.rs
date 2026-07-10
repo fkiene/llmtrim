@@ -226,15 +226,17 @@ pub fn classify_tier(model: &str) -> Option<Tier> {
     }
 }
 
-/// The built-in default preset for Codex (the single `balanced` preset). Opus and Fable get the
-/// flagship, Sonnet the balanced model, Haiku the small/fast model (Claude Code's background
-/// title/token calls land on Haiku, so it should be cheap). Kimi has one model and ignores tiers.
+/// The built-in default preset for Codex (the single `balanced` preset). Opus maps to the deep
+/// reasoning flagship (`gpt-5.5-terra`), Sonnet to the balanced flagship (`gpt-5.5-luna`), Fable
+/// to the fast flagship (`gpt-5.5-sol`), and Haiku to the small/fast model (Claude Code's
+/// background title/token calls land on Haiku, so it should be cheap). Kimi has one model and
+/// ignores tiers.
 pub fn default_codex_tier_model(tier: Tier) -> &'static str {
     match tier {
-        Tier::Opus => "gpt-5.5",
-        Tier::Sonnet => "gpt-5.4",
+        Tier::Opus => "gpt-5.5-terra",
+        Tier::Sonnet => "gpt-5.5-luna",
         Tier::Haiku => "gpt-5.4-mini",
-        Tier::Fable => "gpt-5.5",
+        Tier::Fable => "gpt-5.5-sol",
     }
 }
 
@@ -349,16 +351,19 @@ mod tests {
         let ov = BTreeMap::new();
         assert_eq!(
             resolve_model(SubProvider::Codex, "claude-opus-4-8", &ov),
-            "gpt-5.5"
+            "gpt-5.5-terra"
         );
-        assert_eq!(resolve_model(SubProvider::Codex, "sonnet", &ov), "gpt-5.4");
+        assert_eq!(
+            resolve_model(SubProvider::Codex, "sonnet", &ov),
+            "gpt-5.5-luna"
+        );
         assert_eq!(
             resolve_model(SubProvider::Codex, "haiku", &ov),
             "gpt-5.4-mini"
         );
         assert_eq!(
             resolve_model(SubProvider::Codex, "claude-fable-5", &ov),
-            "gpt-5.5"
+            "gpt-5.5-sol"
         );
     }
 
@@ -406,7 +411,7 @@ mod tests {
         let ov = BTreeMap::new();
         assert_eq!(
             resolve_model(SubProvider::Codex, "mystery-model", &ov),
-            "gpt-5.4"
+            "gpt-5.5-luna"
         );
     }
 }
