@@ -8,6 +8,13 @@ All notable changes to this project are documented here. The format follows
 
 ### Changed
 
+- **`llmtrim sub on`/`off`/`mode` apply immediately.** The interceptor reads its config once at
+  startup, so a reroute change used to sit inert until you manually restarted the daemon. These
+  commands now restart a running interceptor in place to apply the change (and say so); pass
+  `--no-restart` to keep the old behavior and just print the restart hint. Nothing is running,
+  nothing is restarted. Signing in is still required before a freshly enabled reroute works, so
+  `sub on` skips the restart until you have a token.
+
 - **`llmtrim sub codex`: updated default tier models.** The balanced preset now maps Opus to
   `gpt-5.6-terra`, Sonnet to `gpt-5.6-luna`, and Fable to `gpt-5.6-sol`; Haiku stays on the
   cheap `gpt-5.4-mini`. Custom `[sub.codex.tiers]` overrides are unaffected.
