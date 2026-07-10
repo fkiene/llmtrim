@@ -551,12 +551,66 @@ pub fn write_sub_mapping(
 
 /// Disable subscription reroute: set `sub.active = "off"` (the reader filters `off` to unset),
 /// preserving the saved `[sub.<provider>.tiers]` mapping and `mode` so re-enabling with
-/// `sub use <provider>` restores them. Goes through `edit_sub_table_at` like the other editors.
+/// `sub on` restores them. The provider being turned off is remembered in `sub.last` so a bare
+/// `sub on` can bring it back. Goes through `edit_sub_table_at` like the other editors.
 pub fn disable_sub() -> Result<()> {
     let path = config_path().ok_or_else(|| anyhow::anyhow!("no config path (HOME/XDG unset)"))?;
-    edit_sub_table_at(&path, |t| {
+    disable_sub_at(&path)
+}
+
+fn disable_sub_at(path: &std::path::Path) -> Result<()> {
+    edit_sub_table_at(path, |t| {
+        if let Some(active) = t.get("active").and_then(toml::Value::as_str)
+            && active != "off"
+            && !active.is_empty()
+        {
+            let last = active.to_string();
+            t.insert("last".to_string(), toml::Value::String(last));
+        }
         t.insert("active".to_string(), toml::Value::String("off".to_string()));
     })
+}
+
+/// Re-enable reroute to `provider` without rewriting its saved `[sub.<provider>.tiers]` preset
+/// (unlike [`write_sub_mapping`], which resets it to defaults). Used by `sub on` with no explicit
+/// provider, so a customized mapping survives an off/on cycle.
+pub fn enable_sub(provider: &str) -> Result<()> {
+    let path = config_path().ok_or_else(|| anyhow::anyhow!("no config path (HOME/XDG unset)"))?;
+    enable_sub_at(&path, provider)
+}
+
+fn enable_sub_at(path: &std::path::Path, provider: &str) -> Result<()> {
+    let provider = provider.to_string();
+    edit_sub_table_at(path, |t| {
+        t.insert("active".to_string(), toml::Value::String(provider));
+    })
+}
+
+/// The provider a bare `sub on` should restore: the currently-active provider if reroute is still
+/// on, else the `sub.last` provider saved by [`disable_sub`]. `None` if reroute was never enabled.
+pub fn sub_reenable_provider() -> Option<String> {
+    sub_reenable_provider_at(&config_path()?)
+}
+
+fn sub_reenable_provider_at(path: &std::path::Path) -> Option<String> {
+    let doc: toml::Value = toml::from_str(&std::fs::read_to_string(path).ok()?).ok()?;
+    let sub = doc.get("sub")?;
+    // Bare-string form: `sub = "codex"`.
+    if let Some(s) = sub.as_str() {
+        return (s != "off" && !s.is_empty()).then(|| s.trim().to_ascii_lowercase());
+    }
+    let clean = |s: &str| {
+        let s = s.trim();
+        (s != "off" && !s.is_empty()).then(|| s.to_ascii_lowercase())
+    };
+    sub.get("active")
+        .and_then(toml::Value::as_str)
+        .and_then(clean)
+        .or_else(|| {
+            sub.get("last")
+                .and_then(toml::Value::as_str)
+                .and_then(clean)
+        })
 }
 
 fn write_sub_mapping_at(
@@ -1197,6 +1251,52 @@ mod tests {
             file.get("preset").and_then(toml::Value::as_str),
             Some("auto")
         );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn sub_off_on_cycle_preserves_provider_and_mapping() {
+        let dir = std::env::temp_dir().join(format!("llmtrim-sub-onoff-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("config.toml");
+
+        // Enable codex with a customized mapping.
+        let mut tiers = std::collections::BTreeMap::new();
+        tiers.insert("opus".to_string(), "gpt-5.5-custom".to_string());
+        write_sub_mapping_at(&path, "codex", &tiers).unwrap();
+        assert_eq!(sub_reenable_provider_at(&path).as_deref(), Some("codex"));
+
+        // Off remembers the provider as `last` and unsets `active`.
+        disable_sub_at(&path).unwrap();
+        let no_env = |_: &str| None;
+        let file: toml::Value = toml::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        // `off` is the disabled marker (resolve() normalizes it to None downstream).
+        assert_eq!(
+            resolve_sub_provider(&no_env, Some(&file)).as_deref(),
+            Some("off")
+        );
+        assert_eq!(sub_reenable_provider_at(&path).as_deref(), Some("codex"));
+
+        // Bare `on` restores codex without wiping the custom mapping.
+        let restore = sub_reenable_provider_at(&path).unwrap();
+        enable_sub_at(&path, &restore).unwrap();
+        let file: toml::Value = toml::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(
+            resolve_sub_provider(&no_env, Some(&file)).as_deref(),
+            Some("codex")
+        );
+        let read = resolve_sub_tiers(&no_env, Some(&file));
+        assert_eq!(read.get("opus").map(String::as_str), Some("gpt-5.5-custom"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn sub_reenable_none_when_never_enabled() {
+        let dir = std::env::temp_dir().join(format!("llmtrim-sub-none-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("config.toml");
+        std::fs::write(&path, "preset = \"auto\"\n").unwrap();
+        assert_eq!(sub_reenable_provider_at(&path), None);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
