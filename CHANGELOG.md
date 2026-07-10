@@ -6,6 +6,14 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Changed
+
+- **`llmtrim sub`: clearer on/off verbs.** Enabling a reroute is now `sub on <provider>`
+  (with `sub use` and `sub start` accepted as aliases); disabling stays `sub off` (with
+  `sub stop` as an alias). A bare `sub on` re-enables the last provider you used without
+  retyping it, and keeps your customized tier mapping intact across an off/on cycle. `sub`
+  also now appears in the top-level `--help`.
+
 ## [0.9.1] - 2026-07-09
 
 ### Fixed

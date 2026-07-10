@@ -49,6 +49,7 @@ Get started:
   setup      Set everything up and start saving (CA, env, autostart, daemon)
   status     Show the savings dashboard + interceptor health  [aliases: monitor, gain]
   wrap       Launch an agent (claude, codex, …) routed through the interceptor
+  sub        Reroute Claude Code to another subscription's backend (codex|kimi)
   tray       Open the desktop tray app (savings menu-bar / system-tray)
 
 Daemon:
@@ -391,11 +392,18 @@ enum SubCmd {
         provider: String,
     },
     /// Enable reroute to a provider (writes `sub = <provider>` to the config).
-    Use {
-        /// Provider to route to: codex|kimi.
-        provider: String,
+    ///
+    /// Omit the provider to re-enable the last provider you used. `sub use` and `sub start`
+    /// are accepted aliases.
+    #[command(visible_alias = "use", alias = "start")]
+    On {
+        /// Provider to route to: codex|kimi. Omit to re-enable the last provider used.
+        provider: Option<String>,
     },
     /// Disable reroute (sets `sub = off`); traffic goes back to Anthropic with compression only.
+    ///
+    /// `sub stop` is an accepted alias.
+    #[command(alias = "stop")]
     Off,
     /// Set the reroute mode: `always` (reroute every turn) or `on-error` (only when Anthropic
     /// hits a usage/overload limit).
@@ -656,7 +664,27 @@ fn run_auth(provider: &str, action: AuthAction) -> Result<()> {
 // No non-intercept `run_auth` stub: auth is only dispatched from `run_sub`'s `Auth` arm, which is
 // itself `#[cfg(feature = "intercept")]`, so a non-intercept build never references it.
 
-/// Handle `llmtrim sub <setup|use|off|status>`.
+/// Report that reroute is now on, nudging to sign in only when there's no stored token.
+#[cfg(feature = "intercept")]
+fn print_reroute_enabled(p: llmtrim::reroute::SubProvider) {
+    let logged_in =
+        llmtrim::reroute::auth::auth_status_json(p)["logged_in"].as_bool() == Some(true);
+    if logged_in {
+        println!(
+            "Reroute enabled: {}. Restart the proxy (`llmtrim start`) to apply.",
+            p.as_str()
+        );
+    } else {
+        println!(
+            "Reroute enabled: {}. Sign in with `llmtrim sub auth {} login`, then restart \
+             the proxy (`llmtrim start`).",
+            p.as_str(),
+            p.as_str()
+        );
+    }
+}
+
+/// Handle `llmtrim sub <setup|on|off|status>`.
 #[cfg(feature = "intercept")]
 fn run_sub(action: SubCmd) -> Result<()> {
     use llmtrim::reroute::{SubProvider, Tier, default_codex_tier_model};
@@ -676,34 +704,34 @@ fn run_sub(action: SubCmd) -> Result<()> {
                 anyhow::bail!("the mapping editor needs the `breakdown` feature")
             }
         }
-        SubCmd::Use { provider } => {
-            let p = parse(&provider)?;
-            let mut map = std::collections::BTreeMap::new();
-            if p == SubProvider::Codex {
-                for t in Tier::ALL {
-                    map.insert(
-                        t.as_str().to_string(),
-                        default_codex_tier_model(t).to_string(),
-                    );
+        SubCmd::On { provider } => {
+            match provider {
+                // Explicit provider: (re)write the default preset, as `use` always has.
+                Some(provider) => {
+                    let p = parse(&provider)?;
+                    let mut map = std::collections::BTreeMap::new();
+                    if p == SubProvider::Codex {
+                        for t in Tier::ALL {
+                            map.insert(
+                                t.as_str().to_string(),
+                                default_codex_tier_model(t).to_string(),
+                            );
+                        }
+                    }
+                    llmtrim_core::config::write_sub_mapping(p.as_str(), &map)?;
+                    print_reroute_enabled(p);
                 }
-            }
-            llmtrim_core::config::write_sub_mapping(p.as_str(), &map)?;
-            // Only nudge to sign in when there's no stored token — don't tell an already
-            // authenticated user to authenticate.
-            let logged_in =
-                llmtrim::reroute::auth::auth_status_json(p)["logged_in"].as_bool() == Some(true);
-            if logged_in {
-                println!(
-                    "Reroute enabled: {}. Restart the proxy (`llmtrim start`) to apply.",
-                    p.as_str()
-                );
-            } else {
-                println!(
-                    "Reroute enabled: {}. Sign in with `llmtrim sub auth {} login`, then restart \
-                     the proxy (`llmtrim start`).",
-                    p.as_str(),
-                    p.as_str()
-                );
+                // Bare `sub on`: restore the last provider, keeping its saved mapping.
+                None => {
+                    let provider = llmtrim_core::config::sub_reenable_provider().ok_or_else(|| {
+                        anyhow::anyhow!(
+                            "no provider to re-enable — run `llmtrim sub on codex` (or kimi) first"
+                        )
+                    })?;
+                    let p = parse(&provider)?;
+                    llmtrim_core::config::enable_sub(p.as_str())?;
+                    print_reroute_enabled(p);
+                }
             }
             Ok(())
         }
