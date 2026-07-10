@@ -53,6 +53,10 @@ pub struct Record {
 #[derive(Debug, Clone, Default)]
 pub struct BreakdownTurn {
     pub session_id: String,
+    /// Claude Code's own session id (`x-claude-code-session-id` header), when present.
+    /// Distinct from `session_id` (a hash of the system prompt) — this lets the status
+    /// line match a session exactly. `None` for non-Claude-Code traffic or older rows.
+    pub cc_session_id: Option<String>,
     pub agent: String,
     pub project: Option<String>,
     pub session_name: Option<String>,
@@ -360,6 +364,7 @@ impl Tracker {
                     id            INTEGER PRIMARY KEY,
                     ts            TEXT NOT NULL,
                     session_id    TEXT NOT NULL,
+                    cc_session_id TEXT,
                     agent         TEXT NOT NULL,
                     project       TEXT,
                     session_name  TEXT,
@@ -434,6 +439,14 @@ impl Tracker {
             {
                 return Err(e).with_context(|| format!("failed to add breakdown column {col}"));
             }
+        }
+        // cc_session_id is TEXT, not INTEGER — additive ALTER kept separate from the loop above.
+        if let Err(e) = self
+            .conn
+            .execute("ALTER TABLE breakdown_turns ADD COLUMN cc_session_id TEXT", [])
+            && !is_duplicate_column(&e)
+        {
+            return Err(e).context("failed to add breakdown column cc_session_id");
         }
         Ok(())
     }
@@ -527,14 +540,15 @@ impl Tracker {
         self.conn
             .execute(
                 "INSERT INTO breakdown_turns
-                    (ts, session_id, agent, project, session_name, provider, model, window,
-                     fresh_input, cache_read, cache_write, output_tok,
+                    (ts, session_id, cc_session_id, agent, project, session_name, provider, model,
+                     window, fresh_input, cache_read, cache_write, output_tok,
                      input_rate, output_rate, cache_read_rate, cache_write_rate, bill_micros,
                      input_before, input_after)
-                 VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19)",
+                 VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20)",
                 params![
                     ts,
                     turn.session_id,
+                    turn.cc_session_id,
                     turn.agent,
                     turn.project,
                     turn.session_name,
@@ -642,14 +656,15 @@ impl Tracker {
         self.conn
             .execute(
                 "INSERT INTO breakdown_turns
-                    (ts, session_id, agent, project, session_name, provider, model, window,
-                     fresh_input, cache_read, cache_write, output_tok,
+                    (ts, session_id, cc_session_id, agent, project, session_name, provider, model,
+                     window, fresh_input, cache_read, cache_write, output_tok,
                      input_rate, output_rate, cache_read_rate, cache_write_rate, bill_micros,
                      input_before, input_after)
-                 VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19)",
+                 VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20)",
                 params![
                     ts,
                     turn.session_id,
+                    turn.cc_session_id,
                     turn.agent,
                     turn.project,
                     turn.session_name,
@@ -965,6 +980,7 @@ mod tests {
     fn breakdown_turn(session: &str) -> BreakdownTurn {
         BreakdownTurn {
             session_id: session.to_string(),
+            cc_session_id: None,
             agent: "claude-code".to_string(),
             project: Some("/proj".to_string()),
             session_name: None,

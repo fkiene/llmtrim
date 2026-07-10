@@ -218,12 +218,17 @@ fn ledger_snapshot(cc: &CcInput) -> Led {
         .and_then(|p| reroute_real_window(p, &cc.model_id, &cfg.sub_tiers));
     let health = proxy_health();
 
-    // One session-row read serves both trim and cache-cold.
+    // One session-row read serves both trim and cache-cold. Match on `cc_session_id` — the real
+    // Claude Code session id the proxy now records — not the ledger's `session_id`, which is a
+    // hash of the system prompt and never equals Claude Code's UUID.
     let row = cc.session_id.as_deref().and_then(|sid| {
         crate::breakdown::db::BreakdownDb::open()
             .ok()
             .and_then(|db| db.sessions().ok())
-            .and_then(|rows| rows.into_iter().find(|r| r.session_id == sid))
+            .and_then(|rows| {
+                rows.into_iter()
+                    .find(|r| r.cc_session_id.as_deref() == Some(sid))
+            })
     });
     let trim_pct = match &row {
         Some(r) => (r.input_before > 0)

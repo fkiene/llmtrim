@@ -137,6 +137,7 @@ mod tests {
     fn session(name: Option<&str>, project: Option<&str>) -> SessionRow {
         SessionRow {
             session_id: "abc123def456".to_string(),
+            cc_session_id: None,
             agent: "claude-code".to_string(),
             project: project.map(str::to_string),
             session_name: name.map(str::to_string),

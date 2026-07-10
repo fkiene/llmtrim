@@ -553,6 +553,7 @@ mod tests {
     fn metered_turn(agent: &str, before: i64, after: i64, bill: i64) -> BreakdownTurn {
         BreakdownTurn {
             session_id: format!("sess-{agent}"),
+            cc_session_id: None,
             agent: agent.to_string(),
             project: Some("/some/project".to_string()),
             session_name: Some("my session".to_string()),

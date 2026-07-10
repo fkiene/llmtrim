@@ -658,6 +658,8 @@ mod imp {
         blocks: Vec<llmtrim_core::attribution::BlockAttribution>,
         identity: llmtrim_core::attribution::RequestIdentity,
         window: i64,
+        /// Claude Code's own session id (`x-claude-code-session-id` header), when present.
+        cc_session_id: Option<String>,
     }
 
     /// A completed breakdown turn (identity + frozen pricing) plus its reconciled source blocks,
@@ -690,6 +692,7 @@ mod imp {
         json: &str,
         kind: ProviderKind,
         model: Option<&str>,
+        cc_session_id: Option<String>,
     ) -> Option<BreakdownPending> {
         let body: serde_json::Value = serde_json::from_str(json).ok()?;
         let counter = llmtrim_core::tokenizer::counter_for(kind, model).ok()?;
@@ -702,6 +705,7 @@ mod imp {
             blocks,
             identity,
             window: window_for(model),
+            cc_session_id,
         })
     }
 
@@ -805,6 +809,7 @@ mod imp {
                 .session_id
                 .clone()
                 .unwrap_or_else(|| "unknown".to_string()),
+            cc_session_id: xp.cc_session_id.clone(),
             agent: id.agent.clone().unwrap_or_else(|| "unknown".to_string()),
             project: id.project.clone(),
             session_name: None,
@@ -1052,6 +1057,11 @@ mod imp {
                 return req.into();
             }
             let (parts, body) = req.into_parts();
+            let cc_session_id = parts
+                .headers
+                .get("x-claude-code-session-id")
+                .and_then(|v| v.to_str().ok())
+                .map(str::to_string);
             let bytes = match body.collect().await {
                 Ok(c) => c.to_bytes(),
                 Err(_) => return Request::from_parts(parts, Body::empty()).into(),
@@ -1072,6 +1082,7 @@ mod imp {
                     provider,
                     model_override.as_deref(),
                     &memo,
+                    cc_session_id,
                 )
             })
             .await
@@ -1185,6 +1196,7 @@ mod imp {
             let memo = self.memo.clone();
             let body_for_compress = bytes.clone();
             let started = std::time::Instant::now();
+            let cc_session_id = session_id.clone();
             let compressed = tokio::task::spawn_blocking(move || {
                 compress_blocking(
                     &config,
@@ -1192,6 +1204,7 @@ mod imp {
                     ProviderKind::Anthropic,
                     None,
                     &memo,
+                    cc_session_id,
                 )
             })
             .await
@@ -1897,6 +1910,7 @@ mod imp {
         provider: ProviderKind,
         model_override: Option<&str>,
         memo: &Memo,
+        cc_session_id: Option<String>,
     ) -> Option<(String, Pending)> {
         let text = std::str::from_utf8(body).ok()?;
         if !text.trim_start().starts_with('{') {
@@ -1939,7 +1953,12 @@ mod imp {
                 output_shaped: false,
                 frozen_input_tokens: Some(result.frozen_input_tokens.0 as i64),
                 // Passthrough forwards the original verbatim — attribute that body.
-                breakdown: attribute_for_breakdown(text, kind, result.model.as_deref()),
+                breakdown: attribute_for_breakdown(
+                    text,
+                    kind,
+                    result.model.as_deref(),
+                    cc_session_id.clone(),
+                ),
                 reroute: None,
                 fallback: None,
             };
@@ -1968,7 +1987,12 @@ mod imp {
             frozen_input_tokens: Some(result.frozen_input_tokens.0 as i64),
             // Attribute the compressed body we actually forward — its tokens are what the
             // provider bills, so it matches the usage we reconcile against.
-            breakdown: attribute_for_breakdown(&result.request_json, kind, result.model.as_deref()),
+            breakdown: attribute_for_breakdown(
+                &result.request_json,
+                kind,
+                result.model.as_deref(),
+                cc_session_id,
+            ),
             reroute: None,
             fallback: None,
         };
@@ -3741,9 +3765,9 @@ mod imp {
             let cfg = DenseConfig::default();
             let memo = Memo::with_capacity(llmtrim_core::memo::DEFAULT_CAPACITY);
             assert!(
-                compress_blocking(&cfg, b"not json", ProviderKind::OpenAi, None, &memo).is_none()
+                compress_blocking(&cfg, b"not json", ProviderKind::OpenAi, None, &memo, None).is_none()
             );
-            assert!(compress_blocking(&cfg, b"", ProviderKind::OpenAi, None, &memo).is_none());
+            assert!(compress_blocking(&cfg, b"", ProviderKind::OpenAi, None, &memo, None).is_none());
         }
 
         #[test]
@@ -3757,7 +3781,7 @@ mod imp {
             // May return None (net loss) or Some (net win); both are valid.
             // The important assertion: when Some, the compressed form must have fewer input tokens.
             if let Some((compressed, pending)) =
-                compress_blocking(&cfg, body.as_bytes(), ProviderKind::OpenAi, None, &memo)
+                compress_blocking(&cfg, body.as_bytes(), ProviderKind::OpenAi, None, &memo, None)
             {
                 assert!(
                     pending.input_after <= pending.input_before,
@@ -3785,7 +3809,7 @@ mod imp {
             // Dedup is default-on and the spam is contiguous: this must compress, so a
             // `None` here is a regression (the test must not pass vacuously).
             let (compressed, pending) =
-                compress_blocking(&cfg, body.as_bytes(), ProviderKind::OpenAi, None, &memo)
+                compress_blocking(&cfg, body.as_bytes(), ProviderKind::OpenAi, None, &memo, None)
                     .expect("50 identical log lines must produce a net token win");
             assert!(
                 pending.input_after < pending.input_before,
@@ -3885,7 +3909,7 @@ mod imp {
             let cfg = DenseConfig::default();
             let memo = Memo::with_capacity(llmtrim_core::memo::DEFAULT_CAPACITY);
             if let Some((compressed_json, pending)) =
-                compress_blocking(&cfg, body.as_bytes(), ProviderKind::OpenAi, None, &memo)
+                compress_blocking(&cfg, body.as_bytes(), ProviderKind::OpenAi, None, &memo, None)
             {
                 // compress_blocking now always returns Some for valid JSON, even on zero-savings
                 // inputs (the caller records the row; `input_after == input_before` means
@@ -3981,6 +4005,7 @@ mod imp {
                         project: None,
                     },
                     window: 200_000,
+                    cc_session_id: None,
                 }),
                 reroute: None,
                 fallback: None,

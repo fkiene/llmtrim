@@ -2388,6 +2388,7 @@ mod tests {
     fn srow(agent: &str, project: Option<&str>, id: &str, turns: i64, bill: i64) -> SessionRow {
         SessionRow {
             session_id: id.to_string(),
+            cc_session_id: None,
             agent: agent.to_string(),
             project: project.map(str::to_string),
             session_name: None,
@@ -2892,6 +2893,7 @@ mod tests {
         let t = Tracker::open_in_memory().unwrap();
         let turn = |sid: &str, agent: &str, proj: &str, name: &str| BreakdownTurn {
             session_id: sid.into(),
+            cc_session_id: None,
             agent: agent.into(),
             project: Some(proj.into()),
             session_name: Some(name.into()),

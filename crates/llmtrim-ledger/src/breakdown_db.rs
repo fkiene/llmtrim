@@ -14,6 +14,7 @@ use rusqlite::{Connection, params};
 #[derive(Debug, Clone)]
 pub struct SessionRow {
     pub session_id: String,
+    pub cc_session_id: Option<String>,
     pub agent: String,
     pub project: Option<String>,
     pub session_name: Option<String>,
@@ -104,7 +105,7 @@ impl BreakdownDb {
                 // so the latest `session_name` is `rn = 1`, then aggregate — instead of a
                 // correlated subquery that re-scanned the table once per session group.
                 "WITH ranked AS (
-                     SELECT session_id, agent, project, session_name, ts, id,
+                     SELECT session_id, cc_session_id, agent, project, session_name, ts, id,
                             fresh_input, cache_read, cache_write, output_tok,
                             bill_micros, input_before, input_after,
                             ROW_NUMBER() OVER (
@@ -122,7 +123,8 @@ impl BreakdownDb {
                         COALESCE(SUM(bill_micros), 0),
                         COALESCE(SUM(input_before), 0),
                         COALESCE(SUM(input_after), 0),
-                        MAX(ts)
+                        MAX(ts),
+                        MAX(cc_session_id)
                  FROM ranked
                  GROUP BY session_id, agent, project
                  ORDER BY MAX(ts) DESC",
@@ -148,6 +150,7 @@ impl BreakdownDb {
                     input_before: r.get(9)?,
                     input_after: r.get(10)?,
                     last_ts: r.get(11)?,
+                    cc_session_id: r.get(12)?,
                 })
             })
             .context("failed to query sessions")?;
@@ -263,6 +266,7 @@ mod tests {
     fn turn(session: &str) -> BreakdownTurn {
         BreakdownTurn {
             session_id: session.to_string(),
+            cc_session_id: None,
             agent: "claude-code".to_string(),
             project: Some("/proj".to_string()),
             session_name: Some("my session".to_string()),
@@ -322,6 +326,25 @@ mod tests {
             )
             .unwrap();
         BreakdownDb::from_connection(tracker.into_connection())
+    }
+
+    #[test]
+    fn sessions_round_trip_the_cc_session_id() {
+        // The real Claude Code session id (a dashed UUID, distinct from the system-prompt-hash
+        // `session_id`) survives insert → aggregate, so the status line can match a live session.
+        let tracker = Tracker::open_in_memory().unwrap();
+        let mut t = turn("sess-a");
+        t.cc_session_id = Some("968ad7ea-6e4a-430e-a708-4eda80c8b858".to_string());
+        tracker
+            .record_breakdown(&t, &[block("Static", "System prompt", None, 50.0, 100.0)])
+            .unwrap();
+        let db = BreakdownDb::from_connection(tracker.into_connection());
+        let rows = db.sessions().unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(
+            rows[0].cc_session_id.as_deref(),
+            Some("968ad7ea-6e4a-430e-a708-4eda80c8b858")
+        );
     }
 
     #[test]
