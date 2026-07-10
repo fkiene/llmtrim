@@ -7,7 +7,7 @@
 //! width-adaptive line:
 //!
 //! ```text
-//! ◆ Opus·high→codex   ▓▓▓▓▓░░░ 142k   ✂ 6.8%   5h 24%   ♻ 63% cached
+//! ◆ Opus·high→codex   ▓▓▓▓▓░░░ 142k   ✂ 6.8%   ◔ 5h·24%   ♻ 63% cached
 //! ```
 //!
 //! The three left segments (model·effort→backend, context, ✂ trim) are core and never
@@ -59,6 +59,10 @@ fn paint(color: bool, code: &str, s: &str) -> String {
 struct CcInput {
     model: String,
     effort: Option<String>,
+    /// Claude Code's own session id (the `x-claude-code-session-id` it also tags on every
+    /// intercepted request), used to scope trim to *this* session's ledger rows. `None` if
+    /// absent — trim then falls back to the lifetime figure.
+    session_id: Option<String>,
     /// Total input tokens currently in the context window (fresh + cache), from the last
     /// API response. `0` before the first response.
     ctx_tokens: i64,
@@ -79,6 +83,11 @@ fn parse_cc(input: &str) -> CcInput {
     let effort = v
         .pointer("/effort/level")
         .and_then(Value::as_str)
+        .map(str::to_string);
+    let session_id = v
+        .pointer("/session_id")
+        .and_then(Value::as_str)
+        .filter(|s| !s.is_empty())
         .map(str::to_string);
     let ctx_tokens = v
         .pointer("/context_window/total_input_tokens")
@@ -101,6 +110,7 @@ fn parse_cc(input: &str) -> CcInput {
     CcInput {
         model,
         effort,
+        session_id,
         ctx_tokens,
         five_hour_pct,
         cache_pct,
@@ -111,8 +121,10 @@ fn parse_cc(input: &str) -> CcInput {
 
 struct Led {
     health: Health,
-    /// Input compression saved, % of input tokens (lifetime).
-    trim_pct: f64,
+    /// Input compression saved, % of input tokens — scoped to this Claude Code session when
+    /// its id is known, else lifetime. `None` when there are no rows to measure yet (a fresh
+    /// session), which renders an idle `✂ –` rather than a misleading `✂ 0.0%`.
+    trim_pct: Option<f64>,
     /// Active reroute provider (`codex`/`kimi`), if `sub` is on.
     reroute: Option<String>,
 }
@@ -151,22 +163,35 @@ fn proxy_health() -> Health {
     monitor::health(&dv)
 }
 
-fn ledger_snapshot() -> Led {
+fn ledger_snapshot(session_id: Option<&str>) -> Led {
     let reroute = llmtrim_core::config::RuntimeConfig::get()
         .sub
         .clone()
         .filter(|s| !s.is_empty() && s != "off");
     let health = proxy_health();
-
-    let trim_pct = Tracker::open()
-        .and_then(|t| t.summary())
-        .map(|s| ui::saved_pct(s.input_before as f64, s.input_after as f64))
-        .unwrap_or(0.0);
+    let trim_pct = session_trim_pct(session_id);
     Led {
         health,
         trim_pct,
         reroute,
     }
+}
+
+/// Compression saved for `session_id` (its ledger rows), falling back to the lifetime figure
+/// when the id is unknown. `None` — no measurable input yet — renders the idle marker.
+fn session_trim_pct(session_id: Option<&str>) -> Option<f64> {
+    let (before, after) = match session_id {
+        Some(sid) => crate::breakdown::db::BreakdownDb::open()
+            .ok()
+            .and_then(|db| db.sessions().ok())
+            .and_then(|rows| rows.into_iter().find(|r| r.session_id == sid))
+            .map(|r| (r.input_before, r.input_after))?,
+        None => {
+            let s = Tracker::open().and_then(|t| t.summary()).ok()?;
+            (s.input_before, s.input_after)
+        }
+    };
+    (before > 0).then(|| ui::saved_pct(before as f64, after as f64))
 }
 
 // ── rendering ─────────────────────────────────────────────────────────────────────
@@ -222,11 +247,16 @@ fn context_segment(ctx_tokens: i64, color: bool) -> String {
     paint(color, code, &format!("{bar} {k}k"))
 }
 
-/// The third core segment: `✂ 6.8%` when healthy, `⚠ llmtrim degraded` when broken, and
-/// nothing at all when cleanly stopped (llmtrim is simply off — not an error to flag).
+/// The third core segment: `✂ 6.8%` when healthy and this session has saved something, a dim
+/// `✂ –` when healthy but idle (nothing trimmed yet — avoids a misleading `✂ 0.0%` while still
+/// signalling "llmtrim is on"), `⚠ llmtrim degraded` when broken, and nothing at all when
+/// cleanly stopped (llmtrim is simply off — not an error to flag).
 fn trim_or_health_segment(led: &Led, color: bool) -> Option<String> {
     match led.health {
-        Health::Healthy => Some(paint(color, GREEN, &format!("✂ {:.1}%", led.trim_pct))),
+        Health::Healthy => Some(match led.trim_pct {
+            Some(pct) => paint(color, GREEN, &format!("✂ {pct:.1}%")),
+            None => paint(color, DIM, "✂ –"),
+        }),
         Health::Degraded => Some(paint(color, RED, "⚠ llmtrim degraded")),
         Health::Stopped => None,
     }
@@ -237,10 +267,12 @@ fn extra_segments(cc: &CcInput, color: bool) -> Vec<String> {
     let mut out = Vec::new();
     if let Some(p) = cc.five_hour_pct {
         let code = tier_color(p, 70.0, 90.0);
-        out.push(paint(color, code, &format!("5h {:.0}%", p)));
+        // `◔` = the 5-hour window filling up; `·` keeps `5h` from reading as a duration.
+        out.push(paint(color, code, &format!("◔ 5h·{}%", p.floor() as i64)));
     }
     if let Some(c) = cc.cache_pct {
-        out.push(paint(color, DIM, &format!("♻ {:.0}% cached", c)));
+        // Floor, not round: only a genuine 100% cache shows `100%` (99.9 stays `99%`).
+        out.push(paint(color, DIM, &format!("♻ {}% cached", c.floor() as i64)));
     }
     out
 }
@@ -279,7 +311,7 @@ pub fn run() -> Result<()> {
     std::io::stdin().read_to_string(&mut input).ok();
 
     let cc = parse_cc(&input);
-    let led = ledger_snapshot();
+    let led = ledger_snapshot(cc.session_id.as_deref());
     let cols = std::env::var("COLUMNS")
         .ok()
         .and_then(|s| s.parse::<usize>().ok())
@@ -399,7 +431,7 @@ mod tests {
     fn led(health: Health) -> Led {
         Led {
             health,
-            trim_pct: 6.8,
+            trim_pct: Some(6.8),
             reroute: Some("codex".to_string()),
         }
     }
@@ -408,6 +440,7 @@ mod tests {
         CcInput {
             model: "Opus".to_string(),
             effort: Some("high".to_string()),
+            session_id: None,
             ctx_tokens: ctx,
             five_hour_pct: Some(24.0),
             cache_pct: Some(63.0),
@@ -419,7 +452,7 @@ mod tests {
         let out = render_line(&cc(142_000), &led(Health::Healthy), 0, false);
         assert_eq!(
             out,
-            "◆ Opus·high→codex   ▓▓▓▓▓░░░ 142k   ✂ 6.8%   5h 24%   ♻ 63% cached"
+            "◆ Opus·high→codex   ▓▓▓▓▓░░░ 142k   ✂ 6.8%   ◔ 5h·24%   ♻ 63% cached"
         );
     }
 
@@ -463,9 +496,9 @@ mod tests {
     fn narrow_terminal_sheds_extras_right_to_left() {
         // Wide enough for core + quota, but not the cache extra.
         let full = render_line(&cc(142_000), &led(Health::Healthy), 0, false);
-        let width = ui::visible_width("◆ Opus·high→codex   ▓▓▓▓▓░░░ 142k   ✂ 6.8%   5h 24%");
+        let width = ui::visible_width("◆ Opus·high→codex   ▓▓▓▓▓░░░ 142k   ✂ 6.8%   ◔ 5h·24%");
         let out = render_line(&cc(142_000), &led(Health::Healthy), width, false);
-        assert!(out.ends_with("5h 24%"), "keeps quota, sheds cache: {out}");
+        assert!(out.ends_with("5h·24%"), "keeps quota, sheds cache: {out}");
         assert!(!out.contains("cached"), "cache dropped first: {out}");
         assert!(full.len() > out.len());
     }
@@ -488,6 +521,36 @@ mod tests {
         l.reroute = Some("kimi".to_string());
         let out = render_line(&cc(72_000), &l, 0, true);
         assert!(out.contains("→kimi"), "kimi arrow present: {out}");
+    }
+
+    #[test]
+    fn healthy_but_idle_shows_dim_marker_not_zero() {
+        // Nothing trimmed yet in this session: `✂ –`, never a misleading `✂ 0.0%`.
+        let mut l = led(Health::Healthy);
+        l.trim_pct = None;
+        let out = render_line(&cc(48_000), &l, 0, false);
+        assert!(out.contains("✂ –"), "idle marker shown: {out}");
+        assert!(!out.contains("0.0%"), "no fake zero: {out}");
+    }
+
+    #[test]
+    fn quota_and_cache_floor_not_round() {
+        // 99.9% cache is not 100%; 89.9% quota is not 90%.
+        let mut c = cc(48_000);
+        c.five_hour_pct = Some(89.9);
+        c.cache_pct = Some(99.9);
+        let out = render_line(&c, &led(Health::Healthy), 0, false);
+        assert!(out.contains("5h·89%"), "quota floored: {out}");
+        assert!(out.contains("♻ 99% cached"), "cache floored: {out}");
+    }
+
+    #[test]
+    fn parse_cc_reads_session_id() {
+        let cc = parse_cc(r#"{"model":{"display_name":"Opus"},"session_id":"abc-123"}"#);
+        assert_eq!(cc.session_id.as_deref(), Some("abc-123"));
+        // Empty id is treated as absent (falls back to lifetime trim).
+        let cc = parse_cc(r#"{"model":{"display_name":"Opus"},"session_id":""}"#);
+        assert!(cc.session_id.is_none());
     }
 
     #[test]

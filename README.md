@@ -306,10 +306,12 @@ llmtrim statusline install --print  # or print the settings snippet to paste you
 ```
 
 ```text
-◆ Opus·high→codex   ▓▓▓▓▓░░░ 142k   ✂ 6.8%   5h 24%   ♻ 63% cached
+◆ Opus·high→codex   ▓▓▓▓▓░░░ 142k   ✂ 6.8%   ◔ 5h·24%   ♻ 63% cached
 ```
 
-The context gauge is anchored to a fixed 200k budget, not the model's raw window, so a heavy
+The `✂` trim figure is scoped to the current Claude Code session; it reads `✂ –` until llmtrim
+has saved something this session. `◔ 5h·24%` is the share of your Claude.ai 5-hour limit
+used. The context gauge is anchored to a fixed 200k budget, not the model's raw window, so a heavy
 context still reads as heavy on a 1M-context model. Segments drop right-to-left on narrow
 terminals, and anything Claude Code doesn't report (no reroute, no rate limits) is simply left out.
 
