@@ -426,6 +426,9 @@ enum SubCmd {
     Effort {
         /// `none` | `low` | `medium` | `high` | `xhigh` (`max` = `xhigh`).
         level: String,
+        /// Don't restart a running interceptor to apply the change (just print the hint).
+        #[arg(long)]
+        no_restart: bool,
     },
     /// Map one incoming model (a Claude tier `opus|sonnet|haiku|fable`, or an exact model id) to a
     /// provider model. Non-interactive form of `setup`, for scripts and the tray.
@@ -436,6 +439,9 @@ enum SubCmd {
         from: String,
         /// Provider model to route it to.
         to: String,
+        /// Don't restart a running interceptor to apply the change (just print the hint).
+        #[arg(long)]
+        no_restart: bool,
     },
     /// Remove one mapping entry (falls back to the preset default for that model).
     Unmap {
@@ -443,6 +449,9 @@ enum SubCmd {
         provider: String,
         /// Incoming model or tier name to unmap.
         from: String,
+        /// Don't restart a running interceptor to apply the change (just print the hint).
+        #[arg(long)]
+        no_restart: bool,
     },
     /// List the provider's candidate models (for autocompletion). `--json` for machine output.
     Models {
@@ -719,6 +728,20 @@ fn apply_sub_change(no_restart: bool) {
     }
 }
 
+/// Apply a per-provider mapping edit (`map`/`unmap`) for `edited`. Only restarts when `edited` is
+/// the provider reroute is currently pointed at — a change to some other provider's mapping is
+/// inert until you switch to it, so there's no reason to disturb a live session.
+#[cfg(feature = "intercept")]
+fn apply_sub_map_change(edited: llmtrim::reroute::SubProvider, no_restart: bool) {
+    let active = llmtrim_core::config::RuntimeConfig::get()
+        .sub
+        .as_deref()
+        .and_then(llmtrim::reroute::SubProvider::parse);
+    if active == Some(edited) {
+        apply_sub_change(no_restart);
+    }
+}
+
 /// Handle `llmtrim sub <setup|on|off|status>`.
 #[cfg(feature = "intercept")]
 fn run_sub(action: SubCmd) -> Result<()> {
@@ -797,46 +820,53 @@ fn run_sub(action: SubCmd) -> Result<()> {
             apply_sub_change(no_restart);
             Ok(())
         }
-        SubCmd::Effort { level } => {
+        SubCmd::Effort { level, no_restart } => {
             let level = match level.trim().to_ascii_lowercase().as_str() {
                 "max" => "xhigh".to_string(),
                 l @ ("none" | "low" | "medium" | "high" | "xhigh") => l.to_string(),
                 other => anyhow::bail!("unknown effort '{other}' (none|low|medium|high|xhigh)"),
             };
             llmtrim_core::config::write_sub_effort(SubProvider::Codex.as_str(), &level)?;
-            println!(
-                "Codex reasoning effort: {level}. Restart the proxy (`llmtrim start`) to apply."
-            );
+            println!("Codex reasoning effort: {level}.");
             // Effort is Codex-only; if the active provider isn't Codex it's inert until you switch.
             let active = llmtrim_core::config::RuntimeConfig::get()
                 .sub
                 .as_deref()
                 .and_then(SubProvider::parse);
-            if active != Some(SubProvider::Codex) {
+            if active == Some(SubProvider::Codex) {
+                apply_sub_change(no_restart);
+            } else {
                 eprintln!(
                     "note: reroute is not on codex right now, so this effort has no effect until \
-                     `llmtrim sub use codex`."
+                     `llmtrim sub on codex`."
                 );
             }
             Ok(())
         }
-        SubCmd::Map { provider, from, to } => {
+        SubCmd::Map {
+            provider,
+            from,
+            to,
+            no_restart,
+        } => {
             let p = parse(&provider)?;
             llmtrim_core::config::write_sub_map_entry(p.as_str(), &from, &to)?;
-            println!(
-                "Mapped {from} -> {to} for {}. Restart the proxy (`llmtrim start`) to apply.",
-                p.as_str()
-            );
+            println!("Mapped {from} -> {to} for {}.", p.as_str());
+            apply_sub_map_change(p, no_restart);
             Ok(())
         }
-        SubCmd::Unmap { provider, from } => {
+        SubCmd::Unmap {
+            provider,
+            from,
+            no_restart,
+        } => {
             let p = parse(&provider)?;
             llmtrim_core::config::remove_sub_map_entry(p.as_str(), &from)?;
             println!(
-                "Unmapped {from} for {} (back to the preset default). Restart the proxy \
-                 (`llmtrim start`) to apply.",
+                "Unmapped {from} for {} (back to the preset default).",
                 p.as_str()
             );
+            apply_sub_map_change(p, no_restart);
             Ok(())
         }
         SubCmd::Models { provider, json } => {
