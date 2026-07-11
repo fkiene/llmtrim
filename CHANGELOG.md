@@ -8,6 +8,8 @@ All notable changes to this project are documented here. The format follows
 
 ### Fixed
 
+- **Low cache reuse on `sub codex` / `sub kimi`.** Follow-up turns now reuse backend state via `previous_response_id` + output transcript, producing the expected high cache hit rates instead of full resends.
+
 - **Status line stayed red after `/compact`.** The cold-cache segment (`♻ cold · /compact`) and
   context gauge keyed only on the interceptor ledger's `last_ts`. `/compact` runs inside Claude
   Code and does not update that timestamp, so the line kept warning after a successful compact.
