@@ -822,6 +822,12 @@ pub struct RuntimeConfig {
     /// reroutes every matching turn. Env `LLMTRIM_SUB_MODE` (`always`/`on_error`) or the file key
     /// `sub.mode`.
     pub sub_on_error: bool,
+    /// Whether to enable server-side continuation for Codex reroutes (`previous_response_id` +
+    /// delta-only `input` on follow-up turns). This keeps the upstream conversation state warm and
+    /// improves real prompt-cache / token reuse (the mechanism behind good `♻ % cached` numbers).
+    /// Env `LLMTRIM_CODEX_PREVIOUS_RESPONSE_ID` (1/true/yes) or `[sub.codex] previous_response_id = true`.
+    /// Defaults to `true`.
+    pub sub_codex_previous_response_id: bool,
 }
 
 impl RuntimeConfig {
@@ -907,6 +913,7 @@ impl RuntimeConfig {
             sub_tiers: resolve_sub_tiers(&env, file),
             sub_on_error: resolve_sub_on_error(&env, file),
             sub_effort: resolve_sub_effort(&env, file),
+            sub_codex_previous_response_id: resolve_sub_codex_continuation(&env, file),
         }
     }
 }
@@ -995,6 +1002,43 @@ fn resolve_sub_on_error(env: &impl Fn(&str) -> Option<String>, file: Option<&tom
         .and_then(toml::Value::as_str)
         .map(is_on_error)
         .unwrap_or(false)
+}
+
+/// Codex continuation (previous_response_id deltas) enabled? Env `LLMTRIM_CODEX_PREVIOUS_RESPONSE_ID`
+/// (truthy) wins, else `[sub.codex] previous_response_id = true` (or `continuation`). Defaults to
+/// `true` so sub-codex users get the cache/state benefit by default.
+fn resolve_sub_codex_continuation(
+    env: &impl Fn(&str) -> Option<String>,
+    file: Option<&toml::Value>,
+) -> bool {
+    let is_true = |s: &str| {
+        matches!(
+            s.trim().to_ascii_lowercase().as_str(),
+            "1" | "true" | "yes" | "on"
+        )
+    };
+    if let Some(v) = env("LLMTRIM_CODEX_PREVIOUS_RESPONSE_ID").filter(|s| !s.is_empty()) {
+        return is_true(&v);
+    }
+    if let Some(sub) = file.and_then(|v| v.get("sub")) {
+        if let Some(c) = sub.get("codex").or_else(|| sub.get("chatgpt")) {
+            if let Some(b) = c
+                .get("previous_response_id")
+                .or_else(|| c.get("continuation"))
+                .and_then(toml::Value::as_bool)
+            {
+                return b;
+            }
+            if let Some(s) = c
+                .get("previous_response_id")
+                .or_else(|| c.get("continuation"))
+                .and_then(toml::Value::as_str)
+            {
+                return is_true(s);
+            }
+        }
+    }
+    true
 }
 
 /// Persist the breakdown-TUI `theme` choice to the config file's top-level `theme` key,

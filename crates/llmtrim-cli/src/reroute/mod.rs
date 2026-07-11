@@ -15,6 +15,7 @@
 pub mod auth;
 pub mod catalog;
 pub mod codex;
+pub mod continuation;
 pub mod kimi;
 pub mod read_rewrite;
 pub mod sse;
@@ -101,6 +102,16 @@ impl StreamReducer {
         match self {
             StreamReducer::Codex(r) => r.finish(),
             StreamReducer::Kimi(r) => r.finish(),
+        }
+    }
+
+    /// For Codex continuation: take the assistant output items (text + function calls)
+    /// accumulated during reduction for this turn, to append to the transcript for next-turn
+    /// delta detection. Safe no-op for Kimi.
+    pub fn take_codex_output_items(&mut self) -> Vec<Value> {
+        match self {
+            StreamReducer::Codex(r) => r.take_output_items(),
+            StreamReducer::Kimi(_) => vec![],
         }
     }
 }
