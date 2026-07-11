@@ -75,6 +75,12 @@ pub enum ReduceEvent {
     Finish {
         stop_reason: StopReason,
         usage: Usage,
+        /// Codex (and similar) response id, used for server-side continuation via
+        /// previous_response_id. Present when the upstream provided one.
+        response_id: Option<String>,
+        /// Whether this terminal is eligible for continuation recording.
+        /// Mirrors the proxy: true only for completed non-incomplete turns.
+        continuation_eligible: bool,
     },
     /// A mid-stream upstream failure. Once `message_start` has been sent we cannot flip the HTTP
     /// status, so this is surfaced as an Anthropic SSE `error` event (which Claude Code renders).
@@ -145,9 +151,9 @@ impl AnthropicSseEncoder {
                 json!({"type": "input_json_delta", "partial_json": partial}),
             ),
             ReduceEvent::ToolStop => self.close_block(out),
-            ReduceEvent::Finish { stop_reason, usage } => {
-                self.emit_finish(out, *stop_reason, *usage)
-            }
+            ReduceEvent::Finish {
+                stop_reason, usage, ..
+            } => self.emit_finish(out, *stop_reason, *usage),
             ReduceEvent::Error { message } => self.emit_error(out, message),
         }
     }
@@ -310,6 +316,8 @@ mod tests {
                         cache_read: 3,
                         cache_write: 0,
                     },
+                    response_id: None,
+                    continuation_eligible: true,
                 },
             ],
         );
@@ -343,6 +351,8 @@ mod tests {
                 ReduceEvent::Finish {
                     stop_reason: StopReason::ToolUse,
                     usage: Usage::default(),
+                    response_id: None,
+                    continuation_eligible: false,
                 },
             ],
         );
@@ -363,6 +373,8 @@ mod tests {
             &ReduceEvent::Finish {
                 stop_reason: StopReason::EndTurn,
                 usage: Usage::default(),
+                response_id: None,
+                continuation_eligible: false,
             },
             &mut out,
         );

@@ -37,7 +37,11 @@ mod imp {
     use std::path::PathBuf;
     use std::sync::atomic::{AtomicU64, Ordering};
     use std::sync::mpsc::Sender;
+
+    use serde_json::Value;
     use std::sync::{Arc, Mutex};
+
+    use crate::reroute::sse::ReduceEvent;
 
     use anyhow::{Context, Result};
     use bytes::Bytes;
@@ -341,11 +345,20 @@ mod imp {
         /// The rewritten upstream request, retained so `reroute_response` can re-issue it on a
         /// retryable failure (429/5xx). `None` on paths that never retry (the on-error fallback).
         replay: Option<RerouteReplay>,
+        /// The full logical codex (or provider) request body *before* any continuation delta was
+        /// applied. Used to record server continuation state.
+        logical_body: Option<Value>,
+        /// The CC session id (x-claude-code-session-id), used as key for continuation state.
+        session_id: Option<String>,
     }
 
     /// Enough of the rewritten upstream request to re-issue it on a retryable failure. The body is
     /// shared (`Arc`) so retaining it for retries costs one copy of the compressed body, not one
     /// per attempt.
+    ///
+    /// Note: `body` here is the *wire* form (may already be a delta after continuation apply).
+    /// Use `RerouteInfo.logical_body` when you need the full pre-delta version (e.g. on
+    /// continuation errors).
     #[derive(Clone)]
     struct RerouteReplay {
         url: String,
@@ -553,6 +566,43 @@ mod imp {
             get("x-codex-primary-reset-after-seconds"),
             body,
         )
+    }
+
+    fn is_continuation_error(body: &[u8]) -> bool {
+        let lower = String::from_utf8_lossy(body).to_lowercase();
+        lower.contains("previous_response_not_found")
+            || lower.contains("previous response not found")
+            || (lower.contains("continuation") && lower.contains("not found"))
+    }
+
+    /// Centralized recording for Codex continuation.
+    /// Only records when eligible (completed non-incomplete) and we have logical/session.
+    /// Uses take_codex_output_items() to get assistant outputs for the transcript.
+    fn record_codex_continuation(
+        ev: &ReduceEvent,
+        reducer: &mut crate::reroute::StreamReducer,
+        provider: crate::reroute::SubProvider,
+        logical_body: Option<&Value>,
+        session_id: Option<&str>,
+    ) {
+        if let ReduceEvent::Finish {
+            response_id: Some(rid),
+            continuation_eligible: true,
+            ..
+        } = ev
+        {
+            if provider == crate::reroute::SubProvider::Codex {
+                if let Some(logical) = logical_body {
+                    let items = reducer.take_codex_output_items();
+                    crate::reroute::continuation::record_continuation(
+                        session_id,
+                        logical,
+                        Some(rid.as_str()),
+                        &items,
+                    );
+                }
+            }
+        }
     }
 
     /// Build the client-facing message for a non-2xx subscription-backend response. Pulls the
@@ -1261,6 +1311,29 @@ mod imp {
                 }
             };
 
+            // Apply Codex continuation (previous_response_id + delta input) if possible.
+            // `logical_body` is the full pre-delta codex request (used for recording the
+            // transcript and for re-issuing on continuation errors). `sent_body` may be a
+            // delta version. This matches the proxy's handling (except transport specifics).
+            let mut sent_body = rewrite.body.clone();
+            let mut logical_body: Option<Value> = None;
+            if sub == crate::reroute::SubProvider::Codex {
+                if let Ok(mut bval) = serde_json::from_slice::<Value>(&rewrite.body) {
+                    logical_body = Some(bval.clone());
+                    let enabled =
+                        llmtrim_core::config::RuntimeConfig::get().sub_codex_previous_response_id;
+                    let cand = crate::reroute::continuation::continuation_candidate(
+                        session_id.as_deref(),
+                        &bval,
+                        enabled,
+                    );
+                    crate::reroute::continuation::apply_codex_continuation(&mut bval, &cand);
+                    if let Ok(serialized) = serde_json::to_vec(&bval) {
+                        sent_body = serialized;
+                    }
+                }
+            }
+
             // Record intent: provider stays Anthropic (we emit Anthropic SSE, which `Finalize`
             // measures); model is the resolved upstream model; `reroute` marks the response path.
             self.pending = Some(Pending {
@@ -1282,8 +1355,10 @@ mod imp {
                     replay: Some(RerouteReplay {
                         url: format!("https://{}{}", rewrite.host, rewrite.path),
                         headers: rewrite.headers.clone(),
-                        body: Arc::new(rewrite.body.clone()),
+                        body: Arc::new(sent_body.clone()),
                     }),
+                    logical_body,
+                    session_id: session_id.clone(),
                 }),
                 fallback: None,
             });
@@ -1318,7 +1393,7 @@ mod imp {
                     parts.headers.insert(name, val);
                 }
             }
-            Request::from_parts(parts, Body::from(rewrite.body)).into()
+            Request::from_parts(parts, Body::from(sent_body)).into()
         }
 
         /// Stream a rerouted provider response back to the client as Anthropic SSE: feed each
@@ -1356,7 +1431,26 @@ mod imp {
                         };
                         tokio::time::sleep(std::time::Duration::from_millis(wait_ms)).await;
                         attempt += 1;
-                        let Some((s, raw, ra)) = self.reissue_reroute(replay).await else {
+
+                        let body_to_send = if is_continuation_error(&cur_body) {
+                            crate::reroute::continuation::clear_continuation(
+                                info.session_id.as_deref(),
+                            );
+                            if let Some(lval) = &info.logical_body {
+                                serde_json::to_vec(lval)
+                                    .map(Arc::new)
+                                    .unwrap_or_else(|_| replay.body.clone())
+                            } else {
+                                replay.body.clone()
+                            }
+                        } else {
+                            replay.body.clone()
+                        };
+
+                        let Some((s, raw, ra)) = self
+                            .reissue_reroute(&replay.url, replay.headers.clone(), body_to_send)
+                            .await
+                        else {
                             break;
                         };
                         if (200..300).contains(&s) {
@@ -1414,6 +1508,13 @@ mod imp {
                             continue;
                         };
                         for ev in reducer.push(&chunk) {
+                            record_codex_continuation(
+                                &ev,
+                                &mut reducer,
+                                info.provider,
+                                info.logical_body.as_ref(),
+                                info.session_id.as_deref(),
+                            );
                             match &ev {
                                 ReduceEvent::Error { message } => {
                                     fatal.get_or_insert_with(|| message.clone());
@@ -1432,6 +1533,7 @@ mod imp {
             }
 
             if let Some(detail) = fatal {
+                crate::reroute::continuation::clear_continuation(info.session_id.as_deref());
                 let status = reroute_stream_error_status(&detail);
                 let message = format!(
                     "llmtrim: {} subscription backend: {detail}",
@@ -1469,6 +1571,10 @@ mod imp {
                 finalize: Finalize,
                 phase: Phase,
                 prelude: String,
+                // For continuation recording on terminal Finish during live stream
+                provider: crate::reroute::SubProvider,
+                logical_body: Option<Value>,
+                session_id: Option<String>,
             }
             let st = St {
                 inner,
@@ -1478,6 +1584,9 @@ mod imp {
                 finalize,
                 phase: Phase::Prelude,
                 prelude,
+                provider: info.provider,
+                logical_body: info.logical_body.clone(),
+                session_id: info.session_id.clone(),
             };
 
             let stream = hudsucker::futures::stream::unfold(st, |mut st| async move {
@@ -1502,6 +1611,13 @@ mod imp {
                         Phase::Flush => {
                             let mut out = String::new();
                             for ev in st.reducer.finish() {
+                                record_codex_continuation(
+                                    &ev,
+                                    &mut st.reducer,
+                                    st.provider,
+                                    st.logical_body.as_ref(),
+                                    st.session_id.as_deref(),
+                                );
                                 st.encoder.encode(&ev, &mut out);
                             }
                             st.encoder.finish_if_open(&mut out);
@@ -1524,6 +1640,13 @@ mod imp {
                                 };
                                 let mut out = String::new();
                                 for ev in st.reducer.push(&chunk) {
+                                    record_codex_continuation(
+                                        &ev,
+                                        &mut st.reducer,
+                                        st.provider,
+                                        st.logical_body.as_ref(),
+                                        st.session_id.as_deref(),
+                                    );
                                     st.encoder.encode(&ev, &mut out);
                                 }
                                 if out.is_empty() {
@@ -1577,11 +1700,13 @@ mod imp {
         /// round-trip or its task failed (the caller stops retrying and surfaces the last error).
         async fn reissue_reroute(
             &self,
-            replay: &RerouteReplay,
+            url: &str,
+            headers: Vec<(String, String)>,
+            body: Arc<Vec<u8>>,
         ) -> Option<(u16, Vec<u8>, Option<u64>)> {
-            let url = replay.url.clone();
-            let headers = replay.headers.clone();
-            let body = replay.body.clone();
+            let url = url.to_string();
+            let headers = headers;
+            let body = body;
             let proxy = self.upstream_proxy.clone();
             // `forward_post` exposes no response headers, so a retried attempt's reset hint comes
             // from the body (`resets_in_seconds`) — enough for the Codex/Kimi usage-limit shape.
@@ -1615,12 +1740,27 @@ mod imp {
             let mut out = String::new();
             let mut reducer = crate::reroute::StreamReducer::new(info.provider, &info.model);
             for ev in reducer.push(&raw) {
+                record_codex_continuation(
+                    &ev,
+                    &mut reducer,
+                    info.provider,
+                    info.logical_body.as_ref(),
+                    info.session_id.as_deref(),
+                );
                 enc.encode(&ev, &mut out);
             }
             for ev in reducer.finish() {
+                record_codex_continuation(
+                    &ev,
+                    &mut reducer,
+                    info.provider,
+                    info.logical_body.as_ref(),
+                    info.session_id.as_deref(),
+                );
                 enc.encode(&ev, &mut out);
             }
             enc.finish_if_open(&mut out);
+
             let acc = Arc::new(Mutex::new(out.clone().into_bytes()));
             let _finalize = Finalize {
                 acc,
@@ -1695,6 +1835,12 @@ mod imp {
                 }
             };
 
+            let logical_body: Option<Value> = if provider == crate::reroute::SubProvider::Codex {
+                serde_json::from_slice(&rewrite.body).ok()
+            } else {
+                None
+            };
+
             let model = rewrite.model.clone();
             // Record this row against the resolved provider model (marks it a reroute).
             pending.model = Some(model.clone());
@@ -1702,6 +1848,8 @@ mod imp {
                 provider,
                 model: model.clone(),
                 replay: None,
+                logical_body: logical_body.clone(),
+                session_id: fb.session_id.clone(),
             });
 
             let url = format!("https://{}{}", rewrite.host, rewrite.path);
@@ -1751,9 +1899,23 @@ mod imp {
             } else {
                 let mut reducer = crate::reroute::StreamReducer::new(provider, &model);
                 for ev in reducer.push(&raw) {
+                    record_codex_continuation(
+                        &ev,
+                        &mut reducer,
+                        provider,
+                        logical_body.as_ref(),
+                        fb.session_id.as_deref(),
+                    );
                     enc.encode(&ev, &mut out);
                 }
                 for ev in reducer.finish() {
+                    record_codex_continuation(
+                        &ev,
+                        &mut reducer,
+                        provider,
+                        logical_body.as_ref(),
+                        fb.session_id.as_deref(),
+                    );
                     enc.encode(&ev, &mut out);
                 }
                 enc.finish_if_open(&mut out);
@@ -2287,7 +2449,7 @@ mod imp {
             if data.is_empty() || data == "[DONE]" {
                 continue;
             }
-            if let Ok(v) = serde_json::from_str::<Value>(data)
+            if let Ok(v) = serde_json::from_str::<serde_json::Value>(data)
                 && let Some(n) = from_value(&v)
             {
                 best = Some(best.map_or(n, |b| b.max(n)));
@@ -2333,7 +2495,7 @@ mod imp {
             if data.is_empty() || data == "[DONE]" {
                 continue;
             }
-            if let Ok(v) = serde_json::from_str::<Value>(data)
+            if let Ok(v) = serde_json::from_str::<serde_json::Value>(data)
                 && let Some(n) = from_value(&v)
             {
                 best = Some(best.map_or(n, |b| b.max(n)));
@@ -2412,7 +2574,7 @@ mod imp {
             if data.is_empty() || data == "[DONE]" {
                 continue;
             }
-            if let Ok(v) = serde_json::from_str::<Value>(data) {
+            if let Ok(v) = serde_json::from_str::<serde_json::Value>(data) {
                 let (f, w) = from_value(&v);
                 if let Some(n) = f {
                     fresh = Some(fresh.map_or(n, |b| b.max(n)));

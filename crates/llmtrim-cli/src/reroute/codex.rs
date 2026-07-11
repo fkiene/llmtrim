@@ -446,6 +446,9 @@ pub struct Reducer {
     /// is only honored for the item that owns the currently open tool.
     tool_output_index: Option<i64>,
     terminal_seen: bool,
+    // Accumulation for continuation transcript (assistant outputs in codex input item shape)
+    current_assistant_text: String,
+    output_items: Vec<Value>,
 }
 
 impl Reducer {
@@ -460,6 +463,8 @@ impl Reducer {
             tool_flushed: false,
             tool_output_index: None,
             terminal_seen: false,
+            current_assistant_text: String::new(),
+            output_items: Vec::new(),
         }
     }
 
@@ -475,7 +480,16 @@ impl Reducer {
             Some(&self.tool_id),
         );
         if !sanitized.is_empty() {
-            out.push(ReduceEvent::ToolDelta(sanitized));
+            out.push(ReduceEvent::ToolDelta(sanitized.clone()));
+        }
+        // Record for continuation transcript
+        if !self.tool_name.is_empty() {
+            self.output_items.push(json!({
+                "type": "function_call",
+                "call_id": self.tool_id,
+                "name": self.tool_name,
+                "arguments": if sanitized.is_empty() { self.tool_buf.clone() } else { sanitized }
+            }));
         }
     }
 
@@ -488,6 +502,8 @@ impl Reducer {
     }
 
     /// Flush any still-open block at stream end; emit a `Finish EndTurn` if no terminal was seen.
+    /// Note: synthetic Finish always has response_id=None and continuation_eligible=false
+    /// so it never triggers continuation recording (matches proxy expectations).
     pub fn finish(&mut self) -> Vec<ReduceEvent> {
         let mut out = Vec::new();
         self.close_open(&mut out);
@@ -496,16 +512,28 @@ impl Reducer {
             out.push(ReduceEvent::Finish {
                 stop_reason: StopReason::EndTurn,
                 usage: Usage::default(),
+                response_id: None,
+                continuation_eligible: false,
             });
         }
         out
+    }
+
+    /// Take the assistant output items accumulated for this turn (for continuation recording).
+    /// Flushes any pending text.
+    pub fn take_output_items(&mut self) -> Vec<Value> {
+        self.flush_current_text();
+        std::mem::take(&mut self.output_items)
     }
 
     /// Close whatever block is open, emitting its `*Stop`.
     fn close_open(&mut self, out: &mut Vec<ReduceEvent>) {
         match self.open {
             Open::Thinking => out.push(ReduceEvent::ThinkingStop),
-            Open::Text => out.push(ReduceEvent::TextStop),
+            Open::Text => {
+                self.flush_current_text();
+                out.push(ReduceEvent::TextStop);
+            }
             Open::Tool => {
                 self.flush_tool(out);
                 out.push(ReduceEvent::ToolStop);
@@ -513,6 +541,17 @@ impl Reducer {
             Open::None => {}
         }
         self.open = Open::None;
+    }
+
+    fn flush_current_text(&mut self) {
+        if !self.current_assistant_text.is_empty() {
+            let text = std::mem::take(&mut self.current_assistant_text);
+            self.output_items.push(json!({
+                "type": "message",
+                "role": "assistant",
+                "content": [{ "type": "output_text", "text": text }]
+            }));
+        }
     }
 
     fn handle(&mut self, v: &Value, out: &mut Vec<ReduceEvent>) {
@@ -577,6 +616,7 @@ impl Reducer {
                     out.push(ReduceEvent::TextStart);
                     self.open = Open::Text;
                 }
+                self.current_assistant_text.push_str(delta);
                 out.push(ReduceEvent::TextDelta(delta.to_string()));
             }
             "response.function_call_arguments.delta" => {
@@ -650,7 +690,18 @@ impl Reducer {
             .map(map_usage)
             .unwrap_or_default();
         self.terminal_seen = true;
-        out.push(ReduceEvent::Finish { stop_reason, usage });
+        let continuation_eligible = !incomplete;
+        out.push(ReduceEvent::Finish {
+            stop_reason,
+            usage,
+            response_id: v
+                .get("response")
+                .and_then(|r| r.get("id"))
+                .and_then(|i| i.as_str())
+                .map(|s| s.to_string())
+                .or_else(|| v.get("id").and_then(|i| i.as_str()).map(|s| s.to_string())),
+            continuation_eligible,
+        });
     }
 }
 
@@ -1028,6 +1079,8 @@ mod tests {
                         cache_read: 3,
                         cache_write: 0
                     },
+                    response_id: None,
+                    continuation_eligible: true,
                 },
             ]
         );
@@ -1064,6 +1117,8 @@ mod tests {
                         cache_read: 0,
                         cache_write: 0
                     },
+                    response_id: None,
+                    continuation_eligible: true,
                 },
             ]
         );
@@ -1214,6 +1269,8 @@ mod tests {
                 ReduceEvent::Finish {
                     stop_reason: StopReason::EndTurn,
                     usage: Usage::default(),
+                    response_id: None,
+                    continuation_eligible: false,
                 },
             ]
         );
@@ -1224,5 +1281,59 @@ mod tests {
         let sse = "data: {\"type\":\"response.completed\",\"response\":{\"usage\":{\"input_tokens\":1,\"output_tokens\":1}}}\n\n";
         let (_, mut r) = reduce(sse);
         assert!(r.finish().is_empty());
+    }
+
+    #[test]
+    fn completed_sets_continuation_eligible_true() {
+        let sse = concat!(
+            "data: {\"type\":\"response.output_item.added\",\"output_index\":0,\"item\":{\"type\":\"message\",\"id\":\"m\"}}\n\n",
+            "data: {\"type\":\"response.output_text.delta\",\"output_index\":0,\"delta\":\"ok\"}\n\n",
+            "data: {\"type\":\"response.output_item.done\",\"output_index\":0,\"item\":{\"type\":\"message\"}}\n\n",
+            "data: {\"type\":\"response.completed\",\"response\":{\"usage\":{\"input_tokens\":1,\"output_tokens\":1}}}\n\n",
+        );
+        let (events, _) = reduce(sse);
+        let finish = events
+            .iter()
+            .find_map(|e| {
+                if let ReduceEvent::Finish {
+                    continuation_eligible,
+                    ..
+                } = e
+                {
+                    Some(*continuation_eligible)
+                } else {
+                    None
+                }
+            })
+            .unwrap();
+        assert!(finish, "completed should be eligible");
+    }
+
+    #[test]
+    fn incomplete_sets_continuation_eligible_false() {
+        let sse = concat!(
+            "data: {\"type\":\"response.output_item.added\",\"output_index\":0,\"item\":{\"type\":\"message\",\"id\":\"m\"}}\n\n",
+            "data: {\"type\":\"response.output_text.delta\",\"output_index\":0,\"delta\":\"partial\"}\n\n",
+            "data: {\"type\":\"response.incomplete\",\"response\":{\"usage\":{\"input_tokens\":1,\"output_tokens\":0}}}\n\n",
+        );
+        let (events, _) = reduce(sse);
+        let finish = events
+            .iter()
+            .find_map(|e| {
+                if let ReduceEvent::Finish {
+                    continuation_eligible,
+                    ..
+                } = e
+                {
+                    Some(*continuation_eligible)
+                } else {
+                    None
+                }
+            })
+            .unwrap();
+        assert!(
+            !finish,
+            "incomplete should not be eligible for continuation"
+        );
     }
 }

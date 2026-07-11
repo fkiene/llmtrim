@@ -447,6 +447,8 @@ impl Reducer {
             events.push(ReduceEvent::Finish {
                 stop_reason: stop,
                 usage: self.usage,
+                response_id: None,
+                continuation_eligible: false,
             });
             self.terminal = true;
         }
@@ -607,6 +609,8 @@ impl Reducer {
             events.push(ReduceEvent::Finish {
                 stop_reason: stop,
                 usage: self.usage,
+                response_id: None,
+                continuation_eligible: false,
             });
             self.terminal = true;
         }
@@ -932,6 +936,8 @@ mod tests {
                     cache_read: 30,
                     cache_write: 0
                 },
+                response_id: None,
+                continuation_eligible: false,
             }
         );
         // No double finish.
@@ -950,6 +956,8 @@ mod tests {
             &ReduceEvent::Finish {
                 stop_reason: StopReason::EndTurn,
                 usage: Usage::default(),
+                response_id: None,
+                continuation_eligible: false,
             }
         );
     }
