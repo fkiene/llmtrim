@@ -822,14 +822,23 @@ mod tests {
     fn post_compact_reset_clears_cold_even_when_ledger_stale() {
         let mut c = cc(0);
         c.cache_pct = None;
-        assert!(!effective_cache_cold(&c, true), "empty context after compact is not cold");
+        assert!(
+            !effective_cache_cold(&c, true),
+            "empty context after compact is not cold"
+        );
         let mut l = led(Health::Healthy);
         l.cache_cold = effective_cache_cold(&c, true);
         let out = render_line(&c, &l, 0, false);
         assert!(!out.contains("cold"), "no cold nudge after compact: {out}");
         let gauge = context_segment(c.ctx_tokens, 200_000, l.cache_cold, true);
-        assert!(gauge.contains(DIM), "gauge dim (not red) on fresh post-compact context: {gauge}");
-        assert!(!gauge.contains(RED), "gauge not red on fresh post-compact context: {gauge}");
+        assert!(
+            gauge.contains(DIM),
+            "gauge dim (not red) on fresh post-compact context: {gauge}"
+        );
+        assert!(
+            !gauge.contains(RED),
+            "gauge not red on fresh post-compact context: {gauge}"
+        );
     }
 
     #[test]
