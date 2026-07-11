@@ -7,7 +7,7 @@
 //! width-adaptive line:
 //!
 //! ```text
-//! ◆ Opus→codex   ▓▓▓▓▓░░░ 142k   ✂ 6.8%   ◔ 5h·24% · 7d·12%   ♻ 63% cached
+//! ◆ Opus→gpt-5.6-terra   ▓▓▓▓▓░░░ 142k   ✂ 6.8%   ◔ 5h·24% · 7d·12%   ♻ 63% cached
 //! ```
 //!
 //! The three left segments (model→backend, context, ✂ trim) are core and never
@@ -17,6 +17,9 @@
 //! Claude's — green below 40%, orange 40–65%, red above; and red whenever the prompt cache has
 //! gone cold, where the cache segment becomes `♻ cold · /compact`. Segments whose data is
 //! absent — no reroute, an API-key user with no rate limits — simply don't render.
+//!
+//! Under `sub` the arrow shows the concrete model actually serving the turn (e.g. `→gpt-5.6-terra`)
+//! for Codex reroutes; Kimi shows the provider shortname (`→kimi`) since all tiers collapse.
 //!
 //! `install` wires it into `~/.claude/settings.json`; rendering itself never touches the
 //! network or API tokens.
@@ -171,6 +174,11 @@ struct Led {
     /// active — looked up from the model registry, since Claude Code reports its own Claude
     /// window on the wire, not the backend's. `None` when not rerouted (use the blob's window).
     reroute_window: Option<i64>,
+    /// The concrete upstream model id resolved for a `sub` reroute (e.g. "gpt-5.6-terra" for a
+    /// Codex Opus tier). When present (and not Kimi's internal id) we render it after the arrow
+    /// so the status line shows the *real* model serving the turn rather than only the provider
+    /// shortname.
+    resolved_model: Option<String>,
     /// The prompt cache has gone cold: the session has been idle past the TTL, so the next turn
     /// pays a cold write. Renders the cache segment red with a `/compact` nudge.
     cache_cold: bool,
@@ -216,6 +224,9 @@ fn ledger_snapshot(cc: &CcInput) -> Led {
     let reroute_window = reroute
         .as_deref()
         .and_then(|p| reroute_real_window(p, &cc.model_id, &cfg.sub_tiers));
+    let resolved_model = reroute
+        .as_deref()
+        .and_then(|p| reroute_resolved_model(p, &cc.model_id, &cfg.sub_tiers));
     let health = proxy_health();
 
     // One session-row read serves both trim and cache-cold. Match on `cc_session_id` — the real
@@ -233,13 +244,15 @@ fn ledger_snapshot(cc: &CcInput) -> Led {
     };
     let session_savings = row.as_ref().map(|r| (r.input_before, r.input_after));
     let trim_pct = trim_for(cc.session_id.as_deref(), session_savings, lifetime);
-    let cache_cold = row.as_ref().is_some_and(|r| cache_cold(&r.last_ts));
+    let ledger_cold = row.as_ref().is_some_and(|r| cache_cold(&r.last_ts));
+    let cache_cold = effective_cache_cold(cc, ledger_cold);
 
     Led {
         health,
         trim_pct,
         reroute,
         reroute_window,
+        resolved_model,
         cache_cold,
     }
 }
@@ -332,6 +345,33 @@ fn reroute_real_window(
     None
 }
 
+/// Parallel to [`reroute_real_window`]: returns the concrete upstream model id (e.g.
+/// "gpt-5.6-terra") chosen by tier mapping for the status line. Kimi always resolves to its
+/// internal id, which callers suppress in favour of the short provider name.
+#[cfg(feature = "intercept")]
+fn reroute_resolved_model(
+    provider: &str,
+    incoming_model_id: &str,
+    tiers: &std::collections::BTreeMap<String, String>,
+) -> Option<String> {
+    use crate::reroute::SubProvider;
+    let sp = match provider {
+        "codex" => SubProvider::Codex,
+        "kimi" => SubProvider::Kimi,
+        _ => return None,
+    };
+    Some(crate::reroute::resolve_model(sp, incoming_model_id, tiers))
+}
+
+#[cfg(not(feature = "intercept"))]
+fn reroute_resolved_model(
+    _provider: &str,
+    _incoming_model_id: &str,
+    _tiers: &std::collections::BTreeMap<String, String>,
+) -> Option<String> {
+    None
+}
+
 /// Whether the prompt cache has gone cold: `last_ts` (rfc3339, the most recent intercepted
 /// request) is older than the TTL. An unparseable timestamp is treated as not-cold (don't warn
 /// on a data glitch).
@@ -339,6 +379,19 @@ fn cache_cold(last_ts: &str) -> bool {
     chrono::DateTime::parse_from_rfc3339(last_ts)
         .map(|t| chrono::Utc::now().signed_duration_since(t).num_seconds() >= CACHE_TTL_SECS)
         .unwrap_or(false)
+}
+
+/// Fold ledger idle time with Claude Code's live context. `/compact` and other internal turns
+/// can refresh the prompt cache without updating the interceptor's `last_ts`, so a stale ledger
+/// alone would keep the gauge red after the user already compacted.
+fn effective_cache_cold(cc: &CcInput, ledger_cold: bool) -> bool {
+    if !ledger_cold {
+        return false;
+    }
+    // Post-compact reset: empty window, no `current_usage` yet. Do not also key off
+    // `cache_creation_tokens` from the last response — that field is stale once the TTL
+    // expires and would hide a legitimate cold warning on an idle session.
+    cc.ctx_tokens != 0 || cc.cache_pct.is_some()
 }
 
 // ── rendering ─────────────────────────────────────────────────────────────────────
@@ -357,7 +410,9 @@ fn quota_color(pct: f64) -> &'static str {
     }
 }
 
-/// `◆ Opus→codex` — health-brand glyph, model, reroute arrow. The arrow is suppressed when the
+/// `◆ Opus→gpt-5.6-terra` — health-brand glyph, model (Claude tier name), reroute target.
+/// The target is the resolved upstream model for Codex reroutes (so you see the real model
+/// serving the turn) or the provider shortname for Kimi. The arrow is suppressed when the
 /// proxy isn't healthy (traffic isn't being intercepted, so it isn't actually rerouting).
 ///
 /// Effort is intentionally not shown: Claude Code's `effort.level` field doesn't track the
@@ -374,7 +429,13 @@ fn model_segment(cc: &CcInput, led: &Led, color: bool) -> String {
             "kimi" => VIOLET,
             _ => CYAN,
         };
-        s.push_str(&paint(color, code, &format!("→{p}")));
+        let tail = led
+            .resolved_model
+            .as_ref()
+            .filter(|m| *m != "kimi-for-coding")
+            .cloned()
+            .unwrap_or_else(|| p.clone());
+        s.push_str(&paint(color, code, &format!("→{tail}")));
     }
     s
 }
@@ -639,6 +700,7 @@ mod tests {
             trim_pct: Some(6.8),
             reroute: Some("codex".to_string()),
             reroute_window: None,
+            resolved_model: Some("gpt-5.6-terra".to_string()),
             cache_cold: false,
         }
     }
@@ -663,7 +725,7 @@ mod tests {
         let out = render_line(&cc(142_000), &led(Health::Healthy), 0, false);
         assert_eq!(
             out,
-            "◆ Opus→codex   ▓▓▓▓▓░░░ 142k   ✂ 6.8%   ◔ 5h·24% · 7d·12%   ♻ 63% cached"
+            "◆ Opus→gpt-5.6-terra   ▓▓▓▓▓░░░ 142k   ✂ 6.8%   ◔ 5h·24% · 7d·12%   ♻ 63% cached"
         );
     }
 
@@ -714,6 +776,7 @@ mod tests {
     fn stopped_omits_trim_and_arrow_without_warning() {
         let mut l = led(Health::Stopped);
         l.reroute = None;
+        l.resolved_model = None;
         let out = render_line(&cc(48_000), &l, 0, false);
         assert!(!out.contains('✂'), "no trim when off: {out}");
         assert!(!out.contains('⚠'), "clean off is not an error: {out}");
@@ -724,7 +787,7 @@ mod tests {
     fn narrow_terminal_sheds_extras_right_to_left() {
         // Wide enough for core + quota, but not the cache extra.
         let full = render_line(&cc(142_000), &led(Health::Healthy), 0, false);
-        let width = ui::visible_width("◆ Opus→codex   ▓▓▓▓▓░░░ 142k   ✂ 6.8%   ◔ 5h·24% · 7d·12%");
+        let width = ui::visible_width("◆ Opus→gpt-5.6-terra   ▓▓▓▓▓░░░ 142k   ✂ 6.8%   ◔ 5h·24% · 7d·12%");
         let out = render_line(&cc(142_000), &led(Health::Healthy), width, false);
         assert!(out.ends_with("7d·12%"), "keeps quota, sheds cache: {out}");
         assert!(!out.contains("cached"), "cache dropped first: {out}");
@@ -740,6 +803,7 @@ mod tests {
         c.cache_pct = None; // before first API response
         let mut l = led(Health::Healthy);
         l.reroute = None; // no reroute
+        l.resolved_model = None;
         let out = render_line(&c, &l, 0, false);
         assert_eq!(out, "◆ Opus   ▓░░░░░░░ 48k   ✂ 6.8%");
     }
@@ -751,6 +815,42 @@ mod tests {
         let out = render_line(&cc(48_000), &l, 0, false);
         assert!(out.contains("♻ cold · /compact"), "cold hint shown: {out}");
         assert!(!out.contains("cached"), "no stale % when cold: {out}");
+    }
+
+    #[test]
+    fn post_compact_reset_clears_cold_even_when_ledger_stale() {
+        let mut c = cc(0);
+        c.cache_pct = None;
+        assert!(
+            !effective_cache_cold(&c, true),
+            "empty context after compact is not cold"
+        );
+        let mut l = led(Health::Healthy);
+        l.cache_cold = effective_cache_cold(&c, true);
+        let out = render_line(&c, &l, 0, false);
+        assert!(
+            !out.contains("cold"),
+            "no cold nudge after compact: {out}"
+        );
+        let gauge = context_segment(c.ctx_tokens, 200_000, l.cache_cold, true);
+        assert!(
+            gauge.contains(DIM),
+            "gauge dim (not red) on fresh post-compact context: {gauge}"
+        );
+        assert!(
+            !gauge.contains(RED),
+            "gauge not red on fresh post-compact context: {gauge}"
+        );
+    }
+
+    #[test]
+    fn idle_cold_stays_when_context_still_populated() {
+        let mut c = cc(142_000);
+        c.cache_pct = Some(5.0);
+        assert!(
+            effective_cache_cold(&c, true),
+            "populated context with stale ledger still shows cold"
+        );
     }
 
     #[test]
@@ -823,6 +923,7 @@ mod tests {
     fn kimi_reroute_when_healthy() {
         let mut l = led(Health::Healthy);
         l.reroute = Some("kimi".to_string());
+        l.resolved_model = None;
         let out = render_line(&cc(72_000), &l, 0, true);
         assert!(out.contains("→kimi"), "kimi arrow present: {out}");
     }

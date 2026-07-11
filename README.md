@@ -297,7 +297,7 @@ The printed block is the standard MCP config; for a client you edit by hand it l
 
 **Status line for Claude Code.** `llmtrim statusline` renders a single line for Claude Code's
 [custom status line](https://code.claude.com/docs/en/statusline): the model, the subscription
-actually serving the turn when you reroute (`→codex`/`→kimi`), a context-health gauge, and how
+actually serving the turn when you reroute (e.g. `→gpt-5.6-terra` or `→kimi`), a context-health gauge, and how
 much llmtrim is trimming, plus rate-limit and prompt-cache reuse when Claude Code reports them.
 
 ```bash
@@ -306,7 +306,7 @@ llmtrim statusline install --print  # or print the settings snippet to paste you
 ```
 
 ```text
-◆ Opus→codex   ▓▓▓▓▓░░░ 142k   ✂ 6.8%   ◔ 5h·24% · 7d·12%   ♻ 63% cached
+◆ Opus→gpt-5.6-terra   ▓▓▓▓▓░░░ 142k   ✂ 6.8%   ◔ 5h·24% · 7d·12%   ♻ 63% cached
 ```
 
 The `✂` trim figure is scoped to the current Claude Code session; it reads `✂ –` until llmtrim

@@ -6,6 +6,20 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Fixed
+
+- **Status line stayed red after `/compact`.** The cold-cache segment (`♻ cold · /compact`) and
+  context gauge keyed only on the interceptor ledger's `last_ts`. `/compact` runs inside Claude
+  Code and does not update that timestamp, so the line kept warning after a successful compact.
+  The renderer now clears the cold state when Claude Code reports a post-compact reset (empty
+  context, no `current_usage` yet).
+
+### Changed
+
+- **Status line shows the resolved upstream model on `sub` reroutes.** Codex reroutes now render
+  the concrete backend model (e.g. `→gpt-5.6-terra`) instead of the provider shortname (`→codex`);
+  Kimi still shows `→kimi`.
+
 ## [0.9.3] - 2026-07-11
 
 ### Fixed
@@ -30,7 +44,7 @@ All notable changes to this project are documented here. The format follows
   Claude's — green below 40%, orange 40–65%, red above. Rate-limit percentages escalate green →
   amber (70%) → orange (80%) → red (90%). The cache segment turns into `♻ cold · /compact` once
   the session has been idle past the cache TTL, since the next message then pays a cold cache
-  write. The reroute arrow (`→codex`/`→kimi`) shows the subscription actually serving the turn,
+  write. The reroute arrow (e.g. `→gpt-5.6-terra` or `→kimi`) shows the backend actually serving the turn,
   and a `⚠` replaces the savings segment when the interceptor is degraded. Extras shed
   right-to-left on narrow terminals. `llmtrim statusline install` wires it into
   `~/.claude/settings.json` (`--print` emits the snippet instead); `uninstall` removes it.
