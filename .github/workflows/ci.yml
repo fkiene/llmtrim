@@ -500,6 +500,7 @@ jobs:
       - uses: obi1kenobi/cargo-semver-checks-action@v2
         with:
           package: llmtrim-core, llmtrim
+          args: "--release-type major"
 
   # Unused-dependency check. Dead deps inflate the binary and slow the build/startup that
   # this CLI optimizes for. cargo-machete is fast (manifest scan, no compile).
