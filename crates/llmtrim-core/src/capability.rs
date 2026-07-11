@@ -27,7 +27,7 @@ use std::collections::HashMap;
 use once_cell::sync::Lazy;
 use serde_json::Value;
 
-/// LMArena text leaderboard (overall), 2026-07-02 snapshot. See module docs for provenance.
+/// LMArena text leaderboard (overall), 2026-07-10 snapshot. See module docs for provenance.
 const LMARENA_SNAPSHOT: &str = include_str!("../data/lmarena_text.json");
 
 /// Per-model `reasoning` flag from models.dev, embedded at compile time. Backs the
@@ -268,6 +268,6 @@ mod tests {
         assert!(RATINGS.len() > 100, "snapshot should carry the full board");
         // The anchor model must stay above the bar; a refresh dropping it below would silently
         // disable the gate's intent, so assert the threshold relationship, not a pinned number.
-        assert!(RATINGS["claude-sonnet-5-thinking"] > CAPABILITY_THRESHOLD);
+        assert!(RATINGS["claude-sonnet-5-high"] > CAPABILITY_THRESHOLD);
     }
 }

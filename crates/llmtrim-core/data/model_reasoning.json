@@ -1,5 +1,5 @@
 {
-"fetched": "2026-07-10",
+"fetched": "2026-07-11",
 "models": {
 "ai21/jamba-large-1.7": false,
 "aion-labs/aion-2.0": true,
@@ -30,7 +30,6 @@
 "anthropic/claude-sonnet-5": true,
 "arcee-ai/coder-large": false,
 "arcee-ai/trinity-large-thinking": true,
-"arcee-ai/trinity-mini": true,
 "arcee-ai/virtuoso-large": false,
 "baidu/ernie-4.5-vl-424b-a47b": true,
 "bytedance-seed/seed-1.6": true,
@@ -177,6 +176,7 @@
 "gpt-image-1-mini": false,
 "gpt-image-1.5": false,
 "gpt-image-2": false,
+"gpt-realtime-2.1": true,
 "gryphe/mythomax-l2-13b": false,
 "ibm-granite/granite-4.0-h-micro": false,
 "ibm-granite/granite-4.1-8b": false,
