@@ -1,13 +1,14 @@
 //! Server-side continuation for Codex (Responses API) reroute.
 //!
-//! Ports the core idea from claude-code-proxy:
-//! - Use `previous_response_id` + a small `input` delta instead of resending the full
-//!   conversation history on every turn.
-//! - This keeps the backend's internal state (and associated caching/prefix reuse) warm.
-//! - Combined with `prompt_cache_key`, this should produce better `cached_tokens` reports
-//!   from the backend, which then translate into higher "♻ % cached" in the status line.
+//! Uses `previous_response_id` + a small `input` delta (instead of resending the
+//! full conversation history on every turn). This keeps the backend's internal
+//! state (and associated caching/prefix reuse) warm. Combined with
+//! `prompt_cache_key`, this produces better `cached_tokens` reports from the
+//! backend, which translate into a higher "♻ % cached" figure in the status line.
 //!
-//! We work with raw serde_json::Value because the reroute path builds codex bodies as Value.
+//! We work with raw `serde_json::Value` because the reroute path builds Codex
+//! bodies as dynamic JSON (the normal request path is already in Anthropic
+//! shape at this point).
 
 use std::collections::HashMap;
 use std::sync::Mutex;
