@@ -29,6 +29,19 @@ chrono = "0.4"
 # so it can't be read from SQLite like the savings figures are.
 serde_json.workspace = true
 
+# Tauri decides "dev vs production" from the `custom-protocol` feature: its build
+# script sets `dev = !custom_protocol`. In dev mode the webview loads `build.devUrl`
+# (the Vite dev server on :43217); only with `custom-protocol` on does it serve the
+# embedded `dist/` assets over the `tauri://` protocol. `cargo tauri build` would add
+# this feature automatically, but every shipping path here uses plain cargo instead —
+# CI (`tray.yml`), `release.yml`, the Homebrew `cargo install`, and the npm repackage —
+# so it must be a DEFAULT feature or the released tray is a blank window that logs
+# "could not connect to the server" (issue #149). DO NOT REMOVE from `default`.
+# For UI hot-reload, build the dev binary with `--no-default-features` so it uses devUrl.
+[features]
+default = ["custom-protocol"]
+custom-protocol = ["tauri/custom-protocol"]
+
 # Tauri macro-generated scaffolding contains `unsafe` blocks, so this crate cannot
 # inherit the workspace `unsafe_code = "forbid"`. Re-declare lints here without it,
 # mirroring crates/llmtrim-uniffi/Cargo.toml.

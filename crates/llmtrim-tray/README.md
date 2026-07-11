@@ -44,7 +44,10 @@ dependency).
 ```bash
 cd crates/llmtrim-tray
 npm install
-npm run tauri dev      # hot-reload the UI and the Rust shell
+npm run dev            # terminal 1: Vite dev server on :43217 (hot-reloads the UI)
+# terminal 2: run the shell against that dev server. `--no-default-features` drops
+# `custom-protocol` so the webview loads build.devUrl instead of the embedded dist/.
+cargo run -p llmtrim-tray --no-default-features
 ```
 
 The popover reads the same ledger the proxy writes, resolved via
