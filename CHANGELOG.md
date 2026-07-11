@@ -6,6 +6,15 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Fixed
+
+- **The desktop tray popover rendered blank.** Every installed tray (macOS, Linux, Windows) showed
+  an empty white box under the tray icon instead of the stats UI. The shipped binaries were built
+  with plain `cargo` rather than `cargo tauri build`, which left Tauri's `custom-protocol` feature
+  off, so the webview ran in dev mode and tried to load a Vite dev server that does not exist on a
+  user's machine. `custom-protocol` is now a default feature, so release builds embed and serve the
+  real UI. ([#149](https://github.com/fkiene/llmtrim/issues/149))
+
 ## [0.9.2] - 2026-07-10
 
 ### Added
