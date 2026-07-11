@@ -338,6 +338,9 @@ mod imp {
     struct RerouteInfo {
         provider: crate::reroute::SubProvider,
         model: String,
+        /// The model Claude Code selected. The synthesized Anthropic response must preserve it:
+        /// returning the subscription model makes Claude Code reject the response as unknown.
+        client_model: String,
         /// The rewritten upstream request, retained so `reroute_response` can re-issue it on a
         /// retryable failure (429/5xx). `None` on paths that never retry (the on-error fallback).
         replay: Option<RerouteReplay>,
@@ -1279,6 +1282,11 @@ mod imp {
                 reroute: Some(RerouteInfo {
                     provider: sub,
                     model: rewrite.model.clone(),
+                    client_model: anthropic
+                        .get("model")
+                        .and_then(|model| model.as_str())
+                        .unwrap_or_default()
+                        .to_string(),
                     replay: Some(RerouteReplay {
                         url: format!("https://{}{}", rewrite.host, rewrite.path),
                         headers: rewrite.headers.clone(),
@@ -1403,7 +1411,7 @@ mod imp {
             use hudsucker::futures::StreamExt;
             let mut inner = BodyStream::new(body);
             let mut reducer = crate::reroute::StreamReducer::new(info.provider, &info.model);
-            let mut encoder = AnthropicSseEncoder::new(&info.model);
+            let mut encoder = AnthropicSseEncoder::new(&info.client_model);
             let mut prelude = String::new();
             let mut committed = false;
             let mut fatal: Option<String> = None;
@@ -1611,7 +1619,7 @@ mod imp {
             raw: Vec<u8>,
         ) -> Response<Body> {
             use crate::reroute::sse::AnthropicSseEncoder;
-            let mut enc = AnthropicSseEncoder::new(&info.model);
+            let mut enc = AnthropicSseEncoder::new(&info.client_model);
             let mut out = String::new();
             let mut reducer = crate::reroute::StreamReducer::new(info.provider, &info.model);
             for ev in reducer.push(&raw) {
@@ -1655,6 +1663,11 @@ mod imp {
                     "llmtrim: fallback body is not JSON",
                 );
             };
+            let client_model = anthropic
+                .get("model")
+                .and_then(|model| model.as_str())
+                .unwrap_or("unknown")
+                .to_string();
             apply_sub_effort(&mut anthropic, self.sub_effort.as_deref());
 
             let token = match tokio::task::spawn_blocking(move || {
@@ -1666,7 +1679,7 @@ mod imp {
                 Ok(Err(e)) => {
                     return self.fallback_error(
                         pending,
-                        "unknown",
+                        &client_model,
                         &format!(
                             "llmtrim: {p} not authenticated ({e}). Run `llmtrim sub auth {p} login`.",
                             p = provider.as_str()
@@ -1674,7 +1687,11 @@ mod imp {
                     );
                 }
                 Err(_) => {
-                    return self.fallback_error(pending, "unknown", "llmtrim: auth task failed");
+                    return self.fallback_error(
+                        pending,
+                        &client_model,
+                        "llmtrim: auth task failed",
+                    );
                 }
             };
 
@@ -1689,7 +1706,7 @@ mod imp {
                 Err(e) => {
                     return self.fallback_error(
                         pending,
-                        "unknown",
+                        &client_model,
                         &format!("llmtrim: reroute translation failed: {e}"),
                     );
                 }
@@ -1701,6 +1718,7 @@ mod imp {
             pending.reroute = Some(RerouteInfo {
                 provider,
                 model: model.clone(),
+                client_model: client_model.clone(),
                 replay: None,
             });
 
@@ -1724,16 +1742,20 @@ mod imp {
                 Ok(Err(e)) => {
                     return self.fallback_error(
                         pending,
-                        &model,
+                        &client_model,
                         &format!("llmtrim: {} request failed: {e}", provider.as_str()),
                     );
                 }
                 Err(_) => {
-                    return self.fallback_error(pending, &model, "llmtrim: fallback task failed");
+                    return self.fallback_error(
+                        pending,
+                        &client_model,
+                        "llmtrim: fallback task failed",
+                    );
                 }
             };
 
-            let mut enc = AnthropicSseEncoder::new(&model);
+            let mut enc = AnthropicSseEncoder::new(&client_model);
             let mut out = String::new();
             if !(200..300).contains(&status) {
                 let snippet: String = String::from_utf8_lossy(&raw).chars().take(400).collect();

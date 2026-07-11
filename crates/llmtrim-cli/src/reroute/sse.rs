@@ -295,6 +295,26 @@ mod tests {
     }
 
     #[test]
+    fn synthesized_sse_preserves_client_model_id() {
+        // Sub reroute maps claude-sonnet-5 → gpt-5.6-luna upstream; the encoder must still
+        // advertise the Claude Code selection in message_start or the client rejects the turn.
+        let out = encode_all(
+            "claude-sonnet-5",
+            &[
+                ReduceEvent::TextStart,
+                ReduceEvent::TextDelta("ok".into()),
+                ReduceEvent::TextStop,
+                ReduceEvent::Finish {
+                    stop_reason: StopReason::EndTurn,
+                    usage: Usage::default(),
+                },
+            ],
+        );
+        assert!(out.contains("\"model\":\"claude-sonnet-5\""));
+        assert!(!out.contains("gpt-5.6-luna"));
+    }
+
+    #[test]
     fn text_turn_emits_well_formed_anthropic_sse() {
         let out = encode_all(
             "gpt-5.5",
