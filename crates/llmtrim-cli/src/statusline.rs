@@ -787,7 +787,8 @@ mod tests {
     fn narrow_terminal_sheds_extras_right_to_left() {
         // Wide enough for core + quota, but not the cache extra.
         let full = render_line(&cc(142_000), &led(Health::Healthy), 0, false);
-        let width = ui::visible_width("◆ Opus→gpt-5.6-terra   ▓▓▓▓▓░░░ 142k   ✂ 6.8%   ◔ 5h·24% · 7d·12%");
+        let width =
+            ui::visible_width("◆ Opus→gpt-5.6-terra   ▓▓▓▓▓░░░ 142k   ✂ 6.8%   ◔ 5h·24% · 7d·12%");
         let out = render_line(&cc(142_000), &led(Health::Healthy), width, false);
         assert!(out.ends_with("7d·12%"), "keeps quota, sheds cache: {out}");
         assert!(!out.contains("cached"), "cache dropped first: {out}");
@@ -828,10 +829,7 @@ mod tests {
         let mut l = led(Health::Healthy);
         l.cache_cold = effective_cache_cold(&c, true);
         let out = render_line(&c, &l, 0, false);
-        assert!(
-            !out.contains("cold"),
-            "no cold nudge after compact: {out}"
-        );
+        assert!(!out.contains("cold"), "no cold nudge after compact: {out}");
         let gauge = context_segment(c.ctx_tokens, 200_000, l.cache_cold, true);
         assert!(
             gauge.contains(DIM),
