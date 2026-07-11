@@ -331,7 +331,7 @@ fn evict_oldest() {
 
     let mut bytes_guard = TOTAL_TRANSCRIPT_BYTES.lock().unwrap();
     while (map.len() > MAX_STATES || *bytes_guard > MAX_TOTAL_TRANSCRIPT_BYTES) && !map.is_empty() {
-        if let Some((&ref oldest_key, _)) = map.iter().min_by_key(|(_, s)| s.updated_at) {
+        if let Some((oldest_key, _)) = map.iter().min_by_key(|(_, s)| s.updated_at) {
             let key = oldest_key.clone();
             if let Some(old) = map.remove(&key) {
                 *bytes_guard = bytes_guard.saturating_sub(old.transcript_bytes);

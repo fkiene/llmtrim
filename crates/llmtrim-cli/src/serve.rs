@@ -590,18 +590,16 @@ mod imp {
             continuation_eligible: true,
             ..
         } = ev
+            && provider == crate::reroute::SubProvider::Codex
+            && let Some(logical) = logical_body
         {
-            if provider == crate::reroute::SubProvider::Codex {
-                if let Some(logical) = logical_body {
-                    let items = reducer.take_codex_output_items();
-                    crate::reroute::continuation::record_continuation(
-                        session_id,
-                        logical,
-                        Some(rid.as_str()),
-                        &items,
-                    );
-                }
-            }
+            let items = reducer.take_codex_output_items();
+            crate::reroute::continuation::record_continuation(
+                session_id,
+                logical,
+                Some(rid.as_str()),
+                &items,
+            );
         }
     }
 
@@ -1317,20 +1315,20 @@ mod imp {
             // delta version. This matches the proxy's handling (except transport specifics).
             let mut sent_body = rewrite.body.clone();
             let mut logical_body: Option<Value> = None;
-            if sub == crate::reroute::SubProvider::Codex {
-                if let Ok(mut bval) = serde_json::from_slice::<Value>(&rewrite.body) {
-                    logical_body = Some(bval.clone());
-                    let enabled =
-                        llmtrim_core::config::RuntimeConfig::get().sub_codex_previous_response_id;
-                    let cand = crate::reroute::continuation::continuation_candidate(
-                        session_id.as_deref(),
-                        &bval,
-                        enabled,
-                    );
-                    crate::reroute::continuation::apply_codex_continuation(&mut bval, &cand);
-                    if let Ok(serialized) = serde_json::to_vec(&bval) {
-                        sent_body = serialized;
-                    }
+            if sub == crate::reroute::SubProvider::Codex
+                && let Ok(mut bval) = serde_json::from_slice::<Value>(&rewrite.body)
+            {
+                logical_body = Some(bval.clone());
+                let enabled =
+                    llmtrim_core::config::RuntimeConfig::get().sub_codex_previous_response_id;
+                let cand = crate::reroute::continuation::continuation_candidate(
+                    session_id.as_deref(),
+                    &bval,
+                    enabled,
+                );
+                crate::reroute::continuation::apply_codex_continuation(&mut bval, &cand);
+                if let Ok(serialized) = serde_json::to_vec(&bval) {
+                    sent_body = serialized;
                 }
             }
 
@@ -1705,8 +1703,6 @@ mod imp {
             body: Arc<Vec<u8>>,
         ) -> Option<(u16, Vec<u8>, Option<u64>)> {
             let url = url.to_string();
-            let headers = headers;
-            let body = body;
             let proxy = self.upstream_proxy.clone();
             // `forward_post` exposes no response headers, so a retried attempt's reset hint comes
             // from the body (`resets_in_seconds`) — enough for the Codex/Kimi usage-limit shape.

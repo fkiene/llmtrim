@@ -1020,22 +1020,22 @@ fn resolve_sub_codex_continuation(
     if let Some(v) = env("LLMTRIM_CODEX_PREVIOUS_RESPONSE_ID").filter(|s| !s.is_empty()) {
         return is_true(&v);
     }
-    if let Some(sub) = file.and_then(|v| v.get("sub")) {
-        if let Some(c) = sub.get("codex").or_else(|| sub.get("chatgpt")) {
-            if let Some(b) = c
-                .get("previous_response_id")
-                .or_else(|| c.get("continuation"))
-                .and_then(toml::Value::as_bool)
-            {
-                return b;
-            }
-            if let Some(s) = c
-                .get("previous_response_id")
-                .or_else(|| c.get("continuation"))
-                .and_then(toml::Value::as_str)
-            {
-                return is_true(s);
-            }
+    if let Some(sub) = file.and_then(|v| v.get("sub"))
+        && let Some(c) = sub.get("codex").or_else(|| sub.get("chatgpt"))
+    {
+        if let Some(b) = c
+            .get("previous_response_id")
+            .or_else(|| c.get("continuation"))
+            .and_then(toml::Value::as_bool)
+        {
+            return b;
+        }
+        if let Some(s) = c
+            .get("previous_response_id")
+            .or_else(|| c.get("continuation"))
+            .and_then(toml::Value::as_str)
+        {
+            return is_true(s);
         }
     }
     true
