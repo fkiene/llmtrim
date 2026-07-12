@@ -6,6 +6,25 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- **Ordered subscription fallback chains.** `llmtrim sub mode fallback` now tries a list of
+  providers in order instead of a single one: `llmtrim sub chain codex,kimi` (or
+  `LLMTRIM_SUB_CHAIN=codex,kimi`, or `[sub] chain = ["codex", "kimi"]`). When Anthropic cannot
+  serve a turn — quota, payment, throttling, overload, or a transient server failure — Anthropic is
+  retried once, and if it still fails each provider in the chain is tried in turn (with bounded
+  backoff, honoring `Retry-After`) until one answers. A failure reported *inside* an HTTP 200
+  stream counts as a failure too, and is caught before any of it reaches the client. With no chain
+  configured, the active `sub` provider is the chain, so existing setups behave as before.
+
+### Changed
+
+- **Breaking (config): `sub mode on-error` is now `sub mode fallback`.** The old name still works —
+  `llmtrim sub mode on-error`, `LLMTRIM_SUB_MODE=on_error`, and `[sub] mode = "on_error"` all keep
+  meaning fallback, and print a one-line notice — but the new spelling is what gets persisted.
+- **Breaking (library): `llmtrim-core`'s `RuntimeConfig::sub_on_error` is now `sub_fallback`**, and
+  `RuntimeConfig` gained a `sub_chain` field. Hence the 0.10 minor bump.
+
 ### Fixed
 
 - **GPT-5.6 Codex reroutes.** Claude model requests keep the standard Responses shape and use the
