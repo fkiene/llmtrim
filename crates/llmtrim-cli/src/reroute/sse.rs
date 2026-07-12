@@ -308,6 +308,8 @@ mod tests {
                 ReduceEvent::TextStart,
                 ReduceEvent::TextDelta("Hello".into()),
                 ReduceEvent::TextStop,
+                // Note: include continuation fields (response_id + continuation_eligible)
+                // so that MSRV/coverage/test jobs under all feature sets see complete literals.
                 ReduceEvent::Finish {
                     stop_reason: StopReason::EndTurn,
                     usage: Usage {
