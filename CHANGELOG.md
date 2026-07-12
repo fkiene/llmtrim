@@ -48,6 +48,17 @@ All notable changes to this project are documented here. The format follows
   is now reported in the shape the client is reading (an SSE `error` frame on a streaming call, a
   retryable `overloaded_error` otherwise), and the underlying cause is named on stderr, so
   `llmtrim serve` in the foreground shows what actually broke.
+
+- **Subscription reroute: the Codex prompt cache no longer goes cold every turn.** Claude Code
+  prepends a billing-header system block whose hash changes on every turn, and the Codex translator
+  forwarded it at the head of the Responses `instructions` — the very front of the cached prefix —
+  so each turn re-sent a different prefix and paid a full cold cache. The block is now dropped for
+  both Codex and Kimi. On a 4-turn session, cached input read back rose from 4.6k to 34.3k tokens.
+
+- **Subscription reroute: the status line shows trim again.** Rerouted turns never recorded their
+  Claude Code session, so the trim segment sat at `✂ –` even though compression was running
+  normally. It now reports the session's real savings (`✂ 39.8%` on the run above).
+
 - **GPT-5.6 Codex reroutes.** Claude model requests keep the standard Responses shape and use the
   official Codex originator and user-agent identity required by the backend.
 
