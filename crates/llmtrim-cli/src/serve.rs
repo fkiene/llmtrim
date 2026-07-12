@@ -2033,12 +2033,29 @@ mod imp {
                 session_id,
             )
             .map_err(|e| format!("translation failed: {e}"))?;
-            let logical_body = (provider == crate::reroute::SubProvider::Codex)
-                .then(|| serde_json::from_slice(&rewrite.body).ok())
-                .flatten();
+            // Same Codex continuation handling as the single-provider path: `logical_body` is the
+            // full pre-delta request kept for the transcript, while the request actually sent may
+            // carry `previous_response_id` plus only the new input. Without this the
+            // `record_codex_continuation` call on this path would store state nothing ever reads.
+            let mut sent_body = rewrite.body.clone();
+            let mut logical_body = None;
+            if provider == crate::reroute::SubProvider::Codex
+                && let Ok(mut bval) = serde_json::from_slice::<Value>(&rewrite.body)
+            {
+                logical_body = Some(bval.clone());
+                let enabled =
+                    llmtrim_core::config::RuntimeConfig::get().sub_codex_previous_response_id;
+                let cand = crate::reroute::continuation::continuation_candidate(
+                    session_id, &bval, enabled,
+                );
+                crate::reroute::continuation::apply_codex_continuation(&mut bval, &cand);
+                if let Ok(serialized) = serde_json::to_vec(&bval) {
+                    sent_body = serialized;
+                }
+            }
             let url = format!("https://{}{}", rewrite.host, rewrite.path);
             let headers = rewrite.headers.clone();
-            let body = String::from_utf8_lossy(&rewrite.body).into_owned();
+            let body = String::from_utf8_lossy(&sent_body).into_owned();
             let proxy = self.upstream_proxy.clone();
             let mut attempt = 0;
             loop {

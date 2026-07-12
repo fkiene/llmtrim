@@ -412,6 +412,15 @@ fn reasoning_encrypted_content(item: &Value) -> Option<String> {
 
 /// Build a Codex `reasoning` input item from an Anthropic thinking block (signature round-trips
 /// as `encrypted_content`). Returns `None` when the block carries nothing Codex can replay.
+fn reasoning_item(encrypted: &str, summary_text: &str) -> Value {
+    let summary = if summary_text.is_empty() {
+        json!([])
+    } else {
+        json!([{"type": "summary_text", "text": summary_text}])
+    };
+    json!({ "type": "reasoning", "encrypted_content": encrypted, "summary": summary })
+}
+
 fn thinking_input_item(block: &Value) -> Option<Value> {
     let thinking = block
         .get("thinking")
@@ -424,15 +433,7 @@ fn thinking_input_item(block: &Value) -> Option<Value> {
     if signature.is_empty() {
         return None;
     }
-    let mut item = json!({
-        "type": "reasoning",
-        "encrypted_content": signature,
-        "summary": [],
-    });
-    if !thinking.is_empty() {
-        item["summary"] = json!([{"type": "summary_text", "text": thinking}]);
-    }
-    Some(item)
+    Some(reasoning_item(signature, thinking))
 }
 
 /// Build the Responses `text.format` from an Anthropic `output_config.format`.
@@ -551,6 +552,9 @@ pub struct Reducer {
     deferred_text_deltas: Vec<String>,
     // Accumulation for continuation transcript (assistant outputs in codex input item shape)
     current_assistant_text: String,
+    /// Thinking text emitted downstream this block; replayed as the reasoning item's `summary` so
+    /// the transcript matches what `build_input` rebuilds from the echoed thinking block.
+    current_thinking: String,
     output_items: Vec<Value>,
 }
 
@@ -571,6 +575,7 @@ impl Reducer {
             last_signature: None,
             deferred_text_deltas: Vec::new(),
             current_assistant_text: String::new(),
+            current_thinking: String::new(),
             output_items: Vec::new(),
         }
     }
@@ -585,8 +590,14 @@ impl Reducer {
             && self.last_signature.as_deref() != Some(sig.as_str())
         {
             out.push(ReduceEvent::ThinkingSignatureDelta(sig.clone()));
+            // Continuation compares the stored transcript positionally against the input rebuilt
+            // next turn, where the echoed thinking block becomes a reasoning item ahead of the
+            // assistant message. Record the same item here or the prefix never matches again.
+            self.output_items
+                .push(reasoning_item(&sig, &self.current_thinking));
             self.last_signature = Some(sig);
         }
+        self.current_thinking.clear();
         out.push(ReduceEvent::ThinkingStop);
         self.open = Open::None;
         self.flush_deferred_text(out);
@@ -786,6 +797,7 @@ impl Reducer {
             }
             "response.reasoning_summary_part.added" => {
                 if self.open == Open::Thinking {
+                    self.current_thinking.push_str("\n\n");
                     out.push(ReduceEvent::ThinkingDelta("\n\n".to_string()));
                 }
             }
@@ -800,6 +812,7 @@ impl Reducer {
                     out.push(ReduceEvent::ThinkingStart);
                     self.open = Open::Thinking;
                 }
+                self.current_thinking.push_str(delta);
                 out.push(ReduceEvent::ThinkingDelta(delta.to_string()));
             }
             "response.output_text.delta" => {
@@ -1542,6 +1555,41 @@ mod tests {
                 .any(|i| i["content"][0]["text"] == "the answer"),
             "deferred text must also reach the continuation transcript"
         );
+    }
+
+    #[test]
+    fn reasoning_item_reaches_the_continuation_transcript() {
+        let sse = concat!(
+            "data: {\"type\":\"response.reasoning_summary_text.delta\",\"output_index\":0,\"delta\":\"pondering\"}\n\n",
+            "data: {\"type\":\"response.output_item.done\",\"output_index\":0,\"item\":{\"type\":\"reasoning\",\"encrypted_content\":\"enc1\"}}\n\n",
+            "data: {\"type\":\"response.output_item.added\",\"output_index\":1,\"item\":{\"type\":\"message\",\"id\":\"m\"}}\n\n",
+            "data: {\"type\":\"response.output_text.delta\",\"output_index\":1,\"delta\":\"hi\"}\n\n",
+        );
+        let (_events, mut r) = reduce(sse);
+        let items = r.take_output_items();
+        // Continuation matches the stored transcript positionally against the input rebuilt next
+        // turn, where the echoed thinking block becomes a reasoning item ahead of the message.
+        assert_eq!(items[0]["type"], "reasoning");
+        assert_eq!(items[0]["encrypted_content"], "enc1");
+        assert_eq!(items[0]["summary"][0]["text"], "pondering");
+        assert_eq!(items[1]["type"], "message");
+
+        // ...and it must be byte-identical to what `build_input` reconstructs from that block.
+        let rebuilt = build_request_body(
+            &json!({
+                "messages": [{
+                    "role": "assistant",
+                    "content": [
+                        {"type": "thinking", "thinking": "pondering", "signature": "enc1"},
+                        {"type": "text", "text": "hi"}
+                    ]
+                }]
+            }),
+            "gpt-5.6-luna",
+            None,
+        )
+        .expect("build");
+        assert_eq!(rebuilt["input"][0], items[0]);
     }
 
     #[test]
