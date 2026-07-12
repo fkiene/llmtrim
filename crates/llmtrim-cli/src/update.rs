@@ -175,6 +175,26 @@ pub fn run() -> Result<()> {
         ),
     }
 
+    // Re-point the statusline now, while the executable this binary was launched from still
+    // exists — a package manager is about to replace it.
+    match crate::statusline::refresh_if_installed() {
+        Ok(true) => println!(
+            "{}",
+            crate::ui::ok(
+                color,
+                "Refreshed the Claude Code statusline for this update."
+            )
+        ),
+        Ok(false) => {}
+        Err(e) => eprintln!(
+            "{}",
+            crate::ui::note(
+                color,
+                &format!("Couldn't refresh the Claude Code statusline: {e}")
+            )
+        ),
+    }
+
     // Package-manager channels get their commands in a panel; the binary channel on
     // Unix actually runs the installer, so its output stays plain.
     let instructions = |title: &str, cmds: &[&str]| {

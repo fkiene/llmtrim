@@ -19,6 +19,12 @@ All notable changes to this project are documented here. The format follows
   signature when needed, and adaptive `thinking` without an explicit `output_config.effort`
   still enables Codex reasoning.
 
+- **Claude Code statuslines survive package upgrades.** `llmtrim statusline install` now keeps
+  a stable executable path when the active binary is also reachable through a symlink on `PATH`
+  (as with Homebrew's versioned `Cellar` layout), and `llmtrim update` re-points an existing
+  llmtrim-owned entry before the upgrade runs, so the statusline no longer ends up pointing at
+  a removed binary.
+
 ## [0.9.4] - 2026-07-12
 
 ### Fixed
