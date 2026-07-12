@@ -290,6 +290,8 @@ impl Endpoint {
 pub struct Upstream {
     pub status: u16,
     pub content_type: Option<String>,
+    /// Standard retry hint preserved for fallback/retry callers.
+    pub retry_after: Option<String>,
     pub reader: Box<dyn std::io::Read>,
 }
 
@@ -326,10 +328,16 @@ pub fn forward_post(
         .get("content-type")
         .and_then(|v| v.to_str().ok())
         .map(str::to_string);
+    let retry_after = response
+        .headers()
+        .get("retry-after")
+        .and_then(|v| v.to_str().ok())
+        .map(str::to_string);
     let reader = response.into_body().into_reader();
     Ok(Upstream {
         status,
         content_type,
+        retry_after,
         reader: Box::new(reader),
     })
 }
@@ -362,10 +370,16 @@ pub fn forward_get(
         .get("content-type")
         .and_then(|v| v.to_str().ok())
         .map(str::to_string);
+    let retry_after = response
+        .headers()
+        .get("retry-after")
+        .and_then(|v| v.to_str().ok())
+        .map(str::to_string);
     let reader = response.into_body().into_reader();
     Ok(Upstream {
         status,
         content_type,
+        retry_after,
         reader: Box::new(reader),
     })
 }

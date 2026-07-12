@@ -330,8 +330,8 @@ mod imp {
         /// provider's SSE back into Anthropic SSE. `provider` above is kept `Anthropic` so the
         /// output-usage parser and ledger see the Anthropic-shaped reply we emit to the client.
         reroute: Option<RerouteInfo>,
-        /// Set in `sub` on-error mode: the turn was forwarded to Anthropic normally, but if
-        /// Anthropic answers with a quota/overload status, `handle_response` replays it to this
+        /// Set in `sub` fallback mode: the turn was forwarded to Anthropic normally, but if
+        /// Anthropic cannot serve it, `handle_response` replays it to this
         /// subscription provider instead. Mutually exclusive with `reroute` (which reroutes up
         /// front). See [`FallbackInfo`].
         fallback: Option<FallbackInfo>,
@@ -346,7 +346,7 @@ mod imp {
         /// returning the subscription model makes Claude Code reject the response as unknown.
         client_model: String,
         /// The rewritten upstream request, retained so `reroute_response` can re-issue it on a
-        /// retryable failure (429/5xx). `None` on paths that never retry (the on-error fallback).
+        /// retryable failure (429/5xx). `None` on paths that never retry (the fallback path).
         replay: Option<RerouteReplay>,
         /// The full logical codex (or provider) request body *before* any continuation delta was
         /// applied. Used to record server continuation state.
@@ -369,21 +369,54 @@ mod imp {
         body: Arc<Vec<u8>>,
     }
 
-    /// On-error fallback marker attached to a [`Pending`] (see its `fallback` field). Holds what
+    /// Fallback marker attached to a [`Pending`] (see its `fallback` field). Holds what
     /// `handle_response` needs to replay the turn to the subscription provider: the provider, the
     /// original Anthropic request body to translate, and the Claude Code session id (for the
     /// provider's session header).
     #[derive(Clone)]
     struct FallbackInfo {
+        /// First provider retained for the single-provider compatibility helper below.
         provider: crate::reroute::SubProvider,
+        providers: Vec<crate::reroute::SubProvider>,
         anthropic_body: Vec<u8>,
         session_id: Option<String>,
     }
 
-    /// Anthropic statuses that mean "Anthropic can't serve this turn" (usage limit / payment /
-    /// forbidden / overload) and so trigger the on-error reroute to the subscription provider.
+    struct FallbackAttempt {
+        provider: crate::reroute::SubProvider,
+        model: String,
+        logical_body: Option<Value>,
+        body: Vec<u8>,
+    }
+
+    /// Anthropic statuses that mean "Anthropic can't serve this turn" and so trigger fallback.
     fn is_sub_fallback_status(status: u16) -> bool {
-        matches!(status, 402 | 403 | 429 | 529)
+        // Quota/auth failures plus the transient classes used by the sibling proxy. Do not
+        // fail over validation errors (400/422) or a missing Anthropic credential (401): those
+        // are caller/configuration problems, not provider capacity failures.
+        matches!(
+            status,
+            402 | 403 | 408 | 425 | 429 | 500 | 502 | 503 | 504 | 529
+        )
+    }
+
+    /// Some upstreams report a failed turn inside an HTTP 200 SSE response. In fallback mode the
+    /// Anthropic response is buffered before it is exposed to the client, so this path can still
+    /// fail over without emitting a malformed partial stream.
+    fn is_sub_fallback_body(body: &[u8]) -> bool {
+        let text = String::from_utf8_lossy(body).to_ascii_lowercase();
+        text.lines().any(|line| {
+            let data = line
+                .strip_prefix("data:")
+                .map(str::trim)
+                .unwrap_or(line.trim());
+            if let Ok(value) = serde_json::from_str::<Value>(data) {
+                let kind = value.get("type").and_then(Value::as_str);
+                return kind == Some("error")
+                    || (kind == Some("message_stop") && value.get("error").is_some());
+            }
+            data.contains("\"type\":\"error\"") || data.contains("\"type\": \"error\"")
+        })
     }
 
     /// A verbatim copy of the client's request, for replay-on-error.
@@ -974,12 +1007,14 @@ mod imp {
         /// construction. `None` = normal transparent compress-and-forward. When set, intercepted
         /// Anthropic `/v1/messages` traffic is translated and sent to that subscription's backend.
         sub: Option<crate::reroute::SubProvider>,
+        /// Ordered fallback providers. The active `sub` is used when this is empty.
+        sub_chain: Arc<Vec<crate::reroute::SubProvider>>,
         /// Tier→model overrides for the active `sub` (from `[sub.<provider>.tiers]`); empty = use
         /// the built-in preset. Shared across per-request handler clones.
         sub_tiers: Arc<std::collections::BTreeMap<String, String>>,
-        /// On-error reroute mode: when `true`, a set `sub` only takes over after Anthropic itself
+        /// Fallback mode: when `true`, a set `sub` only takes over after Anthropic itself
         /// returns a quota/overload status; when `false`, `sub` reroutes every matching turn.
-        sub_on_error: bool,
+        sub_fallback: bool,
         /// Proxy-side Codex reasoning effort applied to every rerouted request (`None` = off).
         sub_effort: Option<String>,
     }
@@ -1060,16 +1095,16 @@ mod imp {
             // Anthropic. `count_tokens` is answered locally (it would otherwise be billed against
             // the sub provider, so it can't be proxied to Anthropic). This runs before the normal
             // compress/exclude path so a `sub` selection always takes effect.
-            // On-error mode arms a fallback instead of rerouting up front: the turn goes to
+            // Fallback mode arms a fallback instead of rerouting up front: the turn goes to
             // Anthropic normally, and only replays to the sub provider if Anthropic fails (handled
             // in the response phase). Captured here so we can read the session header and body.
-            let mut fallback_arm: Option<(crate::reroute::SubProvider, Option<String>)> = None;
+            let mut fallback_arm: Option<(Vec<crate::reroute::SubProvider>, Option<String>)> = None;
             if let Some(sub) = self.sub
                 && matches!(provider, Some(ProviderKind::Anthropic))
                 && req.method() == Method::POST
             {
                 let path = req.uri().path();
-                if !self.sub_on_error {
+                if !self.sub_fallback {
                     if path.ends_with("/v1/messages/count_tokens") {
                         return self.reroute_count_tokens(req).await;
                     }
@@ -1082,7 +1117,12 @@ mod imp {
                         .get("x-claude-code-session-id")
                         .and_then(|v| v.to_str().ok())
                         .map(str::to_string);
-                    fallback_arm = Some((sub, session_id));
+                    let providers = if self.sub_chain.is_empty() {
+                        vec![sub]
+                    } else {
+                        self.sub_chain.as_ref().clone()
+                    };
+                    fallback_arm = Some((providers, session_id));
                 }
             }
             // Only compress POST bodies to a known provider; pass everything else through.
@@ -1140,7 +1180,7 @@ mod imp {
             .ok()
             .flatten();
 
-            // Capture the (uncompressed) body for the on-error fallback before the match may move
+            // Capture the (uncompressed) body for the fallback before the match may move
             // `bytes`. The Anthropic call still goes out compressed; only a rare fallback replay
             // re-translates this original body to the provider.
             let fallback_body = fallback_arm.as_ref().map(|_| bytes.to_vec());
@@ -1166,18 +1206,23 @@ mod imp {
                 }
                 None => Body::from(Full::new(bytes)),
             };
-            // On-error mode: attach the provider fallback to the pending (creating a bare pending
+            // Fallback mode: attach the provider fallback to the pending (creating a bare pending
             // when compression produced one), so the response phase can replay to the provider on
             // an Anthropic quota/overload status. We only arm the fallback on a *real* pending:
             // when `compress_blocking` declined (malformed body → no pending), we leave it None so
             // the request is forwarded verbatim and no phantom zero-token row is recorded. Such a
             // body would fail at Anthropic anyway, so losing the fallback there is harmless.
-            if let Some((sub, session_id)) = fallback_arm
+            if let Some((providers, session_id)) = fallback_arm
                 && let Some(body) = fallback_body
                 && let Some(pending) = self.pending.as_mut()
             {
+                let provider = providers
+                    .first()
+                    .copied()
+                    .unwrap_or(crate::reroute::SubProvider::Codex);
                 pending.fallback = Some(FallbackInfo {
-                    provider: sub,
+                    provider,
+                    providers,
                     anthropic_body: body,
                     session_id,
                 });
@@ -1775,23 +1820,18 @@ mod imp {
             sse_response(out)
         }
 
-        /// On-error reroute: Anthropic returned a quota/overload status, so replay the (stashed
-        /// original) turn to the subscription provider and hand the client the provider's answer as
-        /// Anthropic SSE. Uses a blocking provider round-trip (`transport::forward_post`, like the
-        /// replay net) since hudsucker already consumed the request; buffers the provider reply (the
-        /// rare error path, not the hot path) and translates it in one shot. Records the row against
-        /// the provider model via `Finalize` on drop.
-        async fn fallback_to_provider(
+        /// Provider-chain fallback. Each backend gets bounded retries for transient HTTP errors;
+        /// a terminal response, auth failure, translation failure, or failed 200 stream advances
+        /// to the next configured provider.
+        async fn fallback_to_chain(
             &mut self,
             mut pending: Pending,
             fb: FallbackInfo,
         ) -> Response<Body> {
             use crate::reroute::sse::{AnthropicSseEncoder, ReduceEvent};
-            let provider = fb.provider;
-
             let Some(mut anthropic) = std::str::from_utf8(&fb.anthropic_body)
                 .ok()
-                .and_then(|t| serde_json::from_str::<serde_json::Value>(t).ok())
+                .and_then(|t| serde_json::from_str::<Value>(t).ok())
             else {
                 return self.fallback_error(
                     pending,
@@ -1801,155 +1841,165 @@ mod imp {
             };
             let client_model = anthropic
                 .get("model")
-                .and_then(|model| model.as_str())
+                .and_then(Value::as_str)
                 .unwrap_or("unknown")
                 .to_string();
             apply_sub_effort(&mut anthropic, self.sub_effort.as_deref());
 
-            let token = match tokio::task::spawn_blocking(move || {
-                crate::reroute::auth::get_token(provider)
-            })
-            .await
-            {
-                Ok(Ok(t)) => t,
-                Ok(Err(e)) => {
-                    return self.fallback_error(
-                        pending,
-                        &client_model,
-                        &format!(
-                            "llmtrim: {p} not authenticated ({e}). Run `llmtrim sub auth {p} login`.",
-                            p = provider.as_str()
-                        ),
-                    );
+            let mut providers = Vec::new();
+            for provider in fb.providers.iter().copied().chain([fb.provider]) {
+                if !providers.contains(&provider) {
+                    providers.push(provider);
                 }
-                Err(_) => {
-                    return self.fallback_error(
-                        pending,
-                        &client_model,
-                        "llmtrim: auth task failed",
+            }
+            let mut failures = Vec::new();
+            for provider in providers {
+                let attempt = match self
+                    .fallback_attempt(provider, &anthropic, fb.session_id.as_deref())
+                    .await
+                {
+                    Ok(attempt) => attempt,
+                    Err(error) => {
+                        failures.push(format!("{}: {error}", provider.as_str()));
+                        continue;
+                    }
+                };
+                let mut reducer =
+                    crate::reroute::StreamReducer::new(attempt.provider, &attempt.model);
+                let mut encoder = AnthropicSseEncoder::new(&client_model);
+                let mut output = String::new();
+                let mut stream_error = None;
+                for event in reducer.push(&attempt.body) {
+                    record_codex_continuation(
+                        &event,
+                        &mut reducer,
+                        attempt.provider,
+                        attempt.logical_body.as_ref(),
+                        fb.session_id.as_deref(),
                     );
+                    if let ReduceEvent::Error { message } = &event {
+                        stream_error = Some(message.clone());
+                    }
+                    encoder.encode(&event, &mut output);
                 }
-            };
+                if stream_error.is_none() {
+                    for event in reducer.finish() {
+                        record_codex_continuation(
+                            &event,
+                            &mut reducer,
+                            attempt.provider,
+                            attempt.logical_body.as_ref(),
+                            fb.session_id.as_deref(),
+                        );
+                        if let ReduceEvent::Error { message } = &event {
+                            stream_error = Some(message.clone());
+                        }
+                        encoder.encode(&event, &mut output);
+                    }
+                }
+                if let Some(error) = stream_error {
+                    crate::reroute::continuation::clear_continuation(fb.session_id.as_deref());
+                    failures.push(format!("{}: {error}", attempt.provider.as_str()));
+                    continue;
+                }
+                encoder.finish_if_open(&mut output);
+                pending.model = Some(attempt.model.clone());
+                pending.reroute = Some(RerouteInfo {
+                    provider: attempt.provider,
+                    model: attempt.model,
+                    client_model: client_model.clone(),
+                    replay: None,
+                    logical_body: attempt.logical_body,
+                    session_id: fb.session_id.clone(),
+                });
+                let acc = Arc::new(Mutex::new(output.clone().into_bytes()));
+                let _finalize = Finalize {
+                    acc,
+                    pending: Some(pending),
+                    ledger: self.ledger.clone(),
+                    breakdown_ledger: self.breakdown_ledger.clone(),
+                };
+                return sse_response(output);
+            }
+            self.fallback_error(
+                pending,
+                &client_model,
+                &format!(
+                    "llmtrim: all fallback providers failed: {}",
+                    failures.join("; ")
+                ),
+            )
+        }
 
-            let rewrite = match crate::reroute::build_upstream(
+        async fn fallback_attempt(
+            &self,
+            provider: crate::reroute::SubProvider,
+            anthropic: &Value,
+            session_id: Option<&str>,
+        ) -> Result<FallbackAttempt, String> {
+            let token =
+                tokio::task::spawn_blocking(move || crate::reroute::auth::get_token(provider))
+                    .await
+                    .map_err(|_| "auth task failed".to_string())?
+                    .map_err(|e| format!("not authenticated ({e})"))?;
+            let rewrite = crate::reroute::build_upstream(
                 provider,
-                &anthropic,
+                anthropic,
                 &self.sub_tiers,
                 &token,
-                fb.session_id.as_deref(),
-            ) {
-                Ok(r) => r,
-                Err(e) => {
-                    return self.fallback_error(
-                        pending,
-                        &client_model,
-                        &format!("llmtrim: reroute translation failed: {e}"),
-                    );
-                }
-            };
-
-            let logical_body: Option<Value> = if provider == crate::reroute::SubProvider::Codex {
-                serde_json::from_slice(&rewrite.body).ok()
-            } else {
-                None
-            };
-
-            let model = rewrite.model.clone();
-            // Record this row against the resolved provider model (marks it a reroute).
-            pending.model = Some(model.clone());
-            pending.reroute = Some(RerouteInfo {
-                provider,
-                model: model.clone(),
-                client_model: client_model.clone(),
-                replay: None,
-                logical_body: logical_body.clone(),
-                session_id: fb.session_id.clone(),
-            });
-
+                session_id,
+            )
+            .map_err(|e| format!("translation failed: {e}"))?;
+            let logical_body = (provider == crate::reroute::SubProvider::Codex)
+                .then(|| serde_json::from_slice(&rewrite.body).ok())
+                .flatten();
             let url = format!("https://{}{}", rewrite.host, rewrite.path);
             let headers = rewrite.headers.clone();
             let body = String::from_utf8_lossy(&rewrite.body).into_owned();
             let proxy = self.upstream_proxy.clone();
-            let result = tokio::task::spawn_blocking(move || {
-                use std::io::Read;
-                let mut up =
-                    crate::transport::forward_post(&url, &headers, &body, proxy.as_deref())
-                        .map_err(|e| e.to_string())?;
-                let mut buf = Vec::new();
-                up.reader.read_to_end(&mut buf).map_err(|e| e.to_string())?;
-                Ok::<(u16, Vec<u8>), String>((up.status, buf))
-            })
-            .await;
-
-            let (status, raw) = match result {
-                Ok(Ok(v)) => v,
-                Ok(Err(e)) => {
-                    return self.fallback_error(
-                        pending,
-                        &client_model,
-                        &format!("llmtrim: {} request failed: {e}", provider.as_str()),
-                    );
-                }
-                Err(_) => {
-                    return self.fallback_error(
-                        pending,
-                        &client_model,
-                        "llmtrim: fallback task failed",
-                    );
-                }
-            };
-
-            let mut enc = AnthropicSseEncoder::new(&client_model);
-            let mut out = String::new();
-            if !(200..300).contains(&status) {
-                let snippet: String = String::from_utf8_lossy(&raw).chars().take(400).collect();
-                enc.encode(
-                    &ReduceEvent::Error {
-                        message: format!(
-                            "llmtrim: {} upstream HTTP {}: {}",
-                            provider.as_str(),
-                            status,
-                            snippet
-                        ),
-                    },
-                    &mut out,
-                );
-            } else {
-                let mut reducer = crate::reroute::StreamReducer::new(provider, &model);
-                for ev in reducer.push(&raw) {
-                    record_codex_continuation(
-                        &ev,
-                        &mut reducer,
+            let mut attempt = 0;
+            loop {
+                let url = url.clone();
+                let headers = headers.clone();
+                let body = body.clone();
+                let proxy = proxy.clone();
+                let result = tokio::task::spawn_blocking(move || {
+                    use std::io::Read;
+                    let mut up =
+                        crate::transport::forward_post(&url, &headers, &body, proxy.as_deref())
+                            .map_err(|e| e.to_string())?;
+                    let mut buf = Vec::new();
+                    up.reader.read_to_end(&mut buf).map_err(|e| e.to_string())?;
+                    let retry_after =
+                        reroute_retry_after_secs(up.retry_after.as_deref(), None, &buf);
+                    Ok::<(u16, Vec<u8>, Option<u64>), String>((up.status, buf, retry_after))
+                })
+                .await
+                .map_err(|_| "fallback task failed".to_string())?
+                .map_err(|e| format!("request failed: {e}"))?;
+                let (status, body, retry_after) = result;
+                if (200..300).contains(&status) {
+                    return Ok(FallbackAttempt {
                         provider,
-                        logical_body.as_ref(),
-                        fb.session_id.as_deref(),
-                    );
-                    enc.encode(&ev, &mut out);
+                        model: rewrite.model,
+                        logical_body,
+                        body,
+                    });
                 }
-                for ev in reducer.finish() {
-                    record_codex_continuation(
-                        &ev,
-                        &mut reducer,
-                        provider,
-                        logical_body.as_ref(),
-                        fb.session_id.as_deref(),
-                    );
-                    enc.encode(&ev, &mut out);
+                if !reroute_should_retry(status) || attempt >= REROUTE_RETRY_MAX {
+                    let snippet: String =
+                        String::from_utf8_lossy(&body).chars().take(300).collect();
+                    return Err(format!("HTTP {status}: {snippet}"));
                 }
-                enc.finish_if_open(&mut out);
+                let Some(wait_ms) = reroute_backoff_ms(attempt, retry_after) else {
+                    return Err(format!("HTTP {status}: retry window exceeds budget"));
+                };
+                tokio::time::sleep(std::time::Duration::from_millis(wait_ms)).await;
+                attempt += 1;
             }
-
-            let acc = Arc::new(Mutex::new(out.clone().into_bytes()));
-            let _finalize = Finalize {
-                acc,
-                pending: Some(pending),
-                ledger: self.ledger.clone(),
-                breakdown_ledger: self.breakdown_ledger.clone(),
-            };
-            sse_response(out)
         }
 
-        /// Emit an Anthropic SSE `error` frame for an on-error fallback that failed before/at the
+        /// Emit an Anthropic SSE `error` frame for a fallback that failed before/at the
         /// provider round-trip, still recording the row (output 0) as the `Finalize` drops.
         fn fallback_error(&self, pending: Pending, model: &str, message: &str) -> Response<Body> {
             use crate::reroute::sse::{AnthropicSseEncoder, ReduceEvent};
@@ -1983,12 +2033,37 @@ mod imp {
             if let Some(info) = pending.reroute.clone() {
                 return self.reroute_response(res, pending, info).await;
             }
-            // On-error reroute: Anthropic answered with a quota/overload status, so replay the turn
+            // Fallback reroute: Anthropic answered with a capacity/transient status, so replay the turn
             // to the subscription provider instead of handing the client Anthropic's error.
             if let Some(fb) = pending.fallback.clone()
                 && is_sub_fallback_status(res.status().as_u16())
             {
-                return self.fallback_to_provider(pending, fb).await;
+                return self.fallback_to_chain(pending, fb).await;
+            }
+            // Some providers encode an error as a successful SSE/JSON response. Buffer only in
+            // fallback mode so a failed stream can still advance to the next provider without
+            // exposing a partial response to Claude Code.
+            let mut res = res;
+            if pending.fallback.is_some() && (200..300).contains(&res.status().as_u16()) {
+                let is_stream = res
+                    .headers()
+                    .get(header::CONTENT_TYPE)
+                    .and_then(|v| v.to_str().ok())
+                    .is_some_and(|v| v.contains("event-stream") || v.contains("json"));
+                if is_stream {
+                    let (parts, body) = res.into_parts();
+                    let bytes = body
+                        .collect()
+                        .await
+                        .map(|c| c.to_bytes().to_vec())
+                        .unwrap_or_default();
+                    if is_sub_fallback_body(&bytes)
+                        && let Some(fb) = pending.fallback.clone()
+                    {
+                        return self.fallback_to_chain(pending, fb).await;
+                    }
+                    res = Response::from_parts(parts, Body::from(bytes));
+                }
             }
             // Safety net: if the upstream rejected our compressed request with a *validation*
             // error (400 Bad Request / 422 Unprocessable) — the failure class our body edits can
@@ -2897,8 +2972,15 @@ mod imp {
                 }
                 parsed
             },
+            sub_chain: Arc::new(
+                RuntimeConfig::get()
+                    .sub_chain
+                    .iter()
+                    .filter_map(|p| crate::reroute::SubProvider::parse(p))
+                    .collect(),
+            ),
             sub_tiers: Arc::new(RuntimeConfig::get().sub_tiers.clone()),
-            sub_on_error: RuntimeConfig::get().sub_on_error,
+            sub_fallback: RuntimeConfig::get().sub_fallback,
             sub_effort: RuntimeConfig::get().sub_effort.clone(),
         };
         // Pre-flight bind: hudsucker's `Proxy::start` collapses a bind failure to a bare
@@ -4017,7 +4099,7 @@ mod imp {
             );
         }
 
-        // ── M0-2: replay-on-error gate ──────────────────────────────────────
+        // ── M0-2: fallback gate ─────────────────────────────────────────────
 
         #[test]
         fn replay_triggered_on_4xx() {
@@ -4034,22 +4116,37 @@ mod imp {
         }
 
         #[test]
-        fn sub_fallback_triggers_on_quota_and_overload_only() {
-            // 402/403 (payment/forbidden), 429 (usage limit), 529 (overloaded) reroute to the sub.
-            for s in [402, 403, 429, 529] {
-                assert!(
-                    is_sub_fallback_status(s),
-                    "{s} must trigger the on-error fallback"
-                );
+        fn sub_fallback_triggers_on_capacity_and_transient_failures() {
+            // Quota/forbidden, throttling, overload, and transient server failures reroute.
+            for s in [402, 403, 408, 425, 429, 500, 502, 503, 504, 529] {
+                assert!(is_sub_fallback_status(s), "{s} must trigger the fallback");
             }
-            // A success, a validation error, and a generic 5xx do not — those are the replay net's
-            // or the client's to handle, not the subscription's.
-            for s in [200, 400, 422, 500, 503] {
+            // A success, validation errors, and missing Anthropic auth stay with the client.
+            for s in [200, 400, 401, 422] {
                 assert!(
                     !is_sub_fallback_status(s),
                     "{s} must not trigger the fallback"
                 );
             }
+        }
+
+        #[test]
+        fn sub_fallback_detects_embedded_stream_errors() {
+            assert!(is_sub_fallback_body(
+                br#"data: {"type":"error","error":{"message":"overloaded"}}
+
+"#
+            ));
+            assert!(is_sub_fallback_body(
+                br#"data: {"type": "message_stop", "error": {"type":"api_error"}}
+
+"#
+            ));
+            assert!(!is_sub_fallback_body(
+                br#"data: {"type":"message_stop","stop_reason":"end_turn"}
+
+"#
+            ));
         }
 
         #[test]
@@ -4158,7 +4255,8 @@ mod imp {
                 exclude_providers: Arc::new(Vec::new()),
                 sub: None,
                 sub_tiers: Arc::new(std::collections::BTreeMap::new()),
-                sub_on_error: false,
+                sub_chain: Arc::new(vec![]),
+                sub_fallback: false,
                 sub_effort: None,
             };
             (handler, rx)

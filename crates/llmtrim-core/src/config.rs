@@ -668,13 +668,27 @@ fn edit_sub_table_at(path: &std::path::Path, edit: impl FnOnce(&mut toml::Table)
     Ok(())
 }
 
-/// Set the reroute mode: `on_error` = reroute only when Anthropic fails, anything else = always.
+/// Set the reroute mode: `fallback` = reroute only when Anthropic fails, `always` = reroute every
+/// matching turn. No legacy spelling is accepted so the persisted configuration has one clear
+/// vocabulary.
 /// Preserves the active provider and every `[sub.<provider>.tiers]` entry.
-pub fn write_sub_mode(on_error: bool) -> Result<()> {
+pub fn write_sub_mode(fallback: bool) -> Result<()> {
     let path = config_path().ok_or_else(|| anyhow::anyhow!("no config path (HOME/XDG unset)"))?;
-    let mode = if on_error { "on_error" } else { "always" };
+    let mode = if fallback { "fallback" } else { "always" };
     edit_sub_table_at(&path, |t| {
         t.insert("mode".to_string(), toml::Value::String(mode.to_string()));
+    })
+}
+
+/// Persist the ordered provider chain used by `sub mode fallback`.
+pub fn write_sub_chain(providers: &[String]) -> Result<()> {
+    let path = config_path().ok_or_else(|| anyhow::anyhow!("no config path (HOME/XDG unset)"))?;
+    let values = providers
+        .iter()
+        .map(|p| toml::Value::String(p.trim().to_ascii_lowercase()))
+        .collect();
+    edit_sub_table_at(&path, |t| {
+        t.insert("chain".to_string(), toml::Value::Array(values));
     })
 }
 
@@ -816,12 +830,14 @@ pub struct RuntimeConfig {
     /// request. Env `LLMTRIM_CODEX_EFFORT` or file `sub.codex.effort`. Ignored by Kimi (single
     /// model, no reasoning knob).
     pub sub_effort: Option<String>,
-    /// Reroute only when Anthropic itself fails (usage limit / overload). When `true`, the proxy
-    /// forwards to Anthropic as usual and only replays the turn to the `sub` provider if Anthropic
-    /// answers with a quota/overload status (402/403/429/529); when `false` (default), a set `sub`
-    /// reroutes every matching turn. Env `LLMTRIM_SUB_MODE` (`always`/`on_error`) or the file key
-    /// `sub.mode`.
-    pub sub_on_error: bool,
+    /// Reroute only when Anthropic fails. When `true`, the proxy forwards to Anthropic as usual
+    /// and tries the ordered [`sub_chain`] providers on a quota, overload, transport, or
+    /// retryable upstream failure; when `false` (default), a set `sub` reroutes every matching
+    /// turn. Env `LLMTRIM_SUB_MODE` (`always`/`fallback`) or the file key `sub.mode`.
+    pub sub_fallback: bool,
+    /// Ordered subscription providers to try in fallback mode. Env `LLMTRIM_SUB_CHAIN` or
+    /// `[sub] chain = ["codex", "kimi"]`; when omitted, the active `sub` provider is used.
+    pub sub_chain: Vec<String>,
     /// Whether to enable server-side continuation for Codex reroutes (`previous_response_id` +
     /// delta-only `input` on follow-up turns). This keeps the upstream conversation state warm and
     /// improves real prompt-cache / token reuse (the mechanism behind good `♻ % cached` numbers).
@@ -911,7 +927,8 @@ impl RuntimeConfig {
                 active.filter(|s| s != "off" && !s.is_empty())
             },
             sub_tiers: resolve_sub_tiers(&env, file),
-            sub_on_error: resolve_sub_on_error(&env, file),
+            sub_fallback: resolve_sub_fallback(&env, file),
+            sub_chain: resolve_sub_chain(&env, file),
             sub_effort: resolve_sub_effort(&env, file),
             sub_codex_previous_response_id: resolve_sub_codex_continuation(&env, file),
         }
@@ -985,23 +1002,56 @@ fn resolve_sub_effort(
         .and_then(clean)
 }
 
-/// Whether reroute runs in `on_error` mode: env `LLMTRIM_SUB_MODE` (`on_error`/`on-error` → true,
+/// Whether reroute runs in `fallback` mode: env `LLMTRIM_SUB_MODE` (`fallback` → true,
 /// `always` → false) wins, else the `sub.mode` table key. Default `false` (reroute always).
-fn resolve_sub_on_error(env: &impl Fn(&str) -> Option<String>, file: Option<&toml::Value>) -> bool {
-    let is_on_error = |s: &str| {
-        matches!(
-            s.trim().to_ascii_lowercase().as_str(),
-            "on_error" | "on-error" | "onerror"
-        )
-    };
+fn resolve_sub_fallback(env: &impl Fn(&str) -> Option<String>, file: Option<&toml::Value>) -> bool {
+    let is_fallback = |s: &str| s.trim().eq_ignore_ascii_case("fallback");
     if let Some(v) = env("LLMTRIM_SUB_MODE").filter(|s| !s.is_empty()) {
-        return is_on_error(&v);
+        return is_fallback(&v);
     }
     file.and_then(|v| v.get("sub"))
         .and_then(|v| v.get("mode"))
         .and_then(toml::Value::as_str)
-        .map(is_on_error)
+        .map(is_fallback)
         .unwrap_or(false)
+}
+
+/// Ordered fallback providers from env or `[sub] chain`. Unknown entries are retained so the
+/// serve layer can report them clearly; an empty/missing chain falls back to the active provider.
+fn resolve_sub_chain(
+    env: &impl Fn(&str) -> Option<String>,
+    file: Option<&toml::Value>,
+) -> Vec<String> {
+    let parse = |raw: &str| {
+        raw.split(',')
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(|s| s.to_ascii_lowercase())
+            .collect::<Vec<_>>()
+    };
+    if let Some(v) = env("LLMTRIM_SUB_CHAIN").filter(|s| !s.is_empty()) {
+        return parse(&v);
+    }
+    let sub = file.and_then(|v| v.get("sub"));
+    let mut chain = sub
+        .and_then(|v| v.get("chain"))
+        .map(|v| match v {
+            toml::Value::Array(values) => values
+                .iter()
+                .filter_map(toml::Value::as_str)
+                .flat_map(parse)
+                .collect(),
+            toml::Value::String(s) => parse(s),
+            _ => Vec::new(),
+        })
+        .unwrap_or_default();
+    if chain.is_empty()
+        && let Some(active) = resolve_sub_provider(env, file)
+        && active != "off"
+    {
+        chain.push(active);
+    }
+    chain
 }
 
 /// Codex continuation (previous_response_id deltas) enabled? Env `LLMTRIM_CODEX_PREVIOUS_RESPONSE_ID`
@@ -1345,19 +1395,40 @@ mod tests {
     }
 
     #[test]
-    fn sub_on_error_env_wins_over_file_mode() {
+    fn sub_fallback_env_wins_over_file_mode() {
         let file: toml::Value =
-            toml::from_str("[sub]\nactive = \"codex\"\nmode = \"on_error\"\n").unwrap();
+            toml::from_str("[sub]\nactive = \"codex\"\nmode = \"fallback\"\n").unwrap();
         let no_env = |_: &str| None;
-        assert!(resolve_sub_on_error(&no_env, Some(&file)));
+        assert!(resolve_sub_fallback(&no_env, Some(&file)));
         // Default is always (false) when no mode key.
         let plain: toml::Value = toml::from_str("sub = \"codex\"").unwrap();
-        assert!(!resolve_sub_on_error(&no_env, Some(&plain)));
+        assert!(!resolve_sub_fallback(&no_env, Some(&plain)));
         // Env overrides the file both ways.
         let env_always = |k: &str| (k == "LLMTRIM_SUB_MODE").then(|| "always".to_string());
-        assert!(!resolve_sub_on_error(&env_always, Some(&file)));
-        let env_err = |k: &str| (k == "LLMTRIM_SUB_MODE").then(|| "on-error".to_string());
-        assert!(resolve_sub_on_error(&env_err, Some(&plain)));
+        assert!(!resolve_sub_fallback(&env_always, Some(&file)));
+        let env_fallback = |k: &str| (k == "LLMTRIM_SUB_MODE").then(|| "fallback".to_string());
+        assert!(resolve_sub_fallback(&env_fallback, Some(&plain)));
+        let env_removed = |k: &str| (k == "LLMTRIM_SUB_MODE").then(|| "legacy".to_string());
+        assert!(!resolve_sub_fallback(&env_removed, Some(&plain)));
+    }
+
+    #[test]
+    fn sub_chain_reads_order_and_falls_back_to_active() {
+        let file: toml::Value =
+            toml::from_str("[sub]\nactive = \"codex\"\nchain = [\"kimi\", \"codex\"]\n").unwrap();
+        let no_env = |_: &str| None;
+        assert_eq!(
+            resolve_sub_chain(&no_env, Some(&file)),
+            vec!["kimi".to_string(), "codex".to_string()]
+        );
+        let plain: toml::Value = toml::from_str("sub = \"kimi\"").unwrap();
+        assert_eq!(resolve_sub_chain(&no_env, Some(&plain)), vec!["kimi"]);
+        let env =
+            |key: &str| (key == "LLMTRIM_SUB_CHAIN").then(|| "codex, kimi, codex".to_string());
+        assert_eq!(
+            resolve_sub_chain(&env, Some(&file)),
+            vec!["codex".to_string(), "kimi".to_string(), "codex".to_string()]
+        );
     }
 
     #[test]
@@ -1365,14 +1436,14 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("llmtrim-sub-edit-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("config.toml");
-        // Seed a full mapping + on-error mode.
+        // Seed a full mapping + fallback mode.
         let mut tiers = std::collections::BTreeMap::new();
         tiers.insert("opus".to_string(), "gpt-5.5".to_string());
         write_sub_mapping_at(&path, "codex", &tiers).unwrap();
         edit_sub_table_at(&path, |t| {
             t.insert(
                 "mode".to_string(),
-                toml::Value::String("on_error".to_string()),
+                toml::Value::String("fallback".to_string()),
             );
         })
         .unwrap();
@@ -1404,7 +1475,7 @@ mod tests {
             resolve_sub_provider(&no_env, Some(&file)).as_deref(),
             Some("codex")
         );
-        assert!(resolve_sub_on_error(&no_env, Some(&file)));
+        assert!(resolve_sub_fallback(&no_env, Some(&file)));
         let read = resolve_sub_tiers(&no_env, Some(&file));
         assert_eq!(read.get("opus").map(String::as_str), Some("gpt-5.5"));
         assert_eq!(
@@ -1434,7 +1505,7 @@ mod tests {
         .unwrap();
         let back: toml::Value = toml::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
         assert!(
-            resolve_sub_on_error(&no_env, Some(&back)),
+            resolve_sub_fallback(&no_env, Some(&back)),
             "mode survived off/on"
         );
         let restored = resolve_sub_tiers(&no_env, Some(&back));

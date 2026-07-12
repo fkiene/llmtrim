@@ -422,12 +422,20 @@ enum SubCmd {
         #[arg(long)]
         no_restart: bool,
     },
-    /// Set the reroute mode: `always` (reroute every turn) or `on-error` (only when Anthropic
-    /// hits a usage/overload limit).
+    /// Set the reroute mode: `always` (reroute every turn) or `fallback` (use the ordered
+    /// subscription chain only when Anthropic cannot serve the turn).
     Mode {
-        /// `always` or `on-error`.
+        /// `always` or `fallback`.
         mode: String,
         /// Don't restart a running interceptor to apply the change (just print the hint).
+        #[arg(long)]
+        no_restart: bool,
+    },
+    /// Set the ordered providers used by `sub mode fallback` (for example `codex,kimi`).
+    Chain {
+        /// Comma-separated providers in try order: codex,kimi.
+        providers: String,
+        /// Don't restart a running interceptor to apply the change.
         #[arg(long)]
         no_restart: bool,
     },
@@ -829,16 +837,39 @@ fn run_sub(action: SubCmd) -> Result<()> {
             Ok(())
         }
         SubCmd::Mode { mode, no_restart } => {
-            let on_error = match mode.trim().to_ascii_lowercase().as_str() {
-                "on-error" | "on_error" | "onerror" | "error" => true,
-                "always" | "all" => false,
-                other => anyhow::bail!("unknown mode '{other}' (always|on-error)"),
+            let fallback = match mode.trim().to_ascii_lowercase().as_str() {
+                "fallback" => true,
+                "always" => false,
+                other => anyhow::bail!("unknown mode '{other}' (always|fallback)"),
             };
-            llmtrim_core::config::write_sub_mode(on_error)?;
+            llmtrim_core::config::write_sub_mode(fallback)?;
             println!(
                 "Reroute mode: {}.",
-                if on_error { "on-error" } else { "always" }
+                if fallback { "fallback" } else { "always" }
             );
+            apply_sub_change(no_restart);
+            Ok(())
+        }
+        SubCmd::Chain {
+            providers,
+            no_restart,
+        } => {
+            let mut chain = Vec::new();
+            for raw in providers.split(',') {
+                let raw = raw.trim();
+                if raw.is_empty() {
+                    continue;
+                }
+                let p = parse(raw)?;
+                if !chain.contains(&p.as_str().to_string()) {
+                    chain.push(p.as_str().to_string());
+                }
+            }
+            if chain.is_empty() {
+                anyhow::bail!("fallback chain is empty (expected codex,kimi)");
+            }
+            llmtrim_core::config::write_sub_chain(&chain)?;
+            println!("Fallback chain: {}.", chain.join(" -> "));
             apply_sub_change(no_restart);
             Ok(())
         }
@@ -930,7 +961,8 @@ fn run_sub(action: SubCmd) -> Result<()> {
                 }
                 let out = serde_json::json!({
                     "provider": active.map(|p| p.as_str()),
-                    "mode": if cfg.sub_on_error { "on_error" } else { "always" },
+                    "mode": if cfg.sub_fallback { "fallback" } else { "always" },
+                    "chain": cfg.sub_chain,
                     "effort": cfg.sub_effort,
                     "mapping": mapping,
                     "auth": {
@@ -947,12 +979,22 @@ fn run_sub(action: SubCmd) -> Result<()> {
                     println!(
                         "Reroute: {} ({})",
                         p.as_str(),
-                        if cfg.sub_on_error {
-                            "on-error"
+                        if cfg.sub_fallback {
+                            "fallback"
                         } else {
                             "always"
                         }
                     );
+                    if cfg.sub_fallback {
+                        println!(
+                            "  chain   -> {}",
+                            if cfg.sub_chain.is_empty() {
+                                p.as_str().to_string()
+                            } else {
+                                cfg.sub_chain.join(" -> ")
+                            }
+                        );
+                    }
                     if p == SubProvider::Codex {
                         println!(
                             "  effort  -> {}",

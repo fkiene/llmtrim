@@ -47,7 +47,7 @@ struct App {
     status: String,
     /// Current reroute mode, shown read-only (set it with `llmtrim sub mode`). The editor edits
     /// the model map only, so it flags where the other half of the setting lives.
-    on_error: bool,
+    fallback: bool,
 }
 
 impl App {
@@ -72,7 +72,7 @@ impl App {
             selected: 0,
             dirty: false,
             status: String::new(),
-            on_error: rc.sub_on_error,
+            fallback: rc.sub_fallback,
         }
     }
 
@@ -153,7 +153,7 @@ impl App {
             ),
             Span::raw(format!(
                 "   mode: {} (set with `llmtrim sub mode`)",
-                if self.on_error { "on-error" } else { "always" }
+                if self.fallback { "fallback" } else { "always" }
             )),
         ]))
         .block(
@@ -249,7 +249,7 @@ mod tests {
             selected: 0,
             dirty: false,
             status: String::new(),
-            on_error: false,
+            fallback: false,
         }
     }
 

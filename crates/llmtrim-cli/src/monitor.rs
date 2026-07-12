@@ -320,8 +320,8 @@ fn render_header(color: bool, d: &DaemonView) -> String {
         if let Some(p) = rc.sub.as_deref() {
             meta.push_str(&format!(
                 " · reroute {p} ({})",
-                if rc.sub_on_error {
-                    "on-error"
+                if rc.sub_fallback {
+                    "fallback"
                 } else {
                     "always"
                 }
@@ -816,7 +816,8 @@ pub fn export_json(
         match cfg.sub.as_deref() {
             Some(p) => json!({
                 "provider": p,
-                "mode": if cfg.sub_on_error { "on_error" } else { "always" },
+                "mode": if cfg.sub_fallback { "fallback" } else { "always" },
+                "chain": cfg.sub_chain,
             }),
             None => serde_json::Value::Null,
         }

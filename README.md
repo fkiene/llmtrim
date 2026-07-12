@@ -440,10 +440,10 @@ automatically. `llmtrim sub setup codex` opens an interactive editor to change w
 each Claude tier (opus / sonnet / haiku / fable) maps to; `llmtrim sub status` shows the
 current mapping; `llmtrim sub off` disables rerouting and sends traffic back to Anthropic.
 
-By default a set provider reroutes every turn. To use the subscription only as a backup, switch
-to on-error mode: `llmtrim sub mode on-error` forwards to Anthropic as usual and falls back to the
-provider only when Anthropic hits a usage limit or overload (402/403/429/529). `llmtrim sub mode
-always` restores the default.
+By default a set provider reroutes every turn. To use subscriptions only as a backup, switch to
+fallback mode: `llmtrim sub mode fallback` forwards to Anthropic as usual and tries the configured
+provider chain when Anthropic hits a quota, overload, transient server error, or transport failure.
+Set the order with `llmtrim sub chain codex,kimi`; `llmtrim sub mode always` restores the default.
 
 The mapping is not limited to the four Claude tiers. `llmtrim sub map codex <from> <to>` remaps
 one model, where `from` is a tier name or an exact incoming model id, so any Anthropic-speaking
@@ -454,7 +454,8 @@ codex` lists the candidate provider models. `llmtrim sub status --json` and `llm
 | env var | config key | meaning |
 | --- | --- | --- |
 | `LLMTRIM_SUB` | `sub` | active reroute provider (`codex`, `kimi`, or `off`) |
-| `LLMTRIM_SUB_MODE` | `sub.mode` | `always` (default) or `on-error` |
+| `LLMTRIM_SUB_MODE` | `sub.mode` | `always` (default) or `fallback` |
+| `LLMTRIM_SUB_CHAIN` | `sub.chain` | ordered fallback providers, e.g. `codex,kimi` |
 
 Codex reasoning is adaptive by default; `llmtrim sub effort <none|low|medium|high|xhigh>` (env
 `LLMTRIM_CODEX_EFFORT`) pins one effort on every rerouted turn instead.
