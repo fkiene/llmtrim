@@ -588,6 +588,43 @@ mod imp {
             .unwrap_or_else(|_| Response::new(Body::empty()))
     }
 
+    /// True if the client asked for a streamed reply (`Accept: text/event-stream`, which the
+    /// Anthropic SDK — and so Claude Code — sets on every `stream: true` call). Read from the
+    /// headers, not the body, so it also works on the passthrough paths that never buffer one.
+    fn wants_event_stream(headers: &header::HeaderMap) -> bool {
+        headers
+            .get(header::ACCEPT)
+            .and_then(|v| v.to_str().ok())
+            .is_some_and(|v| v.contains("text/event-stream"))
+    }
+
+    /// The reply to a *transport* failure against the upstream: the TLS/TCP/HTTP-2 exchange
+    /// never produced a response, so there is no status to relay.
+    ///
+    /// hudsucker's default `handle_error` answers these with a bodiless 502 and logs through
+    /// `tracing`, for which llmtrim installs no subscriber — so the client got an unparseable
+    /// error and the user got no way to see the cause (issue #157). We answer in the shape the
+    /// client is already parsing: an SSE `error` frame for a streaming call, JSON otherwise.
+    ///
+    /// `overloaded_error` (529), not `api_error` (502): a dropped connection is transient and
+    /// this is the class Claude Code retries. A bodiless 502 is a hard failure to the SDK.
+    fn upstream_transport_error(streaming: bool, message: &str) -> Response<Body> {
+        let payload = serde_json::json!({
+            "type": "error",
+            "error": { "type": "overloaded_error", "message": message },
+        });
+        if streaming {
+            // HTTP 200 + an SSE `error` frame: the stream has already been committed to by the
+            // time the client is reading, so the error has to arrive *in* the stream.
+            let mut out = String::new();
+            out.push_str("event: error\ndata: ");
+            out.push_str(&payload.to_string());
+            out.push_str("\n\n");
+            return sse_response(out);
+        }
+        anthropic_error_typed(529, "overloaded_error", message, Some(1))
+    }
+
     /// Anthropic error `type` for an upstream status, so Claude Code renders rate limits and
     /// auth failures as their own error classes instead of a generic `api_error`.
     fn reroute_error_kind(status: u16) -> &'static str {
@@ -1075,6 +1112,10 @@ mod imp {
         memo: Arc<Memo>,
         /// The compressed request awaiting its response (set in `handle_request`).
         pending: Option<Pending>,
+        /// Whether this request asked for a streamed reply (set in `handle_request`, read by
+        /// `handle_error` so a transport failure is reported in the shape the client parses).
+        /// Per-request: the handler is cloned per request, like `pending`.
+        streaming: bool,
         /// Optional upstream proxy URL from `LLMTRIM_UPSTREAM_PROXY`. Used by the replay path
         /// (`forward_post`). The primary MITM interception path honours this setting via the
         /// `ProxyConnector` built at startup (see the `start` function in this module).
@@ -1127,7 +1168,38 @@ mod imp {
             _ctx: &HttpContext,
             req: Request<Body>,
         ) -> RequestOrResponse {
+            self.streaming = wants_event_stream(req.headers());
             self.handle_request_inner(req).await
+        }
+
+        /// A request that never reached the upstream (TLS handshake, TCP reset, HTTP/2 GOAWAY,
+        /// or — the common one on an agent loop — a pooled keep-alive connection the server had
+        /// already closed). hudsucker's default hands the client a bodiless 502 and logs only
+        /// through `tracing`, which llmtrim does not subscribe to: the user sees a dropped
+        /// connection with no cause, and the SDK sees an error it cannot parse (issue #157).
+        ///
+        /// Report it instead: name the cause on stderr (where the rest of llmtrim's proxy
+        /// diagnostics go, so `llmtrim serve` in the foreground shows it) and answer in the
+        /// client's own error shape so it can back off and retry rather than fail the turn.
+        async fn handle_error(
+            &mut self,
+            _ctx: &HttpContext,
+            err: hyper_util::client::legacy::Error,
+        ) -> Response<Body> {
+            // `err` alone prints as "client error (Connect)"; the source chain carries the
+            // underlying cause ("connection closed before message completed", the TLS error, …).
+            let mut cause = err.to_string();
+            let mut src: Option<&(dyn std::error::Error + 'static)> =
+                std::error::Error::source(&err);
+            while let Some(e) = src {
+                cause.push_str(": ");
+                cause.push_str(&e.to_string());
+                src = std::error::Error::source(e);
+            }
+            eprintln!(
+                "llmtrim: upstream request failed ({cause}) — reported to the client as a retryable error"
+            );
+            upstream_transport_error(self.streaming, &format!("upstream request failed: {cause}"))
         }
 
         /// Tee the response: forward it to the client unchanged while accumulating a copy,
@@ -3132,6 +3204,7 @@ mod imp {
             // One process-wide turn-stability memo, shared across the per-request handler clones.
             memo: Arc::new(Memo::with_capacity(llmtrim_core::memo::DEFAULT_CAPACITY)),
             pending: None,
+            streaming: false,
             upstream_proxy: upstream_proxy.clone(),
             exclude_providers: Arc::new(exclusions.providers.clone()),
             exclude_hosts: Arc::new(exclusions.hosts.clone()),
@@ -3555,6 +3628,82 @@ mod imp {
                 429
             );
             assert_eq!(reroute_stream_error_status("something else broke"), 502);
+        }
+
+        /// `Accept: text/event-stream` is what the Anthropic SDK (so Claude Code) sends on a
+        /// `stream: true` call, and it is on the headers of *every* request — including the
+        /// passthrough paths that never buffer a body to look for `"stream": true`.
+        #[test]
+        fn wants_event_stream_reads_the_accept_header() {
+            let mut h = header::HeaderMap::new();
+            assert!(!wants_event_stream(&h), "no Accept header: not streaming");
+            h.insert(header::ACCEPT, "application/json".parse().unwrap());
+            assert!(!wants_event_stream(&h));
+            h.insert(header::ACCEPT, "text/event-stream".parse().unwrap());
+            assert!(wants_event_stream(&h));
+        }
+
+        /// A transport failure on a *streaming* call must arrive as an SSE `error` frame: the
+        /// client is parsing an event stream, and hudsucker's default (a bodiless 502) is not
+        /// something it can read — it just drops the connection (issue #157).
+        #[tokio::test]
+        async fn transport_error_on_a_stream_is_an_sse_error_frame() {
+            let res = upstream_transport_error(true, "connection closed before message completed");
+            assert_eq!(
+                res.status(),
+                200,
+                "the stream itself is committed; the error rides in it"
+            );
+            assert_eq!(
+                res.headers().get(header::CONTENT_TYPE).unwrap(),
+                "text/event-stream"
+            );
+            let body =
+                String::from_utf8(res.into_body().collect().await.unwrap().to_bytes().to_vec())
+                    .unwrap();
+            assert!(
+                body.starts_with("event: error\n"),
+                "SSE error frame: {body}"
+            );
+            assert!(body.ends_with("\n\n"), "frame is terminated: {body:?}");
+            let data = body
+                .lines()
+                .find_map(|l| l.strip_prefix("data: "))
+                .expect("data line");
+            let v: serde_json::Value = serde_json::from_str(data).expect("parseable JSON");
+            assert_eq!(v["type"], "error");
+            assert_eq!(v["error"]["type"], "overloaded_error");
+            assert!(
+                v["error"]["message"]
+                    .as_str()
+                    .unwrap()
+                    .contains("connection closed"),
+                "names the real cause so the user can report it: {v}"
+            );
+        }
+
+        /// The non-streaming shape: a retryable Anthropic error the SDK backs off on, never the
+        /// bodiless 502 that fails the turn outright.
+        #[tokio::test]
+        async fn transport_error_without_a_stream_is_a_retryable_json_error() {
+            let res = upstream_transport_error(false, "tls handshake eof");
+            assert_eq!(
+                res.status(),
+                529,
+                "overloaded: transient, and Claude Code retries it"
+            );
+            assert_eq!(res.headers().get(header::RETRY_AFTER).unwrap(), "1");
+            let body =
+                String::from_utf8(res.into_body().collect().await.unwrap().to_bytes().to_vec())
+                    .unwrap();
+            let v: serde_json::Value = serde_json::from_str(&body).expect("parseable JSON");
+            assert_eq!(v["error"]["type"], "overloaded_error");
+            assert!(
+                v["error"]["message"]
+                    .as_str()
+                    .unwrap()
+                    .contains("tls handshake eof")
+            );
         }
 
         #[test]
@@ -4490,6 +4639,7 @@ mod imp {
                 domains: Arc::new(intercept_domains().into_iter().collect()),
                 memo: Arc::new(Memo::with_capacity(llmtrim_core::memo::DEFAULT_CAPACITY)),
                 pending: None,
+                streaming: false,
                 upstream_proxy: None,
                 exclude_hosts: Arc::new(Vec::new()),
                 exclude_providers: Arc::new(Vec::new()),
