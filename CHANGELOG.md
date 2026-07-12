@@ -40,6 +40,14 @@ All notable changes to this project are documented here. The format follows
 
 ### Fixed
 
+- **Upstream connection failures are reported instead of swallowed ([#157](https://github.com/fkiene/llmtrim/issues/157)).**
+  A request that failed *before* the upstream answered (a TLS error, a reset, a dropped
+  keep-alive) fell through to the proxy library's default handler: an empty-bodied `502`, with
+  the cause logged only through a `tracing` subscriber llmtrim never installs. Claude Code could
+  not parse the reply, so the turn died — and nothing anywhere recorded why. A transport failure
+  is now reported in the shape the client is reading (an SSE `error` frame on a streaming call, a
+  retryable `overloaded_error` otherwise), and the underlying cause is named on stderr, so
+  `llmtrim serve` in the foreground shows what actually broke.
 - **GPT-5.6 Codex reroutes.** Claude model requests keep the standard Responses shape and use the
   official Codex originator and user-agent identity required by the backend.
 
