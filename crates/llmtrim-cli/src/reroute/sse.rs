@@ -313,6 +313,8 @@ mod tests {
                 ReduceEvent::Finish {
                     stop_reason: StopReason::EndTurn,
                     usage: Usage::default(),
+                    response_id: None,
+                    continuation_eligible: false,
                 },
             ],
         );
