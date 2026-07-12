@@ -1457,6 +1457,12 @@ mod imp {
             .await
             .ok()
             .flatten();
+            // The breakdown carries `cc_session_id` — the key the status line scopes trim to — so
+            // it has to ride along on the reroute pending too, or a `sub` session records no
+            // session row and the status line renders an idle `✂ –` for every turn.
+            let breakdown = compressed
+                .as_ref()
+                .and_then(|(_, pending)| pending.breakdown.clone());
             let (mut translate_value, input_before, input_after, tokenizer, exact) =
                 match &compressed {
                     Some((json, pending)) => (
@@ -1545,7 +1551,7 @@ mod imp {
                 original: None,
                 output_shaped: false,
                 frozen_input_tokens: None,
-                breakdown: None,
+                breakdown,
                 reroute: Some(RerouteInfo {
                     provider: sub,
                     model: rewrite.model.clone(),

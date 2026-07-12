@@ -21,10 +21,6 @@ pub const PATH: &str = "/coding/v1/chat/completions";
 const WIRE_MODEL: &str = "kimi-for-coding";
 /// Kimi caps `max_tokens` for the coding endpoint at 32k.
 const MAX_TOKENS_CAP: i64 = 32_000;
-/// System text blocks that begin with this marker are llmtrim/Claude-Code billing metadata and must
-/// not be forwarded upstream.
-const BILLING_HEADER_PREFIX: &str = "x-anthropic-billing-header:";
-
 /// Device id advertised in the `X-Msh-Device-Id` header.
 ///
 /// `LLMTRIM_KIMI_DEVICE_ID` overrides for tests/debugging; otherwise the persistent per-install id
@@ -157,28 +153,7 @@ fn reasoning_effort(anthropic: &Value) -> String {
 /// Flatten the Anthropic `system` (string or block array) into a single string, dropping any text
 /// block whose text starts with the billing-header marker. Returns `None` when nothing survives.
 fn build_system(system: Option<&Value>) -> Option<String> {
-    match system {
-        Some(Value::String(s)) => {
-            if s.starts_with(BILLING_HEADER_PREFIX) || s.is_empty() {
-                None
-            } else {
-                Some(s.clone())
-            }
-        }
-        Some(Value::Array(blocks)) => {
-            let parts: Vec<&str> = blocks
-                .iter()
-                .filter_map(|b| b.get("text").and_then(Value::as_str))
-                .filter(|t| !t.starts_with(BILLING_HEADER_PREFIX))
-                .collect();
-            if parts.is_empty() {
-                None
-            } else {
-                Some(parts.join("\n\n"))
-            }
-        }
-        _ => None,
-    }
+    crate::reroute::flatten_system_text(system)
 }
 
 /// Anthropic `tools` -> Kimi function tools, stripping the hosted `web_search_20250305` tool.

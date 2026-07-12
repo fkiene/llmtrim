@@ -298,6 +298,34 @@ pub fn resolve_model(
         .unwrap_or_else(|| default_codex_tier_model(Tier::Sonnet).to_string())
 }
 
+/// System text blocks beginning with this marker are Claude Code billing metadata smuggled as a
+/// system block, not prompt content. Its `cch=` field changes every turn, so forwarding it poisons
+/// the head of the provider's cached prefix and every turn pays a cold prompt cache.
+pub const BILLING_HEADER_PREFIX: &str = "x-anthropic-billing-header:";
+
+/// Flatten an Anthropic `system` (string or block array) into one string for providers that take a
+/// single system/instructions field, dropping [`BILLING_HEADER_PREFIX`] blocks. `None` when nothing
+/// survives.
+pub fn flatten_system_text(system: Option<&Value>) -> Option<String> {
+    let texts: Vec<&str> = match system? {
+        Value::String(s) => vec![s.as_str()],
+        Value::Array(blocks) => blocks
+            .iter()
+            .filter_map(|b| b.get("text").and_then(Value::as_str))
+            .collect(),
+        _ => return None,
+    };
+    let kept: Vec<&str> = texts
+        .into_iter()
+        .filter(|t| !t.starts_with(BILLING_HEADER_PREFIX) && !t.is_empty())
+        .collect();
+    if kept.is_empty() {
+        None
+    } else {
+        Some(kept.join("\n\n"))
+    }
+}
+
 /// The Codex models the ChatGPT backend actually accepts. A model outside this set 400s upstream;
 /// the caller can still send it (forward-compat) but the mapping editor picks from this list.
 pub const CODEX_MODELS: [&str; 9] = [

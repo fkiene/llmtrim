@@ -42,10 +42,9 @@ pub fn build_request_body(
     let mut body = Map::new();
     body.insert("model".into(), json!(model));
 
-    // instructions = flattened system text (skip when empty).
-    if let Some(instr) = anthropic.get("system").map(flatten_text)
-        && !instr.is_empty()
-    {
+    // instructions = flattened system text, minus Claude Code's billing-header block (its `cch=`
+    // rotates every turn, and `instructions` heads the cached prefix).
+    if let Some(instr) = crate::reroute::flatten_system_text(anthropic.get("system")) {
         body.insert("instructions".into(), json!(instr));
     }
 
@@ -1000,7 +999,42 @@ mod tests {
             None,
         )
         .expect("build");
-        assert_eq!(body["instructions"], "Line 1\nLine 2");
+        assert_eq!(body["instructions"], "Line 1\n\nLine 2");
+    }
+
+    /// Claude Code prepends a billing-header system block whose `cch=` hash changes every turn.
+    /// It heads the Responses cached prefix, so forwarding it would cold-start the prompt cache
+    /// on every turn.
+    #[test]
+    fn instructions_drop_the_billing_header_block() {
+        let body = build_request_body(
+            &json!({
+                "system": [
+                    { "type": "text", "text": "x-anthropic-billing-header: cc_version=1; cch=ff3a6;" },
+                    { "type": "text", "text": "Be concise." }
+                ],
+                "messages": []
+            }),
+            "gpt-5.6-luna",
+            None,
+        )
+        .expect("build");
+        assert_eq!(body["instructions"], "Be concise.");
+    }
+
+    /// A system that is *only* the billing header leaves no instructions at all.
+    #[test]
+    fn billing_header_only_system_yields_no_instructions() {
+        let body = build_request_body(
+            &json!({
+                "system": [{ "type": "text", "text": "x-anthropic-billing-header: cch=ff3a6;" }],
+                "messages": []
+            }),
+            "gpt-5.6-luna",
+            None,
+        )
+        .expect("build");
+        assert!(body.get("instructions").is_none());
     }
 
     #[test]
