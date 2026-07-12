@@ -6,6 +6,19 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Fixed
+
+- **GPT-5.6 Codex reroutes.** Claude model requests keep the standard Responses shape and use the
+  official Codex originator and user-agent identity required by the backend.
+
+- **Subscription reroute: Claude Code thinking no longer 502s on Codex.** The Codex
+  reducer streamed `thinking_delta` summaries but never forwarded the upstream
+  `encrypted_content` as Anthropic `signature_delta`, so Claude Code rejected the SSE
+  stream (502 / dropped connection) and follow-up turns could not replay thinking blocks.
+  Signatures now map both ways (`encrypted_content` ↔ `signature`), text waits for a late
+  signature when needed, and adaptive `thinking` without an explicit `output_config.effort`
+  still enables Codex reasoning.
+
 ## [0.9.4] - 2026-07-12
 
 ### Fixed

@@ -59,6 +59,9 @@ impl Usage {
 pub enum ReduceEvent {
     ThinkingStart,
     ThinkingDelta(String),
+    /// Codex `encrypted_content` / opaque thinking blob, emitted as Anthropic `signature_delta`
+    /// immediately before the thinking block closes. Required for Claude Code multi-turn thinking.
+    ThinkingSignatureDelta(String),
     ThinkingStop,
     TextStart,
     TextDelta(String),
@@ -130,6 +133,10 @@ impl AnthropicSseEncoder {
             ReduceEvent::ThinkingDelta(text) => {
                 self.block_delta(out, json!({"type": "thinking_delta", "thinking": text}))
             }
+            ReduceEvent::ThinkingSignatureDelta(signature) => self.block_delta(
+                out,
+                json!({"type": "signature_delta", "signature": signature}),
+            ),
             ReduceEvent::ThinkingStop => self.close_block(out),
             ReduceEvent::TextStart => {
                 let idx = self.open_block(out, json!({"type": "text", "text": ""}));
@@ -353,6 +360,29 @@ mod tests {
         assert!(out.contains("\"stop_reason\":\"end_turn\""));
         assert!(out.contains("\"cache_read_input_tokens\":3"));
         assert!(out.contains("event: message_stop"));
+    }
+
+    #[test]
+    fn thinking_signature_delta_precedes_block_stop() {
+        let out = encode_all(
+            "m",
+            &[
+                ReduceEvent::ThinkingStart,
+                ReduceEvent::ThinkingDelta("t".into()),
+                ReduceEvent::ThinkingSignatureDelta("sig_blob".into()),
+                ReduceEvent::ThinkingStop,
+                ReduceEvent::Finish {
+                    stop_reason: StopReason::EndTurn,
+                    usage: Usage::default(),
+                    response_id: None,
+                    continuation_eligible: false,
+                },
+            ],
+        );
+        let sig_pos = out.find("\"signature_delta\"").expect("signature_delta");
+        let stop_pos = out.find("content_block_stop").expect("content_block_stop");
+        assert!(sig_pos < stop_pos, "signature must precede block stop");
+        assert!(out.contains("\"signature\":\"sig_blob\""));
     }
 
     #[test]

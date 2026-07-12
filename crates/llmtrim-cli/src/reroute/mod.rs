@@ -57,7 +57,12 @@ pub fn build_upstream(
     let (host, path, body, headers) = match provider {
         SubProvider::Codex => {
             let b = codex::build_request_body(anthropic_body, &model, session_id)?;
-            let h = codex::request_headers(&token.access, token.account_id.as_deref(), session_id);
+            let h = codex::request_headers_with_mode(
+                &token.access,
+                token.account_id.as_deref(),
+                session_id,
+                codex::uses_official_codex_client(&model),
+            );
             (codex::HOST, codex::PATH, serde_json::to_vec(&b)?, h)
         }
         SubProvider::Kimi => {
@@ -366,6 +371,10 @@ mod tests {
         );
         assert_eq!(
             resolve_model(SubProvider::Codex, "sonnet", &ov),
+            "gpt-5.6-luna"
+        );
+        assert_eq!(
+            resolve_model(SubProvider::Codex, "claude-sonnet-5", &ov),
             "gpt-5.6-luna"
         );
         assert_eq!(
