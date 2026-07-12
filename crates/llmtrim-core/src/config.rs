@@ -831,7 +831,7 @@ pub struct RuntimeConfig {
     /// model, no reasoning knob).
     pub sub_effort: Option<String>,
     /// Reroute only when Anthropic fails. When `true`, the proxy forwards to Anthropic as usual
-    /// and tries the ordered [`sub_chain`] providers on a quota, overload, transport, or
+    /// and tries the ordered [`sub_chain`](Self::sub_chain) providers on a quota, overload, transport, or
     /// retryable upstream failure; when `false` (default), a set `sub` reroutes every matching
     /// turn. Env `LLMTRIM_SUB_MODE` (`always`/`fallback`) or the file key `sub.mode`.
     pub sub_fallback: bool,
