@@ -17,8 +17,7 @@ consolidate-commits = true
 # committed or tagged (needs `gh` authenticated). The hook runs from each member's
 # directory (crates/<name>/), so the path is workspace-root-relative; the script itself
 # is cwd-agnostic (git/gh resolve the repo from any subdir).
-# pre-release-hook temporarily disabled to land v0.9.4 (hook was blocking on stale CI contexts from pre-merge runs; local verify + pushed main are clean)
-# pre-release-hook = ["sh", "../../tools/check_ci_green.sh"]
+pre-release-hook = ["sh", "../../tools/check_ci_green.sh"]
 publish = false # crates.io publish happens in release.yml via Trusted Publishing
 verify = false # CI is the verifier; keep the release command fast
 push = true
