@@ -62,6 +62,12 @@ pub struct BreakdownTurn {
     pub session_name: Option<String>,
     pub provider: String,
     pub model: Option<String>,
+    /// The `sub` backend that actually served this turn (`codex`/`kimi`), when one did. `None`
+    /// for a turn Anthropic served — including a fallback-mode turn where Anthropic answered and
+    /// the chain never fired. `provider` above stays the *wire* provider (`anthropic`, the shape
+    /// we parse and reply in), so this is the only record of who really answered; `model` already
+    /// carries the upstream model id on a rerouted turn.
+    pub sub_provider: Option<String>,
     /// Context window of the model, for occupancy %.
     pub window: i64,
     pub fresh_input: i64,
@@ -370,6 +376,7 @@ impl Tracker {
                     session_name  TEXT,
                     provider      TEXT NOT NULL,
                     model         TEXT,
+                    sub_provider  TEXT,
                     window        INTEGER NOT NULL,
                     fresh_input   INTEGER NOT NULL,
                     cache_read    INTEGER NOT NULL,
@@ -440,13 +447,15 @@ impl Tracker {
                 return Err(e).with_context(|| format!("failed to add breakdown column {col}"));
             }
         }
-        // cc_session_id is TEXT, not INTEGER — additive ALTER kept separate from the loop above.
-        if let Err(e) = self.conn.execute(
-            "ALTER TABLE breakdown_turns ADD COLUMN cc_session_id TEXT",
-            [],
-        ) && !is_duplicate_column(&e)
-        {
-            return Err(e).context("failed to add breakdown column cc_session_id");
+        // TEXT columns, not INTEGER — additive ALTERs kept separate from the loop above.
+        for col in ["cc_session_id", "sub_provider"] {
+            if let Err(e) = self.conn.execute(
+                &format!("ALTER TABLE breakdown_turns ADD COLUMN {col} TEXT"),
+                [],
+            ) && !is_duplicate_column(&e)
+            {
+                return Err(e).with_context(|| format!("failed to add breakdown column {col}"));
+            }
         }
         Ok(())
     }
@@ -541,10 +550,10 @@ impl Tracker {
             .execute(
                 "INSERT INTO breakdown_turns
                     (ts, session_id, cc_session_id, agent, project, session_name, provider, model,
-                     window, fresh_input, cache_read, cache_write, output_tok,
+                     sub_provider, window, fresh_input, cache_read, cache_write, output_tok,
                      input_rate, output_rate, cache_read_rate, cache_write_rate, bill_micros,
                      input_before, input_after)
-                 VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20)",
+                 VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21)",
                 params![
                     ts,
                     turn.session_id,
@@ -554,6 +563,7 @@ impl Tracker {
                     turn.session_name,
                     turn.provider,
                     turn.model,
+                    turn.sub_provider,
                     turn.window,
                     turn.fresh_input,
                     turn.cache_read,
@@ -657,10 +667,10 @@ impl Tracker {
             .execute(
                 "INSERT INTO breakdown_turns
                     (ts, session_id, cc_session_id, agent, project, session_name, provider, model,
-                     window, fresh_input, cache_read, cache_write, output_tok,
+                     sub_provider, window, fresh_input, cache_read, cache_write, output_tok,
                      input_rate, output_rate, cache_read_rate, cache_write_rate, bill_micros,
                      input_before, input_after)
-                 VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20)",
+                 VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21)",
                 params![
                     ts,
                     turn.session_id,
@@ -670,6 +680,7 @@ impl Tracker {
                     turn.session_name,
                     turn.provider,
                     turn.model,
+                    turn.sub_provider,
                     turn.window,
                     turn.fresh_input,
                     turn.cache_read,
@@ -986,6 +997,7 @@ mod tests {
             session_name: None,
             provider: "anthropic".to_string(),
             model: Some("claude-sonnet-4".to_string()),
+            sub_provider: None,
             window: 200_000,
             fresh_input: 1000,
             cache_read: 500,

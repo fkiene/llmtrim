@@ -559,6 +559,7 @@ mod tests {
             session_name: Some("my session".to_string()),
             provider: "anthropic".to_string(),
             model: Some("claude-sonnet-4".to_string()),
+            sub_provider: None,
             window: 200_000,
             fresh_input: 50,
             cache_read: 120,
