@@ -2399,6 +2399,8 @@ mod tests {
             input_before: 1000,
             input_after: 600,
             last_ts: "2026-06-19T00:00:00+00:00".to_string(),
+            last_sub_provider: None,
+            last_model: None,
         }
     }
 
@@ -2899,6 +2901,7 @@ mod tests {
             session_name: Some(name.into()),
             provider: "anthropic".into(),
             model: Some("claude-opus-4-8".into()),
+            sub_provider: None,
             window: 200_000,
             fresh_input: 6_000,
             cache_read: 22_000,

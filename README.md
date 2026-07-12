@@ -296,9 +296,11 @@ The printed block is the standard MCP config; for a client you edit by hand it l
 ```
 
 **Status line for Claude Code.** `llmtrim statusline` renders a single line for Claude Code's
-[custom status line](https://code.claude.com/docs/en/statusline): the model, the subscription
-actually serving the turn when you reroute (e.g. `→gpt-5.6-terra` or `→kimi`), a context-health gauge, and how
-much llmtrim is trimming, plus rate-limit and prompt-cache reuse when Claude Code reports them.
+[custom status line](https://code.claude.com/docs/en/statusline): the model, the backend that
+actually served the turn when you reroute (e.g. `→gpt-5.6-terra` or `→kimi`), a context-health
+gauge, and how much llmtrim is trimming, plus rate-limit and prompt-cache reuse when Claude Code
+reports them. The arrow reflects what answered, not what's configured — so in `sub` fallback mode
+it stays off while Anthropic is serving, and appears on the turns the chain actually fires.
 
 ```bash
 llmtrim statusline install          # wire it into ~/.claude/settings.json

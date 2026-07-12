@@ -6,6 +6,19 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Fixed
+
+- **Status line claimed a reroute that never happened in `sub` fallback mode.** The reroute arrow
+  and the context gauge were derived from config: if `sub` was set, the line rendered
+  `◆ Opus→gpt-5.6-terra` on every turn. But in `fallback` mode Anthropic serves the turn and the
+  chain fires only when Anthropic *fails* — so the arrow named a backend that hadn't answered, and
+  the gauge rescaled to that backend's context window, under-reporting how full the real (Claude)
+  window was. The serving backend is now recorded per turn in the ledger (new `sub_provider`
+  column, added to existing ledgers on open) and the status line reads *that*: the arrow appears
+  only on a turn a backend genuinely served, and shows the model it ran. In `always` mode, where
+  every turn reroutes, config still seeds the arrow before the first turn lands, so nothing
+  changes there.
+
 ### Added
 
 - **Ordered subscription fallback chains.** `llmtrim sub mode fallback` now tries a list of

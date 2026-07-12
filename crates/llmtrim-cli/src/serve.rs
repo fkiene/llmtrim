@@ -976,6 +976,10 @@ mod imp {
             session_name: None,
             provider: provider.to_string(),
             model: p.model.clone(),
+            // Who actually answered. `reroute` is set up front in `always` mode, and in
+            // `fallback` mode only once an attempt has *succeeded* — so it is true per turn,
+            // which config alone can never be (a fallback fires only when Anthropic fails).
+            sub_provider: p.reroute.as_ref().map(|r| r.provider.as_str().to_string()),
             // The window heuristic (`window_for`) can under-shoot — it can't tell a 1M-context
             // beta from the model id — which would make occupancy exceed 100%. The window must
             // be at least the prompt actually sent, so clamp it to the real input size.

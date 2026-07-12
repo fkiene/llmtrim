@@ -18,8 +18,12 @@
 //! gone cold, where the cache segment becomes `♻ cold · /compact`. Segments whose data is
 //! absent — no reroute, an API-key user with no rate limits — simply don't render.
 //!
-//! Under `sub` the arrow shows the concrete model actually serving the turn (e.g. `→gpt-5.6-terra`)
-//! for Codex reroutes; Kimi shows the provider shortname (`→kimi`) since all tiers collapse.
+//! Under `sub` the arrow shows the concrete model that served the last turn (e.g.
+//! `→gpt-5.6-terra`) for Codex reroutes; Kimi shows the provider shortname (`→kimi`), since all
+//! its tiers collapse to one internal wire id. The arrow is read from the ledger — what actually
+//! answered — not from config, because in `fallback` mode config predicts nothing: Anthropic
+//! serves the turn and the chain fires only if it fails. So there the arrow appears only on turns
+//! a backend really served, and the gauge keeps Claude's window until one does.
 //!
 //! `install` wires it into `~/.claude/settings.json`; rendering itself never touches the
 //! network or API tokens.
@@ -221,13 +225,7 @@ fn proxy_health() -> Health {
 
 fn ledger_snapshot(cc: &CcInput) -> Led {
     let cfg = llmtrim_core::config::RuntimeConfig::get();
-    let reroute = cfg.sub.clone().filter(|s| !s.is_empty() && s != "off");
-    let reroute_window = reroute
-        .as_deref()
-        .and_then(|p| reroute_real_window(p, &cc.model_id, &cfg.sub_tiers));
-    let resolved_model = reroute
-        .as_deref()
-        .and_then(|p| reroute_resolved_model(p, &cc.model_id, &cfg.sub_tiers));
+    let configured = cfg.sub.clone().filter(|s| !s.is_empty() && s != "off");
     let health = proxy_health();
 
     // One session-row read serves both trim and cache-cold. Match on `cc_session_id` — the real
@@ -248,6 +246,25 @@ fn ledger_snapshot(cc: &CcInput) -> Led {
     let ledger_cold = row.as_ref().is_some_and(|r| cache_cold(&r.last_ts));
     let cache_cold = effective_cache_cold(cc, ledger_cold);
 
+    let (reroute, reroute_window, resolved_model) =
+        match arrow_source(configured.as_deref(), cfg.sub_fallback, row.as_ref()) {
+            // Truth: the backend that answered the last turn, and the model recorded on it.
+            ArrowSource::Served { provider, model } => {
+                let window = model.as_deref().and_then(upstream_window);
+                // Kimi collapses every tier to one internal wire id, which tells the user nothing
+                // the provider shortname doesn't — so the arrow keeps the shortname there.
+                let shown = model.filter(|_| provider != "kimi");
+                (Some(provider), window, shown)
+            }
+            // Prediction (always mode, no turn yet): resolve from the configured tier mapping.
+            ArrowSource::Predicted(provider) => (
+                Some(provider.clone()),
+                reroute_real_window(&provider, &cc.model_id, &cfg.sub_tiers),
+                reroute_resolved_model(&provider, &cc.model_id, &cfg.sub_tiers),
+            ),
+            ArrowSource::None => (None, None, None),
+        };
+
     Led {
         health,
         trim_pct,
@@ -258,12 +275,62 @@ fn ledger_snapshot(cc: &CcInput) -> Led {
     }
 }
 
+/// Where the reroute arrow's content comes from.
+enum ArrowSource {
+    /// The ledger recorded this backend serving the session's last turn. Ground truth.
+    Served {
+        provider: String,
+        model: Option<String>,
+    },
+    /// No turn recorded yet, but `always` mode reroutes every turn — so config predicts it.
+    Predicted(String),
+    /// Anthropic is serving (or nothing is configured): no arrow.
+    None,
+}
+
+/// Decide what the reroute arrow may claim.
+///
+/// The ledger wins whenever it has a turn for this session, because only it knows who actually
+/// answered. Config is consulted solely to bridge the gap before the first turn lands, and only in
+/// `always` mode — where every turn reroutes, so the prediction is sound and the arrow doesn't have
+/// to blink in late on a fresh session.
+///
+/// In `fallback` mode config predicts nothing: the chain fires only when Anthropic actually fails.
+/// Claiming a reroute there would be a lie on every healthy turn (and would rescale the context
+/// gauge to the wrong backend's window), so the arrow stays off until the ledger shows a turn a
+/// backend really served.
+fn arrow_source(
+    configured: Option<&str>,
+    fallback_mode: bool,
+    row: Option<&SessionLedgerRow>,
+) -> ArrowSource {
+    match row {
+        Some(r) => match &r.last_sub_provider {
+            Some(provider) => ArrowSource::Served {
+                provider: provider.clone(),
+                model: r.last_model.clone(),
+            },
+            // A recorded turn that no backend served: Anthropic answered it.
+            None => ArrowSource::None,
+        },
+        None => match configured {
+            Some(p) if !fallback_mode => ArrowSource::Predicted(p.to_string()),
+            _ => ArrowSource::None,
+        },
+    }
+}
+
 /// The ledger fields the status line needs from a session's row: its summed savings and the
 /// timestamp of its last turn (for the cold-cache check).
 struct SessionLedgerRow {
     input_before: i64,
     input_after: i64,
     last_ts: String,
+    /// The `sub` backend that served this session's most recent turn, and that turn's model id.
+    /// The ground truth behind the reroute arrow: in fallback mode a reroute happens only when
+    /// Anthropic actually failed, which config cannot predict.
+    last_sub_provider: Option<String>,
+    last_model: Option<String>,
 }
 
 /// This Claude Code session's aggregated ledger row, matched on the real `cc_session_id`. Behind
@@ -282,6 +349,8 @@ fn session_row(sid: &str) -> Option<SessionLedgerRow> {
             input_before: r.input_before,
             input_after: r.input_after,
             last_ts: r.last_ts,
+            last_sub_provider: r.last_sub_provider,
+            last_model: r.last_model,
         })
 }
 
@@ -327,14 +396,24 @@ fn reroute_real_window(
         "kimi" => SubProvider::Kimi,
         _ => return None,
     };
-    let resolved = crate::reroute::resolve_model(sp, incoming_model_id, tiers);
-    // `kimi-for-coding` is an internal routing id, not a models.dev key — map to the public one.
-    let lookup = if resolved == crate::reroute::KIMI_MODEL {
+    upstream_window(&crate::reroute::resolve_model(sp, incoming_model_id, tiers))
+}
+
+/// Registry window of a concrete upstream model id. `kimi-for-coding` is an internal routing id,
+/// not a models.dev key — map it to the public one.
+#[cfg(feature = "intercept")]
+fn upstream_window(model: &str) -> Option<i64> {
+    let lookup = if model == crate::reroute::KIMI_MODEL {
         "moonshotai/kimi-k2"
     } else {
-        resolved.as_str()
+        model
     };
     llmtrim_core::context_window(lookup).map(|w| w as i64)
+}
+
+#[cfg(not(feature = "intercept"))]
+fn upstream_window(_model: &str) -> Option<i64> {
+    None
 }
 
 #[cfg(not(feature = "intercept"))]
@@ -1030,6 +1109,63 @@ mod tests {
             !out.contains("kimi-for-coding"),
             "no internal wire id on the line: {out}"
         );
+    }
+
+    fn ledger_row(sub: Option<&str>, model: Option<&str>) -> SessionLedgerRow {
+        SessionLedgerRow {
+            input_before: 1000,
+            input_after: 940,
+            last_ts: chrono::Utc::now().to_rfc3339(),
+            last_sub_provider: sub.map(str::to_string),
+            last_model: model.map(str::to_string),
+        }
+    }
+
+    #[test]
+    fn fallback_mode_shows_no_arrow_until_a_backend_actually_serves() {
+        // Anthropic served the turn: the chain is armed but never fired, so claiming a reroute
+        // would be a lie — and would rescale the gauge to Codex's window.
+        let row = ledger_row(None, Some("claude-opus-4-8"));
+        assert!(matches!(
+            arrow_source(Some("codex"), true, Some(&row)),
+            ArrowSource::None
+        ));
+    }
+
+    #[test]
+    fn fallback_mode_shows_the_backend_once_the_chain_fires() {
+        let row = ledger_row(Some("codex"), Some("gpt-5.6-terra"));
+        let ArrowSource::Served { provider, model } = arrow_source(Some("codex"), true, Some(&row))
+        else {
+            panic!("a fired fallback must surface the backend that served it");
+        };
+        assert_eq!(provider, "codex");
+        assert_eq!(model.as_deref(), Some("gpt-5.6-terra"));
+    }
+
+    #[test]
+    fn fallback_mode_never_predicts_from_config_on_a_fresh_session() {
+        // No turn yet. `always` mode could predict; fallback mode cannot — Anthropic serves the
+        // first turn and the chain only fires if it fails.
+        assert!(matches!(
+            arrow_source(Some("codex"), true, None),
+            ArrowSource::None
+        ));
+        assert!(matches!(
+            arrow_source(Some("codex"), false, None),
+            ArrowSource::Predicted(p) if p == "codex"
+        ));
+    }
+
+    #[test]
+    fn ledger_truth_overrides_a_stale_config_prediction() {
+        // `sub` says kimi, but the last turn was actually served by codex — show what happened.
+        let row = ledger_row(Some("codex"), Some("gpt-5.6-terra"));
+        let ArrowSource::Served { provider, .. } = arrow_source(Some("kimi"), false, Some(&row))
+        else {
+            panic!("the ledger outranks config");
+        };
+        assert_eq!(provider, "codex");
     }
 
     #[test]

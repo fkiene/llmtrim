@@ -30,6 +30,13 @@ pub struct SessionRow {
     pub input_after: i64,
     /// rfc3339 timestamp of the most recent turn, for sorting newest-first.
     pub last_ts: String,
+    /// The `sub` backend that served the session's *most recent* turn (`codex`/`kimi`), or `None`
+    /// when Anthropic served it. Per-turn rather than per-session because in fallback mode the
+    /// backend can change from one turn to the next.
+    pub last_sub_provider: Option<String>,
+    /// The model id of that same most-recent turn — the upstream model (e.g. `gpt-5.6-terra`)
+    /// when `last_sub_provider` is set, else the Claude model.
+    pub last_model: Option<String>,
 }
 
 impl SessionRow {
@@ -101,17 +108,23 @@ impl BreakdownDb {
         let mut stmt = self
             .conn
             .prepare(
-                // One pass: rank each turn within its session (a named row first, then newest)
-                // so the latest `session_name` is `rn = 1`, then aggregate — instead of a
-                // correlated subquery that re-scanned the table once per session group.
+                // One pass, two rankings — instead of correlated subqueries that re-scanned the
+                // table once per session group. `rn` prefers a *named* row (so the session keeps
+                // its latest `session_name`), while `recent` is strictly newest-first: the backend
+                // that served the last turn must come from the newest row, not the newest *named*
+                // one.
                 "WITH ranked AS (
                      SELECT session_id, cc_session_id, agent, project, session_name, ts, id,
                             fresh_input, cache_read, cache_write, output_tok,
-                            bill_micros, input_before, input_after,
+                            bill_micros, input_before, input_after, sub_provider, model,
                             ROW_NUMBER() OVER (
                                 PARTITION BY session_id, agent, project
                                 ORDER BY (session_name IS NOT NULL) DESC, id DESC
-                            ) AS rn
+                            ) AS rn,
+                            ROW_NUMBER() OVER (
+                                PARTITION BY session_id, agent, project
+                                ORDER BY id DESC
+                            ) AS recent
                      FROM breakdown_turns
                  )
                  SELECT session_id, agent, project,
@@ -124,7 +137,9 @@ impl BreakdownDb {
                         COALESCE(SUM(input_before), 0),
                         COALESCE(SUM(input_after), 0),
                         MAX(ts),
-                        MAX(cc_session_id)
+                        MAX(cc_session_id),
+                        MAX(CASE WHEN recent = 1 THEN sub_provider END),
+                        MAX(CASE WHEN recent = 1 THEN model END)
                  FROM ranked
                  GROUP BY session_id, agent, project
                  ORDER BY MAX(ts) DESC",
@@ -151,6 +166,8 @@ impl BreakdownDb {
                     input_after: r.get(10)?,
                     last_ts: r.get(11)?,
                     cc_session_id: r.get(12)?,
+                    last_sub_provider: r.get(13)?,
+                    last_model: r.get(14)?,
                 })
             })
             .context("failed to query sessions")?;
@@ -272,6 +289,7 @@ mod tests {
             session_name: Some("my session".to_string()),
             provider: "anthropic".to_string(),
             model: Some("claude-sonnet-4".to_string()),
+            sub_provider: None,
             window: 200_000,
             fresh_input: 50,
             cache_read: 120,
@@ -345,6 +363,109 @@ mod tests {
             rows[0].cc_session_id.as_deref(),
             Some("968ad7ea-6e4a-430e-a708-4eda80c8b858")
         );
+    }
+
+    #[test]
+    fn a_ledger_written_before_sub_provider_existed_still_queries() {
+        // The upgrade path: `sessions()` now SELECTs `sub_provider`, so a ledger created by an
+        // older llmtrim must gain the column on open or every status-line render would error out.
+        let path = std::env::temp_dir().join(format!(
+            "llmtrim-legacy-ledger-{}-{}.db",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let legacy = Connection::open(&path).unwrap();
+        legacy
+            .execute_batch(
+                "CREATE TABLE breakdown_turns (
+                     id INTEGER PRIMARY KEY, ts TEXT NOT NULL, session_id TEXT NOT NULL,
+                     agent TEXT NOT NULL, project TEXT, session_name TEXT,
+                     provider TEXT NOT NULL, model TEXT, window INTEGER NOT NULL,
+                     fresh_input INTEGER NOT NULL, cache_read INTEGER NOT NULL,
+                     cache_write INTEGER NOT NULL, output_tok INTEGER NOT NULL,
+                     input_rate REAL NOT NULL, output_rate REAL NOT NULL,
+                     cache_read_rate REAL NOT NULL, cache_write_rate REAL NOT NULL,
+                     bill_micros INTEGER NOT NULL
+                 );
+                 INSERT INTO breakdown_turns
+                     (ts, session_id, agent, provider, model, window, fresh_input, cache_read,
+                      cache_write, output_tok, input_rate, output_rate, cache_read_rate,
+                      cache_write_rate, bill_micros)
+                 VALUES ('2026-07-01T00:00:00+00:00', 'sess-old', 'claude-code', 'anthropic',
+                         'claude-sonnet-4', 200000, 10, 0, 0, 5, 3.0, 15.0, 0.3, 3.75, 100);",
+            )
+            .unwrap();
+        drop(legacy);
+
+        let tracker = Tracker::open_reader_at(&path).unwrap();
+        let db = BreakdownDb::from_connection(tracker.into_connection());
+        let rows = db.sessions().unwrap();
+        assert_eq!(rows.len(), 1);
+        // The pre-existing turn has no recorded backend — Anthropic served it, as far as we know.
+        assert_eq!(rows[0].last_sub_provider, None);
+        assert_eq!(rows[0].last_model.as_deref(), Some("claude-sonnet-4"));
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn sessions_report_the_backend_that_served_the_newest_turn() {
+        // The `turn()` fixture carries a `session_name`, and the name ranking (`rn`) prefers a
+        // *named* row — so a "latest turn" read off that ranking would answer with whichever named
+        // row sorted first, not the newest one. Anthropic serves turn 1, a fallback to codex fires
+        // on turn 2: the session must report codex, and the model it actually ran.
+        let tracker = Tracker::open_in_memory().unwrap();
+        tracker
+            .record_breakdown(
+                &turn("sess-a"),
+                &[block("Static", "System prompt", None, 50.0, 100.0)],
+            )
+            .unwrap();
+        let mut fired = turn("sess-a");
+        fired.sub_provider = Some("codex".to_string());
+        fired.model = Some("gpt-5.6-terra".to_string());
+        tracker
+            .record_breakdown(
+                &fired,
+                &[block("Static", "System prompt", None, 50.0, 100.0)],
+            )
+            .unwrap();
+
+        let db = BreakdownDb::from_connection(tracker.into_connection());
+        let rows = db.sessions().unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].last_sub_provider.as_deref(), Some("codex"));
+        assert_eq!(rows[0].last_model.as_deref(), Some("gpt-5.6-terra"));
+    }
+
+    #[test]
+    fn sessions_report_no_backend_when_anthropic_served_the_newest_turn() {
+        // The reverse order: the fallback fired once, then Anthropic served the latest turn. The
+        // arrow must go away again rather than latch on the older rerouted turn.
+        let tracker = Tracker::open_in_memory().unwrap();
+        let mut fired = turn("sess-a");
+        fired.sub_provider = Some("codex".to_string());
+        fired.model = Some("gpt-5.6-terra".to_string());
+        tracker
+            .record_breakdown(
+                &fired,
+                &[block("Static", "System prompt", None, 50.0, 100.0)],
+            )
+            .unwrap();
+        tracker
+            .record_breakdown(
+                &turn("sess-a"),
+                &[block("Static", "System prompt", None, 50.0, 100.0)],
+            )
+            .unwrap();
+
+        let db = BreakdownDb::from_connection(tracker.into_connection());
+        let rows = db.sessions().unwrap();
+        assert_eq!(rows[0].last_sub_provider, None);
+        assert_eq!(rows[0].last_model.as_deref(), Some("claude-sonnet-4"));
     }
 
     #[test]
