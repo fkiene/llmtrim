@@ -175,9 +175,9 @@ struct Led {
     /// window on the wire, not the backend's. `None` when not rerouted (use the blob's window).
     reroute_window: Option<i64>,
     /// The concrete upstream model id resolved for a `sub` reroute (e.g. "gpt-5.6-terra" for a
-    /// Codex Opus tier). When present (and not Kimi's internal id) we render it after the arrow
-    /// so the status line shows the *real* model serving the turn rather than only the provider
-    /// shortname.
+    /// Codex Opus tier), rendered after the arrow so the status line shows the *real* model
+    /// serving the turn. `None` when not rerouted, or on Kimi (all tiers collapse to one wire
+    /// id) — the arrow then falls back to the provider shortname.
     resolved_model: Option<String>,
     /// The prompt cache has gone cold: the session has been idle past the TTL, so the next turn
     /// pays a cold write. Renders the cache segment red with a `/compact` nudge.
@@ -346,8 +346,8 @@ fn reroute_real_window(
 }
 
 /// Parallel to [`reroute_real_window`]: returns the concrete upstream model id (e.g.
-/// "gpt-5.6-terra") chosen by tier mapping for the status line. Kimi always resolves to its
-/// internal id, which callers suppress in favour of the short provider name.
+/// "gpt-5.6-terra") chosen by tier mapping for the status line. `None` for Kimi, whose tiers all
+/// collapse to one internal wire id: the shortname is what a reader wants there.
 #[cfg(feature = "intercept")]
 fn reroute_resolved_model(
     provider: &str,
@@ -355,12 +355,14 @@ fn reroute_resolved_model(
     tiers: &std::collections::BTreeMap<String, String>,
 ) -> Option<String> {
     use crate::reroute::SubProvider;
-    let sp = match provider {
-        "codex" => SubProvider::Codex,
-        "kimi" => SubProvider::Kimi,
-        _ => return None,
-    };
-    Some(crate::reroute::resolve_model(sp, incoming_model_id, tiers))
+    if provider != "codex" {
+        return None;
+    }
+    Some(crate::reroute::resolve_model(
+        SubProvider::Codex,
+        incoming_model_id,
+        tiers,
+    ))
 }
 
 #[cfg(not(feature = "intercept"))]
@@ -429,12 +431,7 @@ fn model_segment(cc: &CcInput, led: &Led, color: bool) -> String {
             "kimi" => VIOLET,
             _ => CYAN,
         };
-        let tail = led
-            .resolved_model
-            .as_ref()
-            .filter(|m| *m != "kimi-for-coding")
-            .cloned()
-            .unwrap_or_else(|| p.clone());
+        let tail = led.resolved_model.clone().unwrap_or_else(|| p.clone());
         s.push_str(&paint(color, code, &format!("→{tail}")));
     }
     s
@@ -919,11 +916,20 @@ mod tests {
 
     #[test]
     fn kimi_reroute_when_healthy() {
+        let tiers = std::collections::BTreeMap::new();
         let mut l = led(Health::Healthy);
         l.reroute = Some("kimi".to_string());
-        l.resolved_model = None;
+        l.resolved_model = reroute_resolved_model("kimi", "claude-opus-4-6", &tiers);
+        assert!(
+            l.resolved_model.is_none(),
+            "kimi collapses to one wire id; the arrow shows the shortname"
+        );
         let out = render_line(&cc(72_000), &l, 0, true);
         assert!(out.contains("→kimi"), "kimi arrow present: {out}");
+        assert!(
+            !out.contains("kimi-for-coding"),
+            "no internal wire id on the line: {out}"
+        );
     }
 
     #[test]
