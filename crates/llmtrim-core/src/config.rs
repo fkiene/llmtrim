@@ -1004,15 +1004,43 @@ fn resolve_sub_effort(
 
 /// Whether reroute runs in `fallback` mode: env `LLMTRIM_SUB_MODE` (`fallback` → true,
 /// `always` → false) wins, else the `sub.mode` table key. Default `false` (reroute always).
+///
+/// The pre-0.10 spellings (`on_error`/`on-error`/`onerror`) still resolve to `fallback` — they
+/// mean the same thing, and silently reading them as `always` would flip an existing config into
+/// rerouting *every* turn to the subscription provider. An unrecognized value is reported and
+/// treated as `always` (the default), never as fallback.
+fn parse_sub_mode(raw: &str) -> Option<bool> {
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "always" => Some(false),
+        "fallback" => Some(true),
+        "on_error" | "on-error" | "onerror" => {
+            eprintln!(
+                "llmtrim: sub mode '{}' is the old name for 'fallback' — run `llmtrim sub mode fallback` to update the config",
+                raw.trim()
+            );
+            Some(true)
+        }
+        _ => None,
+    }
+}
+
 fn resolve_sub_fallback(env: &impl Fn(&str) -> Option<String>, file: Option<&toml::Value>) -> bool {
-    let is_fallback = |s: &str| s.trim().eq_ignore_ascii_case("fallback");
+    let resolve = |raw: &str, source: &str| {
+        parse_sub_mode(raw).unwrap_or_else(|| {
+            eprintln!(
+                "llmtrim: unknown sub mode '{}' in {source} — using 'always' (expected always|fallback)",
+                raw.trim()
+            );
+            false
+        })
+    };
     if let Some(v) = env("LLMTRIM_SUB_MODE").filter(|s| !s.is_empty()) {
-        return is_fallback(&v);
+        return resolve(&v, "LLMTRIM_SUB_MODE");
     }
     file.and_then(|v| v.get("sub"))
         .and_then(|v| v.get("mode"))
         .and_then(toml::Value::as_str)
-        .map(is_fallback)
+        .map(|v| resolve(v, "[sub] mode"))
         .unwrap_or(false)
 }
 
@@ -1408,8 +1436,23 @@ mod tests {
         assert!(!resolve_sub_fallback(&env_always, Some(&file)));
         let env_fallback = |k: &str| (k == "LLMTRIM_SUB_MODE").then(|| "fallback".to_string());
         assert!(resolve_sub_fallback(&env_fallback, Some(&plain)));
-        let env_removed = |k: &str| (k == "LLMTRIM_SUB_MODE").then(|| "legacy".to_string());
-        assert!(!resolve_sub_fallback(&env_removed, Some(&plain)));
+        // An unknown value is not fallback (defaults to always, the documented default).
+        let env_unknown = |k: &str| (k == "LLMTRIM_SUB_MODE").then(|| "wat".to_string());
+        assert!(!resolve_sub_fallback(&env_unknown, Some(&plain)));
+    }
+
+    #[test]
+    fn sub_mode_legacy_on_error_still_means_fallback() {
+        // A pre-0.10 config must not silently flip to rerouting every turn.
+        let no_env = |_: &str| None;
+        for legacy in ["on_error", "on-error", "onerror"] {
+            let file: toml::Value =
+                toml::from_str(&format!("[sub]\nactive = \"codex\"\nmode = \"{legacy}\"\n"))
+                    .unwrap();
+            assert!(resolve_sub_fallback(&no_env, Some(&file)), "{legacy}");
+        }
+        let env = |k: &str| (k == "LLMTRIM_SUB_MODE").then(|| "on-error".to_string());
+        assert!(resolve_sub_fallback(&env, None));
     }
 
     #[test]

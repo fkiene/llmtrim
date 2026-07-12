@@ -838,7 +838,9 @@ fn run_sub(action: SubCmd) -> Result<()> {
         }
         SubCmd::Mode { mode, no_restart } => {
             let fallback = match mode.trim().to_ascii_lowercase().as_str() {
-                "fallback" => true,
+                // The old names for the same mode: accepted so an existing muscle-memory command
+                // (or script) keeps working, but persisted under the new spelling.
+                "fallback" | "on-error" | "on_error" | "onerror" => true,
                 "always" => false,
                 other => anyhow::bail!("unknown mode '{other}' (always|fallback)"),
             };

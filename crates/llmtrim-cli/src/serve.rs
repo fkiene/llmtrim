@@ -375,8 +375,7 @@ mod imp {
     /// provider's session header).
     #[derive(Clone)]
     struct FallbackInfo {
-        /// First provider retained for the single-provider compatibility helper below.
-        provider: crate::reroute::SubProvider,
+        /// Providers to try, in order. Never empty (the arming site drops the fallback otherwise).
         providers: Vec<crate::reroute::SubProvider>,
         anthropic_body: Vec<u8>,
         session_id: Option<String>,
@@ -400,22 +399,39 @@ mod imp {
         )
     }
 
-    /// Some upstreams report a failed turn inside an HTTP 200 SSE response. In fallback mode the
-    /// Anthropic response is buffered before it is exposed to the client, so this path can still
-    /// fail over without emitting a malformed partial stream.
+    /// Some upstreams report a failed turn *inside* an HTTP 200 response: an `error` frame in the
+    /// SSE stream, or an error object in a non-streamed JSON reply. Only a top-level `{"type":
+    /// "error"}` counts — an assistant message that merely *mentions* that shape parses as its own
+    /// frame type (`content_block_delta`, …) and is not treated as a failure.
     fn is_sub_fallback_body(body: &[u8]) -> bool {
-        let text = String::from_utf8_lossy(body).to_ascii_lowercase();
+        let text = String::from_utf8_lossy(body);
         text.lines().any(|line| {
             let data = line
                 .strip_prefix("data:")
                 .map(str::trim)
                 .unwrap_or(line.trim());
-            if let Ok(value) = serde_json::from_str::<Value>(data) {
-                let kind = value.get("type").and_then(Value::as_str);
-                return kind == Some("error")
-                    || (kind == Some("message_stop") && value.get("error").is_some());
-            }
-            data.contains("\"type\":\"error\"") || data.contains("\"type\": \"error\"")
+            serde_json::from_str::<Value>(data)
+                .is_ok_and(|value| value.get("type").and_then(Value::as_str) == Some("error"))
+        })
+    }
+
+    /// Whether the SSE seen so far has already committed content to the client — the first
+    /// `message_start`/`content_block_*` frame. Past that point the turn cannot be failed over
+    /// (the client has the beginning of an answer), so the fallback probe stops peeking and
+    /// streams the rest through untouched.
+    fn sse_committed_content(body: &[u8]) -> bool {
+        let text = String::from_utf8_lossy(body);
+        text.lines().any(|line| {
+            let data = line
+                .strip_prefix("data:")
+                .map(str::trim)
+                .unwrap_or(line.trim());
+            serde_json::from_str::<Value>(data).is_ok_and(|value| {
+                matches!(
+                    value.get("type").and_then(Value::as_str),
+                    Some("message_start" | "content_block_start" | "content_block_delta")
+                )
+            })
         })
     }
 
@@ -447,21 +463,79 @@ mod imp {
         matches!(status, 400 | 422)
     }
 
-    /// Replay the original (uncompressed) request to the upstream — direct, all statuses
-    /// relayed — and build a response for the client. `None` if the replay itself fails (in
-    /// which case the caller keeps the compressed response's error).
-    fn replay_original(orig: &OriginalRequest, proxy_url: Option<&str>) -> Option<Response<Body>> {
+    /// Send the original (uncompressed) request to the upstream and buffer the reply. `None` if
+    /// the round-trip itself fails.
+    fn fetch_original(
+        orig: &OriginalRequest,
+        proxy_url: Option<&str>,
+    ) -> Option<(u16, Option<String>, Vec<u8>)> {
         use std::io::Read;
         let body = std::str::from_utf8(&orig.body).ok()?;
         let mut up =
             crate::transport::forward_post(&orig.url, &orig.headers, body, proxy_url).ok()?;
         let mut buf = Vec::new();
         up.reader.read_to_end(&mut buf).ok()?;
-        let mut builder = Response::builder().status(up.status);
-        if let Some(ct) = up.content_type {
+        Some((up.status, up.content_type, buf))
+    }
+
+    /// Build a client response from a buffered upstream reply.
+    fn buffered_response(
+        status: u16,
+        content_type: Option<String>,
+        body: Vec<u8>,
+    ) -> Response<Body> {
+        let mut builder = Response::builder().status(status);
+        if let Some(ct) = content_type {
             builder = builder.header(header::CONTENT_TYPE, ct);
         }
-        builder.body(Body::from(Full::new(Bytes::from(buf)))).ok()
+        builder
+            .body(Body::from(Full::new(Bytes::from(body))))
+            .unwrap_or_else(|_| Response::new(Body::empty()))
+    }
+
+    /// Replay the original (uncompressed) request to the upstream — direct, all statuses
+    /// relayed — and build a response for the client. `None` if the replay itself fails (in
+    /// which case the caller keeps the compressed response's error).
+    fn replay_original(orig: &OriginalRequest, proxy_url: Option<&str>) -> Option<Response<Body>> {
+        let (status, content_type, body) = fetch_original(orig, proxy_url)?;
+        Some(buffered_response(status, content_type, body))
+    }
+
+    /// Peek the head of an Anthropic SSE stream in fallback mode. Stops at the first frame that
+    /// either reports an error (`Err`: the turn has committed nothing to the client, so it can
+    /// still be failed over) or commits content (`message_start`/`content_block_*` — from there on
+    /// the client owns a partial answer and the rest streams through untouched). A transport
+    /// failure before any content is treated as a failed turn too: a dropped Anthropic connection
+    /// is exactly what the chain exists for.
+    async fn probe_sse_head(body: Body) -> Result<Body, ()> {
+        use hudsucker::futures::StreamExt;
+        let mut stream = BodyStream::new(body);
+        let mut head: Vec<Bytes> = Vec::new();
+        let mut seen = Vec::<u8>::new();
+        while let Some(frame) = stream.next().await {
+            let Ok(frame) = frame else {
+                return Err(());
+            };
+            let Ok(bytes) = frame.into_data() else {
+                continue;
+            };
+            seen.extend_from_slice(&bytes);
+            head.push(bytes);
+            if is_sub_fallback_body(&seen) {
+                return Err(());
+            }
+            if sse_committed_content(&seen) {
+                break;
+            }
+        }
+        let head = hudsucker::futures::stream::iter(head.into_iter().map(Ok));
+        let rest = stream.filter_map(|frame| {
+            hudsucker::futures::future::ready(match frame {
+                Ok(frame) => frame.into_data().ok().map(Ok),
+                Err(e) => Some(Err(e)),
+            })
+        });
+        Ok(Body::from_stream(head.chain(rest)))
     }
 
     /// A JSON body response (used for the local `count_tokens` answer on the reroute path).
@@ -549,6 +623,9 @@ mod imp {
     }
 
     const REROUTE_RETRY_MAX: u32 = 3;
+    /// Wall-clock budget for a whole fallback chain (all providers, all their retries). Bounds the
+    /// worst case a client waits after Anthropic already failed.
+    const FALLBACK_CHAIN_BUDGET: std::time::Duration = std::time::Duration::from_secs(90);
     const REROUTE_RETRY_BASE_MS: u64 = 1_000;
     const REROUTE_RETRY_CAP_MS: u64 = 20_000;
 
@@ -1099,30 +1176,33 @@ mod imp {
             // Anthropic normally, and only replays to the sub provider if Anthropic fails (handled
             // in the response phase). Captured here so we can read the session header and body.
             let mut fallback_arm: Option<(Vec<crate::reroute::SubProvider>, Option<String>)> = None;
-            if let Some(sub) = self.sub
-                && matches!(provider, Some(ProviderKind::Anthropic))
-                && req.method() == Method::POST
-            {
+            if matches!(provider, Some(ProviderKind::Anthropic)) && req.method() == Method::POST {
                 let path = req.uri().path();
                 if !self.sub_fallback {
-                    if path.ends_with("/v1/messages/count_tokens") {
-                        return self.reroute_count_tokens(req).await;
-                    }
-                    if path.ends_with("/v1/messages") {
-                        return self.reroute_messages(req, sub).await;
+                    if let Some(sub) = self.sub {
+                        if path.ends_with("/v1/messages/count_tokens") {
+                            return self.reroute_count_tokens(req).await;
+                        }
+                        if path.ends_with("/v1/messages") {
+                            return self.reroute_messages(req, sub).await;
+                        }
                     }
                 } else if path.ends_with("/v1/messages") {
-                    let session_id = req
-                        .headers()
-                        .get("x-claude-code-session-id")
-                        .and_then(|v| v.to_str().ok())
-                        .map(str::to_string);
-                    let providers = if self.sub_chain.is_empty() {
-                        vec![sub]
-                    } else {
-                        self.sub_chain.as_ref().clone()
-                    };
-                    fallback_arm = Some((providers, session_id));
+                    // A chain is enough to arm the fallback: `sub` selects who serves *every* turn
+                    // in `always` mode, but in fallback mode the chain is the whole answer, so
+                    // `sub = off` + a chain is a valid configuration.
+                    let mut providers = self.sub_chain.as_ref().clone();
+                    if providers.is_empty() {
+                        providers.extend(self.sub);
+                    }
+                    if !providers.is_empty() {
+                        let session_id = req
+                            .headers()
+                            .get("x-claude-code-session-id")
+                            .and_then(|v| v.to_str().ok())
+                            .map(str::to_string);
+                        fallback_arm = Some((providers, session_id));
+                    }
                 }
             }
             // Only compress POST bodies to a known provider; pass everything else through.
@@ -1216,12 +1296,7 @@ mod imp {
                 && let Some(body) = fallback_body
                 && let Some(pending) = self.pending.as_mut()
             {
-                let provider = providers
-                    .first()
-                    .copied()
-                    .unwrap_or(crate::reroute::SubProvider::Codex);
                 pending.fallback = Some(FallbackInfo {
-                    provider,
                     providers,
                     anthropic_body: body,
                     session_id,
@@ -1847,15 +1922,19 @@ mod imp {
             apply_sub_effort(&mut anthropic, self.sub_effort.as_deref());
 
             let mut providers = Vec::new();
-            for provider in fb.providers.iter().copied().chain([fb.provider]) {
+            for provider in fb.providers.iter().copied() {
                 if !providers.contains(&provider) {
                     providers.push(provider);
                 }
             }
+            // One wall-clock budget for the whole chain: per-provider backoff × N providers can
+            // otherwise outlast the client's own timeout, and a client that has already given up
+            // makes every further attempt pure waste (and pure spend).
+            let deadline = std::time::Instant::now() + FALLBACK_CHAIN_BUDGET;
             let mut failures = Vec::new();
             for provider in providers {
                 let attempt = match self
-                    .fallback_attempt(provider, &anthropic, fb.session_id.as_deref())
+                    .fallback_attempt(provider, &anthropic, fb.session_id.as_deref(), deadline)
                     .await
                 {
                     Ok(attempt) => attempt,
@@ -1936,7 +2015,11 @@ mod imp {
             provider: crate::reroute::SubProvider,
             anthropic: &Value,
             session_id: Option<&str>,
+            deadline: std::time::Instant,
         ) -> Result<FallbackAttempt, String> {
+            if std::time::Instant::now() >= deadline {
+                return Err("fallback budget exhausted".to_string());
+            }
             let token =
                 tokio::task::spawn_blocking(move || crate::reroute::auth::get_token(provider))
                     .await
@@ -1994,9 +2077,58 @@ mod imp {
                 let Some(wait_ms) = reroute_backoff_ms(attempt, retry_after) else {
                     return Err(format!("HTTP {status}: retry window exceeds budget"));
                 };
-                tokio::time::sleep(std::time::Duration::from_millis(wait_ms)).await;
+                // Don't burn the chain's whole budget waiting on one provider: if this backoff
+                // would eat into the deadline, give the next provider its turn instead.
+                let wait = std::time::Duration::from_millis(wait_ms);
+                if std::time::Instant::now() + wait >= deadline {
+                    return Err(format!(
+                        "HTTP {status}: retry window exceeds fallback budget"
+                    ));
+                }
+                tokio::time::sleep(wait).await;
                 attempt += 1;
             }
+        }
+
+        /// One bounded retry of the turn against Anthropic before the chain takes over. A 503 or a
+        /// short 429 is usually a blip, and a blip should not move a turn (and its spend) to a
+        /// different provider. Returns the `Pending` back when no retry was possible or the retry
+        /// failed, so the caller falls through to the chain. The retry sends the *original*
+        /// (uncompressed) request — the compressed body isn't retained past the forward — so the
+        /// row is recorded honestly as a no-savings turn.
+        async fn retry_anthropic_once(
+            &self,
+            mut pending: Pending,
+            retry_after_secs: Option<u64>,
+        ) -> Result<Response<Body>, Pending> {
+            let Some(original) = pending.original.clone() else {
+                return Err(pending);
+            };
+            // A reset hint beyond the backoff cap (a usage limit hours away) means "don't wait" —
+            // go straight to the chain, which is the whole point of fallback mode.
+            let Some(wait_ms) = reroute_backoff_ms(0, retry_after_secs) else {
+                return Err(pending);
+            };
+            tokio::time::sleep(std::time::Duration::from_millis(wait_ms)).await;
+            let proxy = self.upstream_proxy.clone();
+            let fetched =
+                tokio::task::spawn_blocking(move || fetch_original(&original, proxy.as_deref()))
+                    .await;
+            let Ok(Some((status, content_type, body))) = fetched else {
+                return Err(pending);
+            };
+            if !(200..300).contains(&status) || is_sub_fallback_body(&body) {
+                return Err(pending);
+            }
+            pending.input_after = pending.input_before;
+            pending.output_shaped = false;
+            let _finalize = Finalize {
+                acc: Arc::new(Mutex::new(body.clone())),
+                pending: Some(pending),
+                ledger: self.ledger.clone(),
+                breakdown_ledger: self.breakdown_ledger.clone(),
+            };
+            Ok(buffered_response(status, content_type, body))
         }
 
         /// Emit an Anthropic SSE `error` frame for a fallback that failed before/at the
@@ -2033,36 +2165,61 @@ mod imp {
             if let Some(info) = pending.reroute.clone() {
                 return self.reroute_response(res, pending, info).await;
             }
-            // Fallback reroute: Anthropic answered with a capacity/transient status, so replay the turn
-            // to the subscription provider instead of handing the client Anthropic's error.
+            // Fallback reroute: Anthropic could not serve the turn. On a *transient* status
+            // (429/5xx) Anthropic gets one bounded retry first — a blip should not hand the turn,
+            // and its spend, to another provider — and only then does the chain take over.
             if let Some(fb) = pending.fallback.clone()
                 && is_sub_fallback_status(res.status().as_u16())
             {
+                let status = res.status().as_u16();
+                let (parts, body) = res.into_parts();
+                let bytes = body
+                    .collect()
+                    .await
+                    .map(|c| c.to_bytes().to_vec())
+                    .unwrap_or_default();
+                let mut pending = pending;
+                if reroute_should_retry(status) {
+                    let hint = reroute_retry_after_from_headers(&parts.headers, &bytes);
+                    match self.retry_anthropic_once(pending, hint).await {
+                        Ok(response) => return response,
+                        Err(returned) => pending = returned,
+                    }
+                }
                 return self.fallback_to_chain(pending, fb).await;
             }
-            // Some providers encode an error as a successful SSE/JSON response. Buffer only in
-            // fallback mode so a failed stream can still advance to the next provider without
-            // exposing a partial response to Claude Code.
+            // An upstream can also report a failed turn inside an HTTP 200 body. In fallback mode
+            // we peek the *head* of the stream — up to the first error frame or the first frame
+            // that commits content to the client — and then forward the rest untouched. Buffering
+            // the whole response here would cost every fallback-mode user their streaming.
             let mut res = res;
-            if pending.fallback.is_some() && (200..300).contains(&res.status().as_u16()) {
-                let is_stream = res
+            if let Some(fb) = pending.fallback.clone()
+                && (200..300).contains(&res.status().as_u16())
+            {
+                let content_type = res
                     .headers()
                     .get(header::CONTENT_TYPE)
                     .and_then(|v| v.to_str().ok())
-                    .is_some_and(|v| v.contains("event-stream") || v.contains("json"));
-                if is_stream {
+                    .unwrap_or_default()
+                    .to_string();
+                if content_type.contains("event-stream") {
+                    let (parts, body) = res.into_parts();
+                    match probe_sse_head(body).await {
+                        Ok(body) => res = Response::from_parts(parts, body),
+                        Err(()) => return self.fallback_to_chain(pending, fb).await,
+                    }
+                } else if content_type.contains("json") {
+                    // Non-streamed JSON is a single small object: buffering it costs nothing.
                     let (parts, body) = res.into_parts();
                     let bytes = body
                         .collect()
                         .await
                         .map(|c| c.to_bytes().to_vec())
                         .unwrap_or_default();
-                    if is_sub_fallback_body(&bytes)
-                        && let Some(fb) = pending.fallback.clone()
-                    {
+                    if is_sub_fallback_body(&bytes) {
                         return self.fallback_to_chain(pending, fb).await;
                     }
-                    res = Response::from_parts(parts, Body::from(bytes));
+                    res = Response::from_parts(parts, Body::from(Full::new(Bytes::from(bytes))));
                 }
             }
             // Safety net: if the upstream rejected our compressed request with a *validation*
@@ -2976,7 +3133,17 @@ mod imp {
                 RuntimeConfig::get()
                     .sub_chain
                     .iter()
-                    .filter_map(|p| crate::reroute::SubProvider::parse(p))
+                    .filter_map(|p| {
+                        let parsed = crate::reroute::SubProvider::parse(p);
+                        if parsed.is_none() {
+                            // Silently dropping it would leave a typo'd chain quietly shorter than
+                            // the user configured — and the fallback they think they have missing.
+                            eprintln!(
+                                "llmtrim: unknown provider '{p}' in the sub fallback chain — ignored (expected codex|kimi)"
+                            );
+                        }
+                        parsed
+                    })
                     .collect(),
             ),
             sub_tiers: Arc::new(RuntimeConfig::get().sub_tiers.clone()),
@@ -4137,16 +4304,68 @@ mod imp {
 
 "#
             ));
+            // A non-streamed JSON error body.
             assert!(is_sub_fallback_body(
-                br#"data: {"type": "message_stop", "error": {"type":"api_error"}}
-
-"#
+                br#"{"type":"error","error":{"type":"overloaded_error"}}"#
             ));
             assert!(!is_sub_fallback_body(
                 br#"data: {"type":"message_stop","stop_reason":"end_turn"}
 
 "#
             ));
+            // An assistant message that merely *quotes* an error frame is not a failed turn.
+            assert!(!is_sub_fallback_body(
+                br#"data: {"type":"content_block_delta","delta":{"type":"text_delta","text":"{\"type\":\"error\"}"}}
+
+"#
+            ));
+        }
+
+        #[test]
+        fn sse_committed_content_marks_the_point_of_no_failover() {
+            assert!(sse_committed_content(
+                br#"data: {"type":"message_start","message":{"id":"m"}}
+
+"#
+            ));
+            assert!(sse_committed_content(
+                br#"data: {"type":"content_block_delta","delta":{"type":"text_delta","text":"hi"}}
+
+"#
+            ));
+            // A ping alone commits nothing: the turn can still be failed over.
+            assert!(!sse_committed_content(
+                br#"data: {"type":"ping"}
+
+"#
+            ));
+        }
+
+        #[tokio::test]
+        async fn probe_sse_head_streams_a_good_response_through_unbuffered() {
+            let body = Body::from(Full::new(Bytes::from(
+                "event: message_start\ndata: {\"type\":\"message_start\"}\n\n\
+                 data: {\"type\":\"content_block_delta\",\"delta\":{\"type\":\"text_delta\",\"text\":\"hi\"}}\n\n\
+                 data: {\"type\":\"message_stop\"}\n\n",
+            )));
+            let out = probe_sse_head(body)
+                .await
+                .expect("a good stream must not fail over");
+            let bytes = out.collect().await.unwrap().to_bytes();
+            let text = String::from_utf8_lossy(&bytes);
+            assert!(text.contains("message_start"), "head is replayed");
+            assert!(text.contains("message_stop"), "tail still streams");
+        }
+
+        #[tokio::test]
+        async fn probe_sse_head_fails_over_on_an_error_frame() {
+            let body = Body::from(Full::new(Bytes::from(
+                "event: error\ndata: {\"type\":\"error\",\"error\":{\"type\":\"overloaded_error\"}}\n\n",
+            )));
+            assert!(
+                probe_sse_head(body).await.is_err(),
+                "an error frame before any content must fail over"
+            );
         }
 
         #[test]

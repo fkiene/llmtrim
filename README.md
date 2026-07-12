@@ -444,6 +444,9 @@ By default a set provider reroutes every turn. To use subscriptions only as a ba
 fallback mode: `llmtrim sub mode fallback` forwards to Anthropic as usual and tries the configured
 provider chain when Anthropic hits a quota, overload, transient server error, or transport failure.
 Set the order with `llmtrim sub chain codex,kimi`; `llmtrim sub mode always` restores the default.
+A transient failure (429/5xx) gets one bounded retry against Anthropic before the chain takes over,
+so a blip doesn't move the turn — and its spend — to another provider. (`on-error`, the pre-0.10
+name for this mode, still works.)
 
 The mapping is not limited to the four Claude tiers. `llmtrim sub map codex <from> <to>` remaps
 one model, where `from` is a tier name or an exact incoming model id, so any Anthropic-speaking
