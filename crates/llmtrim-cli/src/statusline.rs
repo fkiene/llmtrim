@@ -24,7 +24,8 @@
 //! `install` wires it into `~/.claude/settings.json`; rendering itself never touches the
 //! network or API tokens.
 
-use std::path::PathBuf;
+use std::ffi::OsStr;
+use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 use serde_json::Value;
@@ -607,11 +608,46 @@ fn claude_settings_path() -> Result<PathBuf> {
     Ok(PathBuf::from(home).join(".claude").join("settings.json"))
 }
 
-/// The `statusLine` object we write. `command` is this binary's absolute path plus the
-/// subcommand, so it works regardless of PATH.
+/// Return a stable PATH alias for `current_exe` when one resolves to the same binary.
+///
+/// Package managers such as Homebrew launch versioned binaries from a `Cellar` path while
+/// exposing a stable symlink in `PATH`. Persisting the versioned path makes Claude Code's
+/// statusline break after an upgrade. We keep the absolute-command behavior, but prefer that
+/// stable alias when it is provably the same executable. If no alias is available, the caller
+/// retains the existing absolute-path fallback.
+fn stable_executable_path(current_exe: &Path, path: Option<&OsStr>) -> PathBuf {
+    let Some(current_real) = std::fs::canonicalize(current_exe).ok() else {
+        return current_exe.to_path_buf();
+    };
+    let Some(name) = current_exe.file_name() else {
+        return current_exe.to_path_buf();
+    };
+    let Some(path) = path else {
+        return current_exe.to_path_buf();
+    };
+
+    for dir in std::env::split_paths(path) {
+        if !dir.is_absolute() {
+            continue;
+        }
+        let candidate = dir.join(name);
+        if candidate == current_exe {
+            continue;
+        }
+        if std::fs::canonicalize(&candidate).ok().as_ref() == Some(&current_real) {
+            return candidate;
+        }
+    }
+
+    current_exe.to_path_buf()
+}
+
+/// The `statusLine` object we write. `command` is an absolute path or a stable PATH alias plus
+/// the subcommand, so it works even when a package manager replaces a versioned executable.
 fn statusline_config() -> Value {
     let exe = std::env::current_exe()
         .ok()
+        .map(|p| stable_executable_path(&p, std::env::var_os("PATH").as_deref()))
         .map(|p| p.display().to_string())
         .unwrap_or_else(|| "llmtrim".to_string());
     let command = if exe.contains(' ') {
@@ -620,6 +656,21 @@ fn statusline_config() -> Value {
         format!("{exe} statusline")
     };
     serde_json::json!({ "type": "command", "command": command, "padding": 0 })
+}
+
+/// Whether a Claude statusline command is one that `llmtrim statusline install` created.
+/// Recognize both POSIX and Windows separators because settings can be moved between systems.
+fn is_llmtrim_statusline_command(command: &str) -> bool {
+    let Some(executable) = command.strip_suffix(" statusline") else {
+        return false;
+    };
+    let executable = executable.trim();
+    let executable = executable
+        .strip_prefix('"')
+        .and_then(|value| value.strip_suffix('"'))
+        .unwrap_or(executable);
+    let name = executable.rsplit(['/', '\\']).next().unwrap_or(executable);
+    name.strip_suffix(".exe").unwrap_or(name) == "llmtrim"
 }
 
 /// Set our `statusLine` key on a parsed settings object, preserving every other key. Pure
@@ -669,6 +720,55 @@ pub fn install(print: bool) -> Result<()> {
         path.display()
     );
     Ok(())
+}
+
+/// Re-point an existing llmtrim-owned Claude statusline at the current binary. Only the
+/// `command` string is rewritten: a custom command is left alone, and so is any other key the
+/// user set on the `statusLine` object (`padding`, …). Returns whether anything changed.
+fn refresh_statusline_config(settings: &mut Value) -> Result<bool> {
+    let Some(status_line) = settings
+        .get_mut("statusLine")
+        .and_then(Value::as_object_mut)
+    else {
+        return Ok(false);
+    };
+    let Some(command) = status_line.get("command").and_then(Value::as_str) else {
+        return Ok(false);
+    };
+    if !is_llmtrim_statusline_command(command) {
+        return Ok(false);
+    }
+
+    let Some(current) = statusline_config()
+        .get("command")
+        .and_then(Value::as_str)
+        .map(str::to_string)
+    else {
+        return Ok(false);
+    };
+    if current == command {
+        return Ok(false);
+    }
+    status_line.insert("command".to_string(), Value::String(current));
+    Ok(true)
+}
+
+/// Refresh an existing llmtrim-owned Claude statusline without touching custom commands.
+/// Returns whether the settings file was rewritten. This runs during `llmtrim update` before
+/// package managers can remove a versioned executable path.
+pub fn refresh_if_installed() -> Result<bool> {
+    let path = claude_settings_path()?;
+    let Ok(s) = std::fs::read_to_string(&path) else {
+        return Ok(false);
+    };
+    let mut settings: Value = serde_json::from_str(&s)
+        .with_context(|| format!("{} is not valid JSON", path.display()))?;
+    if !refresh_statusline_config(&mut settings)? {
+        return Ok(false);
+    }
+    std::fs::write(&path, serde_json::to_string_pretty(&settings)?)
+        .with_context(|| format!("failed to write {}", path.display()))?;
+    Ok(true)
 }
 
 /// Remove the `statusLine` key we wrote (leaves the rest of `settings.json` untouched).
@@ -1000,6 +1100,85 @@ mod tests {
         // ...and the pre-existing keys are untouched.
         assert_eq!(settings["theme"], "dark");
         assert_eq!(settings["permissions"]["allow"][0], "Bash");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn statusline_prefers_stable_path_alias_for_active_binary() {
+        let root = std::env::temp_dir().join(format!(
+            "llmtrim-statusline-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let versioned_dir = root.join("Cellar/llmtrim/0.9.5/bin");
+        let stable_dir = root.join("bin");
+        std::fs::create_dir_all(&versioned_dir).unwrap();
+        std::fs::create_dir_all(&stable_dir).unwrap();
+
+        let name = "llmtrim";
+        let current = versioned_dir.join(name);
+        let stable = stable_dir.join(name);
+        std::fs::write(&current, b"binary").unwrap();
+        std::os::unix::fs::symlink(&current, &stable).unwrap();
+        let path = std::env::join_paths([&stable_dir]).unwrap();
+
+        assert_eq!(
+            stable_executable_path(&current, Some(path.as_os_str())),
+            stable
+        );
+
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn recognizes_only_llmtrim_statusline_commands_for_refresh() {
+        assert!(is_llmtrim_statusline_command(
+            "/opt/homebrew/Cellar/llmtrim/0.9.4/bin/llmtrim statusline"
+        ));
+        assert!(is_llmtrim_statusline_command(
+            r#""C:\Program Files\llmtrim\llmtrim.exe" statusline"#
+        ));
+        assert!(!is_llmtrim_statusline_command("my-statusline-command"));
+        assert!(!is_llmtrim_statusline_command(
+            "llmtrim statusline --custom"
+        ));
+    }
+
+    #[test]
+    fn refreshes_owned_statusline_without_touching_other_settings() {
+        let mut settings = serde_json::json!({
+            "theme": "dark",
+            "statusLine": {
+                "type": "command",
+                "command": "/opt/homebrew/Cellar/llmtrim/0.9.4/bin/llmtrim statusline",
+                "padding": 2
+            }
+        });
+
+        assert!(refresh_statusline_config(&mut settings).unwrap());
+        assert_eq!(settings["theme"], "dark");
+        assert_ne!(
+            settings["statusLine"]["command"],
+            "/opt/homebrew/Cellar/llmtrim/0.9.4/bin/llmtrim statusline"
+        );
+        // Only `command` moves: a padding the user chose survives the update.
+        assert_eq!(settings["statusLine"]["padding"], 2);
+        assert_eq!(settings["statusLine"]["type"], "command");
+
+        let mut custom = serde_json::json!({
+            "statusLine": { "type": "command", "command": "my-statusline-command" }
+        });
+        assert!(!refresh_statusline_config(&mut custom).unwrap());
+        assert_eq!(custom["statusLine"]["command"], "my-statusline-command");
+    }
+
+    #[test]
+    fn refresh_is_a_no_op_when_the_command_already_points_at_this_binary() {
+        let mut settings = serde_json::json!({ "statusLine": statusline_config() });
+        assert!(!refresh_statusline_config(&mut settings).unwrap());
     }
 
     #[test]
