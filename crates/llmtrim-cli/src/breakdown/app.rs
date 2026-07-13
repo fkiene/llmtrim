@@ -2401,6 +2401,8 @@ mod tests {
             last_ts: "2026-06-19T00:00:00+00:00".to_string(),
             last_sub_provider: None,
             last_model: None,
+            last_cache_hit: None,
+            last_input_tokens: 0,
         }
     }
 

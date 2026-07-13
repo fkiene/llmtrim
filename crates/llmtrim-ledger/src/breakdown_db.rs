@@ -23,6 +23,15 @@ pub struct SessionRow {
     pub tokens: i64,
     /// Cache-hit fraction: cache-read over total input (0.0 when no input billed).
     pub cache_hit: f64,
+    /// Cache-hit fraction of the session's *most recent* turn alone, matching the per-turn
+    /// figure Claude Code reports in `current_usage`. `None` when that turn billed no input.
+    /// Distinct from `cache_hit`, which averages the whole session (and so is dragged down by
+    /// the cold first turn) — the status line wants the last turn's rate, not the average.
+    pub last_cache_hit: Option<f64>,
+    /// Input tokens of that same most-recent turn (fresh + cache read + cache write) — the
+    /// context occupancy Claude Code reports as `total_input_tokens`, which it omits from the
+    /// blob mid-turn. `0` when no turn has landed.
+    pub last_input_tokens: i64,
     /// Total bill in micro-USD (frozen per turn, summed).
     pub bill_micros: i64,
     /// Input tokens before / after compression, summed — the session's savings.
@@ -139,7 +148,12 @@ impl BreakdownDb {
                         MAX(ts),
                         MAX(cc_session_id),
                         MAX(CASE WHEN recent = 1 THEN sub_provider END),
-                        MAX(CASE WHEN recent = 1 THEN model END)
+                        MAX(CASE WHEN recent = 1 THEN model END),
+                        COALESCE(MAX(CASE WHEN recent = 1 THEN cache_read END), 0),
+                        COALESCE(
+                            MAX(CASE WHEN recent = 1 THEN fresh_input + cache_read + cache_write END),
+                            0
+                        )
                  FROM ranked
                  GROUP BY session_id, agent, project
                  ORDER BY MAX(ts) DESC",
@@ -149,6 +163,8 @@ impl BreakdownDb {
             .query_map([], |r| {
                 let cache_read: i64 = r.get(6)?;
                 let total_in: i64 = r.get(7)?;
+                let last_read: i64 = r.get(15)?;
+                let last_total_in: i64 = r.get(16)?;
                 Ok(SessionRow {
                     session_id: r.get(0)?,
                     agent: r.get(1)?,
@@ -161,6 +177,9 @@ impl BreakdownDb {
                     } else {
                         0.0
                     },
+                    last_cache_hit: (last_total_in > 0)
+                        .then(|| last_read as f64 / last_total_in as f64),
+                    last_input_tokens: last_total_in,
                     bill_micros: r.get(8)?,
                     input_before: r.get(9)?,
                     input_after: r.get(10)?,

@@ -187,6 +187,13 @@ struct Led {
     /// The prompt cache has gone cold: the session has been idle past the TTL, so the next turn
     /// pays a cold write. Renders the cache segment red with a `/compact` nudge.
     cache_cold: bool,
+    /// Cache-hit rate of this session's last *completed* turn, %, as the proxy measured it on the
+    /// wire. Stands in for the blob's `current_usage` while a turn is in flight — see
+    /// [`cache_pct_for`].
+    last_cache_pct: Option<f64>,
+    /// Input tokens of that same turn — stands in for the blob's `total_input_tokens` while a
+    /// turn is in flight, so the gauge doesn't empty. See [`ctx_tokens_for`].
+    last_ctx_tokens: i64,
 }
 
 /// Minimal [`DaemonView`] for the health check — mirrors `main::daemon_view` but fills only
@@ -272,7 +279,31 @@ fn ledger_snapshot(cc: &CcInput) -> Led {
         reroute_window,
         resolved_model,
         cache_cold,
+        last_cache_pct: row
+            .as_ref()
+            .and_then(|r| r.last_cache_hit)
+            .map(|f| f * 100.0),
+        last_ctx_tokens: row.as_ref().map_or(0, |r| r.last_input_tokens),
     }
+}
+
+/// Resolve the context occupancy the gauge fills against. Claude Code reports
+/// `total_input_tokens` from the *last response*, so like `current_usage` it reads 0 on every
+/// re-render while a turn is in flight — emptying the bar mid-request and refilling it after.
+/// The proxy counted the same input on the wire, so the last completed turn holds the gauge
+/// steady. A genuinely empty context (fresh session, no turn yet) has no ledger row either, so
+/// it still renders empty rather than inventing a fill.
+fn ctx_tokens_for(blob: i64, ledger_last: i64) -> i64 {
+    if blob > 0 { blob } else { ledger_last }
+}
+
+/// Resolve the cache figure the segment shows. Claude Code fills `current_usage` only once a
+/// response's usage has landed, so it is absent from every re-render *during* a turn — trusting
+/// it alone drops the segment mid-request and pops it back afterwards. The proxy measured the
+/// same quantity on the wire for the last completed turn, so it holds the number steady across
+/// the gap instead of blanking it.
+fn cache_pct_for(blob: Option<f64>, ledger_last: Option<f64>) -> Option<f64> {
+    blob.or(ledger_last)
 }
 
 /// Where the reroute arrow's content comes from.
@@ -331,6 +362,13 @@ struct SessionLedgerRow {
     /// Anthropic actually failed, which config cannot predict.
     last_sub_provider: Option<String>,
     last_model: Option<String>,
+    /// Cache-hit fraction of this session's most recent *completed* turn. Claude Code omits
+    /// `current_usage` from the blob while a turn is in flight, so this is what keeps the cache
+    /// segment from blanking out mid-request.
+    last_cache_hit: Option<f64>,
+    /// Input tokens of that same turn — what the context gauge falls back to when the blob
+    /// reports no occupancy mid-request.
+    last_input_tokens: i64,
 }
 
 /// This Claude Code session's aggregated ledger row, matched on the real `cc_session_id`. Behind
@@ -351,6 +389,8 @@ fn session_row(sid: &str) -> Option<SessionLedgerRow> {
             last_ts: r.last_ts,
             last_sub_provider: r.last_sub_provider,
             last_model: r.last_model,
+            last_cache_hit: r.last_cache_hit,
+            last_input_tokens: r.last_input_tokens,
         })
 }
 
@@ -604,7 +644,7 @@ fn extra_segments(cc: &CcInput, led: &Led, color: bool) -> Vec<String> {
         // Cache expired: the next turn pays a cold write, so `/compact` (re-baselines the prompt)
         // pays off here. `cold` communicates the state faster than a stale `0% cached`.
         out.push(paint(color, RED, "♻ cold · /compact"));
-    } else if let Some(c) = cc.cache_pct {
+    } else if let Some(c) = cache_pct_for(cc.cache_pct, led.last_cache_pct) {
         // Floor, not round: only a genuine 100% cache shows `100%` (99.9 stays `99%`).
         out.push(paint(
             color,
@@ -624,7 +664,7 @@ fn render_line(cc: &CcInput, led: &Led, cols: usize, color: bool) -> String {
     let mut core = vec![
         model_segment(cc, led, color),
         context_segment(
-            cc.ctx_tokens,
+            ctx_tokens_for(cc.ctx_tokens, led.last_ctx_tokens),
             effective_window(cc, led),
             led.cache_cold,
             color,
@@ -878,6 +918,8 @@ mod tests {
             reroute_window: None,
             resolved_model: Some("gpt-5.6-terra".to_string()),
             cache_cold: false,
+            last_cache_pct: None,
+            last_ctx_tokens: 0,
         }
     }
 
@@ -1118,6 +1160,8 @@ mod tests {
             last_ts: chrono::Utc::now().to_rfc3339(),
             last_sub_provider: sub.map(str::to_string),
             last_model: model.map(str::to_string),
+            last_cache_hit: None,
+            last_input_tokens: 0,
         }
     }
 
@@ -1179,6 +1223,49 @@ mod tests {
         assert!((own - 33.333).abs() < 0.01, "per-session figure: {own}");
         // No session id at all (non-Claude-Code client) ⇒ lifetime is the only honest figure.
         assert_eq!(trim_for(None, None, lifetime), Some(6.8));
+    }
+
+    #[test]
+    fn context_gauge_holds_its_fill_while_a_turn_is_in_flight() {
+        // `total_input_tokens` comes from the last *response*, so mid-request the blob reports 0
+        // and the bar empties — the flicker the cache segment had. The last completed turn's
+        // input, measured on the wire, holds it.
+        let mut mid_turn = cc(48_000);
+        mid_turn.ctx_tokens = 0;
+        let mut l = led(Health::Healthy);
+        l.last_ctx_tokens = 48_000;
+        assert_eq!(
+            render_line(&mid_turn, &l, 0, false),
+            render_line(&cc(48_000), &l, 0, false),
+            "mid-turn gauge matches the completed-turn gauge"
+        );
+        // The blob wins whenever it has a figure; a truly fresh session (no turn, no row) still
+        // renders empty rather than inventing a fill.
+        assert_eq!(ctx_tokens_for(142_000, 48_000), 142_000);
+        assert_eq!(ctx_tokens_for(0, 0), 0);
+    }
+
+    #[test]
+    fn cache_segment_holds_its_value_while_a_turn_is_in_flight() {
+        // Claude Code drops `current_usage` from the blob mid-request, so `cc.cache_pct` is None
+        // on every re-render during a turn. Without a fallback the segment vanishes and pops back
+        // when the turn lands — a flicker that reads like the cache collapsing.
+        let mut mid_turn = cc(48_000);
+        mid_turn.cache_pct = None;
+        let mut l = led(Health::Healthy);
+        l.last_cache_pct = Some(98.0);
+        let out = render_line(&mid_turn, &l, 0, false);
+        assert!(out.contains("♻ 98% cached"), "last turn stands in: {out}");
+
+        // The blob still wins the moment it has a figure — the ledger is one turn stale.
+        let out = render_line(&cc(48_000), &l, 0, false);
+        assert!(
+            out.contains("♻ 63% cached"),
+            "blob wins when present: {out}"
+        );
+
+        // Nothing anywhere (fresh session, no turn yet) ⇒ no segment, not a fake 0%.
+        assert_eq!(cache_pct_for(None, None), None);
     }
 
     #[test]
