@@ -1083,8 +1083,13 @@ fn resolve_sub_chain(
 }
 
 /// Codex continuation (previous_response_id deltas) enabled? Env `LLMTRIM_CODEX_PREVIOUS_RESPONSE_ID`
-/// (truthy) wins, else `[sub.codex] previous_response_id = true` (or `continuation`). Defaults to
-/// `true` so sub-codex users get the cache/state benefit by default.
+/// (truthy) wins, else `[sub.codex] previous_response_id = true` (or `continuation`).
+///
+/// Defaults to `false`: the ChatGPT backend accepts `previous_response_id` only over its
+/// WebSocket transport, and rejects it on the HTTP `/responses` path we use with
+/// `400 Unsupported parameter`. It is also incoherent with the `store: false` we send — there is
+/// no server-side response to continue from. Left as an opt-in for a future WebSocket transport;
+/// prefix caching via `prompt_cache_key` is what carries the cache today.
 fn resolve_sub_codex_continuation(
     env: &impl Fn(&str) -> Option<String>,
     file: Option<&toml::Value>,
@@ -1116,7 +1121,7 @@ fn resolve_sub_codex_continuation(
             return is_true(s);
         }
     }
-    true
+    false
 }
 
 /// Persist the breakdown-TUI `theme` choice to the config file's top-level `theme` key,
@@ -1420,6 +1425,25 @@ mod tests {
         std::fs::write(&path, "preset = \"auto\"\n").unwrap();
         assert_eq!(sub_reenable_provider_at(&path), None);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn codex_continuation_is_off_unless_asked_for() {
+        let no_env = |_: &str| None;
+        // Off by default: the ChatGPT HTTP `/responses` path rejects `previous_response_id`
+        // outright, so sending it on every follow-up turn 400s the whole session.
+        assert!(!resolve_sub_codex_continuation(&no_env, None));
+        let plain: toml::Value = toml::from_str("sub = \"codex\"").unwrap();
+        assert!(!resolve_sub_codex_continuation(&no_env, Some(&plain)));
+        // Still opt-in-able, for a transport that accepts it.
+        let on: toml::Value = toml::from_str("[sub.codex]\nprevious_response_id = true\n").unwrap();
+        assert!(resolve_sub_codex_continuation(&no_env, Some(&on)));
+        // Env wins both ways.
+        let env_on = |k: &str| (k == "LLMTRIM_CODEX_PREVIOUS_RESPONSE_ID").then(|| "1".to_string());
+        assert!(resolve_sub_codex_continuation(&env_on, None));
+        let env_off =
+            |k: &str| (k == "LLMTRIM_CODEX_PREVIOUS_RESPONSE_ID").then(|| "0".to_string());
+        assert!(!resolve_sub_codex_continuation(&env_off, Some(&on)));
     }
 
     #[test]

@@ -718,11 +718,17 @@ mod imp {
         )
     }
 
+    /// An upstream rejection caused by the `previous_response_id` we attached — a stale/expired
+    /// response id, or a backend that doesn't take the parameter at all (the ChatGPT HTTP
+    /// `/responses` path answers `400 Unsupported parameter: previous_response_id`; it accepts
+    /// continuation only over its WebSocket transport). Either way the cure is the same: drop the
+    /// continuation state and re-issue the full request, which always works.
     fn is_continuation_error(body: &[u8]) -> bool {
         let lower = String::from_utf8_lossy(body).to_lowercase();
         lower.contains("previous_response_not_found")
             || lower.contains("previous response not found")
             || (lower.contains("continuation") && lower.contains("not found"))
+            || (lower.contains("previous_response_id") && lower.contains("unsupported parameter"))
     }
 
     /// Centralized recording for Codex continuation.
@@ -1633,9 +1639,21 @@ mod imp {
                 // at once rather than burning pointless retries.
                 if let Some(replay) = info.replay.as_ref() {
                     let mut attempt = 0;
-                    while attempt < REROUTE_RETRY_MAX && reroute_should_retry(cur_status) {
-                        let Some(wait_ms) = reroute_backoff_ms(attempt, retry_after) else {
-                            break;
+                    // A continuation rejection is retryable regardless of status (it arrives as a
+                    // 400, which is otherwise terminal): the re-issue below drops the continuation
+                    // and sends the full body, so it is a fix, not a blind repeat.
+                    while attempt < REROUTE_RETRY_MAX
+                        && (reroute_should_retry(cur_status) || is_continuation_error(&cur_body))
+                    {
+                        // The upstream isn't struggling, it rejected a parameter — re-issue at once
+                        // rather than making the user wait out a backoff meant for rate limits.
+                        let wait_ms = if is_continuation_error(&cur_body) {
+                            0
+                        } else {
+                            let Some(ms) = reroute_backoff_ms(attempt, retry_after) else {
+                                break;
+                            };
+                            ms
                         };
                         tokio::time::sleep(std::time::Duration::from_millis(wait_ms)).await;
                         attempt += 1;
@@ -3731,6 +3749,24 @@ mod imp {
             for s in [200, 400, 401, 403, 404, 422] {
                 assert!(!reroute_should_retry(s), "{s} should not retry");
             }
+        }
+
+        #[test]
+        fn a_rejected_previous_response_id_is_recognised_as_a_continuation_error() {
+            // The ChatGPT HTTP `/responses` path takes continuation only over its WebSocket
+            // transport; on HTTP it 400s. That 400 is not retryable by status, so it must be
+            // recognised by body — the re-issue drops the continuation and sends the full request.
+            let unsupported = br#"{"detail":"Unsupported parameter: previous_response_id"}"#;
+            assert!(is_continuation_error(unsupported));
+            // The stale-id case this already handled keeps working.
+            assert!(is_continuation_error(
+                br#"{"error":{"code":"previous_response_not_found"}}"#
+            ));
+            // An unrelated 400 must NOT be re-issued — re-sending it would just fail again.
+            assert!(!is_continuation_error(
+                br#"{"detail":"Unsupported parameter: temperature"}"#
+            ));
+            assert!(!is_continuation_error(br#"{"error":"rate limited"}"#));
         }
 
         #[test]
