@@ -6,6 +6,46 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Fixed
+
+- **Codex reroute failed every turn after the first.** The ChatGPT backend accepts
+  `previous_response_id` only over its WebSocket transport; on the HTTP `/responses` path llmtrim
+  uses, it answers `400 Unsupported parameter: previous_response_id`. Server-side continuation
+  defaulted to on, so from the second turn onward every rerouted request died — and it was
+  incoherent with the `store: false` llmtrim sends anyway, since there is no stored response to
+  continue from. Continuation now defaults to off (still available via
+  `LLMTRIM_CODEX_PREVIOUS_RESPONSE_ID` or `[sub.codex] previous_response_id`, for a transport that
+  accepts it), and prefix caching via `prompt_cache_key` carries the cache instead. A rejected
+  continuation now also heals itself: the request is re-issued in full rather than surfacing the
+  400, so an enabled-by-config continuation degrades instead of breaking the session.
+
+- **Compression could rewrite the system prompt.** The compressible set came solely from the cache
+  zone, so a request with no `cache_control` markers had nothing frozen and the text-mutating
+  stages were free to fold n-grams through the instructions. On Claude Code's title-generation
+  call — which carries no markers — this rewrote the few-shot examples, deleting the conditional
+  that gave them meaning. Instructions are what the model conditions on rather than reads as data,
+  so a fold that is harmless in a tool result can invert a directive. `system`, `instructions` and
+  system-role messages are now excluded from compression unconditionally, cached or not. This
+  costs nothing on real traffic (593 of 594 captured requests already had `cache_control` on
+  `system`; replaying 58 of them produces byte-identical output) and closes the gap for the small
+  utility calls that carry no markers.
+
+- **Status line blanked out mid-turn.** The cache percentage and context gauge were read only from
+  Claude Code's blob, which fills `current_usage` and `total_input_tokens` from the *last*
+  response. Claude Code re-runs the status line on every render, so while a turn was in flight both
+  were absent: the cache segment vanished and the gauge emptied, then both snapped back when the
+  turn landed — which reads like the prompt cache collapsing on every message. The proxy measures
+  the same quantities on the wire, so the last completed turn now stands in across the gap. The
+  blob still wins whenever it carries a figure, and a fresh session with no recorded turn renders
+  empty rather than inventing a value.
+
+### Added
+
+- **Reroute request capture.** With `capture_dir` set, the body actually sent to a reroute backend
+  is recorded alongside the existing before/after pair. The capture previously stopped at llmtrim's
+  own pipeline output, leaving the translated payload — the thing the upstream prompt cache keys
+  on — unobservable, which made cache behaviour under `sub` impossible to diagnose from evidence.
+
 ## [0.10.0] - 2026-07-12
 
 ### Fixed
