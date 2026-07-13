@@ -1542,6 +1542,7 @@ mod imp {
                     sent_body = serialized;
                 }
             }
+            capture_reroute(&sent_body, session_id.as_deref(), sub.as_str());
 
             // Record intent: provider stays Anthropic (we emit Anthropic SSE, which `Finalize`
             // measures); model is the resolved upstream model; `reroute` marks the response path.
@@ -2533,6 +2534,34 @@ mod imp {
     /// in the config file), write the before/after request bodies of each compressed request as
     /// one JSON file so an external reviewer can audit compression quality. Off unless set; any
     /// write failure is logged and swallowed — capture must never break proxying.
+    /// Record the *translated* body actually sent to a reroute backend — the Anthropic-side
+    /// [`capture_pair`] stops at our own pipeline output, so without this the wire payload (the
+    /// thing the upstream prompt cache keys on) is unobservable. Diffing consecutive `input`
+    /// arrays for one session is what locates a prefix-cache divergence.
+    fn capture_reroute(body: &[u8], session_id: Option<&str>, provider: &str) {
+        let Some(dir_path) = RuntimeConfig::get().capture_dir.clone() else {
+            return;
+        };
+        let record = serde_json::json!({
+            "ts": chrono::Utc::now().to_rfc3339(),
+            "kind": "reroute",
+            "provider": provider,
+            "session_id": session_id,
+            "sent": serde_json::from_slice::<Value>(body).unwrap_or(Value::Null),
+        });
+        let name = format!(
+            "{}-{:x}-reroute.json",
+            chrono::Utc::now().timestamp_micros(),
+            std::process::id()
+        );
+        let path = dir_path.join(name);
+        if let Err(e) = std::fs::create_dir_all(&dir_path)
+            .and_then(|_| std::fs::write(&path, record.to_string()))
+        {
+            eprintln!("llmtrim: reroute capture failed ({}): {e}", path.display());
+        }
+    }
+
     fn capture_pair(
         before: &str,
         after: &str,
