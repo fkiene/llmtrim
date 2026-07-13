@@ -20,15 +20,37 @@ use crate::ir::Request;
 use crate::provider::Provider;
 
 /// Content-text pointers safe to compress: every content pointer minus those inside the
-/// frozen (cached) prefix. The stages iterate this instead of
-/// [`Provider::content_text_pointers`]; the token gate still counts *all* content.
+/// frozen (cached) prefix, and minus the instructions ([`is_instruction`]). The stages iterate
+/// this instead of [`Provider::content_text_pointers`]; the token gate still counts *all*
+/// content.
 pub fn compressible_pointers(req: &Request, provider: &dyn Provider) -> Vec<String> {
     let frozen = frozen_pointers(req, provider);
     provider
         .content_text_pointers(req)
         .into_iter()
-        .filter(|p| !frozen.contains(p))
+        .filter(|p| !frozen.contains(p) && !is_instruction(req, provider, p))
         .collect()
+}
+
+/// Does this pointer address the system/developer instructions?
+///
+/// Instructions are never compressible, cached or not. They are the text the model *conditions
+/// on* rather than reads as data, so a fold that is harmless in a tool result can invert a
+/// directive: n-gram substitution once rewrote Claude Code's title-prompt few-shot examples from
+/// `Good (Korean session): {"title": …}` to `Good (Korean §3 …`, deleting the conditional and
+/// leaving "Korean titles are good, English titles are bad" — so every session title came back in
+/// Korean. Instructions are also small and near-always inside the provider's cached prefix, so
+/// there was never much to win here.
+///
+/// On real Claude Code traffic this changes nothing (593 of 594 captured requests carry
+/// `cache_control` on `system`, so it was already frozen); it closes the gap for the utility
+/// calls that don't — title generation, summarisation, and any non-caching client.
+fn is_instruction(req: &Request, provider: &dyn Provider, pointer: &str) -> bool {
+    // Top-level instruction fields (Anthropic `/system`, Responses `/instructions`, Gemini
+    // `/systemInstruction/...`) have no turn index; otherwise ask the provider for the role.
+    pointer.starts_with("/system")
+        || pointer.starts_with("/instructions")
+        || provider.role_at(req, pointer) == Some(crate::provider::Role::System)
 }
 
 /// Content-text pointers inside the frozen prefix — everything up to and including the
@@ -93,6 +115,45 @@ mod tests {
 
     fn req(v: Value) -> Request {
         Request::from_value(ProviderKind::Anthropic, v)
+    }
+
+    #[test]
+    fn instructions_are_never_compressible_even_uncached() {
+        // Claude Code's title-generation call carries no `cache_control`, so nothing was frozen
+        // and the stages folded n-grams straight through the system prompt's few-shot examples —
+        // inverting them, and turning every session title Korean. Instructions are off-limits.
+        let r = req(json!({
+            "system": [
+                {"type": "text", "text": "Good (Korean session): {\"title\": \"결제 모듈 리팩토링\"}"},
+            ],
+            "messages": [{"role": "user", "content": "summarise this session"}],
+        }));
+        let p = for_kind(ProviderKind::Anthropic);
+        assert!(
+            frozen_pointers(&r, p.as_ref()).is_empty(),
+            "no cache_control ⇒ nothing frozen"
+        );
+        let c = compressible_pointers(&r, p.as_ref());
+        assert!(
+            !c.iter().any(|p| p.starts_with("/system")),
+            "system stays out of reach: {c:?}"
+        );
+        assert!(
+            c.iter().any(|p| p.starts_with("/messages")),
+            "the session content is still compressible: {c:?}"
+        );
+
+        // Same for a string `system`, and for a wire shape that carries instructions as a
+        // system-role message rather than a top-level field.
+        let r = req(json!({
+            "system": "Return JSON with a single \"title\" field.",
+            "messages": [
+                {"role": "system", "content": "never fold me"},
+                {"role": "user", "content": "but fold me"},
+            ],
+        }));
+        let c = compressible_pointers(&r, p.as_ref());
+        assert_eq!(c, vec!["/messages/1/content".to_string()], "got {c:?}");
     }
 
     #[test]
