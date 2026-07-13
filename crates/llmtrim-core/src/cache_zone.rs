@@ -20,9 +20,9 @@ use crate::ir::Request;
 use crate::provider::Provider;
 
 /// Content-text pointers safe to compress: every content pointer minus those inside the
-/// frozen (cached) prefix, and minus the instructions ([`is_instruction`]). The stages iterate
-/// this instead of [`Provider::content_text_pointers`]; the token gate still counts *all*
-/// content.
+/// frozen (cached) prefix, and minus the system/developer instructions — which are never
+/// compressible, cached or not. The stages iterate this instead of
+/// [`Provider::content_text_pointers`]; the token gate still counts *all* content.
 pub fn compressible_pointers(req: &Request, provider: &dyn Provider) -> Vec<String> {
     let frozen = frozen_pointers(req, provider);
     provider
