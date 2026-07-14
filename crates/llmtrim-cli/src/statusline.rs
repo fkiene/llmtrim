@@ -15,7 +15,7 @@
 //! as the terminal narrows (`COLUMNS`). The context gauge fills and colours against the *real*
 //! window of the model serving the turn — the rerouted backend's window under `sub`, not
 //! Claude's — green below 40%, orange 40–65%, red above; and red whenever the prompt cache has
-//! gone cold, where the cache segment becomes `♻ cold · /compact`. Segments whose data is
+//! gone cold, where the cache segment becomes `♻ cache cold`. Segments whose data is
 //! absent — no reroute, an API-key user with no rate limits — simply don't render.
 //!
 //! Under `sub` the arrow shows the concrete model that served the last turn (e.g.
@@ -55,7 +55,7 @@ const CTX_AMBER_PCT: i64 = 65;
 pub(crate) const CACHE_TTL_SECS: i64 = 3600;
 /// How often Claude Code re-runs the status line while a session sits idle. Without it Claude
 /// Code only re-renders on conversation events, so an abandoned session keeps the line drawn at
-/// its last turn — green and warm — straight through the cache expiring, and `♻ cold · /compact`
+/// its last turn — green and warm — straight through the cache expiring, and `♻ cache cold`
 /// only appears *after* the turn that pays for it. Rendering is local (no network, no tokens),
 /// so a refresh costs one short process; 5 minutes is far finer than the 1h TTL it watches, and
 /// 25× cheaper than polling every 10s would be.
@@ -658,9 +658,10 @@ fn extra_segments(cc: &CcInput, led: &Led, color: bool) -> Vec<String> {
         (None, None) => {}
     }
     if led.cache_cold {
-        // Cache expired: the next turn pays a cold write, so `/compact` (re-baselines the prompt)
-        // pays off here. `cold` communicates the state faster than a stale `0% cached`.
-        out.push(paint(color, RED, "♻ cold · /compact"));
+        // Cache expired: the next turn pays a cold write. State only, no `/compact` nudge —
+        // compacting re-reads the same cold context to summarise it, so it pays that charge too
+        // rather than avoiding it (see `crate::guard::message`).
+        out.push(paint(color, RED, "♻ cache cold"));
     } else if let Some(c) = cache_pct_for(cc.cache_pct, led.last_cache_pct) {
         // Floor, not round: only a genuine 100% cache shows `100%` (99.9 stays `99%`).
         out.push(paint(
@@ -1064,7 +1065,7 @@ mod tests {
         let mut l = led(Health::Healthy);
         l.cache_cold = true;
         let out = render_line(&cc(48_000), &l, 0, false);
-        assert!(out.contains("♻ cold · /compact"), "cold hint shown: {out}");
+        assert!(out.contains("♻ cache cold"), "cold hint shown: {out}");
         assert!(!out.contains("cached"), "no stale % when cold: {out}");
     }
 

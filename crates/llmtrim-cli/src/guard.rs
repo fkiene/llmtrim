@@ -37,6 +37,8 @@ const CACHE_WRITE_MULTIPLIER: f64 = 2.0;
 struct HookInput {
     session_id: String,
     transcript_path: PathBuf,
+    /// What the user typed. Blocking erases it from the input box, so it is saved to disk.
+    prompt: String,
 }
 
 fn parse_hook(input: &str) -> Option<HookInput> {
@@ -52,6 +54,11 @@ fn parse_hook(input: &str) -> Option<HookInput> {
             .unwrap_or("")
             .to_string(),
         transcript_path: PathBuf::from(transcript),
+        prompt: v
+            .get("prompt")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_string(),
     })
 }
 
@@ -128,24 +135,41 @@ fn should_warn(idle_secs: i64, tokens: i64) -> bool {
 // ── the once-per-gap marker ──────────────────────────────────────────────────────
 
 /// Markers live beside the ledger, under llmtrim's existing state dir.
-fn marker_path(session_id: &str) -> Result<PathBuf> {
+fn guard_dir() -> Result<PathBuf> {
     let db = crate::tracking::db_path()?;
-    let dir = db
+    Ok(db
         .parent()
         .context("ledger path has no parent directory")?
-        .join("guard");
+        .join("guard"))
+}
+
+/// The marker for one session, under `dir`. Taking the directory as an argument keeps
+/// [`decide_in`] testable without reaching for the process-global `LLMTRIM_DB_PATH`.
+fn marker_path(dir: &Path, session_id: &str) -> PathBuf {
     // A session id from the payload is a UUID, but never let it walk out of the state dir.
     let safe: String = session_id
         .chars()
         .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
         .collect();
-    Ok(dir.join(format!("{safe}.acked")))
+    dir.join(format!("{safe}.acked"))
 }
 
 /// Whether this exact idle gap was already warned about. The gap is keyed by the timestamp we
 /// are resuming from, so a *later* gap in the same session re-arms the warning.
 fn already_acked(path: &Path, gap_id: &str) -> bool {
     std::fs::read_to_string(path).is_ok_and(|s| s.trim() == gap_id)
+}
+
+/// Stash the blocked prompt beside its marker. Claude Code does not restore it to the input box,
+/// so this is the only copy; failing to write it must not stop the warning.
+fn save_prompt(dir: &Path, session_id: &str, prompt: &str) -> Option<PathBuf> {
+    if prompt.is_empty() {
+        return None;
+    }
+    let path = marker_path(dir, session_id).with_extension("prompt");
+    std::fs::create_dir_all(dir).ok()?;
+    std::fs::write(&path, prompt).ok()?;
+    Some(path)
 }
 
 fn ack(path: &Path, gap_id: &str) -> Result<()> {
@@ -189,10 +213,16 @@ fn human_idle(secs: i64) -> String {
 /// (paying again) — measured on real captures at 128,758 then 45,131 tokens. Resending pays once.
 ///
 /// The user's prompt is not echoed: Claude Code appends it itself as `Original prompt:`, so
-/// echoing nests the warning inside itself on every resend.
-fn message(idle_secs: i64, tokens: i64, cost: Option<f64>) -> String {
+/// echoing nests the warning inside itself on every resend. It is *saved* instead — a blocked
+/// prompt is not restored to the input box (observed: the resend came back as `promptSource:
+/// typed`), so without this the text would be lost.
+fn message(idle_secs: i64, tokens: i64, cost: Option<f64>, saved: Option<&Path>) -> String {
     let cost = match cost {
         Some(c) => format!(" — about ${c:.2}"),
+        None => String::new(),
+    };
+    let saved = match saved {
+        Some(p) => format!(" Your message is saved at {}.", p.display()),
         None => String::new(),
     };
     format!(
@@ -203,10 +233,11 @@ fn message(idle_secs: i64, tokens: i64, cost: Option<f64>) -> String {
          summarise it), and only comes out ahead if you are staying for several more turns. To \
          avoid the charge entirely, ask in a fresh session.\n\
          \n\
-         Not sent. Resend to continue as-is.",
+         Not sent.{} Resend to continue as-is.",
         human_idle(idle_secs),
         tokens as f64 / 1000.0,
         cost,
+        saved,
     )
 }
 
@@ -219,6 +250,11 @@ const PASS: i32 = 0;
 /// Decide and (if warning) print. Returns the exit code. Any error inside maps to `PASS` at the
 /// boundary in [`run`].
 fn decide(input: &str, now: DateTime<Utc>) -> Result<i32> {
+    decide_in(input, now, &guard_dir()?)
+}
+
+/// [`decide`] against an explicit marker directory, so tests drive the real path.
+fn decide_in(input: &str, now: DateTime<Utc>, dir: &Path) -> Result<i32> {
     let Some(hook) = parse_hook(input) else {
         return Ok(PASS);
     };
@@ -236,14 +272,27 @@ fn decide(input: &str, now: DateTime<Utc>) -> Result<i32> {
 
     // Warn once per idle gap; a resend then goes straight through.
     let gap_id = s.last_ts.to_rfc3339();
-    let marker = marker_path(&hook.session_id)?;
+    let marker = marker_path(dir, &hook.session_id);
     if already_acked(&marker, &gap_id) {
         return Ok(PASS);
     }
+    // Ack before printing: if the marker cannot be written we fail open rather than block
+    // without recording that we did.
     ack(&marker, &gap_id)?;
 
+    // Best effort: losing the saved copy is not a reason to let the expensive turn through.
+    let saved = save_prompt(dir, &hook.session_id, &hook.prompt);
+
     let model = pricing_model(&hook.session_id, &s.model);
-    eprintln!("{}", message(idle, s.tokens, cold_turn_cost(s.tokens, &model)));
+    eprintln!(
+        "{}",
+        message(
+            idle,
+            s.tokens,
+            cold_turn_cost(s.tokens, &model),
+            saved.as_deref()
+        )
+    );
     Ok(BLOCK)
 }
 
@@ -371,7 +420,12 @@ fn claude_settings_path() -> Result<PathBuf> {
 /// Wire the hook into `~/.claude/settings.json` (merging, never clobbering). Returns the file it
 /// wrote, so `setup` can report it without printing its own line.
 pub fn wire() -> Result<PathBuf> {
-    let path = claude_settings_path()?;
+    wire_at(claude_settings_path()?)
+}
+
+/// [`wire`] against an explicit settings file, so tests exercise the read-modify-write round
+/// trip instead of only the pure merge.
+fn wire_at(path: PathBuf) -> Result<PathBuf> {
     let mut settings: Value = match std::fs::read_to_string(&path) {
         Ok(s) => serde_json::from_str(&s)
             .with_context(|| format!("{} is not valid JSON", path.display()))?,
@@ -405,12 +459,16 @@ pub fn install(print: bool) -> Result<()> {
 /// Remove our hook from `~/.claude/settings.json`, leaving the user's other hooks alone.
 /// Returns whether one was present.
 pub fn unwire() -> Result<bool> {
-    let path = claude_settings_path()?;
+    unwire_at(claude_settings_path()?)
+}
+
+/// [`unwire`] against an explicit settings file. See [`wire_at`].
+fn unwire_at(path: PathBuf) -> Result<bool> {
     let Ok(s) = std::fs::read_to_string(&path) else {
         return Ok(false);
     };
-    let mut settings: Value =
-        serde_json::from_str(&s).with_context(|| format!("{} is not valid JSON", path.display()))?;
+    let mut settings: Value = serde_json::from_str(&s)
+        .with_context(|| format!("{} is not valid JSON", path.display()))?;
     if !clear_guard_hook(&mut settings, &path)? {
         return Ok(false);
     }
@@ -464,10 +522,6 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let transcript = dir.join("transcript.jsonl");
         std::fs::write(&transcript, lines.join("\n")).unwrap();
-        // Keep every test's markers inside its own dir: `marker_path` hangs off the ledger path,
-        // which `LLMTRIM_DB_PATH` (read by `RuntimeConfig`) would pin — but that's process-global
-        // state, so tests instead assert on `decide` with an explicit `now` and on the marker
-        // helpers directly (below).
         let payload = serde_json::json!({
             "session_id": format!("sess-{}", dir.file_name().unwrap().to_string_lossy()),
             "transcript_path": transcript.display().to_string(),
@@ -481,40 +535,30 @@ mod tests {
         (Utc::now() - chrono::Duration::seconds(secs)).to_rfc3339()
     }
 
-    /// `decide` with the marker step neutralised: the trigger logic, not the filesystem.
-    fn verdict(payload: &str) -> i32 {
-        let hook = match parse_hook(payload) {
-            Some(h) => h,
-            None => return PASS,
-        };
-        let Ok(file) = std::fs::File::open(&hook.transcript_path) else {
-            return PASS;
-        };
-        let Some(s) = scan(std::io::BufReader::new(file)) else {
-            return PASS;
-        };
-        let idle = Utc::now().signed_duration_since(s.last_ts).num_seconds();
-        if should_warn(idle, s.tokens) { BLOCK } else { PASS }
+    /// The real [`decide_in`], with markers kept inside the test's own dir. Drives the whole
+    /// path — scan, trigger, marker, message — not a re-implementation of it.
+    fn verdict(payload: &str, dir: &Path) -> i32 {
+        decide_in(payload, Utc::now(), dir).unwrap_or(PASS)
     }
 
     #[test]
     fn cold_and_big_blocks() {
         let (payload, dir) = fixture(&[entry(&ago(7200), 150_000, false)]);
-        assert_eq!(verdict(&payload), BLOCK);
+        assert_eq!(verdict(&payload, &dir), BLOCK);
         std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]
     fn warm_session_passes() {
         let (payload, dir) = fixture(&[entry(&ago(60), 150_000, false)]);
-        assert_eq!(verdict(&payload), PASS);
+        assert_eq!(verdict(&payload, &dir), PASS);
         std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]
     fn cold_but_small_passes() {
         let (payload, dir) = fixture(&[entry(&ago(7200), 20_000, false)]);
-        assert_eq!(verdict(&payload), PASS);
+        assert_eq!(verdict(&payload, &dir), PASS);
         std::fs::remove_dir_all(dir).unwrap();
     }
 
@@ -526,14 +570,14 @@ mod tests {
             entry(&ago(7200), 150_000, false),
             entry(&ago(30), 150_000, true),
         ]);
-        assert_eq!(verdict(&payload), BLOCK);
+        assert_eq!(verdict(&payload, &dir), BLOCK);
         std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]
     fn sidechain_only_transcript_never_fires() {
         let (payload, dir) = fixture(&[entry(&ago(7200), 150_000, true)]);
-        assert_eq!(verdict(&payload), PASS);
+        assert_eq!(verdict(&payload, &dir), PASS);
         std::fs::remove_dir_all(dir).unwrap();
     }
 
@@ -557,8 +601,9 @@ mod tests {
 
     #[test]
     fn fails_open_on_bad_input() {
-        assert_eq!(verdict("not json"), PASS);
-        assert_eq!(verdict("{}"), PASS);
+        let dir = std::env::temp_dir();
+        assert_eq!(verdict("not json", &dir), PASS);
+        assert_eq!(verdict("{}", &dir), PASS);
         assert_eq!(
             decide(r#"{"transcript_path":"/nonexistent/x.jsonl"}"#, Utc::now()).unwrap(),
             PASS,
@@ -574,7 +619,7 @@ mod tests {
     #[test]
     fn a_transcript_of_junk_lines_fails_open() {
         let (payload, dir) = fixture(&["not json".into(), "{".into()]);
-        assert_eq!(verdict(&payload), PASS);
+        assert_eq!(verdict(&payload, &dir), PASS);
         std::fs::remove_dir_all(dir).unwrap();
     }
 
@@ -609,17 +654,20 @@ mod tests {
 
     #[test]
     fn message_does_not_sell_compact_as_a_saving() {
-        let m = message(7200, 150_000, Some(1.5));
+        let m = message(7200, 150_000, Some(1.5), None);
         assert!(m.contains("2h 0m") && m.contains("150k"), "{m}");
         assert!(m.contains("$1.50"), "cost at the cache-write rate: {m}");
         assert!(
             m.contains("/compact pays it too"),
             "compact is not a money-saver: {m}"
         );
-        assert!(!m.contains("Run /compact"), "no compact recommendation: {m}");
+        assert!(
+            !m.contains("Run /compact"),
+            "no compact recommendation: {m}"
+        );
         assert!(!m.contains("carry on"), "never echo the prompt: {m}");
         // No price for an unknown model ⇒ no figure, but still a warning.
-        assert!(!message(7200, 150_000, None).contains('$'));
+        assert!(!message(7200, 150_000, None, None).contains('$'));
     }
 
     #[test]
@@ -636,14 +684,21 @@ mod tests {
     }
 
     #[test]
-    fn marker_path_lives_under_the_ledger_dir_and_cannot_escape_it() {
-        let p = marker_path("../../etc/passwd").unwrap();
-        let dir = p.parent().unwrap();
-        assert_eq!(dir.file_name().unwrap(), "guard");
+    fn a_hostile_session_id_cannot_walk_the_marker_out_of_its_directory() {
+        let dir = Path::new("/tmp/llmtrim-guard-test");
+        let p = marker_path(dir, "../../etc/passwd");
+        assert_eq!(p.parent().unwrap(), dir, "stays put");
         assert_eq!(
             p.file_name().unwrap().to_string_lossy(),
             "------etc-passwd.acked"
         );
+    }
+
+    #[test]
+    fn markers_live_beside_the_ledger() {
+        // The directory itself is only resolved in production; `decide_in` takes it as an
+        // argument so the tests above never touch the real state dir.
+        assert_eq!(guard_dir().unwrap().file_name().unwrap(), "guard");
     }
 
     // ── settings merge ──────────────────────────────────────────────────────────
@@ -685,7 +740,10 @@ mod tests {
         assert_eq!(cmds.len(), 2, "ours is appended, not substituted: {cmds:?}");
         assert_eq!(cmds[0], "~/.claude/hooks/mine");
         assert!(is_llmtrim_guard_command(&cmds[1]));
-        assert_eq!(settings["hooks"]["Stop"][0]["hooks"][0]["command"], "notify");
+        assert_eq!(
+            settings["hooks"]["Stop"][0]["hooks"][0]["command"],
+            "notify"
+        );
     }
 
     #[test]
@@ -699,7 +757,10 @@ mod tests {
         set_guard_hook(&mut settings, p()).unwrap();
         let cmds = commands(&settings);
         assert_eq!(cmds.len(), 1, "refreshed in place: {cmds:?}");
-        assert_ne!(cmds[0], "/opt/homebrew/Cellar/llmtrim/0.9.4/bin/llmtrim guard");
+        assert_ne!(
+            cmds[0],
+            "/opt/homebrew/Cellar/llmtrim/0.9.4/bin/llmtrim guard"
+        );
         assert!(is_llmtrim_guard_command(&cmds[0]));
     }
 
@@ -724,7 +785,10 @@ mod tests {
         });
         set_guard_hook(&mut settings, p()).unwrap();
         assert!(clear_guard_hook(&mut settings, p()).unwrap());
-        assert_eq!(commands(&settings), vec!["~/.claude/hooks/mine".to_string()]);
+        assert_eq!(
+            commands(&settings),
+            vec!["~/.claude/hooks/mine".to_string()]
+        );
     }
 
     #[test]
@@ -744,5 +808,72 @@ mod tests {
         let mut settings = serde_json::json!([1, 2, 3]);
         assert!(set_guard_hook(&mut settings, p()).is_err());
         assert!(clear_guard_hook(&mut settings, p()).is_err());
+    }
+
+    // ── the real file round trip ────────────────────────────────────────────────
+
+    #[test]
+    fn wire_creates_then_unwire_removes_a_settings_file_on_disk() {
+        let (_, dir) = fixture(&[]);
+        let settings = dir.join("settings.json");
+
+        // A settings file that does not exist yet is created, not an error.
+        wire_at(settings.clone()).unwrap();
+        let written: Value =
+            serde_json::from_str(&std::fs::read_to_string(&settings).unwrap()).unwrap();
+        assert!(is_ours(&written["hooks"]["UserPromptSubmit"][0]));
+
+        // Wiring twice must not duplicate the entry.
+        wire_at(settings.clone()).unwrap();
+        let written: Value =
+            serde_json::from_str(&std::fs::read_to_string(&settings).unwrap()).unwrap();
+        assert_eq!(
+            written["hooks"]["UserPromptSubmit"]
+                .as_array()
+                .unwrap()
+                .len(),
+            1
+        );
+
+        assert!(unwire_at(settings.clone()).unwrap(), "ours was removed");
+        assert!(
+            !unwire_at(settings.clone()).unwrap(),
+            "nothing left to remove"
+        );
+
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn unwire_on_a_missing_settings_file_is_not_an_error() {
+        assert!(!unwire_at(PathBuf::from("/nonexistent/settings.json")).unwrap());
+    }
+
+    #[test]
+    fn a_blocked_prompt_is_saved_because_claude_code_does_not_restore_it() {
+        let (payload, dir) = fixture(&[entry(&ago(7200), 150_000, false)]);
+        assert_eq!(verdict(&payload, &dir), BLOCK);
+
+        let saved: Vec<_> = std::fs::read_dir(&dir)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.path().extension().is_some_and(|x| x == "prompt"))
+            .collect();
+        assert_eq!(saved.len(), 1, "the blocked prompt is stashed");
+        assert_eq!(
+            std::fs::read_to_string(saved[0].path()).unwrap(),
+            "carry on"
+        );
+
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn blocking_then_resending_the_same_gap_goes_through() {
+        // The whole production path, not a re-implementation of its trigger rule.
+        let (payload, dir) = fixture(&[entry(&ago(7200), 150_000, false)]);
+        assert_eq!(verdict(&payload, &dir), BLOCK, "first submit is stopped");
+        assert_eq!(verdict(&payload, &dir), PASS, "the resend goes through");
+        std::fs::remove_dir_all(dir).unwrap();
     }
 }

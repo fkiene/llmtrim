@@ -6,6 +6,35 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- **`llmtrim guard` — stop paying for a cold cache without being told.** Resume a session that has
+  been idle past the prompt-cache TTL and the next turn silently re-writes the entire context,
+  billed at the cache-write rate (2× base input for the 1h TTL Claude Code asks for). On a 225k
+  context — the median across my own idle gaps — that is a few dollars before any work happens, and
+  nothing at the prompt says so. `guard` is a Claude Code `UserPromptSubmit` hook: on the first
+  submit after a long gap on a big context it prints the idle time, the context size and what the
+  cold write costs, then exits 2, which blocks the prompt with no API call. A resend goes straight
+  through, and the blocked message is saved to disk since Claude Code does not restore it. `llmtrim
+  setup` offers to wire it in; `guard install` / `guard uninstall` do it directly, merging into
+  `~/.claude/settings.json` rather than clobbering hooks you already have. It reads Claude Code's
+  transcript, not llmtrim's ledger — the ledger keys sessions by a hash of the system prompt, so a
+  subagent turn would mask a stale main conversation — and every failure path exits 0: a bug in the
+  guard must never block a prompt.
+
+### Changed
+
+- **The status line now refreshes while a session sits idle.** It already reddened the cache segment
+  once the prompt cache expired, but Claude Code only re-renders on conversation events, so an
+  abandoned session kept the line drawn at its last turn — green and warm — straight through the TTL
+  expiring. The warning only appeared *after* the turn that paid for it. It now sets
+  `refreshInterval`, so the state is on screen before you type. Re-run `llmtrim statusline install`
+  to pick it up.
+- **The cold-cache segment no longer suggests `/compact`.** It read `♻ cold · /compact`, which sold
+  compaction as the thrifty move. It isn't: `/compact` re-reads the same cold context to summarise
+  it — paying the charge it appears to avoid — and the next turn then writes a fresh cache for the
+  summary. Resending pays once. The segment now just reports the state: `♻ cache cold`.
+
 ## [0.10.1] - 2026-07-13
 
 ### Fixed

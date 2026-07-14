@@ -315,10 +315,32 @@ The `✂` trim figure is scoped to the current Claude Code session; it reads `�
 has saved something this session. `◔ 5h·24% · 7d·12%` is the share of your Claude.ai 5-hour and
 7-day limits used. The context gauge fills against the real window of the model serving
 the turn — the rerouted backend's window under `sub`, not Claude's — green below 40%, orange
-40–65%, red above. `♻` shows this turn's prompt-cache reuse, and turns into `♻ cold · /compact`
+40–65%, red above. `♻` shows this turn's prompt-cache reuse, and turns into `♻ cache cold`
 once the session has been idle past the cache TTL, since the next message then pays a cold cache
 write. Segments drop right-to-left on narrow terminals, and anything Claude Code doesn't report
 (no reroute, no rate limits) is simply left out.
+
+### Guard
+
+Resuming a session whose prompt cache has expired re-writes the whole context on the very next
+turn, billed at the cache-write rate — a few dollars on a large session, spent before any work
+happens, with nothing at the prompt to say so.
+
+`llmtrim guard` is a Claude Code `UserPromptSubmit` hook that stops that one turn:
+
+```text
+Idle 6h 19m, 347k tokens of context. The prompt cache has expired, so the next turn
+re-writes the whole context — about $3.47 before any work happens.
+
+You pay that whichever way you go: /compact pays it too (it reads the full context to
+summarise it), and only comes out ahead if you are staying for several more turns. To
+avoid the charge entirely, ask in a fresh session.
+```
+
+The prompt is not sent and no API call is made, so the warning itself is free. Resend to continue;
+you are only warned once per idle gap. `llmtrim setup` offers to wire it in, or run `llmtrim guard
+install` (`guard uninstall` to remove it — it merges into `~/.claude/settings.json` and leaves your
+other hooks alone).
 
 ## Works with
 
