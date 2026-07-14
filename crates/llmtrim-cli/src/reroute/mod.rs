@@ -45,6 +45,18 @@ pub struct UpstreamRewrite {
 pub fn build_upstream(
     provider: SubProvider,
     anthropic_body: &Value,
+    overrides: &BTreeMap<String, String>,
+    token: &auth::TokenSet,
+    session_id: Option<&str>,
+) -> Result<UpstreamRewrite> {
+    build_upstream_for_model(provider, anthropic_body, None, overrides, token, session_id)
+}
+
+/// Internal variant that resolves a compact candidate without changing the client-visible model in
+/// the Anthropic body. The public wrapper above retains its stable five-argument API.
+pub(crate) fn build_upstream_for_model(
+    provider: SubProvider,
+    anthropic_body: &Value,
     logical_model: Option<&str>,
     overrides: &BTreeMap<String, String>,
     token: &auth::TokenSet,

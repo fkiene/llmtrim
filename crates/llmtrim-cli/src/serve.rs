@@ -1714,7 +1714,7 @@ mod imp {
                 Err(_) => return anthropic_error(500, "llmtrim: auth task failed").into(),
             };
 
-            let rewrite = match crate::reroute::build_upstream(
+            let rewrite = match crate::reroute::build_upstream_for_model(
                 sub,
                 &translate_value,
                 compact_current.as_ref().map(|c| c.logical_model.as_str()),
@@ -2363,7 +2363,7 @@ mod imp {
                     .await
                     .map_err(|_| "auth task failed".to_string())?
                     .map_err(|e| format!("not authenticated ({e})"))?;
-            let rewrite = crate::reroute::build_upstream(
+            let rewrite = crate::reroute::build_upstream_for_model(
                 provider,
                 anthropic,
                 logical_model,
