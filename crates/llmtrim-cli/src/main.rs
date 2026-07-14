@@ -50,6 +50,7 @@ Get started:
   status     Show the savings dashboard + interceptor health  [aliases: monitor, gain]
   wrap       Launch an agent (claude, codex, …) routed through the interceptor
   sub        Reroute Claude Code to another subscription's backend (codex|kimi)
+  compact    Configure cheaper models for Claude Code /compact
   tray       Open the desktop tray app (savings menu-bar / system-tray)
 
 Daemon:
@@ -119,6 +120,14 @@ enum Commands {
     Sub {
         #[command(subcommand)]
         action: SubCmd,
+    },
+    /// Configure cheaper models for Claude Code `/compact`
+    ///
+    /// Configured alternatives are tried in order when they fit the request. The model Claude Code
+    /// originally requested is always the implicit final fallback.
+    Compact {
+        #[command(subcommand)]
+        action: CompactCmd,
     },
     /// Run the HTTPS interceptor in the foreground
     ///
@@ -494,6 +503,31 @@ enum SubCmd {
     },
 }
 
+#[derive(Subcommand)]
+enum CompactCmd {
+    /// Replace the ordered compact-model alternatives
+    Models {
+        /// Models or portable Claude tiers, in attempt order (for example: haiku sonnet).
+        #[arg(required = true)]
+        models: Vec<String>,
+        /// Save without restarting a running interceptor.
+        #[arg(long)]
+        no_restart: bool,
+    },
+    /// Disable compact model substitution (the original model still handles `/compact`)
+    Off {
+        /// Save without restarting a running interceptor.
+        #[arg(long)]
+        no_restart: bool,
+    },
+    /// Show the configured order and effective backend mappings
+    Status {
+        /// Emit JSON.
+        #[arg(long)]
+        json: bool,
+    },
+}
+
 /// OAuth management for a subscription provider (codex / kimi).
 #[derive(Subcommand)]
 enum AuthAction {
@@ -769,6 +803,78 @@ fn apply_sub_map_change(edited: llmtrim::reroute::SubProvider, no_restart: bool)
         .and_then(llmtrim::reroute::SubProvider::parse);
     if active == Some(edited) {
         apply_sub_change(no_restart);
+    }
+}
+
+#[cfg(feature = "intercept")]
+fn run_compact(action: CompactCmd) -> Result<()> {
+    match action {
+        CompactCmd::Models { models, no_restart } => {
+            let mut normalized = Vec::new();
+            for model in models
+                .iter()
+                .flat_map(|model| model.split(','))
+                .map(str::trim)
+                .filter(|model| !model.is_empty())
+            {
+                if !normalized.iter().any(|existing| existing == model) {
+                    normalized.push(model.to_string());
+                }
+            }
+            if normalized.is_empty() {
+                anyhow::bail!("compact model list is empty; use `llmtrim compact off` to disable");
+            }
+            llmtrim_core::config::write_compact_models(&normalized)?;
+            println!(
+                "Compact models: {} -> original model (implicit).",
+                normalized.join(" -> ")
+            );
+            apply_sub_change(no_restart);
+            Ok(())
+        }
+        CompactCmd::Off { no_restart } => {
+            llmtrim_core::config::write_compact_models(&[])?;
+            println!("Compact model substitution disabled; `/compact` uses the original model.");
+            apply_sub_change(no_restart);
+            Ok(())
+        }
+        CompactCmd::Status { json } => {
+            let cfg = llmtrim_core::config::RuntimeConfig::get();
+            let sub = cfg
+                .sub
+                .as_deref()
+                .and_then(llmtrim::reroute::SubProvider::parse);
+            let original = "<original model>";
+            let plan = llmtrim::compact::plan(&cfg.compact_models, original, sub, &cfg.sub_tiers);
+            if json {
+                let out = serde_json::json!({
+                    "models": cfg.compact_models,
+                    "original_fallback": true,
+                    "resolved": plan.iter().map(|candidate| serde_json::json!({
+                        "logical": candidate.logical_model,
+                        "upstream": candidate.upstream_model,
+                        "context_window": llmtrim_core::context_window(&candidate.upstream_model),
+                        "original": candidate.is_original,
+                    })).collect::<Vec<_>>(),
+                });
+                println!("{}", serde_json::to_string_pretty(&out)?);
+            } else if cfg.compact_models.is_empty() {
+                println!("Compact models: off (original model only).");
+            } else {
+                println!("Compact models: {}", cfg.compact_models.join(" -> "));
+                for candidate in plan.iter().filter(|candidate| !candidate.is_original) {
+                    let window = llmtrim_core::context_window(&candidate.upstream_model)
+                        .map(|tokens| format!("{tokens} tokens"))
+                        .unwrap_or_else(|| "unknown context".to_string());
+                    println!(
+                        "  {} -> {} ({window})",
+                        candidate.logical_model, candidate.upstream_model
+                    );
+                }
+                println!("  then the original requested model (implicit)");
+            }
+            Ok(())
+        }
     }
 }
 
@@ -1291,6 +1397,7 @@ fn run() -> Result<()> {
             ),
         },
         Commands::Sub { action } => run_sub(action)?,
+        Commands::Compact { action } => run_compact(action)?,
         Commands::Update => llmtrim::update::run()?,
         Commands::Mcp { action } => match action {
             None => llmtrim::mcp::run()?,

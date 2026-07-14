@@ -418,6 +418,37 @@ These knobs are orthogonal to compression. Each resolves env-first, then from th
 </details>
 
 <details>
+<summary><b>Use cheaper models for Claude Code compaction</b></summary>
+
+Claude Code runs `/compact` by sending an internal summarization request. llmtrim can recognize
+that request and try an ordered list of cheaper models before the model selected in Claude Code:
+
+```bash
+llmtrim compact models haiku sonnet
+llmtrim compact status
+```
+
+The equivalent config is:
+
+```toml
+[compact]
+models = ["haiku", "sonnet"]
+```
+
+For each entry, llmtrim rebuilds and compresses the original request for that candidate, then checks
+the embedded model registry. A configured model is skipped when its context window is unknown or
+cannot hold the compressed input plus the requested output. If an eligible model fails before any
+answer event reaches Claude Code, llmtrim advances to the next entry. The model originally selected
+in Claude Code is always the implicit final attempt; do not add it to the list. Subscription reroutes
+use the same order after applying the active provider's tier mapping. Run `llmtrim compact off` to
+disable the override.
+
+`llmtrim setup` proposes `haiku, sonnet` on Claude Code installations that have not made a choice.
+An explicitly empty list records that the feature is disabled and prevents repeated setup prompts.
+
+</details>
+
+<details>
 <summary><b>Route Claude Code to another subscription</b> (opt-in; a ChatGPT/Codex or Kimi plan, gray-area on the provider's terms)</summary>
 
 llmtrim can serve Claude Code from a different subscription's backend instead of Anthropic.

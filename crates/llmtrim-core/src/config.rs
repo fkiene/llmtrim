@@ -527,6 +527,7 @@ pub(crate) const RUNTIME_ONLY_KEYS: &[&str] = &[
     "max_breakdown_turns",
     "theme",
     "sub",
+    "compact",
 ];
 
 /// The resolved config-file path (`LLMTRIM_CONFIG`, else `$XDG_CONFIG_HOME`/`$HOME/.config` +
@@ -844,6 +845,12 @@ pub struct RuntimeConfig {
     /// Env `LLMTRIM_CODEX_PREVIOUS_RESPONSE_ID` (1/true/yes) or `[sub.codex] previous_response_id = true`.
     /// Defaults to `true`.
     pub sub_codex_previous_response_id: bool,
+    /// Ordered alternative models for Claude Code compaction requests, read from
+    /// `[compact] models = [...]`. The originally requested model is always appended by the
+    /// interceptor as an implicit final fallback, so it is never stored here. Empty means compact
+    /// model substitution is disabled. File-only: model routing is persistent policy, not an
+    /// environment toggle.
+    pub compact_models: Vec<String>,
 }
 
 impl RuntimeConfig {
@@ -931,6 +938,7 @@ impl RuntimeConfig {
             sub_chain: resolve_sub_chain(&env, file),
             sub_effort: resolve_sub_effort(&env, file),
             sub_codex_previous_response_id: resolve_sub_codex_continuation(&env, file),
+            compact_models: resolve_compact_models(file),
         }
     }
 }
@@ -1122,6 +1130,115 @@ fn resolve_sub_codex_continuation(
         }
     }
     false
+}
+
+/// Ordered compact-model alternatives from `[compact] models`. Preserve user order and retain
+/// only the first occurrence of each non-empty entry. Invalid shapes disable substitution rather
+/// than affecting ordinary compression or proxying.
+fn resolve_compact_models(file: Option<&toml::Value>) -> Vec<String> {
+    let Some(values) = file
+        .and_then(|v| v.get("compact"))
+        .and_then(|v| v.get("models"))
+        .and_then(toml::Value::as_array)
+    else {
+        return Vec::new();
+    };
+    let mut models = Vec::new();
+    for value in values {
+        let Some(model) = value.as_str().map(str::trim).filter(|s| !s.is_empty()) else {
+            continue;
+        };
+        if !models.iter().any(|existing| existing == model) {
+            models.push(model.to_string());
+        }
+    }
+    models
+}
+
+/// Replace `[compact].models` while preserving every unrelated TOML value. The original client
+/// model is deliberately absent: it is an invariant appended per request by the interceptor.
+pub fn write_compact_models(models: &[String]) -> Result<()> {
+    let path = config_path().ok_or_else(|| anyhow::anyhow!("no config path (HOME/XDG unset)"))?;
+    write_compact_models_at(&path, models)
+}
+
+/// Whether the config explicitly contains `[compact].models`, including an empty list used to
+/// remember that setup's recommendation was declined.
+pub fn compact_models_configured() -> bool {
+    let Some(path) = config_path() else {
+        return false;
+    };
+    std::fs::read_to_string(path)
+        .ok()
+        .and_then(|text| text.parse::<toml::Value>().ok())
+        .and_then(|doc| doc.get("compact").cloned())
+        .and_then(|compact| compact.get("models").cloned())
+        .is_some()
+}
+
+fn write_compact_models_at(path: &std::path::Path, models: &[String]) -> Result<()> {
+    use anyhow::Context;
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("creating config dir {}", parent.display()))?;
+    }
+    let values: Vec<String> = models
+        .iter()
+        .map(|m| m.trim())
+        .filter(|m| !m.is_empty())
+        .fold(Vec::new(), |mut out, m| {
+            if !out.iter().any(|existing| existing == m) {
+                out.push(m.to_string());
+            }
+            out
+        });
+    let line = format!(
+        "models = [{}]",
+        values
+            .iter()
+            .map(|m| format!("{m:?}"))
+            .collect::<Vec<_>>()
+            .join(", ")
+    );
+    let existing = std::fs::read_to_string(path).unwrap_or_default();
+    let mut in_compact = false;
+    let mut compact_found = false;
+    let mut replaced = false;
+    let mut out = Vec::new();
+    for raw in existing.lines() {
+        let trimmed = raw.trim();
+        let section = trimmed.split('#').next().unwrap_or_default().trim();
+        if section.starts_with('[') {
+            if in_compact && !replaced {
+                out.push(line.clone());
+                replaced = true;
+            }
+            in_compact = section == "[compact]";
+            compact_found |= in_compact;
+        }
+        if in_compact
+            && trimmed
+                .split('=')
+                .next()
+                .is_some_and(|key| key.trim() == "models")
+        {
+            out.push(line.clone());
+            replaced = true;
+        } else {
+            out.push(raw.to_string());
+        }
+    }
+    if !replaced {
+        if !out.is_empty() && !out.last().is_some_and(|existing| existing.is_empty()) {
+            out.push(String::new());
+        }
+        if !compact_found {
+            out.push("[compact]".to_string());
+        }
+        out.push(line);
+    }
+    std::fs::write(path, format!("{}\n", out.join("\n")))
+        .with_context(|| format!("writing {}", path.display()))
 }
 
 /// Persist the breakdown-TUI `theme` choice to the config file's top-level `theme` key,
@@ -1849,6 +1966,70 @@ mod tests {
             .map(|(k, v)| (k.to_string(), v.to_string()))
             .collect();
         RuntimeConfig::resolve(|k| env.get(k).cloned(), Some(&value))
+    }
+
+    #[test]
+    fn compact_models_preserve_order_and_deduplicate() {
+        let c = resolve_file("[compact]\nmodels = [\"haiku\", \"sonnet\", \"haiku\", \"\"]\n");
+        assert_eq!(c.compact_models, vec!["haiku", "sonnet"]);
+    }
+
+    #[test]
+    fn compact_only_config_keeps_auto_routing() {
+        let value: toml::Value =
+            toml::from_str("[compact]\nmodels = [\"haiku\", \"sonnet\"]\n").unwrap();
+        assert!(DenseConfig::from_toml_value(value).unwrap().auto);
+    }
+
+    #[test]
+    fn compact_writer_preserves_existing_config() {
+        let dir = std::env::temp_dir().join(format!("llmtrim-compact-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("config.toml");
+        std::fs::write(
+            &path,
+            "capture_dir = \"/captures\"\n[sub]\nactive = \"off\"\n[sub.codex.tiers]\nopus = \"gpt-test\"\n",
+        )
+        .unwrap();
+        write_compact_models_at(&path, &["haiku".into(), "sonnet".into(), "haiku".into()]).unwrap();
+        let file: toml::Value = toml::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(resolve_compact_models(Some(&file)), vec!["haiku", "sonnet"]);
+        assert_eq!(
+            file.get("capture_dir").and_then(toml::Value::as_str),
+            Some("/captures")
+        );
+        assert_eq!(
+            file.get("sub")
+                .and_then(|v| v.get("codex"))
+                .and_then(|v| v.get("tiers"))
+                .and_then(|v| v.get("opus"))
+                .and_then(toml::Value::as_str),
+            Some("gpt-test")
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn compact_writer_handles_commented_or_nonfinal_section() {
+        let dir = std::env::temp_dir().join(format!(
+            "llmtrim-compact-section-test-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("config.toml");
+        std::fs::write(
+            &path,
+            "# keep me\n[compact] # routing policy\n# models intentionally omitted\n[sub]\nactive = \"off\"\n",
+        )
+        .unwrap();
+        write_compact_models_at(&path, &["haiku".into()]).unwrap();
+        let text = std::fs::read_to_string(&path).unwrap();
+        let file: toml::Value = toml::from_str(&text).unwrap();
+        assert_eq!(resolve_compact_models(Some(&file)), vec!["haiku"]);
+        assert_eq!(text.matches("[compact]").count(), 1);
+        assert!(text.contains("# keep me"));
+        assert!(text.find("models =").unwrap() < text.find("[sub]").unwrap());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

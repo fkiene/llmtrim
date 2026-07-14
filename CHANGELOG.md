@@ -6,6 +6,16 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- **Ordered model fallback for Claude Code `/compact`.** Configure `[compact] models = ["haiku",
+  "sonnet"]` or run `llmtrim compact models haiku sonnet` to try cheaper models for compaction.
+  Each candidate is admitted against its known context window after candidate-specific compression;
+  failures before any output advance to the next candidate, and Claude Code's selected model remains
+  the implicit final fallback. The same chain works through subscription tier mappings, while
+  preserving the original model identity in the response. `llmtrim setup` proposes the default
+  chain on Claude Code installations that have not made a choice.
+
 ## [0.10.1] - 2026-07-13
 
 ### Fixed

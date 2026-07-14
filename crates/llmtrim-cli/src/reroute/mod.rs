@@ -45,14 +45,17 @@ pub struct UpstreamRewrite {
 pub fn build_upstream(
     provider: SubProvider,
     anthropic_body: &Value,
+    logical_model: Option<&str>,
     overrides: &BTreeMap<String, String>,
     token: &auth::TokenSet,
     session_id: Option<&str>,
 ) -> Result<UpstreamRewrite> {
-    let incoming = anthropic_body
-        .get("model")
-        .and_then(|v| v.as_str())
-        .unwrap_or_default();
+    let incoming = logical_model.unwrap_or_else(|| {
+        anthropic_body
+            .get("model")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default()
+    });
     let model = resolve_model(provider, incoming, overrides);
     let (host, path, body, headers) = match provider {
         SubProvider::Codex => {

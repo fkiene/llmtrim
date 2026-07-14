@@ -10,6 +10,8 @@ pub mod autostart;
 pub mod bench;
 #[cfg(feature = "breakdown")]
 pub mod breakdown;
+#[cfg(feature = "intercept")]
+pub mod compact;
 pub mod daemon;
 pub mod discover;
 pub mod doctor;

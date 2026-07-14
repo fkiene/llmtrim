@@ -335,6 +335,67 @@ mod imp {
         /// subscription provider instead. Mutually exclusive with `reroute` (which reroutes up
         /// front). See [`FallbackInfo`].
         fallback: Option<FallbackInfo>,
+        /// Set when this turn is Claude Code's `/compact` summarization request and
+        /// `[compact].models` configures alternatives: the remaining candidates to try (in
+        /// order) if the current one fails before committing content to the client. `None` for
+        /// every ordinary turn.
+        compact: Option<CompactAttempt>,
+    }
+
+    /// Compact-model retry state attached to a [`Pending`] (see its `compact` field). Holds
+    /// everything needed to rebuild and resend the turn on a different candidate model without
+    /// re-deriving the plan or re-reading the client's original bytes.
+    #[derive(Clone)]
+    struct CompactAttempt {
+        /// Remaining candidates, in attempt order. The original requested model is always the
+        /// last entry (see [`crate::compact::plan`]), so this list is never empty while a retry
+        /// is possible.
+        candidates: Vec<crate::compact::Candidate>,
+        url: String,
+        headers: Vec<(String, String)>,
+        /// The client's untouched request bytes — every candidate is rebuilt from this, never
+        /// from a previous candidate's (already model-swapped, already compressed) body.
+        original_body: Arc<Vec<u8>>,
+        max_tokens: u64,
+        /// The model Claude Code actually requested — restored in the client-visible response
+        /// regardless of which candidate served the turn.
+        client_model: String,
+        sub: Option<crate::reroute::SubProvider>,
+        session_id: Option<String>,
+    }
+
+    /// Anthropic statuses a compact candidate can fail with for reasons specific to *that*
+    /// candidate (too small a context window, an unrecognized/unavailable model) rather than the
+    /// request itself — advancing to the next candidate is the correct response, unlike the
+    /// general compression replay-on-400 path (which resends the *same* model).
+    fn compact_should_retry(status: u16) -> bool {
+        matches!(
+            status,
+            400 | 402 | 403 | 404 | 408 | 422 | 425 | 429 | 500 | 502 | 503 | 504 | 529
+        )
+    }
+
+    /// A compact subscription attempt may advance only while nothing client-visible has been
+    /// produced. The first non-error reducer event commits the candidate permanently.
+    fn compact_precommit_error(events: &[crate::reroute::sse::ReduceEvent]) -> bool {
+        matches!(
+            events.first(),
+            Some(crate::reroute::sse::ReduceEvent::Error { .. })
+        )
+    }
+
+    /// Change only the response's typed model field; never rewrite arbitrary text that happens
+    /// to contain a model id.
+    fn client_model_json(body: &[u8], client_model: &str) -> Vec<u8> {
+        let Ok(mut value) = serde_json::from_slice::<Value>(body) else {
+            return body.to_vec();
+        };
+        if value.is_object() {
+            value["model"] = Value::String(client_model.to_string());
+            serde_json::to_vec(&value).unwrap_or_else(|_| body.to_vec())
+        } else {
+            body.to_vec()
+        }
     }
 
     /// Reroute marker attached to a [`Pending`] (see its `reroute` field).
@@ -1145,6 +1206,8 @@ mod imp {
         sub_fallback: bool,
         /// Proxy-side Codex reasoning effort applied to every rerouted request (`None` = off).
         sub_effort: Option<String>,
+        /// Runtime-only ordered alternatives for Claude Code compact turns.
+        compact_models: Arc<Vec<String>>,
     }
 
     impl Drop for Interceptor {
@@ -1319,6 +1382,90 @@ mod imp {
                 Ok(c) => c.to_bytes(),
                 Err(_) => return Request::from_parts(parts, Body::empty()).into(),
             };
+            // Compact turns use an isolated candidate plan. Every attempt is rebuilt from these
+            // untouched client bytes; ordinary requests never enter this runtime-only path.
+            let compact_plan = if provider == ProviderKind::Anthropic
+                && !self.compact_models.is_empty()
+            {
+                std::str::from_utf8(&bytes)
+                    .ok()
+                    .and_then(|text| serde_json::from_str::<Value>(text).ok())
+                    .and_then(|value| {
+                        crate::compact::detect(&value).map(|original| (value, original))
+                    })
+                    .map(|(_, original)| {
+                        crate::compact::plan(&self.compact_models, &original, None, &self.sub_tiers)
+                    })
+            } else {
+                None
+            };
+            if let Some(plan) = compact_plan {
+                let original: Value = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
+                let max_tokens = original
+                    .get("max_tokens")
+                    .and_then(Value::as_u64)
+                    .unwrap_or(64_000);
+                let original_model = original
+                    .get("model")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .to_string();
+                let candidates: Vec<_> = plan
+                    .into_iter()
+                    .filter(|c| {
+                        c.is_original || llmtrim_core::context_window(&c.upstream_model).is_some()
+                    })
+                    .collect();
+                for (index, candidate) in candidates.iter().enumerate() {
+                    let mut value = original.clone();
+                    value["model"] = Value::String(candidate.upstream_model.clone());
+                    let Ok(candidate_body) = serde_json::to_vec(&value) else {
+                        continue;
+                    };
+                    let config = self.config.clone();
+                    let memo = self.memo.clone();
+                    let sid = cc_session_id.clone();
+                    let Some((json, mut pending)) = tokio::task::spawn_blocking(move || {
+                        compress_blocking(
+                            &config,
+                            &candidate_body,
+                            ProviderKind::Anthropic,
+                            None,
+                            &memo,
+                            sid,
+                        )
+                    })
+                    .await
+                    .ok()
+                    .flatten() else {
+                        continue;
+                    };
+                    if !candidate.is_original {
+                        let Some(window) = llmtrim_core::context_window(&candidate.upstream_model)
+                        else {
+                            continue;
+                        };
+                        if !crate::compact::fits(u64::from(window), pending.input_after, max_tokens)
+                        {
+                            continue;
+                        }
+                    }
+                    let host = host.clone().unwrap_or_default();
+                    let path = parts.uri.path_and_query().map_or("/", |p| p.as_str());
+                    pending.model = Some(candidate.upstream_model.clone());
+                    pending.compact = Some(CompactAttempt {
+                        candidates: candidates[index + 1..].to_vec(),
+                        url: format!("https://{host}{path}"),
+                        headers: forward_headers(&parts.headers),
+                        original_body: Arc::new(bytes.to_vec()),
+                        max_tokens,
+                        client_model: original_model,
+                        sub: None,
+                        session_id: cc_session_id.clone(),
+                    });
+                    return Request::from_parts(parts, Body::from(json)).into();
+                }
+            }
             // Run the CPU-bound compression on the blocking pool so a burst of large requests
             // can't monopolize the async workers (which would stall response streaming for
             // everyone). Cheap to move in: `Bytes` is ref-counted, `config` is an `Arc`.
@@ -1443,26 +1590,90 @@ mod imp {
                 return anthropic_error(400, "llmtrim: request body is not JSON").into();
             };
 
-            // Compression stacks in front: compress the Anthropic body, then translate the
-            // compressed form. On no win, translate the original. Runs on the blocking pool.
-            let config = self.config.clone();
-            let memo = self.memo.clone();
-            let body_for_compress = bytes.clone();
+            let client_model = anthropic
+                .get("model")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_string();
+            let mut compact_candidates = crate::compact::detect(&anthropic)
+                .filter(|_| !self.compact_models.is_empty())
+                .map(|original| {
+                    crate::compact::plan(
+                        &self.compact_models,
+                        &original,
+                        Some(sub),
+                        &self.sub_tiers,
+                    )
+                })
+                .unwrap_or_default();
+            let max_tokens = anthropic
+                .get("max_tokens")
+                .and_then(Value::as_u64)
+                .unwrap_or(64_000);
+            // Every compact candidate is compressed and counted independently from the immutable
+            // client body. The body model remains the client's model; `logical_model` selects the
+            // backend and `model_override` selects the candidate tokenizer.
             let started = std::time::Instant::now();
-            let cc_session_id = session_id.clone();
-            let compressed = tokio::task::spawn_blocking(move || {
-                compress_blocking(
-                    &config,
-                    &body_for_compress,
-                    ProviderKind::Anthropic,
-                    None,
-                    &memo,
-                    cc_session_id,
-                )
-            })
-            .await
-            .ok()
-            .flatten();
+            let mut compact_current = None;
+            let mut compressed = None;
+            if compact_candidates.is_empty() {
+                let config = self.config.clone();
+                let memo = self.memo.clone();
+                let raw = bytes.clone();
+                let sid = session_id.clone();
+                compressed = tokio::task::spawn_blocking(move || {
+                    compress_blocking(&config, &raw, ProviderKind::Anthropic, None, &memo, sid)
+                })
+                .await
+                .ok()
+                .flatten();
+            } else {
+                for (index, candidate) in compact_candidates.iter().enumerate() {
+                    let config = self.config.clone();
+                    let memo = self.memo.clone();
+                    let raw = bytes.clone();
+                    let sid = session_id.clone();
+                    let model = candidate.logical_model.clone();
+                    let next = tokio::task::spawn_blocking(move || {
+                        compress_blocking(
+                            &config,
+                            &raw,
+                            ProviderKind::Anthropic,
+                            Some(&model),
+                            &memo,
+                            sid,
+                        )
+                    })
+                    .await
+                    .ok()
+                    .flatten();
+                    let Some((_, pending)) = next.as_ref() else {
+                        if candidate.is_original {
+                            compact_current = Some(candidate.clone());
+                            compressed = next;
+                            compact_candidates = compact_candidates[index + 1..].to_vec();
+                            break;
+                        }
+                        continue;
+                    };
+                    if !candidate.is_original {
+                        let Some(window) = llmtrim_core::context_window(&candidate.upstream_model)
+                        else {
+                            continue;
+                        };
+                        if !crate::compact::fits(u64::from(window), pending.input_after, max_tokens)
+                        {
+                            continue;
+                        }
+                    }
+                    compact_current = Some(candidate.clone());
+                    compressed = next;
+                    compact_candidates = compact_candidates[index + 1..].to_vec();
+                    break;
+                }
+            }
+            // Compression stacks in front: compress the Anthropic body, then translate the
+            // compressed form. On no win, translate the original.
             // The breakdown carries `cc_session_id` — the key the status line scopes trim to — so
             // it has to ride along on the reroute pending too, or a `sub` session records no
             // session row and the status line renders an idle `✂ –` for every turn.
@@ -1506,6 +1717,7 @@ mod imp {
             let rewrite = match crate::reroute::build_upstream(
                 sub,
                 &translate_value,
+                compact_current.as_ref().map(|c| c.logical_model.as_str()),
                 &self.sub_tiers,
                 &token,
                 session_id.as_deref(),
@@ -1562,11 +1774,7 @@ mod imp {
                 reroute: Some(RerouteInfo {
                     provider: sub,
                     model: rewrite.model.clone(),
-                    client_model: anthropic
-                        .get("model")
-                        .and_then(|model| model.as_str())
-                        .unwrap_or_default()
-                        .to_string(),
+                    client_model: client_model.clone(),
                     replay: Some(RerouteReplay {
                         url: format!("https://{}{}", rewrite.host, rewrite.path),
                         headers: rewrite.headers.clone(),
@@ -1576,6 +1784,16 @@ mod imp {
                     session_id: session_id.clone(),
                 }),
                 fallback: None,
+                compact: compact_current.map(|_| CompactAttempt {
+                    candidates: compact_candidates,
+                    url: format!("https://{}{}", rewrite.host, rewrite.path),
+                    headers: rewrite.headers.clone(),
+                    original_body: Arc::new(bytes.to_vec()),
+                    max_tokens,
+                    client_model,
+                    sub: Some(sub),
+                    session_id: session_id.clone(),
+                }),
             });
 
             // Retarget the request onto the provider host + path.
@@ -1633,6 +1851,13 @@ mod imp {
                     .map(|c| c.to_bytes().to_vec())
                     .unwrap_or_default();
                 let mut retry_after = reroute_retry_after_from_headers(&parts.headers, &cur_body);
+
+                if pending.compact.is_some()
+                    && compact_should_retry(cur_status)
+                    && let Some(retried) = self.retry_compact_sub(pending.clone()).await
+                {
+                    return retried;
+                }
 
                 // Server-side retry for transient / rate-limit failures (mirrors what a native
                 // Anthropic client does): re-issue the same upstream request with backoff, honoring
@@ -1760,6 +1985,11 @@ mod imp {
             }
 
             if let Some(detail) = fatal {
+                if pending.compact.is_some()
+                    && let Some(retried) = self.retry_compact_sub(pending.clone()).await
+                {
+                    return retried;
+                }
                 crate::reroute::continuation::clear_continuation(info.session_id.as_deref());
                 let status = reroute_stream_error_status(&detail);
                 let message = format!(
@@ -2035,7 +2265,13 @@ mod imp {
             let mut failures = Vec::new();
             for provider in providers {
                 let attempt = match self
-                    .fallback_attempt(provider, &anthropic, fb.session_id.as_deref(), deadline)
+                    .fallback_attempt(
+                        provider,
+                        &anthropic,
+                        None,
+                        fb.session_id.as_deref(),
+                        deadline,
+                    )
                     .await
                 {
                     Ok(attempt) => attempt,
@@ -2115,6 +2351,7 @@ mod imp {
             &self,
             provider: crate::reroute::SubProvider,
             anthropic: &Value,
+            logical_model: Option<&str>,
             session_id: Option<&str>,
             deadline: std::time::Instant,
         ) -> Result<FallbackAttempt, String> {
@@ -2129,6 +2366,7 @@ mod imp {
             let rewrite = crate::reroute::build_upstream(
                 provider,
                 anthropic,
+                logical_model,
                 &self.sub_tiers,
                 &token,
                 session_id,
@@ -2249,6 +2487,154 @@ mod imp {
             Ok(buffered_response(status, content_type, body))
         }
 
+        /// Retry the remaining always-subscription compact candidates. Each attempt starts from
+        /// immutable Anthropic bytes, gets candidate-specific compression/tokenization, and is
+        /// buffered until the reducer either commits a non-error event or reports a precommit
+        /// error. HTTP failures and precommit reducer errors advance to the next candidate.
+        async fn retry_compact_sub(&self, pending: Pending) -> Option<Response<Body>> {
+            use crate::reroute::sse::ReduceEvent;
+            let state = pending.compact.clone()?;
+            let provider = state.sub?;
+            let original: Value = serde_json::from_slice(&state.original_body).ok()?;
+            let deadline = std::time::Instant::now() + FALLBACK_CHAIN_BUDGET;
+            for candidate in &state.candidates {
+                let config = self.config.clone();
+                let memo = self.memo.clone();
+                let raw = state.original_body.clone();
+                let sid = state.session_id.clone();
+                let model = candidate.logical_model.clone();
+                let Some((json, mut winner)) = tokio::task::spawn_blocking(move || {
+                    compress_blocking(
+                        &config,
+                        &raw,
+                        ProviderKind::Anthropic,
+                        Some(&model),
+                        &memo,
+                        sid,
+                    )
+                })
+                .await
+                .ok()
+                .flatten() else {
+                    continue;
+                };
+                if !candidate.is_original {
+                    let Some(window) = llmtrim_core::context_window(&candidate.upstream_model)
+                    else {
+                        continue;
+                    };
+                    if !crate::compact::fits(
+                        u64::from(window),
+                        winner.input_after,
+                        state.max_tokens,
+                    ) {
+                        continue;
+                    }
+                }
+                let mut body =
+                    serde_json::from_str::<Value>(&json).unwrap_or_else(|_| original.clone());
+                apply_sub_effort(&mut body, self.sub_effort.as_deref());
+                let attempt = match self
+                    .fallback_attempt(
+                        provider,
+                        &body,
+                        Some(&candidate.logical_model),
+                        state.session_id.as_deref(),
+                        deadline,
+                    )
+                    .await
+                {
+                    Ok(attempt) => attempt,
+                    Err(_) => continue,
+                };
+
+                let mut reducer = crate::reroute::StreamReducer::new(provider, &attempt.model);
+                let mut events = reducer.push(&attempt.body);
+                events.extend(reducer.finish());
+                let committed = events
+                    .iter()
+                    .any(|event| !matches!(event, ReduceEvent::Error { .. }));
+                if compact_precommit_error(&events) || !committed {
+                    crate::reroute::continuation::clear_continuation(state.session_id.as_deref());
+                    continue;
+                }
+
+                winner.model = Some(attempt.model.clone());
+                winner.compact = None;
+                winner.reroute = Some(RerouteInfo {
+                    provider,
+                    model: attempt.model,
+                    client_model: state.client_model.clone(),
+                    replay: None,
+                    logical_body: attempt.logical_body,
+                    session_id: state.session_id.clone(),
+                });
+                let info = winner.reroute.clone().expect("reroute set above");
+                return Some(self.finish_buffered_reroute(winner, &info, attempt.body));
+            }
+            None
+        }
+
+        /// Rebuild each remaining direct-Anthropic compact candidate from immutable client bytes.
+        /// Responses are buffered only on this failure path, allowing both HTTP and precommit SSE
+        /// errors to advance without exposing a partial answer.
+        async fn retry_compact_direct(&self, mut pending: Pending) -> Option<Response<Body>> {
+            let state = pending.compact.clone()?;
+            for candidate in state.candidates.iter() {
+                let mut value: Value = serde_json::from_slice(&state.original_body).ok()?;
+                value["model"] = Value::String(candidate.upstream_model.clone());
+                let raw = serde_json::to_vec(&value).ok()?;
+                let config = self.config.clone();
+                let memo = self.memo.clone();
+                let sid = state.session_id.clone();
+                let (json, next) = tokio::task::spawn_blocking(move || {
+                    compress_blocking(&config, &raw, ProviderKind::Anthropic, None, &memo, sid)
+                })
+                .await
+                .ok()
+                .flatten()?;
+                if !candidate.is_original {
+                    let Some(window) = llmtrim_core::context_window(&candidate.upstream_model)
+                    else {
+                        continue;
+                    };
+                    if !crate::compact::fits(u64::from(window), next.input_after, state.max_tokens)
+                    {
+                        continue;
+                    }
+                }
+                let url = state.url.clone();
+                let headers = state.headers.clone();
+                let proxy = self.upstream_proxy.clone();
+                let fetched = tokio::task::spawn_blocking(move || {
+                    use std::io::Read;
+                    let mut up =
+                        crate::transport::forward_post(&url, &headers, &json, proxy.as_deref())
+                            .ok()?;
+                    let mut body = Vec::new();
+                    up.reader.read_to_end(&mut body).ok()?;
+                    Some((up.status, up.content_type, body))
+                })
+                .await
+                .ok()
+                .flatten()?;
+                if !compact_should_retry(fetched.0) && !is_sub_fallback_body(&fetched.2) {
+                    pending = next;
+                    pending.model = Some(candidate.upstream_model.clone());
+                    pending.compact = None;
+                    let body = client_model_json(&fetched.2, &state.client_model);
+                    let _finalize = Finalize {
+                        acc: Arc::new(Mutex::new(body.clone())),
+                        pending: Some(pending),
+                        ledger: self.ledger.clone(),
+                        breakdown_ledger: self.breakdown_ledger.clone(),
+                    };
+                    return Some(buffered_response(fetched.0, fetched.1, body));
+                }
+            }
+            None
+        }
+
         /// Emit an Anthropic SSE `error` frame for a fallback that failed before/at the
         /// provider round-trip, still recording the row (output 0) as the `Finalize` drops.
         fn fallback_error(&self, pending: Pending, model: &str, message: &str) -> Response<Body> {
@@ -2277,6 +2663,38 @@ mod imp {
             let Some(pending) = self.pending.take() else {
                 return res;
             };
+            // Compact direct-Anthropic turns are held until the first candidate is known to have
+            // committed. Buffering is deliberately limited to this rare runtime-only request: it
+            // lets an HTTP failure or an in-stream error advance to the next immutable rebuild.
+            if let Some(state) = pending.compact.clone()
+                && state.sub.is_none()
+            {
+                let status = res.status().as_u16();
+                let content_type = res
+                    .headers()
+                    .get(header::CONTENT_TYPE)
+                    .and_then(|v| v.to_str().ok())
+                    .map(str::to_string);
+                let body = res
+                    .into_body()
+                    .collect()
+                    .await
+                    .map(|c| c.to_bytes().to_vec())
+                    .unwrap_or_default();
+                if (compact_should_retry(status) || is_sub_fallback_body(&body))
+                    && let Some(retried) = self.retry_compact_direct(pending.clone()).await
+                {
+                    return retried;
+                }
+                let body = client_model_json(&body, &state.client_model);
+                let _finalize = Finalize {
+                    acc: Arc::new(Mutex::new(body.clone())),
+                    pending: Some(pending),
+                    ledger: self.ledger.clone(),
+                    breakdown_ledger: self.breakdown_ledger.clone(),
+                };
+                return buffered_response(status, content_type, body);
+            }
             // Subscription reroute: the upstream reply is the provider's SSE — translate it back to
             // Anthropic SSE (the normal compress/replay/tee path below is for verbatim-forwarded
             // Anthropic responses).
@@ -2491,6 +2909,7 @@ mod imp {
                 ),
                 reroute: None,
                 fallback: None,
+                compact: None,
             };
             return Some((text.to_string(), pending));
         }
@@ -2525,6 +2944,7 @@ mod imp {
             ),
             reroute: None,
             fallback: None,
+            compact: None,
         };
         capture_pair(text, &result.request_json, &pending, &result.stages);
         Some((result.request_json, pending))
@@ -3296,6 +3716,7 @@ mod imp {
             sub_tiers: Arc::new(RuntimeConfig::get().sub_tiers.clone()),
             sub_fallback: RuntimeConfig::get().sub_fallback,
             sub_effort: RuntimeConfig::get().sub_effort.clone(),
+            compact_models: Arc::new(RuntimeConfig::get().compact_models.clone()),
         };
         // Pre-flight bind: hudsucker's `Proxy::start` collapses a bind failure to a bare
         // "io error", hiding whether the port is in use or OS-reserved. Bind once ourselves
@@ -4719,6 +5140,7 @@ mod imp {
                 sub_chain: Arc::new(vec![]),
                 sub_fallback: false,
                 sub_effort: None,
+                compact_models: Arc::new(vec![]),
             };
             (handler, rx)
         }
@@ -4767,6 +5189,7 @@ mod imp {
                 }),
                 reroute: None,
                 fallback: None,
+                compact: None,
             };
             // Provider billed: 120 cached read, 30 cache write, 50 fresh (sum 200), 40 output.
             let usage = ResponseUsage {
@@ -5087,6 +5510,7 @@ mod imp {
                 breakdown: None,
                 reroute: None,
                 fallback: None,
+                compact: None,
             });
 
             let bad_resp = Response::builder()
@@ -5145,6 +5569,7 @@ mod imp {
                 breakdown: None,
                 reroute: None,
                 fallback: None,
+                compact: None,
             });
 
             let bad_resp = Response::builder()
@@ -5196,6 +5621,7 @@ mod imp {
                 breakdown: None,
                 reroute: None,
                 fallback: None,
+                compact: None,
             });
 
             let unprocessable = Response::builder()
@@ -5248,6 +5674,7 @@ mod imp {
                     breakdown: None,
                     reroute: None,
                     fallback: None,
+                    compact: None,
                 });
 
                 let resp = Response::builder()
@@ -5304,6 +5731,7 @@ mod imp {
                 breakdown: None,
                 reroute: None,
                 fallback: None,
+                compact: None,
             });
 
             let sse_chunks = concat!(
@@ -5401,6 +5829,7 @@ mod imp {
                 breakdown: None,
                 reroute: None,
                 fallback: None,
+                compact: None,
             });
 
             // The complete SSE payload.
@@ -5505,6 +5934,7 @@ mod imp {
                 breakdown: None,
                 reroute: None,
                 fallback: None,
+                compact: None,
             });
 
             // Three chunks; the client will consume only the first then drop the body.
@@ -5582,6 +6012,7 @@ mod imp {
                 breakdown: None,
                 reroute: None,
                 fallback: None,
+                compact: None,
             });
 
             // Zero-chunk stream: body ends immediately.
