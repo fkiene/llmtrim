@@ -13,6 +13,7 @@ pub mod breakdown;
 pub mod daemon;
 pub mod discover;
 pub mod doctor;
+pub mod guard;
 pub mod mcp;
 pub mod monitor;
 pub mod quality;

@@ -51,7 +51,8 @@ const CTX_AMBER_PCT: i64 = 65;
 /// (verified from the capture corpus: 3333×1h vs 288×5m), and the cache stays warm up to the
 /// TTL since the last intercepted request. Past this idle gap the cache is cold, so a stale
 /// "cached %" would lie about the next turn paying a cold write — show it cold instead.
-const CACHE_TTL_SECS: i64 = 3600;
+/// Shared with [`crate::guard`], so the hook and the status line agree on when a cache is cold.
+pub(crate) const CACHE_TTL_SECS: i64 = 3600;
 
 // ── ANSI palette ────────────────────────────────────────────────────────────────
 // The status line is captured by Claude Code (never a TTY), but Claude Code renders ANSI,
@@ -397,6 +398,15 @@ fn session_row(sid: &str) -> Option<SessionLedgerRow> {
 #[cfg(not(feature = "breakdown"))]
 fn session_row(_sid: &str) -> Option<SessionLedgerRow> {
     None
+}
+
+/// The concrete model a `sub` backend served this session's last turn with, if any — the only
+/// thing [`crate::guard`] takes from the ledger, and only to price a rerouted turn correctly.
+/// `None` (no row, no reroute, or no `breakdown` feature) never changes the guard's decision.
+pub(crate) fn session_sub_model(session_id: &str) -> Option<String> {
+    let row = session_row(session_id)?;
+    row.last_sub_provider.as_ref()?;
+    row.last_model
 }
 
 /// Decide the trim figure: this session's own savings when we have its row; idle (`None`) for a
@@ -758,26 +768,36 @@ fn stable_executable_path(current_exe: &Path, path: Option<&OsStr>) -> PathBuf {
     current_exe.to_path_buf()
 }
 
-/// The `statusLine` object we write. `command` is an absolute path or a stable PATH alias plus
-/// the subcommand, so it works even when a package manager replaces a versioned executable.
-fn statusline_config() -> Value {
+/// The command string Claude Code should run for one of our subcommands: an absolute path or a
+/// stable PATH alias, so it survives a package manager replacing a versioned executable. Shared
+/// with [`crate::guard`], which writes a hook command the same way.
+pub(crate) fn exe_command(subcommand: &str) -> String {
     let exe = std::env::current_exe()
         .ok()
         .map(|p| stable_executable_path(&p, std::env::var_os("PATH").as_deref()))
         .map(|p| p.display().to_string())
         .unwrap_or_else(|| "llmtrim".to_string());
-    let command = if exe.contains(' ') {
-        format!("\"{exe}\" statusline")
+    if exe.contains(' ') {
+        format!("\"{exe}\" {subcommand}")
     } else {
-        format!("{exe} statusline")
-    };
-    serde_json::json!({ "type": "command", "command": command, "padding": 0 })
+        format!("{exe} {subcommand}")
+    }
+}
+
+/// The `statusLine` object we write.
+fn statusline_config() -> Value {
+    serde_json::json!({ "type": "command", "command": exe_command("statusline"), "padding": 0 })
 }
 
 /// Whether a Claude statusline command is one that `llmtrim statusline install` created.
-/// Recognize both POSIX and Windows separators because settings can be moved between systems.
 fn is_llmtrim_statusline_command(command: &str) -> bool {
-    let Some(executable) = command.strip_suffix(" statusline") else {
+    is_llmtrim_command(command, "statusline")
+}
+
+/// Whether `command` is the llmtrim binary invoked with exactly `subcommand`. Recognize both
+/// POSIX and Windows separators because settings can be moved between systems.
+pub(crate) fn is_llmtrim_command(command: &str, subcommand: &str) -> bool {
+    let Some(executable) = command.strip_suffix(&format!(" {subcommand}")) else {
         return false;
     };
     let executable = executable.trim();
