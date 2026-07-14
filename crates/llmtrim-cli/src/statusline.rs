@@ -53,6 +53,13 @@ const CTX_AMBER_PCT: i64 = 65;
 /// "cached %" would lie about the next turn paying a cold write — show it cold instead.
 /// Shared with [`crate::guard`], so the hook and the status line agree on when a cache is cold.
 pub(crate) const CACHE_TTL_SECS: i64 = 3600;
+/// How often Claude Code re-runs the status line while a session sits idle. Without it Claude
+/// Code only re-renders on conversation events, so an abandoned session keeps the line drawn at
+/// its last turn — green and warm — straight through the cache expiring, and `♻ cold · /compact`
+/// only appears *after* the turn that pays for it. Rendering is local (no network, no tokens),
+/// so a refresh costs one short process; 5 minutes is far finer than the 1h TTL it watches, and
+/// 25× cheaper than polling every 10s would be.
+const REFRESH_INTERVAL_SECS: i64 = 300;
 
 // ── ANSI palette ────────────────────────────────────────────────────────────────
 // The status line is captured by Claude Code (never a TTY), but Claude Code renders ANSI,
@@ -786,7 +793,12 @@ pub(crate) fn exe_command(subcommand: &str) -> String {
 
 /// The `statusLine` object we write.
 fn statusline_config() -> Value {
-    serde_json::json!({ "type": "command", "command": exe_command("statusline"), "padding": 0 })
+    serde_json::json!({
+        "type": "command",
+        "command": exe_command("statusline"),
+        "padding": 0,
+        "refreshInterval": REFRESH_INTERVAL_SECS,
+    })
 }
 
 /// Whether a Claude statusline command is one that `llmtrim statusline install` created.
@@ -1428,6 +1440,16 @@ mod tests {
     fn refresh_is_a_no_op_when_the_command_already_points_at_this_binary() {
         let mut settings = serde_json::json!({ "statusLine": statusline_config() });
         assert!(!refresh_statusline_config(&mut settings).unwrap());
+    }
+
+    #[test]
+    fn statusline_config_asks_claude_code_to_refresh_while_idle() {
+        // Claude Code otherwise re-renders only on conversation events, so the cold-cache
+        // warning would land after the expensive turn instead of before it.
+        assert_eq!(
+            statusline_config()["refreshInterval"],
+            serde_json::json!(300)
+        );
     }
 
     #[test]
