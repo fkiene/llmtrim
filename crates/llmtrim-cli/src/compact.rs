@@ -212,6 +212,16 @@ pub fn strip_history_thinking(body: &mut Value) -> bool {
     changed
 }
 
+/// Drop `output_config` from a compact candidate's body. Claude Code's `/compact` sets
+/// `output_config.effort` (the field [`detect`] keys on), which some models reject ("This model
+/// does not support the effort parameter." — e.g. the Haiku family). Effort steering is
+/// inessential to a summarization turn, so a swapped-in candidate simply drops it. The original
+/// model — which Claude Code chose the effort for — keeps it. Returns `true` when removed.
+pub fn strip_output_config(body: &mut Value) -> bool {
+    body.as_object_mut()
+        .is_some_and(|obj| obj.remove("output_config").is_some())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -299,6 +309,17 @@ mod tests {
             .map(|m| m["role"].as_str().unwrap())
             .collect();
         assert_eq!(roles, vec!["user", "user"]);
+    }
+
+    #[test]
+    fn output_config_is_dropped() {
+        // `output_config.effort` 400s models that don't support the effort parameter (e.g. haiku).
+        let mut body = compact_body("x");
+        assert!(body.get("output_config").is_some());
+        assert!(strip_output_config(&mut body));
+        assert!(body.get("output_config").is_none());
+        // No-op when already absent.
+        assert!(!strip_output_config(&mut body));
     }
 
     #[test]

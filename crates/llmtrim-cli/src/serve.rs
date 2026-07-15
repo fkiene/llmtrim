@@ -1441,9 +1441,11 @@ mod imp {
                         max_tokens,
                     );
                     // A swapped-in model can't validate the original model's history thinking
-                    // signatures; the original keeps them (they're its own).
+                    // signatures, and may reject `output_config.effort`; the original keeps both
+                    // (they're valid for / chosen for it).
                     if !candidate.is_original {
                         crate::compact::strip_history_thinking(&mut value);
+                        crate::compact::strip_output_config(&mut value);
                     }
                     let Ok(candidate_body) = serde_json::to_vec(&value) else {
                         continue;
@@ -2620,6 +2622,7 @@ mod imp {
                 );
                 if !candidate.is_original {
                     crate::compact::strip_history_thinking(&mut value);
+                    crate::compact::strip_output_config(&mut value);
                 }
                 let raw = serde_json::to_vec(&value).ok()?;
                 let config = self.config.clone();
@@ -5465,6 +5468,11 @@ mod imp {
             assert!(
                 !has_thinking,
                 "history thinking must be stripped for a swapped model"
+            );
+            // ...and `output_config.effort`, which haiku rejects, is dropped.
+            assert!(
+                body.get("output_config").is_none(),
+                "output_config must be dropped for a swapped model"
             );
         }
 
