@@ -1495,7 +1495,16 @@ mod imp {
                     // candidate when this one fails (e.g. a candidate that rejects the request);
                     // without it the raw first-candidate error is passed straight to the client.
                     self.pending = Some(pending);
-                    return Request::from_parts(parts, Body::from(json)).into();
+                    // The compressed candidate body is smaller than the client's, so the inherited
+                    // `content-length` is now stale. Forwarding it makes the CDN reject the request
+                    // (an HTML `400 Bad Request`) before it reaches the API, silently burning the
+                    // first candidate and falling the turn through to the next model. Drop it so
+                    // hyper recomputes, and force identity encoding for the response tee — mirroring
+                    // the ordinary compressed-request path below.
+                    let mut req = Request::from_parts(parts, Body::from(json));
+                    req.headers_mut().remove(header::CONTENT_LENGTH);
+                    req.headers_mut().remove(header::ACCEPT_ENCODING);
+                    return req.into();
                 }
             }
             // Run the CPU-bound compression on the blocking pool so a burst of large requests
@@ -5429,12 +5438,25 @@ mod imp {
             })
             .to_string();
 
-            let req = post_request("https://api.anthropic.com/v1/messages", &input_json);
+            let mut req = post_request("https://api.anthropic.com/v1/messages", &input_json);
+            // The client's content-length is for the uncompressed body; after the swap+compress it
+            // is stale and, if forwarded, the CDN rejects the candidate before it reaches the API.
+            req.headers_mut().insert(
+                header::CONTENT_LENGTH,
+                input_json.len().to_string().parse().unwrap(),
+            );
             let result = handler.handle_request_inner(req).await;
 
             let RequestOrResponse::Request(out_req) = result else {
                 panic!("compact request must be forwarded, not short-circuited");
             };
+
+            // The stale content-length is dropped so hyper recomputes it for the compressed body
+            // (otherwise the candidate 400s at the CDN and the turn silently falls through).
+            assert!(
+                out_req.headers().get(header::CONTENT_LENGTH).is_none(),
+                "stale content-length must be dropped from the forwarded compact candidate"
+            );
 
             // The fall-through fix: pending is stored with the remaining-candidate state.
             let pending = handler
