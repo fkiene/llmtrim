@@ -1440,6 +1440,11 @@ mod imp {
                         &candidate.upstream_model,
                         max_tokens,
                     );
+                    // A swapped-in model can't validate the original model's history thinking
+                    // signatures; the original keeps them (they're its own).
+                    if !candidate.is_original {
+                        crate::compact::strip_history_thinking(&mut value);
+                    }
                     let Ok(candidate_body) = serde_json::to_vec(&value) else {
                         continue;
                     };
@@ -2613,6 +2618,9 @@ mod imp {
                     &candidate.upstream_model,
                     state.max_tokens,
                 );
+                if !candidate.is_original {
+                    crate::compact::strip_history_thinking(&mut value);
+                }
                 let raw = serde_json::to_vec(&value).ok()?;
                 let config = self.config.clone();
                 let memo = self.memo.clone();
@@ -5408,7 +5416,13 @@ mod imp {
                 "max_tokens": 64000,
                 "thinking": {"type": "adaptive"},
                 "output_config": {"effort": "low"},
-                "messages": [{"role": "user", "content": [{"type": "text", "text": marker_text}]}]
+                "messages": [
+                    {"role": "assistant", "content": [
+                        {"type": "thinking", "thinking": "prior", "signature": "opus-sig"},
+                        {"type": "text", "text": "earlier answer"}
+                    ]},
+                    {"role": "user", "content": [{"type": "text", "text": marker_text}]}
+                ]
             })
             .to_string();
 
@@ -5444,6 +5458,14 @@ mod imp {
             assert_eq!(body["model"], "claude-haiku-4-5");
             assert_eq!(body["thinking"]["type"], "enabled");
             assert!(body["thinking"]["budget_tokens"].as_u64().unwrap() < 64_000);
+            // The swapped model can't validate opus's history thinking signatures, so they're gone.
+            let has_thinking = serde_json::to_string(&body["messages"])
+                .unwrap()
+                .contains("\"thinking\"");
+            assert!(
+                !has_thinking,
+                "history thinking must be stripped for a swapped model"
+            );
         }
 
         // Test 1b: WebSocket refusal ──────────────────────────────────────────

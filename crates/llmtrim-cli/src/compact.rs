@@ -171,6 +171,47 @@ pub fn normalize_compact_thinking(body: &mut Value, model: &str, max_tokens: u64
     true
 }
 
+/// Drop assistant `thinking`/`redacted_thinking` blocks from the conversation history. Anthropic
+/// binds a thinking block's `signature` to the model (tier) that produced it, so a swapped-in
+/// compact candidate can't validate the original model's signatures ("Invalid signature in thinking
+/// block") and rejects the whole request. Compaction summarizes the text/tool content, so dropping
+/// the history's reasoning is safe; a turn left with no content blocks is removed so the request
+/// stays well-formed. Only this isolated compact request is edited. Returns `true` when the body
+/// was modified.
+pub fn strip_history_thinking(body: &mut Value) -> bool {
+    let Some(messages) = body.get_mut("messages").and_then(Value::as_array_mut) else {
+        return false;
+    };
+    let mut changed = false;
+    for message in messages.iter_mut() {
+        if message.get("role").and_then(Value::as_str) != Some("assistant") {
+            continue;
+        }
+        let Some(content) = message.get_mut("content").and_then(Value::as_array_mut) else {
+            continue;
+        };
+        let before = content.len();
+        content.retain(|block| {
+            !matches!(
+                block.get("type").and_then(Value::as_str),
+                Some("thinking") | Some("redacted_thinking")
+            )
+        });
+        changed |= content.len() != before;
+    }
+    // An assistant turn stripped down to nothing would be an empty-content error: drop it whole.
+    if changed && let Some(messages) = body.get_mut("messages").and_then(Value::as_array_mut) {
+        messages.retain(|message| {
+            message
+                .get("content")
+                .and_then(Value::as_array)
+                .map(|blocks| blocks.is_empty())
+                != Some(true)
+        });
+    }
+    changed
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -215,6 +256,57 @@ mod tests {
         let mut body = compact_body("x");
         assert!(normalize_compact_thinking(&mut body, "gpt-4o-mini", 64_000));
         assert!(body.get("thinking").is_none());
+    }
+
+    #[test]
+    fn history_thinking_blocks_are_stripped_but_other_content_kept() {
+        let mut body = json!({
+            "model": "claude-haiku-4-5",
+            "messages": [
+                {"role": "user", "content": "start"},
+                {"role": "assistant", "content": [
+                    {"type": "thinking", "thinking": "hmm", "signature": "opus-sig"},
+                    {"type": "text", "text": "answer"}
+                ]},
+                {"role": "user", "content": "go"}
+            ]
+        });
+        assert!(strip_history_thinking(&mut body));
+        let assistant = &body["messages"][1]["content"];
+        assert_eq!(assistant.as_array().unwrap().len(), 1);
+        assert_eq!(assistant[0]["type"], "text");
+        // User turns and a string-content turn are untouched.
+        assert_eq!(body["messages"][0]["content"], "start");
+    }
+
+    #[test]
+    fn assistant_turn_reduced_to_nothing_is_dropped() {
+        let mut body = json!({
+            "messages": [
+                {"role": "user", "content": "hi"},
+                {"role": "assistant", "content": [
+                    {"type": "thinking", "thinking": "only reasoning", "signature": "s"}
+                ]},
+                {"role": "user", "content": "summarize"}
+            ]
+        });
+        assert!(strip_history_thinking(&mut body));
+        // The pure-thinking assistant turn is removed so no empty-content block is sent.
+        let roles: Vec<&str> = body["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|m| m["role"].as_str().unwrap())
+            .collect();
+        assert_eq!(roles, vec!["user", "user"]);
+    }
+
+    #[test]
+    fn strip_history_thinking_is_a_noop_without_thinking() {
+        let mut body = json!({
+            "messages": [{"role": "assistant", "content": [{"type": "text", "text": "hi"}]}]
+        });
+        assert!(!strip_history_thinking(&mut body));
     }
 
     #[test]
