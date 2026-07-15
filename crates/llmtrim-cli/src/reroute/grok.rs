@@ -502,12 +502,11 @@ impl Reducer {
                     stopped: false,
                 },
             );
-        } else if !name.is_empty() {
-            if let Some(t) = self.tools.get_mut(call_id) {
-                if t.name.is_empty() {
-                    t.name = name.to_string();
-                }
-            }
+        } else if !name.is_empty()
+            && let Some(t) = self.tools.get_mut(call_id)
+            && t.name.is_empty()
+        {
+            t.name = name.to_string();
         }
     }
 
@@ -635,12 +634,11 @@ impl Reducer {
                     return;
                 };
                 self.ensure_tool(&call_id, "");
-                if let Some(tool) = self.tools.get_mut(&call_id) {
-                    if tool.buf.is_empty()
-                        && let Some(args) = v.get("arguments").and_then(Value::as_str)
-                    {
-                        tool.buf.push_str(args);
-                    }
+                if let Some(tool) = self.tools.get_mut(&call_id)
+                    && tool.buf.is_empty()
+                    && let Some(args) = v.get("arguments").and_then(Value::as_str)
+                {
+                    tool.buf.push_str(args);
                 }
                 // Prefer completing this call if it is the open one; otherwise leave buffered
                 // until its output_item.done or stream end.

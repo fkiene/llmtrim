@@ -1131,6 +1131,8 @@ fn run_sub(action: SubCmd) -> Result<()> {
                             }
                         }
                         SubProvider::Kimi => {}
+                        // SubProvider is non_exhaustive for semver; new backends need a map here.
+                        _ => {}
                     }
                     llmtrim_core::config::write_sub_mapping(p.as_str(), &map)?;
                     print_reroute_enabled(p)
@@ -1373,6 +1375,7 @@ fn run_sub(action: SubCmd) -> Result<()> {
                         SubProvider::Kimi => {
                             println!("  all tiers -> {}", llmtrim::reroute::KIMI_MODEL);
                         }
+                        _ => println!("  (unknown provider)"),
                     }
                     // Auth is what makes reroute actually work — surface it here, not just in JSON.
                     let auth = llmtrim::reroute::auth::auth_status_json(p);

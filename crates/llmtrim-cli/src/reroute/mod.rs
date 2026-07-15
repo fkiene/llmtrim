@@ -103,8 +103,9 @@ pub(crate) fn build_upstream_for_model(
     })
 }
 
-/// Provider-dispatching wrapper over the two [`sse`] reducers, so [`crate::serve`] can hold one
+/// Provider-dispatching wrapper over the provider reducers, so [`crate::serve`] can hold one
 /// reducer regardless of provider and stream the translated Anthropic SSE incrementally.
+#[non_exhaustive]
 pub enum StreamReducer {
     Codex(codex::Reducer),
     Kimi(kimi::Reducer),
@@ -201,6 +202,7 @@ fn count_text_tokens(text: &str, model: Option<&str>) -> i64 {
 
 /// Which subscription backend intercepted Anthropic traffic is rerouted to.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum SubProvider {
     Codex,
     Kimi,

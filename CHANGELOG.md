@@ -6,6 +6,12 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Breaking
+
+- **`SubProvider` / `StreamReducer` gain a `Grok` variant** and are marked `#[non_exhaustive]` so
+  further backends can land without a major bump. External exhaustive `match`es need a `_` arm.
+  Workspace version is **0.11.0** (0.x minor = semver-breaking).
+
 ### Added
 
 - **`llmtrim ensure`:** bring this machine to the recommended state. Installs or refreshes owned
@@ -1125,7 +1131,8 @@ bill, never a broken call.
   (6 targets with SLSA build provenance), CI on Linux/macOS/Windows with secret
   scanning, license compliance, and MSRV gates.
 
-[Unreleased]: https://github.com/fkiene/llmtrim/compare/v0.10.2...HEAD
+[Unreleased]: https://github.com/fkiene/llmtrim/compare/v0.11.0...HEAD
+[0.11.0]: https://github.com/fkiene/llmtrim/compare/v0.10.2...v0.11.0
 [0.10.2]: https://github.com/fkiene/llmtrim/compare/v0.10.1...v0.10.2
 [0.10.1]: https://github.com/fkiene/llmtrim/compare/v0.10.0...v0.10.1
 [0.10.0]: https://github.com/fkiene/llmtrim/compare/v0.9.4...v0.10.0
