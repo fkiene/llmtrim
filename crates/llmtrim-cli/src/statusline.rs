@@ -7,7 +7,7 @@
 //! width-adaptive line:
 //!
 //! ```text
-//! ◆ Opus→gpt-5.6-terra   ▓▓▓▓▓░░░ 142k   ✂ 6.8%   ◔ 5h·24% · 7d·12%   ♻ 63% cached
+//! ◆ Opus→gpt-5.6-terra   ▓▓▓▓▓░░░ 142k   ✂ 6.8%   ◔ 3h·24% · 4d·12%   ♻ 63% cached
 //! ```
 //!
 //! The three left segments (model→backend, context, ✂ trim) are core and never
@@ -109,6 +109,9 @@ struct CcInput {
     /// 5-hour and 7-day rate-limit usage %, Claude.ai subscribers only.
     five_hour_pct: Option<f64>,
     seven_day_pct: Option<f64>,
+    /// Rate-limit window reset times, used to show the remaining duration beside each quota.
+    five_hour_resets_at: Option<String>,
+    seven_day_resets_at: Option<String>,
     /// Share of this turn's input served from the prompt cache, % — computed from the last
     /// API call's `current_usage`. `None` before the first response or right after `/compact`.
     cache_pct: Option<f64>,
@@ -149,6 +152,14 @@ fn parse_cc(input: &str) -> CcInput {
     let seven_day_pct = v
         .pointer("/rate_limits/seven_day/used_percentage")
         .and_then(Value::as_f64);
+    let five_hour_resets_at = v
+        .pointer("/rate_limits/five_hour/resets_at")
+        .and_then(Value::as_str)
+        .map(str::to_string);
+    let seven_day_resets_at = v
+        .pointer("/rate_limits/seven_day/resets_at")
+        .and_then(Value::as_str)
+        .map(str::to_string);
     let cache_pct = {
         let cu = v.pointer("/context_window/current_usage");
         let field = |k: &str| {
@@ -169,6 +180,8 @@ fn parse_cc(input: &str) -> CcInput {
         window,
         five_hour_pct,
         seven_day_pct,
+        five_hour_resets_at,
+        seven_day_resets_at,
         cache_pct,
     }
 }
@@ -549,6 +562,20 @@ fn quota_color(pct: f64) -> &'static str {
     }
 }
 
+/// The largest useful unit left before a quota window resets.
+fn remaining_time_label(resets_at: Option<&str>) -> Option<String> {
+    let resets_at = chrono::DateTime::parse_from_rfc3339(resets_at?).ok()?;
+    let remaining = resets_at.signed_duration_since(chrono::Utc::now());
+    let minutes = remaining.num_minutes().max(0);
+    Some(if minutes >= 24 * 60 {
+        format!("{}d", minutes / (24 * 60))
+    } else if minutes >= 60 {
+        format!("{}h", minutes / 60)
+    } else {
+        format!("{minutes}m")
+    })
+}
+
 /// `◆ Opus→gpt-5.6-terra` — health-brand glyph, model (Claude tier name), reroute target.
 /// The target is the resolved upstream model for Codex reroutes (so you see the real model
 /// serving the turn) or the provider shortname for Kimi. The arrow is suppressed when the
@@ -632,10 +659,9 @@ fn trim_or_health_segment(led: &Led, color: bool) -> Option<String> {
 /// a narrow terminal.
 fn extra_segments(cc: &CcInput, led: &Led, color: bool) -> Vec<String> {
     let mut out = Vec::new();
-    // One quota segment carrying both rolling windows: `◔ 5h·15% · 7d·12%`. `◔` = a window
-    // filling up; `·` keeps `5h`/`7d` from reading as durations. Only the *percentage* is
-    // coloured on its own value (a maxed 5h doesn't paint a comfortable 7d) — the `5h`/`7d`
-    // labels are constant, so colouring them is noise; they stay dim.
+    // One quota segment carrying both rolling windows, labelled by the time remaining until
+    // each reset: `◔ 3h·15% · 4d·12%`. Only the *percentage* is coloured on its own value
+    // (a maxed 5h doesn't paint a comfortable 7d); the time labels stay dim.
     let quota = |label: &str, p: f64| {
         format!(
             "{}{}",
@@ -645,16 +671,20 @@ fn extra_segments(cc: &CcInput, led: &Led, color: bool) -> Vec<String> {
     };
     let glyph = paint(color, DIM, "◔");
     let sep = paint(color, DIM, "·");
+    let five_label =
+        remaining_time_label(cc.five_hour_resets_at.as_deref()).unwrap_or_else(|| "5h".to_string());
+    let seven_label =
+        remaining_time_label(cc.seven_day_resets_at.as_deref()).unwrap_or_else(|| "7d".to_string());
     match (cc.five_hour_pct, cc.seven_day_pct) {
         (Some(h), Some(d)) => {
             out.push(format!(
                 "{glyph} {} {sep} {}",
-                quota("5h", h),
-                quota("7d", d)
+                quota(&five_label, h),
+                quota(&seven_label, d)
             ));
         }
-        (Some(h), None) => out.push(format!("{glyph} {}", quota("5h", h))),
-        (None, Some(d)) => out.push(format!("{glyph} {}", quota("7d", d))),
+        (Some(h), None) => out.push(format!("{glyph} {}", quota(&five_label, h))),
+        (None, Some(d)) => out.push(format!("{glyph} {}", quota(&seven_label, d))),
         (None, None) => {}
     }
     if led.cache_cold {
@@ -966,6 +996,8 @@ mod tests {
             window: Some(200_000),
             five_hour_pct: Some(24.0),
             seven_day_pct: Some(12.0),
+            five_hour_resets_at: None,
+            seven_day_resets_at: None,
             cache_pct: Some(63.0),
         }
     }
@@ -1100,6 +1132,21 @@ mod tests {
             effective_cache_cold(&c, true),
             "populated context with stale ledger still shows cold"
         );
+    }
+
+    #[test]
+    fn quota_labels_show_time_remaining_until_reset() {
+        let mut c = cc(48_000);
+        c.five_hour_resets_at = Some(
+            (chrono::Utc::now() + chrono::Duration::hours(3) + chrono::Duration::minutes(30))
+                .to_rfc3339(),
+        );
+        c.seven_day_resets_at = Some(
+            (chrono::Utc::now() + chrono::Duration::days(4) + chrono::Duration::hours(12))
+                .to_rfc3339(),
+        );
+        let out = render_line(&c, &led(Health::Healthy), 0, false);
+        assert!(out.contains("◔ 3h·24% · 4d·12%"), "remaining labels: {out}");
     }
 
     #[test]

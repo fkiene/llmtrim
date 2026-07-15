@@ -308,13 +308,14 @@ llmtrim statusline install --print  # or print the settings snippet to paste you
 ```
 
 ```text
-◆ Opus→gpt-5.6-terra   ▓▓▓▓▓░░░ 142k   ✂ 6.8%   ◔ 5h·24% · 7d·12%   ♻ 63% cached
+◆ Opus→gpt-5.6-terra   ▓▓▓▓▓░░░ 142k   ✂ 6.8%   ◔ 3h·24% · 4d·12%   ♻ 63% cached
 ```
 
 The `✂` trim figure is scoped to the current Claude Code session; it reads `✂ –` until llmtrim
-has saved something this session. `◔ 5h·24% · 7d·12%` is the share of your Claude.ai 5-hour and
-7-day limits used. The context gauge fills against the real window of the model serving
-the turn — the rerouted backend's window under `sub`, not Claude's — green below 40%, orange
+has saved something this session. `◔ 3h·24% · 4d·12%` shows the time remaining until each
+Claude.ai rate-limit window resets and the share of that window used. The context gauge fills
+against the real window of the model serving the turn — the rerouted backend's window under `sub`,
+not Claude's — green below 40%, orange
 40–65%, red above. `♻` shows this turn's prompt-cache reuse, and turns into `♻ cache cold`
 once the session has been idle past the cache TTL, since the next message then pays a cold cache
 write. Segments drop right-to-left on narrow terminals, and anything Claude Code doesn't report
