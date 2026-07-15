@@ -15,6 +15,7 @@
 pub mod auth;
 pub mod catalog;
 pub mod codex;
+pub mod context_limit;
 pub mod continuation;
 pub mod kimi;
 pub mod read_rewrite;
