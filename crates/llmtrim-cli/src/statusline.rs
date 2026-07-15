@@ -109,9 +109,10 @@ struct CcInput {
     /// 5-hour and 7-day rate-limit usage %, Claude.ai subscribers only.
     five_hour_pct: Option<f64>,
     seven_day_pct: Option<f64>,
-    /// Rate-limit window reset times, used to show the remaining duration beside each quota.
-    five_hour_resets_at: Option<String>,
-    seven_day_resets_at: Option<String>,
+    /// Rate-limit window reset times (Unix epoch seconds, as Claude Code sends them), used to show
+    /// the remaining duration beside each quota.
+    five_hour_resets_at: Option<i64>,
+    seven_day_resets_at: Option<i64>,
     /// Share of this turn's input served from the prompt cache, % — computed from the last
     /// API call's `current_usage`. `None` before the first response or right after `/compact`.
     cache_pct: Option<f64>,
@@ -154,12 +155,10 @@ fn parse_cc(input: &str) -> CcInput {
         .and_then(Value::as_f64);
     let five_hour_resets_at = v
         .pointer("/rate_limits/five_hour/resets_at")
-        .and_then(Value::as_str)
-        .map(str::to_string);
+        .and_then(Value::as_i64);
     let seven_day_resets_at = v
         .pointer("/rate_limits/seven_day/resets_at")
-        .and_then(Value::as_str)
-        .map(str::to_string);
+        .and_then(Value::as_i64);
     let cache_pct = {
         let cu = v.pointer("/context_window/current_usage");
         let field = |k: &str| {
@@ -572,11 +571,10 @@ fn quota_color(pct: f64) -> &'static str {
     }
 }
 
-/// The largest useful unit left before a quota window resets.
-fn remaining_time_label(resets_at: Option<&str>) -> Option<String> {
-    let resets_at = chrono::DateTime::parse_from_rfc3339(resets_at?).ok()?;
-    let remaining = resets_at.signed_duration_since(chrono::Utc::now());
-    let minutes = remaining.num_minutes().max(0);
+/// The largest useful unit left before a quota window resets. `resets_at` is Unix epoch seconds,
+/// the shape Claude Code actually sends (`"resets_at": 1738425600`).
+fn remaining_time_label(resets_at: Option<i64>) -> Option<String> {
+    let minutes = (resets_at? - chrono::Utc::now().timestamp()).max(0) / 60;
     Some(if minutes >= 24 * 60 {
         format!("{}d", minutes / (24 * 60))
     } else if minutes >= 60 {
@@ -682,9 +680,9 @@ fn extra_segments(cc: &CcInput, led: &Led, color: bool) -> Vec<String> {
     let glyph = paint(color, DIM, "◔");
     let sep = paint(color, DIM, "·");
     let five_label =
-        remaining_time_label(cc.five_hour_resets_at.as_deref()).unwrap_or_else(|| "5h".to_string());
+        remaining_time_label(cc.five_hour_resets_at).unwrap_or_else(|| "5h".to_string());
     let seven_label =
-        remaining_time_label(cc.seven_day_resets_at.as_deref()).unwrap_or_else(|| "7d".to_string());
+        remaining_time_label(cc.seven_day_resets_at).unwrap_or_else(|| "7d".to_string());
     match (cc.five_hour_pct, cc.seven_day_pct) {
         (Some(h), Some(d)) => {
             out.push(format!(
@@ -1149,11 +1147,11 @@ mod tests {
         let mut c = cc(48_000);
         c.five_hour_resets_at = Some(
             (chrono::Utc::now() + chrono::Duration::hours(3) + chrono::Duration::minutes(30))
-                .to_rfc3339(),
+                .timestamp(),
         );
         c.seven_day_resets_at = Some(
             (chrono::Utc::now() + chrono::Duration::days(4) + chrono::Duration::hours(12))
-                .to_rfc3339(),
+                .timestamp(),
         );
         let out = render_line(&c, &led(Health::Healthy), 0, false);
         assert!(out.contains("◔ 3h·24% · 4d·12%"), "remaining labels: {out}");
@@ -1393,7 +1391,8 @@ mod tests {
         let blob = r#"{"model":{"display_name":"Sonnet","id":"claude-sonnet-5"},"effort":{"level":"medium"},
             "context_window":{"total_input_tokens":123456,"context_window_size":1000000,
               "current_usage":{"input_tokens":10,"cache_creation_input_tokens":10,"cache_read_input_tokens":80}},
-            "rate_limits":{"five_hour":{"used_percentage":41.2},"seven_day":{"used_percentage":9.0}}}"#;
+            "rate_limits":{"five_hour":{"used_percentage":41.2,"resets_at":1738425600},
+              "seven_day":{"used_percentage":9.0,"resets_at":1738857600}}}"#;
         let cc = parse_cc(blob);
         assert_eq!(cc.model, "Sonnet");
         assert_eq!(cc.model_id, "claude-sonnet-5");
@@ -1402,6 +1401,9 @@ mod tests {
         assert_eq!(cc.window, Some(1_000_000));
         assert_eq!(cc.five_hour_pct, Some(41.2));
         assert_eq!(cc.seven_day_pct, Some(9.0));
+        // Claude Code sends `resets_at` as Unix epoch seconds (an integer), not an RFC3339 string.
+        assert_eq!(cc.five_hour_resets_at, Some(1_738_425_600));
+        assert_eq!(cc.seven_day_resets_at, Some(1_738_857_600));
         // 80 cache reads of 100 total input = 80%.
         assert_eq!(cc.cache_pct, Some(80.0));
     }
