@@ -409,6 +409,25 @@ fn reasoning_encrypted_content(item: &Value) -> Option<String> {
         .map(str::to_string)
 }
 
+/// Sentinel prefixing a thinking-block signature that carries llmtrim's own Codex
+/// `encrypted_content`. Codex `encrypted_content` is opaque to Anthropic, so we tunnel it through
+/// Claude Code as the thinking `signature`; the marker lets the next turn tell our blobs apart from
+/// Anthropic thinking signatures left in the history when `/sub` is switched on mid-conversation.
+/// Replaying a foreign signature as `encrypted_content` makes Codex 400 the whole turn ("Encrypted
+/// content could not be decrypted or parsed"), so unmarked signatures are dropped instead.
+const CODEX_SIG_MARK: &str = "llmtrim-codex-v1:";
+
+/// Tag a raw Codex `encrypted_content` blob so a later turn recognises it as ours.
+fn mark_codex_signature(encrypted: &str) -> String {
+    format!("{CODEX_SIG_MARK}{encrypted}")
+}
+
+/// Recover the raw Codex `encrypted_content` from a thinking signature we issued, or `None` for a
+/// foreign / empty signature Codex would reject.
+fn unmark_codex_signature(signature: &str) -> Option<&str> {
+    signature.strip_prefix(CODEX_SIG_MARK)
+}
+
 /// Build a Codex `reasoning` input item from an Anthropic thinking block (signature round-trips
 /// as `encrypted_content`). Returns `None` when the block carries nothing Codex can replay.
 fn reasoning_item(encrypted: &str, summary_text: &str) -> Value {
@@ -429,10 +448,12 @@ fn thinking_input_item(block: &Value) -> Option<Value> {
         .get("signature")
         .and_then(Value::as_str)
         .unwrap_or_default();
-    if signature.is_empty() {
-        return None;
-    }
-    Some(reasoning_item(signature, thinking))
+    // Only replay encrypted content Codex itself issued (marked when we tunnelled it out). A foreign
+    // or empty signature — e.g. an Anthropic thinking block carried over when `/sub` is enabled
+    // mid-conversation — is dropped so the turn proceeds without that reasoning item rather than
+    // 400ing on an undecryptable blob.
+    let encrypted = unmark_codex_signature(signature)?;
+    Some(reasoning_item(encrypted, thinking))
 }
 
 /// Build the Responses `text.format` from an Anthropic `output_config.format`.
@@ -588,7 +609,12 @@ impl Reducer {
         if let Some(sig) = self.thinking_encrypted.take()
             && self.last_signature.as_deref() != Some(sig.as_str())
         {
-            out.push(ReduceEvent::ThinkingSignatureDelta(sig.clone()));
+            // Tunnel the blob out marked so the next turn replays only what Codex issued; the stored
+            // transcript keeps the raw blob, matching the input rebuilt from the marker-stripped
+            // signature.
+            out.push(ReduceEvent::ThinkingSignatureDelta(mark_codex_signature(
+                &sig,
+            )));
             // Continuation compares the stored transcript positionally against the input rebuilt
             // next turn, where the echoed thinking block becomes a reasoning item ahead of the
             // assistant message. Record the same item here or the prefix never matches again.
@@ -1516,7 +1542,7 @@ mod tests {
             vec![
                 ReduceEvent::ThinkingStart,
                 ReduceEvent::ThinkingDelta("pondering".into()),
-                ReduceEvent::ThinkingSignatureDelta("enc_sig_1".into()),
+                ReduceEvent::ThinkingSignatureDelta(mark_codex_signature("enc_sig_1")),
                 ReduceEvent::ThinkingStop,
                 ReduceEvent::TextStart,
                 ReduceEvent::TextDelta("answer".into()),
@@ -1537,7 +1563,7 @@ mod tests {
             events,
             vec![
                 ReduceEvent::ThinkingStart,
-                ReduceEvent::ThinkingSignatureDelta("enc_only".into()),
+                ReduceEvent::ThinkingSignatureDelta(mark_codex_signature("enc_only")),
                 ReduceEvent::ThinkingStop,
                 ReduceEvent::TextStart,
                 ReduceEvent::TextDelta("ok".into()),
@@ -1557,14 +1583,17 @@ mod tests {
             "data: {\"type\":\"response.output_text.delta\",\"output_index\":3,\"delta\":\"hi\"}\n\n",
         );
         let (events, _) = reduce(sse);
-        let sigs: Vec<&str> = events
+        let sigs: Vec<String> = events
             .iter()
             .filter_map(|e| match e {
-                ReduceEvent::ThinkingSignatureDelta(s) => Some(s.as_str()),
+                ReduceEvent::ThinkingSignatureDelta(s) => Some(s.clone()),
                 _ => None,
             })
             .collect();
-        assert_eq!(sigs, vec!["enc1", "enc2"]);
+        assert_eq!(
+            sigs,
+            vec![mark_codex_signature("enc1"), mark_codex_signature("enc2")]
+        );
     }
 
     #[test]
@@ -1608,13 +1637,14 @@ mod tests {
         assert_eq!(items[0]["summary"][0]["text"], "pondering");
         assert_eq!(items[1]["type"], "message");
 
-        // ...and it must be byte-identical to what `build_input` reconstructs from that block.
+        // ...and it must be byte-identical to what `build_input` reconstructs from that block, whose
+        // signature Claude Code echoes back in the marked form we tunnelled out.
         let rebuilt = build_request_body(
             &json!({
                 "messages": [{
                     "role": "assistant",
                     "content": [
-                        {"type": "thinking", "thinking": "pondering", "signature": "enc1"},
+                        {"type": "thinking", "thinking": "pondering", "signature": mark_codex_signature("enc1")},
                         {"type": "text", "text": "hi"}
                     ]
                 }]
@@ -1633,7 +1663,7 @@ mod tests {
                 "messages": [{
                     "role": "assistant",
                     "content": [
-                        {"type": "thinking", "thinking": "pondered", "signature": "enc_rt"},
+                        {"type": "thinking", "thinking": "pondered", "signature": mark_codex_signature("enc_rt")},
                         {"type": "text", "text": "done"}
                     ]
                 }]
@@ -1669,6 +1699,44 @@ mod tests {
     }
 
     #[test]
+    fn foreign_thinking_signature_is_dropped_not_replayed_to_codex() {
+        // Enabling `/sub` mid-conversation carries Anthropic thinking blocks into the first Codex
+        // turn. Their signatures are not Codex `encrypted_content`; replaying them verbatim made
+        // Codex 400 the whole request ("Encrypted content could not be decrypted or parsed"). The
+        // foreign block must be dropped while the rest of the assistant turn still reaches Codex.
+        let body = build_request_body(
+            &json!({
+                "messages": [{
+                    "role": "assistant",
+                    "content": [
+                        {"type": "thinking", "thinking": "claude reasoning", "signature": "EssC-anthropic-blob-kBgB"},
+                        {"type": "text", "text": "kept"}
+                    ]
+                }]
+            }),
+            "gpt-5.5",
+            None,
+        )
+        .expect("build");
+        let input = body["input"].as_array().expect("input");
+        // No reasoning item is forwarded (the foreign signature is not tunnelled back)...
+        assert!(
+            input.iter().all(|i| i["type"] != "reasoning"),
+            "foreign signature must not become a Codex reasoning item: {input:?}"
+        );
+        // ...and no `encrypted_content` leaks through anywhere in the request.
+        assert!(
+            !serde_json::to_string(&body)
+                .unwrap()
+                .contains("EssC-anthropic-blob-kBgB"),
+            "foreign encrypted blob must not reach Codex"
+        );
+        // ...but the assistant's actual message survives.
+        assert_eq!(input[0]["type"], "message");
+        assert_eq!(input[0]["content"][0]["text"], "kept");
+    }
+
+    #[test]
     fn text_waits_for_reasoning_signature_when_done_follows_message_added() {
         // Upstream may emit the assistant message before the reasoning item's terminal `done`.
         let sse = concat!(
@@ -1683,7 +1751,7 @@ mod tests {
             vec![
                 ReduceEvent::ThinkingStart,
                 ReduceEvent::ThinkingDelta("hmm".into()),
-                ReduceEvent::ThinkingSignatureDelta("late_sig".into()),
+                ReduceEvent::ThinkingSignatureDelta(mark_codex_signature("late_sig")),
                 ReduceEvent::ThinkingStop,
                 ReduceEvent::TextStart,
                 ReduceEvent::TextDelta("ans".into()),
