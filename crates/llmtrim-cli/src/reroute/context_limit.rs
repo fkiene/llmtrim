@@ -69,38 +69,53 @@ fn message_count(body: &Value) -> usize {
 
 /// True when `text` (HTTP body, SSE error message, or status phrase) describes a context-window
 /// rejection from Codex, Kimi, OpenAI-compatible, or Anthropic-shaped error payloads.
+///
+/// Prefer explicit codes and tight collocations. Loose pairs like `context`∩`limit` or
+/// `exceeds`∩`maximum` false-positive on deadlines, rate limits that mention “context”,
+/// max-images validation, and parameter bounds — those must not latch a session.
 pub fn is_context_limit_text(text: &str) -> bool {
     let m = text.to_lowercase();
     if m.is_empty() {
         return false;
     }
-    // Explicit codes / types first.
+    // Deadlines / cancellations often contain both "context" and "exceed" — never treat as overflow.
+    if m.contains("deadline") || m.contains("canceled") || m.contains("cancelled") {
+        return false;
+    }
+
+    // Explicit API codes / types first.
     if m.contains("context_length_exceeded")
-        || m.contains("context_length")
-        || m.contains("max_tokens_exceeded")
-        || m.contains("token_limit")
         || m.contains("prompt_too_long")
         || m.contains("input_too_long")
         || m.contains("string_above_max_length")
+        || m.contains("context_length_limit")
     {
         return true;
     }
-    // Natural-language forms used by ChatGPT/Codex, Kimi, and Anthropic.
-    let contextish = m.contains("context")
-        && (m.contains("window")
-            || m.contains("length")
-            || m.contains("limit")
-            || m.contains("overflow")
-            || m.contains("exceed"));
-    let tokenish =
-        (m.contains("too many tokens") || m.contains("too long") || m.contains("maximum"))
-            && (m.contains("token")
-                || m.contains("prompt")
-                || m.contains("input")
-                || m.contains("message"));
-    let exceeds_model = m.contains("exceeds")
-        && (m.contains("context") || m.contains("maximum") || m.contains("model"));
-    contextish || tokenish || exceeds_model
+
+    // Tight natural-language collocations used by ChatGPT/Codex, Kimi, and Anthropic.
+    if m.contains("context window")
+        || m.contains("context length")
+        || m.contains("maximum context")
+        || m.contains("max context")
+        || m.contains("context overflow")
+        || m.contains("too many tokens")
+        || m.contains("prompt is too long")
+        || m.contains("input is too long")
+        || m.contains("request too large")
+    {
+        return true;
+    }
+
+    // "exceeds the context window of this model" / "input exceeds … context"
+    if m.contains("exceed")
+        && m.contains("context")
+        && (m.contains("window") || m.contains("length") || m.contains("limit"))
+    {
+        return true;
+    }
+
+    false
 }
 
 /// HTTP-path detection: non-success status whose body (or extracted error message) is a
@@ -179,6 +194,21 @@ pub fn mark_must_compact(session_id: Option<&str>) {
     evict_oldest();
 }
 
+/// Clear the block latch without replacing the last-known-good snapshot. Used when a non-sub
+/// (Anthropic) path accepts a turn and we may not have a body worth storing.
+pub fn clear_must_compact(session_id: Option<&str>) {
+    let Some(session_id) = session_id else {
+        return;
+    };
+    let mut guard = STATES.lock().unwrap();
+    if let Some(map) = guard.as_mut()
+        && let Some(state) = map.get_mut(session_id)
+    {
+        state.must_compact = false;
+        state.updated_at = now_ms();
+    }
+}
+
 /// Record a request the subscription backend accepted (content committed / successful completion).
 /// Clears `must_compact` — a successful compact or ordinary turn unblocks the session.
 pub fn record_accepted(session_id: Option<&str>, anthropic_body: &Value) {
@@ -190,21 +220,9 @@ pub fn record_accepted(session_id: Option<&str>, anthropic_body: &Value) {
         .map(|b| b.len() as u64)
         .unwrap_or(0);
     if bytes == 0 || bytes > MAX_SNAPSHOT_BYTES {
-        // Oversized or empty: keep must_compact clear but drop the snapshot rather than OOM.
-        let mut guard = STATES.lock().unwrap();
-        if let Some(map) = guard.as_mut()
-            && let Some(state) = map.get_mut(session_id)
-        {
-            if let Some(old) = state.last_good.take() {
-                let old_b = state.last_good_bytes;
-                state.last_good_bytes = 0;
-                drop(old);
-                let mut total = TOTAL_BYTES.lock().unwrap();
-                *total = total.saturating_sub(old_b);
-            }
-            state.must_compact = false;
-            state.updated_at = now_ms();
-        }
+        // Oversized or empty: clear the latch but keep any prior last-known-good. Wiping LKG
+        // here would leave a later context-limit with nothing to rewrite onto for /compact.
+        clear_must_compact(Some(session_id));
         return;
     }
 
@@ -272,10 +290,15 @@ pub fn looks_like_session_reset(session_id: Option<&str>, body: &Value) -> bool 
         return false;
     };
     let good = state.last_good.as_ref().map(message_count).unwrap_or(0);
+    if good == 0 {
+        // Blocked with no snapshot (first-turn overflow, or oversized accept kept LKG empty):
+        // a short bootstrap conversation is the only non-compact recovery for a reused id.
+        return cur <= 1;
+    }
     // A reset is shorter than what we last accepted; ordinary turns only grow (or stay
     // similar when the client re-sends). Compact requests keep the full overflowing history
     // and are handled separately.
-    good > 0 && cur < good
+    cur < good
 }
 
 /// While `must_compact`, rewrite a real Claude Code compact request so its conversation history
@@ -356,6 +379,24 @@ pub fn gate_inbound(session_id: Option<&str>, body: &mut Value, is_compact: bool
         };
     }
     InboundAction::Block
+}
+
+/// True when events show a context-limit error before any content/tool/thinking event.
+/// Each entry is `(is_content_commit, error_message_or_empty)`. Safe to call
+/// [`mark_must_compact`] only when this returns true.
+pub fn pre_output_context_limit(events: &[(bool, &str)]) -> bool {
+    let mut committed = false;
+    let mut saw_context_limit = false;
+    for (is_content, err_msg) in events {
+        if *is_content {
+            committed = true;
+            break;
+        }
+        if !err_msg.is_empty() && is_context_limit_text(err_msg) {
+            saw_context_limit = true;
+        }
+    }
+    !committed && saw_context_limit
 }
 
 fn evict_oldest() {
@@ -474,6 +515,7 @@ mod tests {
             "This model's maximum context length is 128000 tokens."
         ));
         assert!(is_context_limit_text("prompt is too long: 200000 tokens"));
+        assert!(is_context_limit_text("too many tokens in the request"));
         assert!(is_context_limit_http(
             400,
             br#"{"error":{"message":"Your input exceeds the context window of this model.","type":"invalid_request_error"}}"#
@@ -482,7 +524,31 @@ mod tests {
             400,
             br#"{"error":{"code":"context_length_exceeded","message":"too big"}}"#
         ));
+    }
+
+    #[test]
+    fn rejects_non_context_errors_that_share_loose_substrings() {
+        let _lock = test_lock();
         assert!(!is_context_limit_text("rate limit reached"));
+        assert!(!is_context_limit_text(
+            "Please provide more context. Rate limit reached."
+        ));
+        assert!(!is_context_limit_text("context deadline exceeded"));
+        assert!(!is_context_limit_text(
+            "rpc error: code = DeadlineExceeded desc = context deadline exceeded"
+        ));
+        assert!(!is_context_limit_text(
+            "Invalid parameter: max_tokens exceeds maximum"
+        ));
+        assert!(!is_context_limit_text(
+            "The maximum number of images per message is 100"
+        ));
+        assert!(!is_context_limit_text(
+            "tools.0.custom.input_schema: JSON schema is too long"
+        ));
+        assert!(!is_context_limit_text(
+            "Value exceeds maximum allowed for temperature"
+        ));
         assert!(!is_context_limit_http(
             429,
             br#"{"error":{"message":"rate limit"}}"#
@@ -491,6 +557,19 @@ mod tests {
             200,
             br#"{"error":{"message":"context_length_exceeded"}}"#
         ));
+    }
+
+    #[test]
+    fn pre_output_helper_requires_no_content_commit() {
+        let _lock = test_lock();
+        assert!(pre_output_context_limit(&[
+            (false, "context_length_exceeded"),
+        ]));
+        assert!(!pre_output_context_limit(&[
+            (true, ""),
+            (false, "context_length_exceeded"),
+        ]));
+        assert!(!pre_output_context_limit(&[(false, "rate limit reached")]));
     }
 
     #[test]
@@ -570,6 +649,48 @@ mod tests {
             }
         );
         assert!(!must_compact(sid));
+    }
+
+    #[test]
+    fn reset_works_when_blocked_without_last_good() {
+        let _lock = test_lock();
+        clear_all_for_tests();
+        let sid = Some("sess-no-lkg");
+        // First-turn overflow: latch with no prior snapshot.
+        mark_must_compact(sid);
+        assert!(must_compact(sid));
+        assert_eq!(last_good_message_count_for_tests("sess-no-lkg"), None);
+
+        let mut fresh = body_with_n_messages(1);
+        assert_eq!(
+            gate_inbound(sid, &mut fresh, false),
+            InboundAction::Allow {
+                rewrote_compact: false
+            }
+        );
+        assert!(!must_compact(sid));
+    }
+
+    #[test]
+    fn oversized_accept_keeps_prior_last_good() {
+        let _lock = test_lock();
+        clear_all_for_tests();
+        let sid = Some("sess-oversize");
+        record_accepted(sid, &body_with_n_messages(3));
+        assert_eq!(last_good_message_count_for_tests("sess-oversize"), Some(3));
+
+        // Build a body larger than MAX_SNAPSHOT_BYTES so record_accepted refuses to store it.
+        let huge_text = "x".repeat((MAX_SNAPSHOT_BYTES as usize) + 64);
+        let huge = json!({
+            "messages": [{"role": "user", "content": huge_text}]
+        });
+        record_accepted(sid, &huge);
+        assert!(!must_compact(sid));
+        assert_eq!(
+            last_good_message_count_for_tests("sess-oversize"),
+            Some(3),
+            "prior LKG must survive an oversized accept"
+        );
     }
 
     #[test]

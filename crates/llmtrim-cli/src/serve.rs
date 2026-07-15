@@ -325,7 +325,7 @@ mod imp {
         /// Per-source attribution of the forwarded request (breakdown view). `None` on bodies we
         /// couldn't attribute; never affects proxying.
         breakdown: Option<BreakdownPending>,
-        /// Set when this request was rerouted to a subscription backend (`sub = codex|kimi`): the
+        /// Set when this request was rerouted to a subscription backend (`sub = codex|kimi|grok`): the
         /// target provider + resolved upstream model. `handle_response` uses it to translate the
         /// provider's SSE back into Anthropic SSE. `provider` above is kept `Anthropic` so the
         /// output-usage parser and ledger see the Anthropic-shaped reply we emit to the client.
@@ -737,6 +737,44 @@ mod imp {
             };
         }
         anthropic_error_typed(400, "invalid_request_error", message, None)
+    }
+
+    /// After Anthropic (or a non-sub path) accepts a turn, clear any context-limit latch and
+    /// refresh the last-known-good snapshot when we still have the request body.
+    fn note_session_accepted(pending: &Pending) {
+        let session_id = pending
+            .fallback
+            .as_ref()
+            .and_then(|f| f.session_id.as_deref())
+            .or_else(|| {
+                pending
+                    .breakdown
+                    .as_ref()
+                    .and_then(|b| b.cc_session_id.as_deref())
+            })
+            .or_else(|| {
+                pending
+                    .compact
+                    .as_ref()
+                    .and_then(|c| c.session_id.as_deref())
+            });
+        if session_id.is_none() {
+            return;
+        }
+        // Prefer the full Anthropic body kept for fallback / original replay.
+        if let Some(fb) = pending.fallback.as_ref()
+            && let Ok(body) = serde_json::from_slice::<Value>(&fb.anthropic_body)
+        {
+            crate::reroute::context_limit::record_accepted(session_id, &body);
+            return;
+        }
+        if let Some(orig) = pending.original.as_ref()
+            && let Ok(body) = serde_json::from_slice::<Value>(&orig.body)
+        {
+            crate::reroute::context_limit::record_accepted(session_id, &body);
+            return;
+        }
+        crate::reroute::context_limit::clear_must_compact(session_id);
     }
 
     /// Statuses worth re-issuing against the subscription backend: transient server/overload
@@ -1218,7 +1256,7 @@ mod imp {
         /// forwarded verbatim (still intercepted, just not compressed).
         exclude_hosts: Arc<Vec<String>>,
         exclude_providers: Arc<Vec<String>>,
-        /// Subscription reroute target (`sub = codex|kimi`), snapshotted from [`RuntimeConfig`] at
+        /// Subscription reroute target (`sub = codex|kimi|grok`), snapshotted from [`RuntimeConfig`] at
         /// construction. `None` = normal transparent compress-and-forward. When set, intercepted
         /// Anthropic `/v1/messages` traffic is translated and sent to that subscription's backend.
         sub: Option<crate::reroute::SubProvider>,
@@ -1424,8 +1462,38 @@ mod imp {
                 Ok(c) => c.to_bytes(),
                 Err(_) => return Request::from_parts(parts, Body::empty()).into(),
             };
+            // Context-limit guard on the Anthropic path (fallback mode and any latched session).
+            // Always-sub is gated inside `reroute_messages`; this covers the compress+forward
+            // path so a blocked session cannot keep compressing/overflowing after a sub latch.
+            let mut bytes = bytes;
+            if provider == ProviderKind::Anthropic
+                && let Some(mut anthropic) = std::str::from_utf8(&bytes)
+                    .ok()
+                    .and_then(|t| serde_json::from_str::<Value>(t).ok())
+            {
+                let is_compact = crate::compact::detect(&anthropic).is_some();
+                match crate::reroute::context_limit::gate_inbound(
+                    cc_session_id.as_deref(),
+                    &mut anthropic,
+                    is_compact,
+                ) {
+                    crate::reroute::context_limit::InboundAction::Block => {
+                        return context_limit_guard_response(
+                            None,
+                            &self.ledger,
+                            &self.breakdown_ledger,
+                        )
+                        .into();
+                    }
+                    crate::reroute::context_limit::InboundAction::Allow { .. } => {
+                        if let Ok(serialized) = serde_json::to_vec(&anthropic) {
+                            bytes = Bytes::from(serialized);
+                        }
+                    }
+                }
+            }
             // Compact turns use an isolated candidate plan. Every attempt is rebuilt from these
-            // untouched client bytes; ordinary requests never enter this runtime-only path.
+            // (possibly LKG-rewritten) client bytes; ordinary requests never enter this path.
             let compact_plan = if provider == ProviderKind::Anthropic
                 && !self.compact_models.is_empty()
             {
@@ -2106,9 +2174,9 @@ mod imp {
             }
 
             if let Some(detail) = fatal {
-                // Pre-output stream error only (`committed` is still false). A context-limit
-                // rejection blocks the session; other errors keep the existing compact-retry path.
-                if crate::reroute::context_limit::is_context_limit_text(&detail) {
+                // Only latch when nothing client-visible was committed. A single chunk can yield
+                // content then Error; marking then would discard the prelude and force /compact.
+                if crate::reroute::context_limit::is_context_limit_text(&detail) && !committed {
                     crate::reroute::continuation::clear_continuation(info.session_id.as_deref());
                     crate::reroute::context_limit::mark_must_compact(info.session_id.as_deref());
                     return context_limit_guard_response(
@@ -2140,7 +2208,9 @@ mod imp {
 
             // Backend accepted this turn (content committed, no pre-output fatal): refresh the
             // last-known-good snapshot and clear any prior must_compact latch.
-            if let Some(snap) = info.anthropic_snapshot.as_ref() {
+            if committed
+                && let Some(snap) = info.anthropic_snapshot.as_ref()
+            {
                 crate::reroute::context_limit::record_accepted(info.session_id.as_deref(), snap);
             }
 
@@ -2462,46 +2532,43 @@ mod imp {
                 let mut encoder = AnthropicSseEncoder::new(&client_model);
                 let mut output = String::new();
                 let mut stream_error = None;
-                for event in reducer.push(&attempt.body) {
+                let mut committed = false;
+                let mut events = reducer.push(&attempt.body);
+                events.extend(reducer.finish());
+                for event in &events {
+                    match event {
+                        ReduceEvent::Error { message } if !committed => {
+                            stream_error = Some(message.clone());
+                        }
+                        ReduceEvent::Error { .. } | ReduceEvent::Finish { .. } => {}
+                        _ => committed = true,
+                    }
                     record_codex_continuation(
-                        &event,
+                        event,
                         &mut reducer,
                         attempt.provider,
                         attempt.logical_body.as_ref(),
                         fb.session_id.as_deref(),
                     );
-                    if let ReduceEvent::Error { message } = &event {
-                        stream_error = Some(message.clone());
-                    }
-                    encoder.encode(&event, &mut output);
-                }
-                if stream_error.is_none() {
-                    for event in reducer.finish() {
-                        record_codex_continuation(
-                            &event,
-                            &mut reducer,
-                            attempt.provider,
-                            attempt.logical_body.as_ref(),
-                            fb.session_id.as_deref(),
-                        );
-                        if let ReduceEvent::Error { message } = &event {
-                            stream_error = Some(message.clone());
-                        }
-                        encoder.encode(&event, &mut output);
-                    }
+                    encoder.encode(event, &mut output);
                 }
                 if let Some(error) = stream_error {
                     crate::reroute::continuation::clear_continuation(fb.session_id.as_deref());
-                    // Context-limit on a fallback provider: block the session (same as always-sub).
-                    // Do not advance to the next provider — history will not fit them either, and
-                    // we must not expose partial output (none was committed: stream_error only).
-                    if crate::reroute::context_limit::is_context_limit_text(&error) {
+                    // Pre-output context-limit only — never latch after client-visible content.
+                    if crate::reroute::context_limit::is_context_limit_text(&error) && !committed {
                         crate::reroute::context_limit::mark_must_compact(fb.session_id.as_deref());
                         return context_limit_guard_response(
                             Some(pending),
                             &self.ledger,
                             &self.breakdown_ledger,
                         );
+                    }
+                    // Content already committed: do not surface as a clean next-provider attempt
+                    // (partial answer may already be in `output`); treat as terminal for this
+                    // provider and continue the chain only when nothing was committed.
+                    if committed {
+                        failures.push(format!("{}: {error}", attempt.provider.as_str()));
+                        continue;
                     }
                     failures.push(format!("{}: {error}", attempt.provider.as_str()));
                     continue;
@@ -2680,6 +2747,7 @@ mod imp {
             }
             pending.input_after = pending.input_before;
             pending.output_shaped = false;
+            note_session_accepted(&pending);
             let _finalize = Finalize {
                 acc: Arc::new(Mutex::new(body.clone())),
                 pending: Some(pending),
@@ -2747,15 +2815,51 @@ mod imp {
                     .await
                 {
                     Ok(attempt) => attempt,
-                    Err(_) => continue,
+                    Err(error) => {
+                        // Context-limit is terminal for the compact chain: mark and stop (no more
+                        // candidates, no silent swallow of the overflow).
+                        if crate::reroute::context_limit::is_context_limit_text(&error) {
+                            crate::reroute::continuation::clear_continuation(
+                                state.session_id.as_deref(),
+                            );
+                            crate::reroute::context_limit::mark_must_compact(
+                                state.session_id.as_deref(),
+                            );
+                            return Some(context_limit_guard_response(
+                                Some(pending),
+                                &self.ledger,
+                                &self.breakdown_ledger,
+                            ));
+                        }
+                        continue;
+                    }
                 };
 
                 let mut reducer = crate::reroute::StreamReducer::new(provider, &attempt.model);
                 let mut events = reducer.push(&attempt.body);
                 events.extend(reducer.finish());
-                let committed = events
-                    .iter()
-                    .any(|event| !matches!(event, ReduceEvent::Error { .. }));
+                let mut committed = false;
+                let mut pre_output_ctx = false;
+                for event in &events {
+                    match event {
+                        ReduceEvent::Error { message } if !committed => {
+                            if crate::reroute::context_limit::is_context_limit_text(message) {
+                                pre_output_ctx = true;
+                            }
+                        }
+                        ReduceEvent::Error { .. } | ReduceEvent::Finish { .. } => {}
+                        _ => committed = true,
+                    }
+                }
+                if pre_output_ctx && !committed {
+                    crate::reroute::continuation::clear_continuation(state.session_id.as_deref());
+                    crate::reroute::context_limit::mark_must_compact(state.session_id.as_deref());
+                    return Some(context_limit_guard_response(
+                        Some(pending),
+                        &self.ledger,
+                        &self.breakdown_ledger,
+                    ));
+                }
                 if compact_precommit_error(&events) || !committed {
                     crate::reroute::continuation::clear_continuation(state.session_id.as_deref());
                     continue;
@@ -2835,6 +2939,9 @@ mod imp {
                     pending.model = Some(candidate.upstream_model.clone());
                     pending.compact = None;
                     let body = client_model_json(&fetched.2, &state.client_model);
+                    if (200..300).contains(&fetched.0) {
+                        note_session_accepted(&pending);
+                    }
                     let _finalize = Finalize {
                         acc: Arc::new(Mutex::new(body.clone())),
                         pending: Some(pending),
@@ -2998,6 +3105,11 @@ mod imp {
                 rec.output_shaped = Some(false);
                 let _ = self.ledger.send(rec);
                 return replayed;
+            }
+            // Anthropic accepted the turn (we are not failing over): clear any context-limit
+            // latch so a later always-sub flip does not block against a stale LKG.
+            if (200..300).contains(&status.as_u16()) {
+                note_session_accepted(&pending);
             }
             let is_sse = res
                 .headers()
@@ -3903,7 +4015,7 @@ mod imp {
                     && let Some(r) = raw
                 {
                     eprintln!(
-                        "llmtrim: unknown sub provider '{r}' — reroute disabled (expected codex|kimi)"
+                        "llmtrim: unknown sub provider '{r}' — reroute disabled (expected codex|kimi|grok)"
                     );
                 }
                 parsed
@@ -3918,7 +4030,7 @@ mod imp {
                             // Silently dropping it would leave a typo'd chain quietly shorter than
                             // the user configured — and the fallback they think they have missing.
                             eprintln!(
-                                "llmtrim: unknown provider '{p}' in the sub fallback chain — ignored (expected codex|kimi)"
+                                "llmtrim: unknown provider '{p}' in the sub fallback chain — ignored (expected codex|kimi|grok)"
                             );
                         }
                         parsed
@@ -4465,6 +4577,27 @@ mod imp {
                 Some(1)
             );
             crate::reroute::context_limit::clear_all_for_tests();
+        }
+
+        #[test]
+        fn context_limit_pre_output_decision_requires_no_content_commit() {
+            // Locks the live-path invariant: content then error must not latch.
+            use crate::reroute::context_limit::pre_output_context_limit;
+            assert!(pre_output_context_limit(&[(
+                false,
+                "Your input exceeds the context window of this model."
+            )]));
+            assert!(
+                !pre_output_context_limit(&[
+                    (true, ""),
+                    (false, "Your input exceeds the context window of this model."),
+                ]),
+                "content commit before error: do not mark must_compact"
+            );
+            assert!(!pre_output_context_limit(&[(
+                false,
+                "context deadline exceeded"
+            )]));
         }
 
         /// `Accept: text/event-stream` is what the Anthropic SDK (so Claude Code) sends on a
