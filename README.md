@@ -5,7 +5,7 @@
 <h1 align="center">llmtrim</h1>
 
 <p align="center">
-  <strong>Local proxy that compresses LLM API traffic so you pay less — same answers, smaller bill.</strong>
+  <strong>Local proxy that compresses LLM API traffic so you pay less. Same answers, smaller bill.</strong>
 </p>
 
 <p align="center">
@@ -56,15 +56,15 @@ npm install -g @llmtrim/cli@latest && llmtrim setup
 llmtrim status
 ```
 
-That's the whole install. `setup` starts a local proxy, wires your shell, and — if Claude Code is present — turns on the recommended tooling (status line, cold-cache guard, `/sub`, cheaper `/compact`). No per-feature install checklist.
+That's it. `setup` starts a local proxy, wires your shell, and (when Claude Code is present) turns on the status line, cold-cache guard, `/sub`, and cheaper `/compact`. You do not run a separate install for each of those.
 
-| You want… | Run |
+| You want | Run |
 |---|---|
-| **First install** | `llmtrim setup` |
-| **New version** | `llmtrim update` |
-| **Something feels off** | `llmtrim ensure` · or `llmtrim doctor --fix` · or press **`f`** in `status` |
+| First install | `llmtrim setup` |
+| New version | `llmtrim update` (then `llmtrim ensure` after npm/brew/cargo) |
+| Something broken | `llmtrim ensure` · `llmtrim doctor --fix` · or **`f`** in `status` |
 
-> Works with anything that honors `HTTPS_PROXY`: Claude Code, Codex, Cursor, Aider, your own SDK. Not GitHub Copilot (certificate pinning). [Full list →](#works-with)
+> Any tool that honors `HTTPS_PROXY` works (Claude Code, Codex, Cursor, Aider, your SDK). GitHub Copilot does not (certificate pinning). [Full list →](#works-with)
 
 <details>
 <summary><b>Other installers</b> (Homebrew, curl, Scoop, Cargo, Docker)</summary>
@@ -90,7 +90,7 @@ Full options: [INSTALL.md](INSTALL.md).
 <details>
 <summary><b>Desktop tray</b> (menu bar / system tray)</summary>
 
-Savings at a glance without a terminal. Ships with Homebrew, Scoop, and npm packages; `setup` can enable open-at-login. Open anytime with `llmtrim tray`. On Linux desktops, `ensure` can download the tray binary from the [latest release](https://github.com/fkiene/llmtrim/releases) (`libwebkit2gtk-4.1`, `libayatana-appindicator3`).
+Menu-bar / system-tray popover with the same savings numbers. Bundled in Homebrew, Scoop, and npm; `setup` can enable open-at-login. Open with `llmtrim tray`. On Linux desktops, interactive `ensure` can fetch the tray binary from the [latest release](https://github.com/fkiene/llmtrim/releases) (needs `libwebkit2gtk-4.1` and `libayatana-appindicator3`).
 
 <p align="center"><img src="crates/llmtrim-tray/docs/popover.svg" alt="llmtrim tray popover" width="320"></p>
 
@@ -101,9 +101,9 @@ Savings at a glance without a terminal. Ships with Homebrew, Scoop, and npm pack
 
 Same technique as [mitmproxy](https://mitmproxy.org), scoped to LLM API hosts only. `setup` changes three things; `llmtrim uninstall` reverses all three:
 
-1. **Private CA** in `~/.llmtrim/` — name-constrained so it cannot intercept your bank or email
-2. **Shell env** — `HTTPS_PROXY` + CA trust
-3. **Login service** — daemon at login
+1. Private CA in `~/.llmtrim/` (name-constrained; cannot intercept your bank or email)
+2. Shell env: `HTTPS_PROXY` + CA trust
+3. Login service: daemon at login
 
 No API keys stored (your tool's auth is forwarded). Prompts never touch disk; only anonymous token counts. Full threat model: [SECURITY.md](SECURITY.md).
 
@@ -118,36 +118,34 @@ openssl x509 -in ~/.llmtrim/ca.pem -noout -text | grep -A3 "Name Constraints"
 
 ## Day to day
 
-Three verbs. Everything else is optional.
-
 ```bash
-llmtrim status     # live savings + health  (aliases: monitor, gain)
-llmtrim update     # new release · restart daemon · refresh integrations
-llmtrim ensure     # make this machine match the recommended state
+llmtrim status     # savings + health  (aliases: monitor, gain)
+llmtrim update     # new release, restart daemon, refresh integrations
+llmtrim ensure     # match the recommended install state on this machine
 ```
 
 | Situation | Command |
 |---|---|
 | Watch savings | `llmtrim status` |
-| After `npm` / `brew` / `cargo` upgrade | `llmtrim ensure` (or press **`f`** in status) |
+| After `npm` / `brew` / `cargo` upgrade | `llmtrim ensure` (or **`f`** in status) |
 | Diagnose | `llmtrim doctor` · repair with `doctor --fix` |
 | Pause / resume proxy | `llmtrim stop` · `llmtrim start` |
 | Force one session through llmtrim | `llmtrim wrap claude` |
 | Remove everything | `llmtrim uninstall` |
 
-Claude Code integrations (status line, guard, `/sub`, compact models) stay current automatically after `setup` / `update` / `ensure`. You do not re-run install commands after a release.
+After `setup`, `update`, or `ensure`, owned Claude Code pieces (status line, guard, `/sub`, compact defaults) stay in sync with the binary. You should not need `statusline install` or similar after an upgrade.
 
-Reports: `llmtrim status --daily` · `--weekly` · `--monthly` · `--json` · `--csv`.
+Time series: `llmtrim status --daily` · `--weekly` · `--monthly` · `--json` · `--csv`.
 
 ---
 
 ## What it does
 
-You run Claude Code, Codex, Cursor, or your own app. Every request ships a large blob: system prompt, tools, history, and raw tool output. You pay for all of it, every turn.
+You run Claude Code, Codex, Cursor, or your own app. Each request carries a large blob: system prompt, tools, history, and raw tool output. You pay for that on every turn.
 
-**Much of that text is waste** — a 200-line build log with two errors, tool schemas resent fifty times, JSON with hundreds of near-identical rows. The model does not need the bulk to answer well.
+A lot of it is noise. A 200-line build log with two errors. Tool schemas resent fifty times. JSON with hundreds of near-identical rows. The model does not need the bulk to answer well.
 
-**llmtrim removes the waste on your machine** before the request leaves for the provider. Your tool is unchanged; the reply is unchanged; the bill is smaller.
+llmtrim strips that noise on your machine before the request hits the provider. Your tool stays the same, the reply stays the same, the bill shrinks.
 
 ```
   before:  your tool ───── full request ─────▶  OpenAI / Anthropic / …
@@ -159,15 +157,15 @@ You run Claude Code, Codex, Cursor, or your own app. Every request ships a large
 ```
 
 > [!IMPORTANT]
-> **It cannot make your bill bigger or break a request.** Each step is re-measured with the provider's real tokenizer and reverted if it does not save tokens. If the provider rejects the compressed body, the original is resent. Worst case: zero savings.
+> Compression cannot raise your bill or break a request. Each step is re-measured with the provider's real tokenizer and undone if it does not save tokens. If the provider rejects the compressed body, the original is resent. Worst case is zero savings.
 
-Everything is local. Nothing is sent to us.
+Everything runs locally. Nothing is sent to us.
 
 ### In action
 
-A real agent build log: 58 lines, only two errors. The model still needs those errors — not the other 56.
+Real agent build log: 58 lines, two of them errors. Keep the errors, drop the rest.
 
-**Before** (4,662 chars) → **After** (978 chars, **−79%**):
+Before (4,662 chars) → after (978 chars, −79%):
 
 ```text
 # before (noise + signal)
@@ -227,14 +225,14 @@ Default `auto` enables each stage only where it pays. `safe` is lossless-only. [
 
 ## Claude Code
 
-If `~/.claude` exists, `setup` / `update` / `ensure` wire these automatically. No separate install commands.
+When `~/.claude` exists, `setup`, `update`, and `ensure` wire these. No separate install commands.
 
 | Feature | What you get |
 |---|---|
-| **Status line** | Model, context gauge, trim %, rate limits, cache warm/cold |
-| **Guard** | Blocks one turn when a cold cache resume would re-write a huge context (and bill for it) |
-| **`/compact` models** | Prefer Haiku → Sonnet before your selected model |
-| **`/sub`** | Per-window: `/sub on` · `/sub off` · `/sub status` |
+| Status line | Model, context gauge, trim %, rate limits, cache warm/cold |
+| Guard | Blocks one turn if a cold-cache resume would rewrite a huge context (and bill for it) |
+| `/compact` models | Prefer Haiku → Sonnet before your selected model |
+| `/sub` | Per-window: `/sub on` · `/sub off` · `/sub status` |
 
 ```text
 ◆ Opus→gpt-5.6-terra   ▓▓▓▓▓░░░ 142k   ✂ 6.8%   ◔ 3h·24% · 4d·12%   ♻ 63% cached
@@ -243,29 +241,29 @@ If `~/.claude` exists, `setup` / `update` / `ensure` wire these automatically. N
 <details>
 <summary><b>Status line details</b></summary>
 
-Claude Code [custom status line](https://code.claude.com/docs/en/statusline). The arrow shows the backend that **actually** answered (not just config), so in `sub` fallback mode it stays off while Anthropic serves and appears when a chain provider does.
+Claude Code [custom status line](https://code.claude.com/docs/en/statusline). The arrow is the backend that answered the last turn (not merely what is configured). In `sub` fallback mode it stays off while Anthropic serves and shows up when a chain provider does.
 
-- `✂` — trim for this session (`✂ –` until something is saved)
-- `◔` — Claude.ai rate-limit windows (time left · % used)
-- Context gauge — fill of the serving model's real window (green &lt;40%, orange 40–65%, red above)
-- `♻` — prompt-cache reuse; becomes `♻ cache cold` after the cache TTL
+- `✂`: trim for this session (`✂ –` until something is saved)
+- `◔`: Claude.ai rate-limit windows (time left · % used)
+- Context gauge: fill of the serving model's real window (green under 40%, orange 40-65%, red above)
+- `♻`: prompt-cache reuse; becomes `♻ cache cold` after the cache TTL
 
-Owned settings rewrite themselves when the binary path or payload changes. Opt out: leave a custom status line in place, or remove ours via power-user commands.
+Owned settings rewrite themselves when the binary path or payload changes. To opt out, leave your own status line in place, or uninstall ours (`llmtrim statusline uninstall`).
 
 </details>
 
 <details>
 <summary><b>Cold-cache guard</b></summary>
 
-Resuming a large session after the prompt-cache TTL re-writes the whole context at cache-write rates — often dollars — with no warning at the prompt.
+Resuming a large session after the prompt-cache TTL rewrites the whole context at cache-write rates (often a few dollars) with no warning at the prompt.
 
-Guard is a free `UserPromptSubmit` hook: it blocks **one** turn, prints idle time / context size / estimated cost, and lets a resend through. `/compact` pays the cold write too (it must read the full context to summarize).
+Guard is a free `UserPromptSubmit` hook. It blocks one turn, prints idle time, context size, and estimated cost, then lets a resend through. `/compact` pays that cold write too, because it has to read the full context to summarize.
 
-Opt out permanently: `llmtrim guard uninstall` (remembered by `ensure`).
+Opt out: `llmtrim guard uninstall`. `ensure` remembers that choice.
 
 ```text
 Idle 6h 19m, 347k tokens of context. The prompt cache has expired, so the next turn
-re-writes the whole context — about $3.47 before any work happens.
+rewrites the whole context (about $3.47 before any work happens).
 ```
 
 </details>
@@ -274,7 +272,7 @@ re-writes the whole context — about $3.47 before any work happens.
 <summary><b>Cheaper `/compact`</b></summary>
 
 ```bash
-llmtrim compact models haiku sonnet   # power-user; setup already sets this
+llmtrim compact models haiku sonnet   # setup already sets this by default
 llmtrim compact status
 llmtrim compact off
 ```
@@ -284,14 +282,14 @@ llmtrim compact off
 models = ["haiku", "sonnet"]
 ```
 
-Candidates are tried in order when they fit the compressed request; Claude's selected model is always the final fallback (do not list it). Empty `models = []` remembers opt-out.
+Candidates run in order when they fit the compressed request. Claude's selected model is always the last fallback (do not put it in the list). Empty `models = []` records opt-out.
 
 </details>
 
 <details>
-<summary><b>Subscription reroute (`sub`)</b> — opt-in; may conflict with provider ToS</summary>
+<summary><b>Subscription reroute (`sub`)</b> (opt-in; may conflict with provider ToS)</summary>
 
-Serve Claude Code from a ChatGPT/Codex or Kimi plan instead of (or as fallback to) Anthropic. Warning is printed at login — decide for yourself.
+Serve Claude Code from a ChatGPT/Codex or Kimi plan instead of Anthropic, or as fallback when Anthropic fails. Login prints a warning; decide for yourself.
 
 ```bash
 llmtrim sub auth codex login    # or: kimi
@@ -302,7 +300,7 @@ llmtrim sub chain codex,kimi
 llmtrim sub off
 ```
 
-**This window only** (installed with ensure; includes subagents; survives `/clear`):
+This window only (installed with ensure; includes subagents; survives `/clear`):
 
 ```text
 /sub on
@@ -377,7 +375,7 @@ llmtrim mcp install --print  # paste into any client
 }
 ```
 
-Tools: `llmtrim_compress`, `llmtrim_compress_text`, `llmtrim_stats` — same ledger as `status`.
+Tools: `llmtrim_compress`, `llmtrim_compress_text`, `llmtrim_stats` (same ledger as `status`).
 
 </details>
 
@@ -400,13 +398,13 @@ Any tool that honors `HTTPS_PROXY` and an env-provided CA:
 | Warp, Devin | ❌ | Provider call is server-side; a local proxy never sees it |
 | Cursor Agent, Kiro | ❌ | Routes through a vendor gateway, not a standard provider host |
 
-Prefer no proxy? Any MCP client (Claude Code, Cursor, custom agents) can call llmtrim directly as tools instead: run `llmtrim mcp install`, or see [CLI, MCP, or library](#use-it-as-a-cli-mcp-or-library).
+No proxy: any MCP client can call llmtrim as tools (`llmtrim mcp install`), or use the [CLI / library](#use-it-as-a-cli-mcp-or-library).
 
-Providers come from the [`llm_providers`](https://crates.io/crates/llm_providers) registry (OpenAI, Anthropic, Google, DeepSeek, Mistral, xAI, Moonshot, Zhipu, Qwen, OpenRouter, …) and update with it. Every non-LLM connection passes through untouched.
+Providers come from the [`llm_providers`](https://crates.io/crates/llm_providers) registry (OpenAI, Anthropic, Google, DeepSeek, Mistral, xAI, Moonshot, Zhipu, Qwen, OpenRouter, …) and update with it. Non-LLM connections pass through untouched.
 
 ## Configuration
 
-**Default is fine for almost everyone.** `auto` inspects each request and picks compressors by shape (tools → `agent`, code → `code`, long Q&A → `rag`, else `aggressive`).
+Default is fine for most traffic. `auto` inspects each request and picks compressors by shape (tools → `agent`, code → `code`, long Q&A → `rag`, else `aggressive`).
 
 Override with `LLMTRIM_PRESET=<name>` or `preset = "<name>"` in `$XDG_CONFIG_HOME/llmtrim/config.toml`:
 
@@ -463,7 +461,7 @@ These knobs are orthogonal to compression. Each resolves env-first, then from th
 | env var | config key | meaning |
 | --- | --- | --- |
 | `LLMTRIM_EXTRA_HOSTS` | `extra_hosts` | extra exact LLM-API hosts to intercept (comma-separated env / array in file), e.g. a self-hosted OpenAI-compatible endpoint |
-| `LLMTRIM_EXCLUDE_PROVIDERS` | `exclude_providers` | wire shapes to skip compressing — `openai` / `anthropic` / `google` (e.g. `anthropic` to leave Claude Code untouched); coarse, covers every host of that shape |
+| `LLMTRIM_EXCLUDE_PROVIDERS` | `exclude_providers` | wire shapes to skip compressing: `openai` / `anthropic` / `google` (e.g. `anthropic` to leave Claude Code untouched); coarse, covers every host of that shape |
 | `LLMTRIM_EXCLUDE_HOSTS` | `exclude_hosts` | exact hostnames to skip compressing (e.g. `openrouter.ai`); precise, leaves other hosts of the same shape compressed |
 | `LLMTRIM_UPSTREAM_PROXY` | `upstream_proxy` | route egress through another proxy (see below) |
 | `LLMTRIM_DB_PATH` | `db_path` | ledger location |
@@ -478,7 +476,7 @@ These knobs are orthogonal to compression. Each resolves env-first, then from th
 
 </details>
 
-Claude Code–specific options (compact models, subscription reroute) are documented under
+Claude Code options (compact models, subscription reroute) are under
 [Claude Code](#claude-code).
 
 <details>
@@ -491,7 +489,7 @@ export LLMTRIM_UPSTREAM_PROXY=http://host:port
 
 Outbound calls use `CONNECT` + verifying TLS; the upstream only sees the encrypted stream.
 Looping to llmtrim's own listen address is rejected. Put the variable in the **daemon's**
-launch environment (launchd / systemd), not only your interactive shell — profile secrets
+launch environment (launchd / systemd), not only your interactive shell. Profile secrets
 sit in plaintext.
 
 Companion tools on another port (e.g. [headroom](https://github.com/chopratejas/headroom)) are fine.
@@ -635,14 +633,14 @@ Built on [`tiktoken-rs`](https://crates.io/crates/tiktoken-rs), [`tree-sitter`](
 
 ```bash
 llmtrim doctor          # diagnose
-llmtrim doctor --fix     # diagnose + apply recommended repairs
-llmtrim ensure          # same repair path without the checklist
+llmtrim doctor --fix     # diagnose + apply repairs
+llmtrim ensure          # same repair path
 ```
 
-Each failing check names its fix. Captured a bad request? Set `LLMTRIM_CAPTURE_DIR` and
+Each failing check names its fix. If a request was mangled, set `LLMTRIM_CAPTURE_DIR` and
 [open an issue](https://github.com/fkiene/llmtrim/issues) with the before/after pair.
 
-If it saved you money, a ⭐ helps others find it.
+If llmtrim saved you money, a ⭐ helps others find it.
 
 ## Star history
 
