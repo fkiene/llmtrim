@@ -1,7 +1,7 @@
 //! `guard` — a Claude Code `UserPromptSubmit` hook that stops the first turn of a resumed,
 //! cold-cache, large-context session so the user sees what it costs *before* paying it.
 //!
-//! Past the prompt-cache TTL (the same 1h Claude Code asks for, [`crate::statusline::CACHE_TTL_SECS`])
+//! Past the prompt-cache TTL (the same 1h Claude Code asks for and the status line uses)
 //! a resumed session re-writes its whole context on the next request, billed at the cache-write
 //! rate. Nothing at the prompt says so. So on the first submit after a long idle gap on a big
 //! context, print the figure to stderr and exit 2 — Claude Code blocks the prompt with no API
