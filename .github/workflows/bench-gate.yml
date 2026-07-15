@@ -50,8 +50,23 @@ jobs:
       # Corpora are not vendored (license + size); fetch them fresh, like any reproduction.
       # On an HF outage this step fails and the advisory goes red - it never blocks a PR.
       - name: Download corpora (only the gated set, small N; the gate reads the first 5/corpus)
+        id: corpora
         working-directory: crates/llmtrim-cli/bench
-        run: PYTHONPATH=scripts python3 -m benchkit.data.download 10 gsm8k,hotpotqa,squad2,truthfulqa,cnn,lb_qasper,lb_multifieldqa,lb_2wikimqa,lb_gov_report,lb_multinews
+        run: |
+          corpora=gsm8k,hotpotqa,squad2,truthfulqa,cnn,lb_qasper,lb_multifieldqa,lb_2wikimqa,lb_gov_report,lb_multinews
+          for attempt in 1 2 3; do
+            PYTHONPATH=scripts python3 -m benchkit.data.download 10 "$corpora"
+            found=$(find data -maxdepth 1 -name '*.jsonl' -size +0c | wc -l)
+            if [ "$found" -eq 10 ]; then
+              echo 'available=true' >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+            echo "Corpus download attempt $attempt produced $found/10 files" >&2
+            sleep $((attempt * 15))
+          done
+          echo 'available=false' >> "$GITHUB_OUTPUT"
+          echo '::warning::Benchmark corpora are unavailable upstream; skipping this advisory run.'
       - name: Bench check (invariants + reduction vs baseline)
+        if: steps.corpora.outputs.available == 'true'
         working-directory: crates/llmtrim-cli/bench
         run: make check
