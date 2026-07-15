@@ -1435,6 +1435,11 @@ mod imp {
                 for (index, candidate) in candidates.iter().enumerate() {
                     let mut value = original.clone();
                     value["model"] = Value::String(candidate.upstream_model.clone());
+                    crate::compact::normalize_compact_thinking(
+                        &mut value,
+                        &candidate.upstream_model,
+                        max_tokens,
+                    );
                     let Ok(candidate_body) = serde_json::to_vec(&value) else {
                         continue;
                     };
@@ -1479,6 +1484,10 @@ mod imp {
                         sub: None,
                         session_id: cc_session_id.clone(),
                     });
+                    // Store the compact state so the response handler can advance to the next
+                    // candidate when this one fails (e.g. a candidate that rejects the request);
+                    // without it the raw first-candidate error is passed straight to the client.
+                    self.pending = Some(pending);
                     return Request::from_parts(parts, Body::from(json)).into();
                 }
             }
@@ -2599,6 +2608,11 @@ mod imp {
             for candidate in state.candidates.iter() {
                 let mut value: Value = serde_json::from_slice(&state.original_body).ok()?;
                 value["model"] = Value::String(candidate.upstream_model.clone());
+                crate::compact::normalize_compact_thinking(
+                    &mut value,
+                    &candidate.upstream_model,
+                    state.max_tokens,
+                );
                 let raw = serde_json::to_vec(&value).ok()?;
                 let config = self.config.clone();
                 let memo = self.memo.clone();
@@ -5376,6 +5390,60 @@ mod imp {
                 rx.try_recv().is_err(),
                 "no ledger record must be emitted from handle_request_inner alone"
             );
+        }
+
+        /// A direct-Anthropic `/compact` turn must store `pending` with its compact state (so the
+        /// response handler can advance past a failing candidate) and forward the first candidate
+        /// with the swapped-in model and its thinking reconciled — here `adaptive` downgraded to an
+        /// `enabled` budget because Haiku is reasoning-capable but rejects `adaptive`.
+        #[tokio::test]
+        async fn compact_request_sets_pending_and_reconciles_candidate_thinking() {
+            let (mut handler, _rx) = make_interceptor();
+            handler.compact_models = Arc::new(vec!["haiku".to_string()]);
+
+            let marker_text = crate::compact::MARKERS.join("\n");
+            let input_json = serde_json::json!({
+                "model": "claude-opus-4-8",
+                "stream": true,
+                "max_tokens": 64000,
+                "thinking": {"type": "adaptive"},
+                "output_config": {"effort": "low"},
+                "messages": [{"role": "user", "content": [{"type": "text", "text": marker_text}]}]
+            })
+            .to_string();
+
+            let req = post_request("https://api.anthropic.com/v1/messages", &input_json);
+            let result = handler.handle_request_inner(req).await;
+
+            let RequestOrResponse::Request(out_req) = result else {
+                panic!("compact request must be forwarded, not short-circuited");
+            };
+
+            // The fall-through fix: pending is stored with the remaining-candidate state.
+            let pending = handler
+                .pending
+                .as_ref()
+                .expect("compact request must set self.pending for candidate fall-through");
+            let compact = pending
+                .compact
+                .as_ref()
+                .expect("pending must carry compact state");
+            assert!(compact.sub.is_none(), "direct-Anthropic compact has no sub");
+            // The original model is the implicit last candidate to fall through to.
+            assert!(
+                compact
+                    .candidates
+                    .iter()
+                    .any(|c| c.upstream_model == "claude-opus-4-8"),
+                "original model must remain as a fall-through candidate"
+            );
+
+            // The forwarded body targets the swapped model with adaptive thinking downgraded.
+            let out_body = drain_body(out_req.into_body()).await;
+            let body: serde_json::Value = serde_json::from_slice(&out_body).expect("valid JSON");
+            assert_eq!(body["model"], "claude-haiku-4-5");
+            assert_eq!(body["thinking"]["type"], "enabled");
+            assert!(body["thinking"]["budget_tokens"].as_u64().unwrap() < 64_000);
         }
 
         // Test 1b: WebSocket refusal ──────────────────────────────────────────

@@ -6,11 +6,11 @@
 
 use std::collections::BTreeMap;
 
-use serde_json::Value;
+use serde_json::{Value, json};
 
 use crate::reroute::{SubProvider, resolve_model};
 
-const MARKERS: [&str; 3] = [
+pub(crate) const MARKERS: [&str; 3] = [
     "CRITICAL: Respond with TEXT ONLY. Do NOT call any tools.",
     "Your task is to create a detailed summary of the conversation so far",
     "an <analysis> block followed by a <summary> block",
@@ -136,6 +136,41 @@ pub fn fits(context_window: u64, input_tokens: i64, max_tokens: u64) -> bool {
         .is_some_and(|total| total <= context_window)
 }
 
+/// Thinking budget (tokens) substituted for `adaptive` when a compact candidate can't take the
+/// adaptive mode. Ample for a summarization turn's reasoning; clamped below the request's
+/// `max_tokens` (and above Anthropic's 1024 floor) so it's valid on every model.
+const COMPACT_THINKING_BUDGET: u64 = 8_192;
+
+/// Reconcile a compact candidate's `thinking` block with the swapped-in model. Claude Code's
+/// `/compact` uses `thinking.type = "adaptive"`, which only some models accept — the Haiku family
+/// rejects it ("adaptive thinking is not supported on this model") even though it *is*
+/// reasoning-capable. So:
+///
+/// - a reasoning-capable model keeps thinking, with `adaptive` downgraded to an explicit
+///   `enabled` budget (universally accepted);
+/// - a non-reasoning model has the block stripped entirely.
+///
+/// Only this isolated compact request is edited — the client's ordinary turns keep their thinking,
+/// so it resumes after compaction. Reasoning capability comes from the embedded models.dev flag
+/// ([`llmtrim_core::model_is_reasoning_capable`]), not a hardcoded model list. Returns `true` when
+/// the body was modified.
+pub fn normalize_compact_thinking(body: &mut Value, model: &str, max_tokens: u64) -> bool {
+    if body.pointer("/thinking/type").and_then(Value::as_str) != Some("adaptive") {
+        return false;
+    }
+    if llmtrim_core::model_is_reasoning_capable(model) {
+        // Keep thinking, but as an explicit budget every model accepts. Stay under `max_tokens`
+        // (Anthropic requires `budget_tokens < max_tokens`) and above the 1024 floor.
+        let budget = COMPACT_THINKING_BUDGET
+            .min(max_tokens.saturating_sub(1))
+            .max(1_024);
+        body["thinking"] = json!({ "type": "enabled", "budget_tokens": budget });
+    } else if let Some(obj) = body.as_object_mut() {
+        obj.remove("thinking");
+    }
+    true
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -154,6 +189,61 @@ mod tests {
 
     fn signature() -> String {
         format!("{}\n{}\n{}", MARKERS[0], MARKERS[1], MARKERS[2])
+    }
+
+    #[test]
+    fn adaptive_thinking_downgrades_to_a_budget_when_the_model_can_reason() {
+        // A reasoning-capable model keeps thinking, with `adaptive` swapped for an explicit budget
+        // (clamped below max_tokens, above the 1024 floor). The decision is the models.dev flag, not
+        // the id — this fixture just needs one model the registry marks reasoning-capable.
+        assert!(llmtrim_core::model_is_reasoning_capable("claude-haiku-4-5"));
+        let mut body = compact_body("x");
+        assert!(normalize_compact_thinking(
+            &mut body,
+            "claude-haiku-4-5",
+            64_000
+        ));
+        assert_eq!(body["thinking"]["type"], "enabled");
+        let budget = body["thinking"]["budget_tokens"].as_u64().unwrap();
+        assert!((1_024..64_000).contains(&budget), "{budget}");
+    }
+
+    #[test]
+    fn adaptive_thinking_is_stripped_when_the_model_cannot_reason() {
+        // A model the registry marks non-reasoning can't take any thinking block: strip it.
+        assert!(!llmtrim_core::model_is_reasoning_capable("gpt-4o-mini"));
+        let mut body = compact_body("x");
+        assert!(normalize_compact_thinking(&mut body, "gpt-4o-mini", 64_000));
+        assert!(body.get("thinking").is_none());
+    }
+
+    #[test]
+    fn non_adaptive_thinking_is_left_untouched() {
+        // Only `adaptive` needs reconciling; an explicit budget is already universal.
+        let mut body = json!({
+            "model": "claude-haiku-4-5",
+            "max_tokens": 64000,
+            "thinking": {"type": "enabled", "budget_tokens": 8000},
+        });
+        assert!(!normalize_compact_thinking(
+            &mut body,
+            "claude-haiku-4-5",
+            64_000
+        ));
+        assert_eq!(body["thinking"]["budget_tokens"], 8000);
+    }
+
+    #[test]
+    fn budget_is_clamped_below_a_small_max_tokens() {
+        // Defensive: if the request cap were ever tiny, the budget must stay strictly under it.
+        let mut body = compact_body("x");
+        body["max_tokens"] = json!(1500);
+        assert!(normalize_compact_thinking(
+            &mut body,
+            "claude-haiku-4-5",
+            1500
+        ));
+        assert!(body["thinking"]["budget_tokens"].as_u64().unwrap() < 1500);
     }
 
     #[test]

@@ -217,6 +217,13 @@ pub fn latest_model_for_family(family: &str) -> Option<String> {
     capability::latest_model_for_family(family)
 }
 
+/// Whether a model has a reasoning/thinking mode, per the embedded models.dev `reasoning` flag
+/// (refreshed by `tools/refresh_reasoning.py`). Opt-in: an unlisted model returns `false`. Used by
+/// the CLI's compaction reroute to decide whether a swapped-in model can keep a `thinking` block.
+pub fn model_is_reasoning_capable(model_id: &str) -> bool {
+    capability::model_is_reasoning_capable(model_id)
+}
+
 /// Pick the workload preset for a request from its structure alone (no model): tool
 /// calls → `agent`; fenced code → `code`; a long context segment alongside a question
 /// (≥2 messages) → `rag` (sentence pruning, not blanket-`aggressive`, which misfires on
