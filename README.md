@@ -300,8 +300,6 @@ llmtrim sub chain codex,kimi,grok
 llmtrim sub off
 ```
 
-Grok maps Claude tiers to `grok-4.5` (opus/sonnet/fable) and `grok-composer-2.5-fast` (haiku).
-
 This window only (installed with ensure; includes subagents; survives `/clear`):
 
 ```text
