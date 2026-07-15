@@ -16,6 +16,9 @@ const MARKERS: [&str; 3] = [
     "an <analysis> block followed by a <summary> block",
 ];
 
+/// Fallback ids for the `haiku`/`sonnet` aliases used only when the embedded models.dev snapshot
+/// has no entry for the family (see [`direct_model`]); the live value is scanned from the snapshot
+/// via [`llmtrim_core::latest_model_for_family`] so a new release doesn't need a code bump here.
 pub const DEFAULT_HAIKU: &str = "claude-haiku-4-5";
 pub const DEFAULT_SONNET: &str = "claude-sonnet-5";
 
@@ -73,10 +76,16 @@ fn collect_text(value: &Value, out: &mut String) {
     }
 }
 
+/// Resolve a `haiku`/`sonnet` family alias to the newest concrete id in the embedded models.dev
+/// snapshot, falling back to the pinned default only if the family is missing from the snapshot.
+/// Any other value is passed through as an explicit model id.
 fn direct_model(model: &str) -> String {
-    match model.trim().to_ascii_lowercase().as_str() {
-        "haiku" => DEFAULT_HAIKU.to_string(),
-        "sonnet" => DEFAULT_SONNET.to_string(),
+    let alias = model.trim().to_ascii_lowercase();
+    match alias.as_str() {
+        "haiku" => llmtrim_core::latest_model_for_family("haiku")
+            .unwrap_or_else(|| DEFAULT_HAIKU.to_string()),
+        "sonnet" => llmtrim_core::latest_model_for_family("sonnet")
+            .unwrap_or_else(|| DEFAULT_SONNET.to_string()),
         _ => model.trim().to_string(),
     }
 }

@@ -159,9 +159,62 @@ pub(crate) fn context_window_for(model_id: &str) -> Option<u32> {
     CONTEXT.get(id).copied()
 }
 
+/// Highest-versioned concrete model id for a Claude family (`haiku`, `sonnet`, `opus`, …),
+/// scanned from the embedded models.dev snapshot instead of a hand-maintained constant — same
+/// data-driven-snapshot pattern as the gates above. Keys are matched by the `claude-{family}-`
+/// prefix, dated snapshot suffixes (`-20251001`) are folded into their bare id, and the remaining
+/// dot/dash version components are compared numerically, so `sonnet` resolves to `claude-sonnet-5`
+/// over `claude-sonnet-4-6`. Returns the canonical (date-suffix-free) id, or `None` when the family
+/// is absent from the snapshot, so the caller keeps its own default.
+pub(crate) fn latest_model_for_family(family: &str) -> Option<String> {
+    let prefix = format!("claude-{}-", family.to_ascii_lowercase());
+    CONTEXT
+        .keys()
+        .filter_map(|id| {
+            let rest = id.strip_prefix(&prefix)?;
+            let mut parts: Vec<&str> = rest.split('-').collect();
+            // Drop a trailing 8-digit date snapshot so `4-5-20251001` folds into `4-5`.
+            if parts
+                .last()
+                .is_some_and(|p| p.len() == 8 && p.bytes().all(|b| b.is_ascii_digit()))
+            {
+                parts.pop();
+            }
+            // Every remaining component must be a numeric version segment (`4`, `5`); anything
+            // else (a named variant, `-thinking`) is not a base family release — skip it.
+            let version = parts
+                .iter()
+                .map(|p| p.parse::<u32>())
+                .collect::<Result<Vec<u32>, _>>()
+                .ok()?;
+            (!version.is_empty()).then(|| (version, format!("{prefix}{}", parts.join("-"))))
+        })
+        .max_by(|a, b| a.0.cmp(&b.0))
+        .map(|(_, id)| id)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn latest_family_scanned_from_snapshot_picks_highest_version() {
+        // `5` must beat `4-6`/`4-5`, and the dated `-20251001` snapshot must fold into the bare id.
+        assert_eq!(
+            latest_model_for_family("sonnet").as_deref(),
+            Some("claude-sonnet-5")
+        );
+        assert_eq!(
+            latest_model_for_family("haiku").as_deref(),
+            Some("claude-haiku-4-5")
+        );
+        assert_eq!(
+            latest_model_for_family("opus").as_deref(),
+            Some("claude-opus-4-8")
+        );
+        // An unknown family is a miss, so the caller keeps its own default.
+        assert_eq!(latest_model_for_family("nonesuch"), None);
+    }
 
     #[test]
     fn weak_models_are_below_the_bar() {
