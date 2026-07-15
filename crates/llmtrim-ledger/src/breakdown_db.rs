@@ -127,11 +127,11 @@ impl BreakdownDb {
                             fresh_input, cache_read, cache_write, output_tok,
                             bill_micros, input_before, input_after, sub_provider, model,
                             ROW_NUMBER() OVER (
-                                PARTITION BY session_id, agent, project
+                                PARTITION BY session_id, cc_session_id, agent, project
                                 ORDER BY (session_name IS NOT NULL) DESC, id DESC
                             ) AS rn,
                             ROW_NUMBER() OVER (
-                                PARTITION BY session_id, agent, project
+                                PARTITION BY session_id, cc_session_id, agent, project
                                 ORDER BY id DESC
                             ) AS recent
                      FROM breakdown_turns
@@ -146,7 +146,7 @@ impl BreakdownDb {
                         COALESCE(SUM(input_before), 0),
                         COALESCE(SUM(input_after), 0),
                         MAX(ts),
-                        MAX(cc_session_id),
+                        cc_session_id,
                         MAX(CASE WHEN recent = 1 THEN sub_provider END),
                         MAX(CASE WHEN recent = 1 THEN model END),
                         COALESCE(MAX(CASE WHEN recent = 1 THEN cache_read END), 0),
@@ -155,7 +155,7 @@ impl BreakdownDb {
                             0
                         )
                  FROM ranked
-                 GROUP BY session_id, agent, project
+                 GROUP BY session_id, cc_session_id, agent, project
                  ORDER BY MAX(ts) DESC",
             )
             .context("failed to prepare sessions query")?;
@@ -382,6 +382,45 @@ mod tests {
             rows[0].cc_session_id.as_deref(),
             Some("968ad7ea-6e4a-430e-a708-4eda80c8b858")
         );
+    }
+
+    #[test]
+    fn sessions_keep_claude_code_windows_separate() {
+        let tracker = Tracker::open_in_memory().unwrap();
+        let mut first = turn("shared-prompt-hash");
+        first.cc_session_id = Some("window-a".to_string());
+        first.fresh_input = 12_000;
+        first.cache_read = 30_000;
+        first.cache_write = 0;
+        tracker
+            .record_breakdown(
+                &first,
+                &[block("Static", "System prompt", None, 12_000.0, 30_000.0)],
+            )
+            .unwrap();
+
+        let mut second = turn("shared-prompt-hash");
+        second.cc_session_id = Some("window-b".to_string());
+        second.fresh_input = 3_000;
+        second.cache_read = 240_000;
+        second.cache_write = 0;
+        tracker
+            .record_breakdown(
+                &second,
+                &[block("Static", "System prompt", None, 3_000.0, 240_000.0)],
+            )
+            .unwrap();
+
+        let db = BreakdownDb::from_connection(tracker.into_connection());
+        let rows = db.sessions().unwrap();
+        assert_eq!(rows.len(), 2);
+        let tokens_for = |id: &str| {
+            rows.iter()
+                .find(|row| row.cc_session_id.as_deref() == Some(id))
+                .map(|row| row.last_input_tokens)
+        };
+        assert_eq!(tokens_for("window-a"), Some(42_000));
+        assert_eq!(tokens_for("window-b"), Some(243_000));
     }
 
     #[test]
