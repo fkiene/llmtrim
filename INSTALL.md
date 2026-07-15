@@ -1,149 +1,171 @@
 # Installing llmtrim
 
-## Quick install (Linux / macOS)
+Three verbs cover the whole lifecycle:
+
+| You want… | Run |
+|---|---|
+| **First install** | install the binary, then `llmtrim setup` |
+| **New version** | `llmtrim update` (then `llmtrim ensure` on package-manager channels) |
+| **Something feels off** | `llmtrim ensure` · or `llmtrim doctor --fix` |
+
+Most people only need **Get the binary** + **Bootstrap** below.
+
+---
+
+## Get the binary
+
+### npm (recommended)
+
+```bash
+npm install -g @llmtrim/cli@latest && llmtrim setup
+```
+
+Prebuilt binary for your platform — no Rust. Prefer the global install over `npx` for
+`setup`: the daemon and autostart need a path that survives `npm cache clean`.
+
+### curl (Linux / macOS)
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/fkiene/llmtrim/main/install.sh | sh
 ```
 
-Downloads the latest release binary for your platform into `~/.local/bin`. Override with:
+Installs into `~/.local/bin` and runs `setup` for you. Overrides:
 
 ```bash
-LLMTRIM_INSTALL_DIR=/usr/local/bin LLMTRIM_VERSION=v0.1.0 \
+LLMTRIM_INSTALL_DIR=/usr/local/bin LLMTRIM_VERSION=v0.10.2 \
   curl -fsSL https://raw.githubusercontent.com/fkiene/llmtrim/main/install.sh | sh
 ```
 
-If `~/.local/bin` isn't on your `PATH`:
+If `~/.local/bin` is not on your `PATH`:
 
 ```bash
 export PATH="$HOME/.local/bin:$PATH"   # add to ~/.bashrc or ~/.zshrc
 ```
 
-## Quick install (Windows)
+### PowerShell (Windows)
 
 ```powershell
 irm https://raw.githubusercontent.com/fkiene/llmtrim/main/install.ps1 | iex
 ```
 
-Downloads the latest release binary into `%LOCALAPPDATA%\llmtrim\bin` and adds it to your
-user `PATH`. Override with:
+Binary lands in `%LOCALAPPDATA%\llmtrim\bin` (user `PATH` updated). Overrides:
 
 ```powershell
-$env:LLMTRIM_VERSION = "v0.1.0"    # pin a release
-$env:LLMTRIM_NO_SETUP = "1"        # install the binary only, skip `setup`
+$env:LLMTRIM_VERSION = "v0.10.2"   # pin a release
+$env:LLMTRIM_NO_SETUP = "1"        # binary only; run setup yourself later
 irm https://raw.githubusercontent.com/fkiene/llmtrim/main/install.ps1 | iex
 ```
 
-Open a new PowerShell window afterward so the `PATH` and profile env apply. Prebuilt binaries
-ship for both x64 and ARM64. WSL users: use the Linux line above.
+Open a new PowerShell window so `PATH` and env apply. x64 and ARM64 ship; WSL uses the Linux line.
 
-## Homebrew (macOS / Linux)
+### Other channels
 
 ```bash
 brew install fkiene/tap/llmtrim
-# or, from this repo's formula:
-brew install --build-from-source ./Formula/llmtrim.rb
+cargo binstall llmtrim                 # or: cargo install --locked llmtrim
+scoop bucket add llmtrim https://github.com/fkiene/scoop-bucket && scoop install llmtrim
 ```
 
-## With npm
+Homebrew from this repo: `brew install --build-from-source ./Formula/llmtrim.rb`.
 
-```bash
-npm install -g @llmtrim/cli@latest && llmtrim setup   # prebuilt binary for your platform (no Rust needed)
-```
-
-`npx @llmtrim/cli compress < req.json` works for trying it without installing, but use the
-global install for `setup`: the daemon and autostart need a binary that survives
-`npm cache clean`, which the npx cache does not.
-
-## With Cargo
-
-```bash
-cargo binstall llmtrim     # prebuilt binary (needs cargo-binstall; seconds)
-cargo install --locked llmtrim   # or compile from crates.io
-```
-
-## Scoop (Windows)
-
-```powershell
-scoop bucket add llmtrim https://github.com/fkiene/scoop-bucket
-scoop install llmtrim
-```
-
-## Docker
-
-For containers and CI: runs the proxy with the state on a volume:
+### Docker
 
 ```bash
 docker run -d --name llmtrim -p 43117:43117 -v llmtrim-state:/data ghcr.io/fkiene/llmtrim
-# wire your shell to it (CA comes out of the container, no manual file hunting):
 docker run --rm -v llmtrim-state:/data ghcr.io/fkiene/llmtrim ca --pem > ~/.llmtrim-ca.pem
 export HTTPS_PROXY=http://localhost:43117 NODE_EXTRA_CA_CERTS=~/.llmtrim-ca.pem
 ```
 
-The image binds `0.0.0.0` inside the container (set `LLMTRIM_BIND` to change). The two
-`export`s are the whole client side; put them in your shell profile or your CI job env.
+Image binds `0.0.0.0` inside the container (`LLMTRIM_BIND` to change). Put the two
+`export`s in the job or shell that should route through the proxy.
 
-## From source
+### From source
 
 ```bash
 git clone https://github.com/fkiene/llmtrim
 cd llmtrim
-cargo build --release
-# binary at target/release/llmtrim
+cargo build --release                  # target/release/llmtrim
 cargo install --path . --locked
 ```
 
-Requires Rust 1.88+ (edition 2024). `rusqlite` is bundled (no system SQLite needed) and pinned at 0.39: 0.40+ pulls `libsqlite3-sys` 0.38, whose build script needs the still-unstable `cfg_select` ([rust#115585](https://github.com/rust-lang/rust/issues/115585)) and won't build on stable.
+Rust 1.88+ (edition 2024). `rusqlite` is bundled (no system SQLite) and pinned at 0.39:
+0.40+ pulls `libsqlite3-sys` 0.38, which needs unstable `cfg_select`
+([rust#115585](https://github.com/rust-lang/rust/issues/115585)) and will not build on stable.
 
-## Verify
+---
+
+## Bootstrap (after the binary is on PATH)
+
+The curl / npm installers run this for you. After Cargo, Homebrew, Scoop, source, or
+`LLMTRIM_NO_SETUP=1`, run it yourself:
+
+```bash
+llmtrim setup      # CA + shell env + autostart + Claude Code integrations + daemon
+llmtrim status     # live savings dashboard
+```
+
+Open a **new** terminal so tools inherit `HTTPS_PROXY`. Re-running `setup` is safe
+(idempotent).
+
+When Claude Code is present (`~/.claude`), `setup` also enables:
+
+- status line  
+- cold-cache guard  
+- window-local `/sub`  
+- cheaper `/compact` model chain  
+
+No separate install checklist. Later upgrades refresh these via `update` / `ensure`.
+
+llmtrim is a local MITM proxy (plus optional Claude Code hooks).  
+`llmtrim uninstall` reverses it. How traffic reaches tools: [README](README.md#what-it-does).
+
+### Verify
 
 ```bash
 llmtrim --version
 llmtrim --help
+llmtrim doctor          # end-to-end; doctor --fix applies repairs
 ```
 
-## Next: bootstrap the interceptor
-
-The `curl | sh` installer runs this for you. If you built from source or skipped it
-(`LLMTRIM_NO_SETUP=1`), run it yourself:
-
-```bash
-llmtrim setup     # CA + HTTPS_PROXY/NODE_EXTRA_CA_CERTS in your shell profile + autostart + start
-llmtrim status    # live savings dashboard
-```
-
-llmtrim is purely a MITM proxy; it configures your **environment** (no IDE settings).
-See [the README](README.md#how-it-reaches-your-tools) for how it reaches your tools.
+---
 
 ## Update
 
-One command, channel-aware: it detects how llmtrim was installed and **restarts the daemon
-onto the new binary** (a binary swap alone leaves the old version running):
+One command when possible — new binary, daemon restart, integration refresh. No
+per-feature reinstall notes.
 
 ```bash
 llmtrim update
 ```
 
-- **Binary** (`curl | sh`): re-runs the installer to fetch the latest release, then restarts.
-- **Cargo / Homebrew**: prints the right command (`cargo install --locked llmtrim --force` /
-  `brew upgrade fkiene/tap/llmtrim`), then run `llmtrim start --force` to restart the daemon on it.
+| Channel | What happens |
+|---|---|
+| **Binary** (`curl \| sh`) | Re-runs the installer, restarts the daemon, runs `ensure` |
+| **npm / Homebrew / Cargo** | Prints the package command; then run `llmtrim ensure` (or press **`f`** in `status`) |
 
-`status` shows a one-line notice when a newer release exists (checked at most once a day,
-cached; set `LLMTRIM_NO_UPDATE_CHECK=1` to disable, and it's skipped offline). Pin a version
-in production and update promptly; security fixes land on the latest release (see SECURITY.md).
+`status` shows a one-line notice when a newer release exists (cached ≤ once/day;
+`LLMTRIM_NO_UPDATE_CHECK=1` to disable; skipped offline). Pin versions in production;
+security fixes land on the latest release ([SECURITY.md](SECURITY.md)).
+
+Incomplete after an upgrade?
+
+```bash
+llmtrim ensure
+llmtrim doctor --fix
+```
+
+---
 
 ## Uninstall
 
-One command, fully transparent: the exact inverse of `setup`:
+Exact inverse of `setup`:
 
 ```bash
-llmtrim uninstall            # stop daemon, disable autostart, strip env block, remove CA + state + binary
-llmtrim uninstall --purge    # also delete the savings ledger
+llmtrim uninstall              # stop daemon, disable autostart, strip env, remove CA + state + binary
+llmtrim uninstall --purge      # also delete the savings ledger
 llmtrim uninstall --keep-binary
 ```
 
-Installed via a package manager? Run `llmtrim uninstall` **first** (it undoes `setup`;
-removing the package alone leaves `HTTPS_PROXY` pointing at a dead proxy and breaks your
-LLM tools), then remove the binary with your manager. `uninstall` detects the channel
-and prints the exact command (`npm uninstall -g @llmtrim/cli` / `cargo uninstall llmtrim` /
-`brew uninstall llmtrim`).
+**Package managers:** run `llmtrim uninstall` **first**. Removing only the package leaves
+`HTTPS_PROXY` pointing at a dead proxy. `uninstall` detects the channel and prints the
+follow-up (`npm uninstall -g @llmtrim/cli` / `cargo uninstall llmtrim` / `brew uninstall llmtrim`).
