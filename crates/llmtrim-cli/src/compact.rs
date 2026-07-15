@@ -17,7 +17,7 @@ const MARKERS: [&str; 3] = [
 ];
 
 /// Fallback ids for the `haiku`/`sonnet` aliases used only when the embedded models.dev snapshot
-/// has no entry for the family (see [`direct_model`]); the live value is scanned from the snapshot
+/// has no entry for the family (see `direct_model`); the live value is scanned from the snapshot
 /// via [`llmtrim_core::latest_model_for_family`] so a new release doesn't need a code bump here.
 pub const DEFAULT_HAIKU: &str = "claude-haiku-4-5";
 pub const DEFAULT_SONNET: &str = "claude-sonnet-5";
