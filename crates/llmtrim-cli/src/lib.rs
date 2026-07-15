@@ -29,4 +29,5 @@ pub mod transport;
 pub mod tray;
 pub mod ui;
 pub mod update;
+pub mod window_sub;
 pub mod wrap;

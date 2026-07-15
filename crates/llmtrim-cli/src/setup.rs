@@ -567,6 +567,30 @@ pub fn run(requested: Option<u16>, force: bool) -> Result<()> {
             ));
         }
     }
+    // Window-local /sub is safe to install automatically: it only adds owned hooks and a skill;
+    // it neither edits global reroute configuration nor restarts the daemon.
+    if crate::statusline::claude_code_present() {
+        match std::env::current_exe()
+            .ok()
+            .map(|p| crate::window_sub::install(&p.display().to_string()))
+        {
+            Some(Ok(())) => rows.push((
+                ui::OK,
+                "Window /sub".into(),
+                "installed Claude Code window-local controls".into(),
+            )),
+            Some(Err(e)) => rows.push((
+                ui::WARN,
+                "Window /sub".into(),
+                format!("not installed: {e}"),
+            )),
+            None => rows.push((
+                ui::WARN,
+                "Window /sub".into(),
+                "could not resolve llmtrim binary".into(),
+            )),
+        }
+    }
 
     // 4. Reconcile the interceptor. If a healthy daemon is already serving the resolved port,
     //    leave it running — re-running `setup` must not drop in-flight requests (the old code
@@ -877,7 +901,17 @@ pub fn uninstall(purge: bool, keep_binary: bool) -> Result<()> {
         )),
     }
 
-    // 2c. Unwire the Claude Code guard hook, leaving the user's other hooks in place.
+    // 2c. Remove only llmtrim-owned Claude window /sub hooks and skill.
+    match crate::window_sub::uninstall() {
+        Ok(()) => rows.push((
+            ui::OK,
+            "Window /sub".into(),
+            "removed owned Claude Code integration".into(),
+        )),
+        Err(e) => rows.push((ui::WARN, "Window /sub".into(), format!("not removed: {e}"))),
+    }
+
+    // 2d. Unwire the Claude Code guard hook, leaving the user's other hooks in place.
     match crate::guard::unwire() {
         Ok(true) => rows.push((
             ui::OK,

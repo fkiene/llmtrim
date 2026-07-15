@@ -253,7 +253,13 @@ fn proxy_health() -> Health {
 
 fn ledger_snapshot(cc: &CcInput) -> Led {
     let cfg = llmtrim_core::config::RuntimeConfig::get();
-    let configured = cfg.sub.clone().filter(|s| !s.is_empty() && s != "off");
+    let global = cfg.sub.clone().filter(|s| !s.is_empty() && s != "off");
+    let window_intent = crate::window_sub::lookup(cc.session_id.as_deref());
+    let configured = match &window_intent {
+        Some(crate::window_sub::Intent::Enabled { provider }) => Some(provider.clone()),
+        Some(crate::window_sub::Intent::Disabled) => None,
+        None => global,
+    };
     let health = proxy_health();
 
     // One session-row read serves both trim and cache-cold. Match on `cc_session_id` — the real
@@ -274,24 +280,28 @@ fn ledger_snapshot(cc: &CcInput) -> Led {
     let ledger_cold = row.as_ref().is_some_and(|r| cache_cold(&r.last_ts));
     let cache_cold = effective_cache_cold(cc, ledger_cold);
 
-    let (reroute, reroute_window, resolved_model) =
-        match arrow_source(configured.as_deref(), cfg.sub_fallback, row.as_ref()) {
-            // Truth: the backend that answered the last turn, and the model recorded on it.
-            ArrowSource::Served { provider, model } => {
-                let window = model.as_deref().and_then(upstream_window);
-                // Kimi collapses every tier to one internal wire id, which tells the user nothing
-                // the provider shortname doesn't — so the arrow keeps the shortname there.
-                let shown = model.filter(|_| provider != "kimi");
-                (Some(provider), window, shown)
-            }
-            // Prediction (always mode, no turn yet): resolve from the configured tier mapping.
-            ArrowSource::Predicted(provider) => (
-                Some(provider.clone()),
-                reroute_real_window(&provider, &cc.model_id, &cfg.sub_tiers),
-                reroute_resolved_model(&provider, &cc.model_id, &cfg.sub_tiers),
-            ),
-            ArrowSource::None => (None, None, None),
-        };
+    let arrow = if matches!(window_intent, Some(crate::window_sub::Intent::Disabled)) {
+        ArrowSource::None
+    } else {
+        arrow_source(configured.as_deref(), cfg.sub_fallback, row.as_ref())
+    };
+    let (reroute, reroute_window, resolved_model) = match arrow {
+        // Truth: the backend that answered the last turn, and the model recorded on it.
+        ArrowSource::Served { provider, model } => {
+            let window = model.as_deref().and_then(upstream_window);
+            // Kimi collapses every tier to one internal wire id, which tells the user nothing
+            // the provider shortname doesn't — so the arrow keeps the shortname there.
+            let shown = model.filter(|_| provider != "kimi");
+            (Some(provider), window, shown)
+        }
+        // Prediction (always mode, no turn yet): resolve from the configured tier mapping.
+        ArrowSource::Predicted(provider) => (
+            Some(provider.clone()),
+            reroute_real_window(&provider, &cc.model_id, &cfg.sub_tiers),
+            reroute_resolved_model(&provider, &cc.model_id, &cfg.sub_tiers),
+        ),
+        ArrowSource::None => (None, None, None),
+    };
 
     Led {
         health,

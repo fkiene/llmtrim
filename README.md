@@ -496,6 +496,22 @@ automatically. `llmtrim sub setup codex` opens an interactive editor to change w
 each Claude tier (opus / sonnet / haiku / fable) maps to; `llmtrim sub status` shows the
 current mapping; `llmtrim sub off` disables rerouting and sends traffic back to Anthropic.
 
+`llmtrim setup` also installs a user-wide Claude Code command for changing only the current
+Claude Code window:
+
+```text
+/sub on
+/sub off
+/sub status
+```
+
+The window override includes its subagents and survives `/clear` and compaction. It does not affect
+other open windows or newly started Claude Code processes. A resumed or forked conversation starts
+with a fresh window policy; `/exit` removes the override, while an uncleanly terminated window
+expires after 30 minutes. `/sub off` forces Anthropic with compression for that window, even when
+the global reroute policy uses `always` or `fallback`. Run `llmtrim window-sub install` or
+`llmtrim window-sub uninstall` explicitly to manage the Claude Code integration.
+
 By default a set provider reroutes every turn. To use subscriptions only as a backup, switch to
 fallback mode: `llmtrim sub mode fallback` forwards to Anthropic as usual and tries the configured
 provider chain when Anthropic hits a quota, overload, transient server error, or transport failure.

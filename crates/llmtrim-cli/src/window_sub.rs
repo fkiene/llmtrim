@@ -1,0 +1,483 @@
+//! Private, per-Claude-Code-window subscription overrides.
+//!
+//! This deliberately lives outside the global llmtrim config: a slash command must not
+//! restart the proxy or alter another Claude Code window.
+use std::collections::BTreeMap;
+use std::fs::{self, OpenOptions};
+use std::io::{Read, Write};
+use std::path::{Path, PathBuf};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+use anyhow::{Context, Result, bail};
+use serde::{Deserialize, Serialize};
+
+const TTL: Duration = Duration::from_secs(30 * 60);
+const TOUCH: Duration = Duration::from_secs(60);
+const COMMAND_NAME: &str = "sub";
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+struct Registry {
+    #[serde(default)]
+    windows: BTreeMap<String, Window>,
+    #[serde(default)]
+    sessions: BTreeMap<String, String>,
+}
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct Window {
+    /// `None` follows the global policy; a value is this window's explicit override.
+    intent: Option<Intent>,
+    touched: u64,
+    #[serde(default)]
+    last_provider: Option<String>,
+}
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum Intent {
+    Enabled { provider: String },
+    Disabled,
+}
+
+fn now() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
+}
+fn valid(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 160
+        && value
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.'))
+        && !value.contains("..")
+}
+fn valid_provider(value: &str) -> bool {
+    matches!(value, "codex" | "kimi")
+}
+
+pub fn registry_path() -> Result<PathBuf> {
+    Ok(crate::daemon::home_dir()?.join("claude-window-sub.json"))
+}
+struct RegistryLock(PathBuf);
+
+impl Drop for RegistryLock {
+    fn drop(&mut self) {
+        let _ = fs::remove_file(&self.0);
+    }
+}
+
+fn lock_registry(path: &Path) -> Result<RegistryLock> {
+    let lock = path.with_extension("lock");
+    if let Some(parent) = lock.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    for _ in 0..200 {
+        match OpenOptions::new().write(true).create_new(true).open(&lock) {
+            Ok(_) => return Ok(RegistryLock(lock)),
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                let stale = fs::metadata(&lock)
+                    .and_then(|m| m.modified())
+                    .ok()
+                    .and_then(|t| t.elapsed().ok())
+                    .is_some_and(|age| age > Duration::from_secs(30));
+                if stale {
+                    let _ = fs::remove_file(&lock);
+                } else {
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+            }
+            Err(e) => return Err(e).context("creating window registry lock"),
+        }
+    }
+    bail!("timed out waiting for window registry lock")
+}
+
+fn load_at(path: &Path) -> Result<Registry> {
+    if !path.exists() {
+        return Ok(Registry::default());
+    }
+    if fs::symlink_metadata(path)?.file_type().is_symlink() {
+        bail!("refusing symlinked window registry");
+    }
+    let mut raw = String::new();
+    fs::File::open(path)?.read_to_string(&mut raw)?;
+    serde_json::from_str(&raw).context("corrupt window registry")
+}
+fn replace_file(tmp: &Path, destination: &Path) -> Result<()> {
+    #[cfg(windows)]
+    if destination.exists() {
+        fs::remove_file(destination)?;
+    }
+    fs::rename(tmp, destination)?;
+    Ok(())
+}
+
+fn save_at(path: &Path, registry: &Registry) -> Result<()> {
+    let parent = path.parent().context("registry has no parent")?;
+    fs::create_dir_all(parent)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(parent, fs::Permissions::from_mode(0o700))?;
+    }
+    let tmp = path.with_extension("json.tmp");
+    if tmp.exists() && fs::symlink_metadata(&tmp)?.file_type().is_symlink() {
+        bail!("refusing symlinked registry temp file");
+    }
+    let bytes = serde_json::to_vec_pretty(registry)?;
+    let mut file = OpenOptions::new()
+        .create(true)
+        .write(true)
+        .truncate(true)
+        .open(&tmp)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        file.set_permissions(fs::Permissions::from_mode(0o600))?;
+    }
+    file.write_all(&bytes)?;
+    file.sync_all()?;
+    replace_file(&tmp, path)?;
+    Ok(())
+}
+fn prune(registry: &mut Registry, current: u64) {
+    registry
+        .windows
+        .retain(|_, w| current.saturating_sub(w.touched) <= TTL.as_secs());
+    registry
+        .sessions
+        .retain(|_, t| registry.windows.contains_key(t));
+}
+fn token() -> String {
+    let mut b = [0u8; 24];
+    if let Ok(mut f) = fs::File::open("/dev/urandom") {
+        let _ = f.read_exact(&mut b);
+    }
+    if b.iter().all(|x| *x == 0) {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static COUNTER: AtomicU64 = AtomicU64::new(0);
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        let seed = nanos
+            ^ ((std::process::id() as u128) << 64)
+            ^ COUNTER.fetch_add(1, Ordering::Relaxed) as u128;
+        for (i, x) in b.iter_mut().enumerate() {
+            *x = seed.rotate_left((i * 7 % 128) as u32) as u8 ^ (i as u8).wrapping_mul(29);
+        }
+    }
+    b.iter().map(|x| format!("{x:02x}")).collect()
+}
+/// Register a fresh startup/resume window, or retain its token across clear/compact.
+pub fn session_start(session: &str, source: &str, existing: Option<&str>) -> Result<String> {
+    if !valid(session) {
+        bail!("invalid Claude session id");
+    }
+    let path = registry_path()?;
+    let _lock = lock_registry(&path)?;
+    let mut r = load_at(&path)?;
+    let t = now();
+    prune(&mut r, t);
+    let token = if matches!(source, "clear" | "compact") {
+        existing
+            .filter(|x| valid(x) && r.windows.contains_key(*x))
+            .map(str::to_owned)
+            .unwrap_or_else(token)
+    } else {
+        token()
+    };
+    r.windows
+        .entry(token.clone())
+        .or_insert(Window {
+            intent: None,
+            touched: t,
+            last_provider: None,
+        })
+        .touched = t;
+    r.sessions.insert(session.to_owned(), token.clone());
+    save_at(&path, &r)?;
+    Ok(token)
+}
+pub fn session_end(session: &str, reason: &str) -> Result<()> {
+    if !valid(session) {
+        return Ok(());
+    }
+    let path = registry_path()?;
+    let _lock = lock_registry(&path)?;
+    let mut r = load_at(&path)?;
+    if let Some(token) = r.sessions.remove(session)
+        && reason != "clear"
+    {
+        r.windows.remove(&token);
+        r.sessions.retain(|_, mapped| mapped != &token);
+    }
+    prune(&mut r, now());
+    save_at(&path, &r)
+}
+pub fn set(session: &str, enabled: bool, provider: Option<&str>) -> Result<()> {
+    if !valid(session) {
+        bail!("invalid Claude session id");
+    }
+    let path = registry_path()?;
+    let _lock = lock_registry(&path)?;
+    let mut r = load_at(&path)?;
+    prune(&mut r, now());
+    let t = r
+        .sessions
+        .get(session)
+        .cloned()
+        .context("this Claude Code window is not registered; restart or resume it first")?;
+    let w = r
+        .windows
+        .get_mut(&t)
+        .context("window expired; restart or resume it first")?;
+    w.touched = now();
+    if enabled {
+        let p = provider
+            .map(str::to_owned)
+            .or_else(|| w.last_provider.clone())
+            .context(
+                "no configured subscription provider; run llmtrim sub on codex or kimi first",
+            )?;
+        if !valid_provider(&p) {
+            bail!("unsupported subscription provider");
+        }
+        w.last_provider = Some(p.clone());
+        w.intent = Some(Intent::Enabled { provider: p });
+    } else {
+        w.intent = Some(Intent::Disabled);
+    }
+    save_at(&path, &r)
+}
+/// Read intent by inbound Claude session ID. Corruption deliberately falls back to global policy.
+pub fn lookup(session: Option<&str>) -> Option<Intent> {
+    let session = session.filter(|s| valid(s))?;
+    let path = registry_path().ok()?;
+    let _lock = lock_registry(&path).ok()?;
+    let mut r = load_at(&path).ok()?;
+    let token = r.sessions.get(session)?.clone();
+    let window = r.windows.get_mut(&token)?;
+    let current = now();
+    if current.saturating_sub(window.touched) > TTL.as_secs() {
+        r.windows.remove(&token);
+        r.sessions.retain(|_, mapped| mapped != &token);
+        let _ = save_at(&path, &r);
+        return None;
+    }
+    let intent = window.intent.clone();
+    if current.saturating_sub(window.touched) >= TOUCH.as_secs() {
+        window.touched = current;
+        let _ = save_at(&path, &r);
+    }
+    intent
+}
+pub fn status(session: &str) -> Result<Option<Intent>> {
+    Ok(lookup(Some(session)))
+}
+
+#[cfg(unix)]
+fn quoted_exe(exe: &str) -> String {
+    format!("'{}'", exe.replace('\'', "'\"'\"'"))
+}
+
+#[cfg(windows)]
+fn quoted_exe(exe: &str) -> String {
+    format!("\"{}\"", exe.replace('"', "\"\""))
+}
+
+#[cfg(not(any(unix, windows)))]
+fn quoted_exe(exe: &str) -> String {
+    exe.to_string()
+}
+
+pub fn command_markdown(exe: &str) -> String {
+    let exe = quoted_exe(exe);
+    format!(
+        "---\ndescription: Toggle llmtrim subscription rerouting for this Claude Code window only.\ndisable-model-invocation: true\nargument-hint: \"on|off|status\"\n---\n\n<!-- llmtrim-owned-window-sub -->\n!`{exe} window-sub slash \"$ARGUMENTS\" \"$CLAUDE_CODE_SESSION_ID\"`\n"
+    )
+}
+fn settings_path() -> Result<PathBuf> {
+    let h = std::env::var_os("CLAUDE_CONFIG_DIR")
+        .map(PathBuf::from)
+        .or_else(|| {
+            std::env::var_os("HOME")
+                .or_else(|| std::env::var_os("USERPROFILE"))
+                .map(|x| PathBuf::from(x).join(".claude"))
+        })
+        .context("could not determine Claude config directory")?;
+    Ok(h.join("settings.json"))
+}
+const HOOK_MARKER: &str = "# llmtrim-owned-window-sub-hook";
+
+fn owned(v: &serde_json::Value) -> bool {
+    v.get("command")
+        .and_then(serde_json::Value::as_str)
+        .is_some_and(|command| command.trim_end().ends_with(HOOK_MARKER))
+}
+
+fn remove_owned_hooks(groups: &mut Vec<serde_json::Value>) {
+    for group in groups.iter_mut() {
+        if let Some(hooks) = group
+            .get_mut("hooks")
+            .and_then(serde_json::Value::as_array_mut)
+        {
+            hooks.retain(|hook| !owned(hook));
+        }
+    }
+    groups.retain(|group| {
+        group
+            .get("hooks")
+            .and_then(serde_json::Value::as_array)
+            .is_none_or(|hooks| !hooks.is_empty())
+    });
+}
+pub fn install(exe: &str) -> Result<()> {
+    let hook_exe = quoted_exe(exe);
+    let p = settings_path()?;
+    let skill = p
+        .parent()
+        .context("settings has no parent")?
+        .join("skills")
+        .join(COMMAND_NAME);
+    let skill_file = skill.join("SKILL.md");
+    if skill_file.exists()
+        && !fs::read_to_string(&skill_file)
+            .unwrap_or_default()
+            .contains("llmtrim-owned-window-sub")
+    {
+        bail!(
+            "{} already exists and is not owned by llmtrim",
+            skill_file.display()
+        );
+    }
+    let mut root = if p.exists() {
+        serde_json::from_str(&fs::read_to_string(&p)?)?
+    } else {
+        serde_json::json!({})
+    };
+    let obj = root
+        .as_object_mut()
+        .context("Claude settings root must be an object")?;
+    let hooks = obj
+        .entry("hooks")
+        .or_insert_with(|| serde_json::json!({}))
+        .as_object_mut()
+        .context("Claude hooks must be an object")?;
+    for (event, command) in [
+        (
+            "SessionStart",
+            format!("{hook_exe} window-sub hook-start {HOOK_MARKER}"),
+        ),
+        (
+            "SessionEnd",
+            format!("{hook_exe} window-sub hook-end {HOOK_MARKER}"),
+        ),
+    ] {
+        let arr = hooks
+            .entry(event)
+            .or_insert_with(|| serde_json::json!([]))
+            .as_array_mut()
+            .context("Claude hook event must be an array")?;
+        remove_owned_hooks(arr);
+        arr.push(serde_json::json!({"hooks":[{"type":"command","command":command,"timeout":10}]}));
+    }
+    let dir = p.parent().context("settings has no parent")?;
+    fs::create_dir_all(dir)?;
+    let tmp = p.with_extension("json.tmp");
+    fs::write(&tmp, serde_json::to_vec_pretty(&root)?)?;
+    replace_file(&tmp, &p)?;
+    fs::create_dir_all(&skill)?;
+    fs::write(skill_file, command_markdown(exe))?;
+    Ok(())
+}
+pub fn uninstall() -> Result<()> {
+    let p = settings_path()?;
+    if p.exists() {
+        let mut r: serde_json::Value = serde_json::from_str(&fs::read_to_string(&p)?)?;
+        if let Some(h) = r
+            .get_mut("hooks")
+            .and_then(serde_json::Value::as_object_mut)
+        {
+            for e in ["SessionStart", "SessionEnd"] {
+                if let Some(groups) = h.get_mut(e).and_then(serde_json::Value::as_array_mut) {
+                    remove_owned_hooks(groups);
+                }
+            }
+        }
+        fs::write(&p, serde_json::to_vec_pretty(&r)?)?;
+    }
+    let skill = settings_path()?
+        .parent()
+        .unwrap()
+        .join("skills")
+        .join(COMMAND_NAME);
+    let skill_file = skill.join("SKILL.md");
+    if fs::read_to_string(&skill_file)
+        .unwrap_or_default()
+        .contains("llmtrim-owned-window-sub")
+    {
+        fs::remove_file(skill_file)?;
+        if fs::read_dir(&skill)?.next().is_none() {
+            fs::remove_dir(skill)?;
+        }
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn rejects_traversal_and_accepts_opaque_ids() {
+        assert!(valid("01abc_DEF-9"));
+        assert!(!valid("../escape"));
+        assert!(!valid("bad/slash"));
+    }
+
+    #[test]
+    fn registry_prunes_expired_window_and_session() {
+        let mut r = Registry::default();
+        r.windows.insert(
+            "token".into(),
+            Window {
+                intent: None,
+                touched: 1,
+                last_provider: None,
+            },
+        );
+        r.sessions.insert("session".into(), "token".into());
+        prune(&mut r, TTL.as_secs() + 2);
+        assert!(r.windows.is_empty());
+        assert!(r.sessions.is_empty());
+    }
+
+    #[test]
+    fn skill_uses_session_environment_without_exposing_it() {
+        let text = command_markdown("llmtrim");
+        assert!(text.contains("CLAUDE_CODE_SESSION_ID"));
+        assert!(!text.contains("LLMTRIM_CLAUDE_WINDOW_TOKEN"));
+    }
+
+    #[test]
+    fn removing_owned_hook_preserves_neighbors_in_the_same_group() {
+        let mut groups = vec![serde_json::json!({
+            "hooks": [
+                {"type": "command", "command": "user-hook"},
+                {"type": "command", "command": format!("llmtrim window-sub hook-start {HOOK_MARKER}")}
+            ]
+        })];
+        remove_owned_hooks(&mut groups);
+        assert_eq!(groups.len(), 1);
+        assert_eq!(groups[0]["hooks"].as_array().unwrap().len(), 1);
+        assert_eq!(groups[0]["hooks"][0]["command"], "user-hook");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn executable_path_is_single_quote_escaped() {
+        let command = command_markdown("/tmp/a'$(touch nope)/llmtrim");
+        assert!(command.contains("'/tmp/a'\"'\"'$(touch nope)/llmtrim'"));
+    }
+}

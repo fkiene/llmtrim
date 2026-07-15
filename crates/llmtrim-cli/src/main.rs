@@ -9,7 +9,7 @@ use std::io::{Read, Write};
 use std::path::PathBuf;
 use std::str::FromStr;
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand};
 use llmtrim::bench::{self, BenchCase};
 use llmtrim::monitor;
@@ -381,6 +381,12 @@ enum Commands {
     /// head-to-head comparators (Headroom, caveman).
     #[command(subcommand)]
     Bench(BenchCmd),
+    /// Internal Claude Code window-local subscription integration.
+    #[command(hide = true)]
+    WindowSub {
+        #[arg(trailing_var_arg = true)]
+        args: Vec<String>,
+    },
 }
 
 /// Benchmark suite — a single dispatcher over every measurement axis.
@@ -733,6 +739,121 @@ fn read_stdin() -> Result<String> {
         .read_to_string(&mut buf)
         .context("failed to read stdin")?;
     Ok(buf)
+}
+
+#[cfg(feature = "intercept")]
+fn window_sub_provider() -> Result<String> {
+    let configured = llmtrim_core::config::RuntimeConfig::get()
+        .sub
+        .clone()
+        .or_else(llmtrim_core::config::sub_reenable_provider)
+        .context("no provider to re-enable — run `llmtrim sub on codex` (or kimi) first")?;
+    let provider = llmtrim::reroute::SubProvider::parse(&configured)
+        .context("configured subscription provider is invalid")?;
+    let logged_in = llmtrim::reroute::auth::auth_status_json(provider)
+        .get("logged_in")
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false);
+    if !logged_in {
+        bail!(
+            "{} is not signed in — run `llmtrim sub auth {} login` first",
+            provider.as_str(),
+            provider.as_str()
+        );
+    }
+    Ok(provider.as_str().to_string())
+}
+
+#[cfg(not(feature = "intercept"))]
+fn window_sub_provider() -> Result<String> {
+    bail!("window-scoped rerouting needs the `intercept` feature")
+}
+
+fn run_window_sub(args: Vec<String>) -> Result<()> {
+    let action = args.first().map(String::as_str).unwrap_or("status");
+    let session_from_env = || {
+        std::env::var("CLAUDE_CODE_SESSION_ID")
+            .ok()
+            .or_else(|| std::env::var("CLAUDE_SESSION_ID").ok())
+    };
+    match action {
+        "install" => {
+            llmtrim::window_sub::install(&std::env::current_exe()?.display().to_string())?;
+            println!("Claude Code /sub integration installed.");
+        }
+        "uninstall" => {
+            llmtrim::window_sub::uninstall()?;
+            println!("Claude Code /sub integration removed.");
+        }
+        "hook-start" => {
+            let mut raw = String::new();
+            std::io::stdin().read_to_string(&mut raw)?;
+            let value: serde_json::Value = serde_json::from_str(&raw)?;
+            let session = value
+                .get("session_id")
+                .and_then(serde_json::Value::as_str)
+                .context("SessionStart missing session_id")?;
+            let source = value
+                .get("source")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("startup");
+            let existing = std::env::var("LLMTRIM_CLAUDE_WINDOW_TOKEN").ok();
+            let token = llmtrim::window_sub::session_start(session, source, existing.as_deref())?;
+            if let Ok(file) = std::env::var("CLAUDE_ENV_FILE") {
+                let mut f = std::fs::OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .open(file)?;
+                writeln!(f, "export LLMTRIM_CLAUDE_WINDOW_TOKEN={token}")?;
+            }
+        }
+        "hook-end" => {
+            let mut raw = String::new();
+            std::io::stdin().read_to_string(&mut raw)?;
+            let v: serde_json::Value = serde_json::from_str(&raw)?;
+            if let Some(s) = v.get("session_id").and_then(serde_json::Value::as_str) {
+                let reason = v
+                    .get("reason")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or("");
+                let _ = llmtrim::window_sub::session_end(s, reason);
+            }
+        }
+        "slash" => {
+            let command = args.get(1).map(String::as_str).unwrap_or("status");
+            let session = args
+                .get(2)
+                .filter(|x| !x.is_empty())
+                .cloned()
+                .or_else(session_from_env)
+                .context("Claude Code session unavailable")?;
+            match command.trim() {
+                "on" => {
+                    let provider = window_sub_provider()?;
+                    llmtrim::window_sub::set(&session, true, Some(&provider))?;
+                    println!("Subscription rerouting enabled for this window ({provider}).");
+                }
+                "off" => {
+                    llmtrim::window_sub::set(&session, false, None)?;
+                    println!(
+                        "Subscription rerouting disabled for this window; Anthropic compression remains active."
+                    );
+                }
+                "status" | "" => match llmtrim::window_sub::status(&session)? {
+                    Some(llmtrim::window_sub::Intent::Enabled { provider }) => {
+                        println!("This window: subscription rerouting enabled ({provider}).")
+                    }
+                    Some(llmtrim::window_sub::Intent::Disabled) => {
+                        println!("This window: subscription rerouting disabled.")
+                    }
+                    None => println!("This window follows the global subscription policy."),
+                },
+                _ => bail!("usage: /sub on|off|status"),
+            }
+        }
+        _ => bail!("unknown window-sub action"),
+    };
+    Ok(())
 }
 
 fn main() {
@@ -1421,6 +1542,16 @@ fn run() -> Result<()> {
         },
         Commands::Sub { action } => run_sub(action)?,
         Commands::Compact { action } => run_compact(action)?,
+        Commands::WindowSub { args } => {
+            let hook = args.first().is_some_and(|arg| arg.starts_with("hook-"));
+            if let Err(error) = run_window_sub(args) {
+                if hook {
+                    eprintln!("llmtrim: window /sub hook skipped: {error:#}");
+                } else {
+                    return Err(error);
+                }
+            }
+        }
         Commands::Update => llmtrim::update::run()?,
         Commands::Mcp { action } => match action {
             None => llmtrim::mcp::run()?,

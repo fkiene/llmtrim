@@ -1323,8 +1323,24 @@ mod imp {
             let mut fallback_arm: Option<(Vec<crate::reroute::SubProvider>, Option<String>)> = None;
             if matches!(provider, Some(ProviderKind::Anthropic)) && req.method() == Method::POST {
                 let path = req.uri().path();
-                if !self.sub_fallback {
-                    if let Some(sub) = self.sub {
+                // The filesystem registry is consulted per request, keyed by Claude Code's
+                // inbound session header.  A local `off` is authoritative and suppresses both
+                // direct reroute and global fallback; an absent/expired record follows global.
+                let window_intent = crate::window_sub::lookup(
+                    req.headers()
+                        .get("x-claude-code-session-id")
+                        .and_then(|v| v.to_str().ok()),
+                );
+                let window_sub = match &window_intent {
+                    Some(crate::window_sub::Intent::Enabled { provider }) => {
+                        crate::reroute::SubProvider::parse(provider)
+                    }
+                    _ => None,
+                };
+                let window_disabled =
+                    matches!(window_intent, Some(crate::window_sub::Intent::Disabled));
+                if !window_disabled && (!self.sub_fallback || window_sub.is_some()) {
+                    if let Some(sub) = window_sub.or(self.sub) {
                         if path.ends_with("/v1/messages/count_tokens") {
                             return self.reroute_count_tokens(req).await;
                         }
@@ -1332,7 +1348,7 @@ mod imp {
                             return self.reroute_messages(req, sub).await;
                         }
                     }
-                } else if path.ends_with("/v1/messages") {
+                } else if !window_disabled && path.ends_with("/v1/messages") {
                     // A chain is enough to arm the fallback: `sub` selects who serves *every* turn
                     // in `always` mode, but in fallback mode the chain is the whole answer, so
                     // `sub = off` + a chain is a valid configuration.
