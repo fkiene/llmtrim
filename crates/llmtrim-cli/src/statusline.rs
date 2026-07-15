@@ -15,7 +15,7 @@
 //! as the terminal narrows (`COLUMNS`). The context gauge fills and colours against the *real*
 //! window of the model serving the turn — the rerouted backend's window under `sub`, not
 //! Claude's — green below 40%, orange 40–65%, red above; and red whenever the prompt cache has
-//! gone cold, where the cache segment becomes `♻ cold · /compact`. Segments whose data is
+//! gone cold, where the cache segment becomes `♻ cache cold`. Segments whose data is
 //! absent — no reroute, an API-key user with no rate limits — simply don't render.
 //!
 //! Under `sub` the arrow shows the concrete model that served the last turn (e.g.
@@ -51,7 +51,15 @@ const CTX_AMBER_PCT: i64 = 65;
 /// (verified from the capture corpus: 3333×1h vs 288×5m), and the cache stays warm up to the
 /// TTL since the last intercepted request. Past this idle gap the cache is cold, so a stale
 /// "cached %" would lie about the next turn paying a cold write — show it cold instead.
-const CACHE_TTL_SECS: i64 = 3600;
+/// Shared with [`crate::guard`], so the hook and the status line agree on when a cache is cold.
+pub(crate) const CACHE_TTL_SECS: i64 = 3600;
+/// How often Claude Code re-runs the status line while a session sits idle. Without it Claude
+/// Code only re-renders on conversation events, so an abandoned session keeps the line drawn at
+/// its last turn — green and warm — straight through the cache expiring, and `♻ cache cold`
+/// only appears *after* the turn that pays for it. Rendering is local (no network, no tokens),
+/// so a refresh costs one short process; 5 minutes is far finer than the 1h TTL it watches, and
+/// 25× cheaper than polling every 10s would be.
+const REFRESH_INTERVAL_SECS: i64 = 300;
 
 // ── ANSI palette ────────────────────────────────────────────────────────────────
 // The status line is captured by Claude Code (never a TTY), but Claude Code renders ANSI,
@@ -399,6 +407,15 @@ fn session_row(_sid: &str) -> Option<SessionLedgerRow> {
     None
 }
 
+/// The concrete model a `sub` backend served this session's last turn with, if any — the only
+/// thing [`crate::guard`] takes from the ledger, and only to price a rerouted turn correctly.
+/// `None` (no row, no reroute, or no `breakdown` feature) never changes the guard's decision.
+pub(crate) fn session_sub_model(session_id: &str) -> Option<String> {
+    let row = session_row(session_id)?;
+    row.last_sub_provider.as_ref()?;
+    row.last_model
+}
+
 /// Decide the trim figure: this session's own savings when we have its row; idle (`None`) for a
 /// known Claude Code session with no recorded turn yet — *not* the lifetime figure, which would
 /// flash a misleading number for a beat before the first turn lands; and only the lifetime figure
@@ -641,9 +658,10 @@ fn extra_segments(cc: &CcInput, led: &Led, color: bool) -> Vec<String> {
         (None, None) => {}
     }
     if led.cache_cold {
-        // Cache expired: the next turn pays a cold write, so `/compact` (re-baselines the prompt)
-        // pays off here. `cold` communicates the state faster than a stale `0% cached`.
-        out.push(paint(color, RED, "♻ cold · /compact"));
+        // Cache expired: the next turn pays a cold write. State only, no `/compact` nudge —
+        // compacting re-reads the same cold context to summarise it, so it pays that charge too
+        // rather than avoiding it (see `crate::guard::message`).
+        out.push(paint(color, RED, "♻ cache cold"));
     } else if let Some(c) = cache_pct_for(cc.cache_pct, led.last_cache_pct) {
         // Floor, not round: only a genuine 100% cache shows `100%` (99.9 stays `99%`).
         out.push(paint(
@@ -758,26 +776,41 @@ fn stable_executable_path(current_exe: &Path, path: Option<&OsStr>) -> PathBuf {
     current_exe.to_path_buf()
 }
 
-/// The `statusLine` object we write. `command` is an absolute path or a stable PATH alias plus
-/// the subcommand, so it works even when a package manager replaces a versioned executable.
-fn statusline_config() -> Value {
+/// The command string Claude Code should run for one of our subcommands: an absolute path or a
+/// stable PATH alias, so it survives a package manager replacing a versioned executable. Shared
+/// with [`crate::guard`], which writes a hook command the same way.
+pub(crate) fn exe_command(subcommand: &str) -> String {
     let exe = std::env::current_exe()
         .ok()
         .map(|p| stable_executable_path(&p, std::env::var_os("PATH").as_deref()))
         .map(|p| p.display().to_string())
         .unwrap_or_else(|| "llmtrim".to_string());
-    let command = if exe.contains(' ') {
-        format!("\"{exe}\" statusline")
+    if exe.contains(' ') {
+        format!("\"{exe}\" {subcommand}")
     } else {
-        format!("{exe} statusline")
-    };
-    serde_json::json!({ "type": "command", "command": command, "padding": 0 })
+        format!("{exe} {subcommand}")
+    }
+}
+
+/// The `statusLine` object we write.
+fn statusline_config() -> Value {
+    serde_json::json!({
+        "type": "command",
+        "command": exe_command("statusline"),
+        "padding": 0,
+        "refreshInterval": REFRESH_INTERVAL_SECS,
+    })
 }
 
 /// Whether a Claude statusline command is one that `llmtrim statusline install` created.
-/// Recognize both POSIX and Windows separators because settings can be moved between systems.
 fn is_llmtrim_statusline_command(command: &str) -> bool {
-    let Some(executable) = command.strip_suffix(" statusline") else {
+    is_llmtrim_command(command, "statusline")
+}
+
+/// Whether `command` is the llmtrim binary invoked with exactly `subcommand`. Recognize both
+/// POSIX and Windows separators because settings can be moved between systems.
+pub(crate) fn is_llmtrim_command(command: &str, subcommand: &str) -> bool {
+    let Some(executable) = command.strip_suffix(&format!(" {subcommand}")) else {
         return false;
     };
     let executable = executable.trim();
@@ -1032,7 +1065,7 @@ mod tests {
         let mut l = led(Health::Healthy);
         l.cache_cold = true;
         let out = render_line(&cc(48_000), &l, 0, false);
-        assert!(out.contains("♻ cold · /compact"), "cold hint shown: {out}");
+        assert!(out.contains("♻ cache cold"), "cold hint shown: {out}");
         assert!(!out.contains("cached"), "no stale % when cold: {out}");
     }
 
@@ -1408,6 +1441,16 @@ mod tests {
     fn refresh_is_a_no_op_when_the_command_already_points_at_this_binary() {
         let mut settings = serde_json::json!({ "statusLine": statusline_config() });
         assert!(!refresh_statusline_config(&mut settings).unwrap());
+    }
+
+    #[test]
+    fn statusline_config_asks_claude_code_to_refresh_while_idle() {
+        // Claude Code otherwise re-renders only on conversation events, so the cold-cache
+        // warning would land after the expensive turn instead of before it.
+        assert_eq!(
+            statusline_config()["refreshInterval"],
+            serde_json::json!(300)
+        );
     }
 
     #[test]

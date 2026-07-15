@@ -1189,7 +1189,7 @@ pub fn overview_data(
 /// matched across every provider (the ledger records the wire-shape provider, not the
 /// upstream brand), then the embedded models.dev snapshot for models the registry hasn't
 /// shipped yet (e.g. day-one releases like claude-fable-5 on 0.14.3).
-fn llm_prices(model_id: &str) -> Option<(f64, f64)> {
+pub(crate) fn llm_prices(model_id: &str) -> Option<(f64, f64)> {
     #[cfg(feature = "intercept")]
     for &provider_id in llm_providers::get_providers_data().keys() {
         if let Some(model) = llm_providers::get_model_ref(provider_id, model_id) {

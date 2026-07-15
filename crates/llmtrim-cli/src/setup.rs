@@ -546,6 +546,28 @@ pub fn run(requested: Option<u16>, force: bool) -> Result<()> {
         }
     }
 
+    // 3d. Claude Code's cold-cache guard. Offered only to Claude Code users (setup stays
+    //     client-agnostic otherwise), default on; `--force` / a non-interactive setup take that
+    //     default without asking. Merges into `hooks.UserPromptSubmit` — other hooks are kept.
+    if crate::statusline::claude_code_present() {
+        if force || confirm_guard_default_yes() {
+            match crate::guard::wire() {
+                Ok(path) => rows.push((
+                    ui::OK,
+                    "Guard".into(),
+                    format!("warns before a cold resumed turn · {}", path.display()),
+                )),
+                Err(e) => rows.push((ui::WARN, "Guard".into(), format!("not wired: {e}"))),
+            }
+        } else {
+            rows.push((
+                ui::OK,
+                "Guard".into(),
+                "left off · enable later with `llmtrim guard install`".into(),
+            ));
+        }
+    }
+
     // 4. Reconcile the interceptor. If a healthy daemon is already serving the resolved port,
     //    leave it running — re-running `setup` must not drop in-flight requests (the old code
     //    stopped + respawned unconditionally on every run). Restart only when the port is
@@ -750,6 +772,22 @@ fn confirm_tray_default_yes() -> bool {
     !matches!(line.trim().to_ascii_lowercase().as_str(), "n" | "no")
 }
 
+/// Ask whether to arm the cold-cache guard, defaulting to yes. Same contract as
+/// [`confirm_tray_default_yes`]: a scripted `setup` stays non-interactive and takes the default.
+fn confirm_guard_default_yes() -> bool {
+    use std::io::{IsTerminal, Write};
+    if !std::io::stdin().is_terminal() {
+        return true;
+    }
+    print!("Warn before the first turn of a resumed session whose cache went cold? [Y/n] ");
+    let _ = std::io::stdout().flush();
+    let mut line = String::new();
+    if std::io::stdin().read_line(&mut line).is_err() {
+        return false;
+    }
+    !matches!(line.trim().to_ascii_lowercase().as_str(), "n" | "no")
+}
+
 /// Best-effort caveman detection: the flag file its session hook writes, its standalone
 /// hook files, or a Claude Code plugin-cache entry. Read-only probes; any I/O failure
 /// reads as "not installed" — setup must never fail because of someone else's tool.
@@ -837,6 +875,17 @@ pub fn uninstall(purge: bool, keep_binary: bool) -> Result<()> {
             "Tray autostart".into(),
             format!("not changed: {e}"),
         )),
+    }
+
+    // 2c. Unwire the Claude Code guard hook, leaving the user's other hooks in place.
+    match crate::guard::unwire() {
+        Ok(true) => rows.push((
+            ui::OK,
+            "Guard".into(),
+            "removed from Claude Code settings".into(),
+        )),
+        Ok(false) => rows.push((ui::NOTE, "Guard".into(), "no hook to remove".into())),
+        Err(e) => rows.push((ui::WARN, "Guard".into(), format!("not removed: {e}"))),
     }
 
     // 3. Remove the interceptor env. Windows: the `HKCU\Environment` values (plus any legacy

@@ -282,6 +282,17 @@ enum Commands {
         #[command(subcommand)]
         action: Option<StatuslineCmd>,
     },
+    /// Warn before the first turn of a resumed, cold-cache session (or `guard install` to wire it up)
+    ///
+    /// With no subcommand, acts as Claude Code's `UserPromptSubmit` hook: reads the hook JSON on
+    /// stdin and, when the session has been idle past the prompt-cache TTL with a large context,
+    /// blocks that one prompt and prints what re-writing the context will cost. Resend to go ahead.
+    /// `install` wires it into `~/.claude/settings.json` (merging with your other hooks);
+    /// `install --print` just prints the settings snippet.
+    Guard {
+        #[command(subcommand)]
+        action: Option<GuardCmd>,
+    },
     /// Check the install end-to-end and explain anything broken
     ///
     /// Read-only diagnosis: binary, daemon, port, env wiring (persisted + this shell),
@@ -570,6 +581,18 @@ enum StatuslineCmd {
         print: bool,
     },
     /// Remove the status line from `~/.claude/settings.json`
+    Uninstall,
+}
+
+#[derive(Subcommand)]
+enum GuardCmd {
+    /// Wire the guard hook into `~/.claude/settings.json`
+    Install {
+        /// Print the settings snippet instead of editing the file.
+        #[arg(long)]
+        print: bool,
+    },
+    /// Remove the guard hook from `~/.claude/settings.json`
     Uninstall,
 }
 
@@ -1407,6 +1430,13 @@ fn run() -> Result<()> {
             None => llmtrim::statusline::run()?,
             Some(StatuslineCmd::Install { print }) => llmtrim::statusline::install(print)?,
             Some(StatuslineCmd::Uninstall) => llmtrim::statusline::uninstall()?,
+        },
+        Commands::Guard { action } => match action {
+            // The hook path: Claude Code reads the exit code, so return it rather than a Result —
+            // 2 blocks the prompt, anything else lets it through.
+            None => std::process::exit(llmtrim::guard::run()),
+            Some(GuardCmd::Install { print }) => llmtrim::guard::install(print)?,
+            Some(GuardCmd::Uninstall) => llmtrim::guard::uninstall()?,
         },
         Commands::Monitor {
             // Deprecated no-op (see the field docs): accepted, then ignored.
