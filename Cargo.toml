@@ -21,7 +21,7 @@ default-members = [
 
 # Shared package metadata — inherited by each member via `field.workspace = true`.
 [workspace.package]
-version = "0.10.2-dev"
+version = "0.10.2"
 edition = "2024"
 rust-version = "1.88"
 repository = "https://github.com/fkiene/llmtrim"
