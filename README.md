@@ -232,7 +232,7 @@ When `~/.claude` exists, `setup`, `update`, and `ensure` wire these. No separate
 | Status line | Model, context gauge, trim %, rate limits, cache warm/cold |
 | Guard | Blocks one turn if a cold-cache resume would rewrite a huge context (and bill for it) |
 | `/compact` models | Prefer Haiku → Sonnet before your selected model |
-| `/sub` | Per-window: `/sub on` · `/sub off` · `/sub status` |
+| `/sub` | Per-window: `/sub on [optional:codex\|kimi\|grok]` · `/sub off` · `/sub status` |
 
 ```text
 ◆ Opus→gpt-5.6-terra   ▓▓▓▓▓░░░ 142k   ✂ 6.8%   ◔ 3h·24% · 4d·12%   ♻ 63% cached
@@ -289,21 +289,21 @@ Candidates run in order when they fit the compressed request. Claude's selected 
 <details>
 <summary><b>Subscription reroute (`sub`)</b> (opt-in; may conflict with provider ToS)</summary>
 
-Serve Claude Code from a ChatGPT/Codex or Kimi plan instead of Anthropic, or as fallback when Anthropic fails. Login prints a warning; decide for yourself.
+Serve Claude Code from a ChatGPT/Codex, Kimi, or SuperGrok plan instead of Anthropic, or as fallback when Anthropic fails. Login prints a warning; decide for yourself.
 
 ```bash
-llmtrim sub auth codex login    # or: kimi
-llmtrim sub on codex
+llmtrim sub auth codex login    # or kimi / grok
+llmtrim sub on codex            # or kimi / grok
 llmtrim sub status
 llmtrim sub mode fallback       # only when Anthropic fails
-llmtrim sub chain codex,kimi
+llmtrim sub chain codex,kimi,grok
 llmtrim sub off
 ```
 
 This window only (installed with ensure; includes subagents; survives `/clear`):
 
 ```text
-/sub on
+/sub on [optional:codex|kimi|grok]   # bare /sub on = last window provider or global sub
 /sub off
 /sub status
 ```

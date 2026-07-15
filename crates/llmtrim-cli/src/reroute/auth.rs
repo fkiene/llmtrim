@@ -1,5 +1,5 @@
-//! OAuth + runtime token supply for the two subscription reroute providers (Codex/ChatGPT and
-//! Kimi). Owns the interactive login flows (PKCE browser + device-code) and [`get_token`], the
+//! OAuth + runtime token supply for the subscription reroute providers (Codex/ChatGPT, Kimi, and
+//! Grok). Owns the interactive login flows (PKCE browser + device-code) and [`get_token`], the
 //! hot-path token accessor that refreshes on the fly.
 //!
 //! **Blocking by design.** Everything here uses blocking `ureq` (no async): the CLI login
@@ -11,12 +11,12 @@
 //! guards each provider with a process-wide `Mutex` and re-checks expiry after taking the lock,
 //! so only one caller ever fires a refresh.
 //!
-//! **Terms of service.** Driving a ChatGPT/Kimi subscription through a non-official client
+//! **Terms of service.** Driving a ChatGPT/Kimi/Grok subscription through a non-official client
 //! violates the provider ToS and can get the account restricted. The login flows print this
 //! warning before starting; use at your own risk.
 //!
-//! Storage: `~/.llmtrim/codex/auth.json` and `~/.llmtrim/kimi/auth.json` (dir `0700`, file
-//! `0600` on unix), written atomically (temp file + rename).
+//! Storage: `~/.llmtrim/{codex,kimi,grok}/auth.json` (dir `0700`, file `0600` on unix), written
+//! atomically (temp file + rename).
 
 use std::io::{Read, Write};
 use std::path::PathBuf;
@@ -81,6 +81,20 @@ pub fn get_token(provider: SubProvider) -> Result<TokenSet> {
                 account_id: None,
             })
         }
+        SubProvider::Grok => {
+            let stored = read_grok()
+                .context("no Grok credentials — run `llmtrim sub auth grok login` first")?;
+            let now = now_ms();
+            let stored = if needs_refresh(stored.expires, now) {
+                grok_refresh(&stored)?
+            } else {
+                stored
+            };
+            Ok(TokenSet {
+                access: stored.access,
+                account_id: None,
+            })
+        }
     }
 }
 
@@ -98,6 +112,11 @@ const KIMI_HOST: &str = "https://auth.kimi.com";
 const KIMI_CLIENT_ID: &str = "17e5f671-d194-4dfb-9706-5516cb48c098";
 const KIMI_CLI_VERSION: &str = "1.37.0";
 
+/// Grok CLI public OAuth client (same as Grok Build / claude-code-proxy).
+const GROK_ISSUER: &str = "https://auth.x.ai";
+const GROK_CLIENT_ID: &str = "b1a00492-073a-47ea-816f-4c329264a828";
+const GROK_SCOPES: &str = "openid profile email offline_access grok-cli:access api:access conversations:read conversations:write";
+
 /// Refresh anything within 5 minutes of expiry.
 const REFRESH_MARGIN_MS: u64 = 5 * 60 * 1000;
 
@@ -108,7 +127,7 @@ const HTTP_TIMEOUT: Duration = Duration::from_secs(60);
 const FLOW_TIMEOUT: Duration = Duration::from_secs(300);
 
 const TOS_WARNING: &str = "\
-WARNING: Using a ChatGPT/Kimi subscription through a non-official client violates the
+WARNING: Using a ChatGPT/Kimi/Grok subscription through a non-official client violates the
 provider's Terms of Service and can get your account restricted or banned. This is
 opt-in and unsupported. Proceed at your own risk.\n";
 
@@ -144,6 +163,18 @@ struct KimiStored {
     user_id: Option<String>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct GrokStored {
+    access: String,
+    refresh: String,
+    /// Epoch milliseconds.
+    expires: u64,
+    #[serde(default)]
+    issuer: String,
+    #[serde(rename = "clientId", default)]
+    client_id: String,
+}
+
 // ---------------------------------------------------------------------------
 // Wire response shapes
 // ---------------------------------------------------------------------------
@@ -167,11 +198,13 @@ struct TokenResponse {
 
 static CODEX_LOCK: Lazy<Mutex<()>> = Lazy::new(|| Mutex::new(()));
 static KIMI_LOCK: Lazy<Mutex<()>> = Lazy::new(|| Mutex::new(()));
+static GROK_LOCK: Lazy<Mutex<()>> = Lazy::new(|| Mutex::new(()));
 
 fn provider_lock(provider: SubProvider) -> &'static Mutex<()> {
     match provider {
         SubProvider::Codex => &CODEX_LOCK,
         SubProvider::Kimi => &KIMI_LOCK,
+        SubProvider::Grok => &GROK_LOCK,
     }
 }
 
@@ -298,12 +331,20 @@ fn kimi_dir() -> Result<PathBuf> {
     Ok(home_dir()?.join("kimi"))
 }
 
+fn grok_dir() -> Result<PathBuf> {
+    Ok(home_dir()?.join("grok"))
+}
+
 fn codex_auth_path() -> Result<PathBuf> {
     Ok(codex_dir()?.join("auth.json"))
 }
 
 fn kimi_auth_path() -> Result<PathBuf> {
     Ok(kimi_dir()?.join("auth.json"))
+}
+
+fn grok_auth_path() -> Result<PathBuf> {
+    Ok(grok_dir()?.join("auth.json"))
 }
 
 /// Create `dir` (recursively) and, on unix, tighten it to `0700`.
@@ -376,6 +417,19 @@ fn read_kimi() -> Result<KimiStored> {
 fn write_kimi(auth: &KimiStored) -> Result<()> {
     let path = kimi_auth_path()?;
     let json = serde_json::to_string_pretty(auth).context("failed to serialize Kimi auth")?;
+    write_atomic(&path, &json)
+}
+
+fn read_grok() -> Result<GrokStored> {
+    let path = grok_auth_path()?;
+    let raw = std::fs::read_to_string(&path)
+        .with_context(|| format!("failed to read {}", path.display()))?;
+    serde_json::from_str(&raw).with_context(|| format!("failed to parse {}", path.display()))
+}
+
+fn write_grok(auth: &GrokStored) -> Result<()> {
+    let path = grok_auth_path()?;
+    let json = serde_json::to_string_pretty(auth).context("failed to serialize Grok auth")?;
     write_atomic(&path, &json)
 }
 
@@ -789,6 +843,7 @@ pub fn auth_status_json(provider: super::SubProvider) -> serde_json::Value {
     let stored = match provider {
         SubProvider::Codex => read_codex().ok().map(|s| (s.expires, s.account_id)),
         SubProvider::Kimi => read_kimi().ok().map(|s| (s.expires, None)),
+        SubProvider::Grok => read_grok().ok().map(|s| (s.expires, None)),
     };
     match stored {
         Some((expires, account_id)) => serde_json::json!({
@@ -958,6 +1013,253 @@ pub fn kimi_status() -> Result<()> {
 pub fn kimi_logout() -> Result<()> {
     delete_if_exists(&kimi_auth_path()?)?;
     println!("Kimi credentials deleted.");
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Grok — OIDC discovery + PKCE browser login
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Deserialize)]
+struct GrokDiscovery {
+    issuer: String,
+    authorization_endpoint: String,
+    token_endpoint: String,
+}
+
+fn grok_discover() -> Result<GrokDiscovery> {
+    let url = format!("{GROK_ISSUER}/.well-known/openid-configuration");
+    let mut resp = ureq::get(&url)
+        .config()
+        .proxy(None)
+        .http_status_as_error(false)
+        .timeout_global(Some(HTTP_TIMEOUT))
+        .build()
+        .call()
+        .map_err(|e| anyhow!("Grok OIDC discovery failed: {e}"))?;
+    let status = resp.status().as_u16();
+    let text = resp.body_mut().read_to_string().unwrap_or_default();
+    if !(200..300).contains(&status) {
+        bail!("Grok OIDC discovery failed (HTTP {status}): {text}");
+    }
+    let discovery: GrokDiscovery =
+        serde_json::from_str(&text).context("failed to parse Grok OIDC discovery")?;
+    if discovery.issuer != GROK_ISSUER {
+        bail!("Grok OIDC discovery issuer mismatch");
+    }
+    // Endpoints must stay on auth.x.ai.
+    for endpoint in [&discovery.authorization_endpoint, &discovery.token_endpoint] {
+        if !endpoint.starts_with(GROK_ISSUER) {
+            bail!("Grok OIDC endpoint is outside the canonical issuer: {endpoint}");
+        }
+    }
+    Ok(discovery)
+}
+
+/// Build stored creds from a token response.
+///
+/// `require_refresh`: login/authorization-code must grant an offline session. Refresh responses
+/// often omit `refresh_token` (RFC 6749); pass `false` and supply `prev_refresh` so the chain
+/// survives (same pattern as Codex/Kimi).
+fn grok_stored_from(
+    tr: TokenResponse,
+    require_refresh: bool,
+    prev_refresh: Option<&str>,
+) -> Result<GrokStored> {
+    if tr.access_token.is_empty() {
+        bail!("Grok token response missing access_token");
+    }
+    let refresh = tr
+        .refresh_token
+        .filter(|r| !r.is_empty())
+        .or_else(|| prev_refresh.map(str::to_string))
+        .filter(|r| !r.is_empty());
+    let refresh = match refresh {
+        Some(r) => r,
+        None if require_refresh => {
+            bail!("Grok login did not grant an offline session (no refresh_token)")
+        }
+        None => bail!("Grok token response missing refresh_token and no prior session to keep"),
+    };
+    Ok(GrokStored {
+        access: tr.access_token,
+        refresh,
+        expires: expiry_ms(tr.expires_in, 3600),
+        issuer: GROK_ISSUER.to_string(),
+        client_id: GROK_CLIENT_ID.to_string(),
+    })
+}
+
+fn grok_exchange_code(
+    token_endpoint: &str,
+    code: &str,
+    redirect_uri: &str,
+    code_verifier: &str,
+) -> Result<TokenResponse> {
+    let form = [
+        ("grant_type", "authorization_code".to_string()),
+        ("code", code.to_string()),
+        ("redirect_uri", redirect_uri.to_string()),
+        ("client_id", GROK_CLIENT_ID.to_string()),
+        ("code_verifier", code_verifier.to_string()),
+    ];
+    let (status, body) = post_form(token_endpoint, &[], &form)?;
+    if !(200..300).contains(&status) {
+        bail!("Grok token exchange failed (HTTP {status}): {body}");
+    }
+    serde_json::from_str(&body).context("failed to parse Grok token response")
+}
+
+fn grok_refresh(stored: &GrokStored) -> Result<GrokStored> {
+    if stored.issuer != GROK_ISSUER || stored.client_id != GROK_CLIENT_ID {
+        bail!("unsupported Grok OAuth session — run `llmtrim sub auth grok login` again");
+    }
+    let discovery = grok_discover()?;
+    let form = [
+        ("grant_type", "refresh_token".to_string()),
+        ("refresh_token", stored.refresh.clone()),
+        ("client_id", GROK_CLIENT_ID.to_string()),
+    ];
+    let (status, body) = post_form(&discovery.token_endpoint, &[], &form)?;
+    if status == 401 || status == 403 {
+        let _ = delete_if_exists(&grok_auth_path()?);
+        bail!(
+            "Grok refresh rejected (HTTP {status}); credentials cleared — run \
+             `llmtrim sub auth grok login` again"
+        );
+    }
+    if !(200..300).contains(&status) {
+        bail!("Grok refresh failed (HTTP {status}): {body}");
+    }
+    let tr: TokenResponse =
+        serde_json::from_str(&body).context("failed to parse Grok refresh response")?;
+    // Refresh responses may omit refresh_token; keep the prior one (Codex/Kimi do the same).
+    let fresh = grok_stored_from(tr, false, Some(&stored.refresh))?;
+    write_grok(&fresh)?;
+    Ok(fresh)
+}
+
+/// PKCE browser flow against `auth.x.ai` with an ephemeral loopback callback.
+pub fn grok_login() -> Result<()> {
+    print!("{TOS_WARNING}");
+
+    let discovery = grok_discover()?;
+    let verifier = random_b64url_32();
+    let challenge = pkce_challenge(&verifier);
+    let state = random_b64url_32();
+
+    // Ephemeral port (unlike Codex's fixed 1455) so concurrent tools don't collide.
+    let listener = std::net::TcpListener::bind("127.0.0.1:0")
+        .context("failed to bind loopback for the Grok OAuth callback")?;
+    let port = listener
+        .local_addr()
+        .context("failed to read Grok callback port")?
+        .port();
+    let redirect_uri = format!("http://127.0.0.1:{port}/callback");
+
+    let authorize = format!(
+        "{auth}?response_type=code&client_id={cid}&redirect_uri={redir}&scope={scope}\
+         &code_challenge={chal}&code_challenge_method=S256&state={state}",
+        auth = discovery.authorization_endpoint,
+        cid = urlencode(GROK_CLIENT_ID),
+        redir = urlencode(&redirect_uri),
+        scope = urlencode(GROK_SCOPES),
+        chal = challenge,
+        state = state,
+    );
+
+    println!("Open this URL in your browser to authorize llmtrim:\n\n  {authorize}\n");
+    try_open_browser(&authorize);
+    println!("Waiting for the authorization callback (up to 5 minutes)...");
+
+    let code = wait_for_grok_callback(listener, &state)?;
+    let tr = grok_exchange_code(&discovery.token_endpoint, &code, &redirect_uri, &verifier)?;
+    let stored = grok_stored_from(tr, true, None)?;
+    write_grok(&stored)?;
+    println!("Grok login complete.");
+    Ok(())
+}
+
+/// Same shape as Codex's callback waiter, but the path is `/callback` (Grok OIDC convention)
+/// rather than `/auth/callback`.
+fn wait_for_grok_callback(listener: std::net::TcpListener, expected_state: &str) -> Result<String> {
+    listener
+        .set_nonblocking(true)
+        .context("failed to set Grok callback listener non-blocking")?;
+    let deadline = std::time::Instant::now() + FLOW_TIMEOUT;
+
+    loop {
+        if std::time::Instant::now() >= deadline {
+            bail!("timed out waiting for the Grok OAuth callback after 5 minutes");
+        }
+        match listener.accept() {
+            Ok((mut stream, _addr)) => {
+                let _ = stream.set_read_timeout(Some(Duration::from_secs(5)));
+                let mut buf = [0u8; 8192];
+                let n = stream.read(&mut buf).unwrap_or(0);
+                let req = String::from_utf8_lossy(&buf[..n]);
+                let target = first_request_target(&req);
+
+                match target.and_then(parse_grok_callback) {
+                    Some((code, state)) => {
+                        if state != expected_state {
+                            respond(&mut stream, "state mismatch — please retry the login");
+                            bail!("OAuth state mismatch (possible CSRF); aborting");
+                        }
+                        respond(
+                            &mut stream,
+                            "llmtrim authorization received. You can close this tab.",
+                        );
+                        return Ok(code);
+                    }
+                    None => {
+                        respond(&mut stream, "waiting for the authorization callback...");
+                    }
+                }
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                std::thread::sleep(Duration::from_millis(100));
+            }
+            Err(e) => return Err(e).context("Grok callback listener accept failed"),
+        }
+    }
+}
+
+/// Parse `/callback?code=X&state=Y` into `(code, state)`.
+fn parse_grok_callback(target: &str) -> Option<(String, String)> {
+    let (path, query) = target.split_once('?')?;
+    if path != "/callback" {
+        return None;
+    }
+    let mut code = None;
+    let mut state = None;
+    for pair in query.split('&') {
+        let (k, v) = pair.split_once('=')?;
+        match k {
+            "code" => code = Some(urldecode(v)),
+            "state" => state = Some(urldecode(v)),
+            "error" => return None,
+            _ => {}
+        }
+    }
+    Some((code?, state.unwrap_or_default()))
+}
+
+/// Device-code login is not supported for Grok yet (browser PKCE only).
+pub fn grok_device() -> Result<()> {
+    bail!("Grok device login is unavailable — use `llmtrim sub auth grok login` (browser OAuth)")
+}
+
+pub fn grok_status() -> Result<()> {
+    let stored = read_grok().context("no Grok credentials stored")?;
+    println!("Grok: logged in");
+    println!("  {}", expiry_line(stored.expires));
+    Ok(())
+}
+
+pub fn grok_logout() -> Result<()> {
+    delete_if_exists(&grok_auth_path()?)?;
+    println!("Grok credentials deleted.");
     Ok(())
 }
 

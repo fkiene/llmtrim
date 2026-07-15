@@ -369,6 +369,7 @@ fn known_display_name(agent: &str) -> Option<&'static str> {
     match agent {
         "claude-code" => Some("Claude Code"),
         "codex" => Some("Codex"),
+        "grok" => Some("Grok"),
         "gemini" => Some("Gemini"),
         _ => None,
     }

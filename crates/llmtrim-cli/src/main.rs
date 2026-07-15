@@ -51,7 +51,7 @@ Get started:
   update     Update to the latest release and refresh integrations
   ensure     Bring this machine to the recommended current state
   wrap       Launch an agent (claude, codex, …) routed through the interceptor
-  sub        Reroute Claude Code to another subscription's backend (codex|kimi)
+  sub        Reroute Claude Code to another subscription's backend (codex|kimi|grok)
   tray       Open the desktop tray app (savings menu-bar / system-tray)
 
 Daemon:
@@ -116,7 +116,7 @@ enum Commands {
     ///
     /// With `sub` enabled, intercepted Anthropic traffic is translated and sent to your
     /// ChatGPT (codex) or Kimi subscription instead of Anthropic. Authenticate first with
-    /// `llmtrim sub auth codex login` / `llmtrim sub auth kimi login`.
+    /// `llmtrim sub auth codex login` / `llmtrim sub auth kimi login` / `llmtrim sub auth grok login`.
     Sub {
         #[command(subcommand)]
         action: SubCmd,
@@ -439,9 +439,9 @@ enum BenchCmd {
 /// Subscription reroute: send Claude Code traffic to another subscription's backend.
 #[derive(Subcommand)]
 enum SubCmd {
-    /// Open the interactive tier→model mapping editor for a provider (codex|kimi).
+    /// Open the interactive tier→model mapping editor for a provider (codex|kimi|grok).
     Setup {
-        /// Provider to edit: codex|kimi.
+        /// Provider to edit: codex|kimi|grok.
         provider: String,
     },
     /// Enable reroute to a provider (writes `sub = <provider>` to the config).
@@ -450,7 +450,7 @@ enum SubCmd {
     /// are accepted aliases.
     #[command(visible_alias = "use", alias = "start")]
     On {
-        /// Provider to route to: codex|kimi. Omit to re-enable the last provider used.
+        /// Provider to route to: codex|kimi|grok. Omit to re-enable the last provider used.
         provider: Option<String>,
         /// Don't restart a running interceptor to apply the change (just print the hint).
         #[arg(long)]
@@ -474,9 +474,9 @@ enum SubCmd {
         #[arg(long)]
         no_restart: bool,
     },
-    /// Set the ordered providers used by `sub mode fallback` (for example `codex,kimi`).
+    /// Set the ordered providers used by `sub mode fallback` (for example `codex,kimi,grok`).
     Chain {
-        /// Comma-separated providers in try order: codex,kimi.
+        /// Comma-separated providers in try order: codex,kimi,grok.
         providers: String,
         /// Don't restart a running interceptor to apply the change.
         #[arg(long)]
@@ -494,7 +494,7 @@ enum SubCmd {
     /// Map one incoming model (a Claude tier `opus|sonnet|haiku|fable`, or an exact model id) to a
     /// provider model. Non-interactive form of `setup`, for scripts and the tray.
     Map {
-        /// Provider whose mapping to edit: codex|kimi.
+        /// Provider whose mapping to edit: codex|kimi|grok.
         provider: String,
         /// Incoming model or tier name to map from.
         from: String,
@@ -506,7 +506,7 @@ enum SubCmd {
     },
     /// Remove one mapping entry (falls back to the preset default for that model).
     Unmap {
-        /// Provider whose mapping to edit: codex|kimi.
+        /// Provider whose mapping to edit: codex|kimi|grok.
         provider: String,
         /// Incoming model or tier name to unmap.
         from: String,
@@ -516,7 +516,7 @@ enum SubCmd {
     },
     /// List the provider's candidate models (for autocompletion). `--json` for machine output.
     Models {
-        /// Provider: codex|kimi.
+        /// Provider: codex|kimi|grok.
         provider: String,
         /// Emit a JSON array of model ids.
         #[arg(long)]
@@ -530,7 +530,7 @@ enum SubCmd {
     },
     /// Sign in / out of a subscription (`llmtrim sub auth codex login`).
     Auth {
-        /// Provider: codex|kimi.
+        /// Provider: codex|kimi|grok.
         provider: String,
         #[command(subcommand)]
         action: AuthAction,
@@ -758,15 +758,29 @@ fn read_stdin() -> Result<String> {
     Ok(buf)
 }
 
+/// Resolve which subscription backend a window `/sub on [provider]` should use, and require it
+/// to be signed in. With an explicit name (`/sub on grok`), only that provider is considered.
+/// Without one (`/sub on`), fall back to the global/last-enabled `sub` config.
 #[cfg(feature = "intercept")]
-fn window_sub_provider() -> Result<String> {
-    let configured = llmtrim_core::config::RuntimeConfig::get()
-        .sub
-        .clone()
-        .or_else(llmtrim_core::config::sub_reenable_provider)
-        .context("no provider to re-enable — run `llmtrim sub on codex` (or kimi) first")?;
-    let provider = llmtrim::reroute::SubProvider::parse(&configured)
-        .context("configured subscription provider is invalid")?;
+fn window_sub_provider(requested: Option<&str>) -> Result<String> {
+    use llmtrim::reroute::SubProvider;
+    let configured = match requested {
+        Some(raw) => {
+            let p = SubProvider::parse(raw).ok_or_else(|| {
+                anyhow::anyhow!("unknown provider '{raw}' (codex|kimi|grok)")
+            })?;
+            p.as_str().to_string()
+        }
+        None => llmtrim_core::config::RuntimeConfig::get()
+            .sub
+            .clone()
+            .or_else(llmtrim_core::config::sub_reenable_provider)
+            .context(
+                "no provider to re-enable — pass one (`/sub on grok`) or run `llmtrim sub on codex|kimi|grok` first",
+            )?,
+    };
+    let provider =
+        SubProvider::parse(&configured).context("configured subscription provider is invalid")?;
     let logged_in = llmtrim::reroute::auth::auth_status_json(provider)
         .get("logged_in")
         .and_then(serde_json::Value::as_bool)
@@ -782,7 +796,7 @@ fn window_sub_provider() -> Result<String> {
 }
 
 #[cfg(not(feature = "intercept"))]
-fn window_sub_provider() -> Result<String> {
+fn window_sub_provider(_requested: Option<&str>) -> Result<String> {
     bail!("window-scoped rerouting needs the `intercept` feature")
 }
 
@@ -843,26 +857,40 @@ fn run_window_sub(args: Vec<String>) -> Result<()> {
             }
         }
         "slash" => {
-            let command = args.get(1).map(String::as_str).unwrap_or("status");
+            // `$ARGUMENTS` arrives as a single string: "on", "on grok", "off", "status", …
+            let raw = args.get(1).map(String::as_str).unwrap_or("status");
+            let parts: Vec<&str> = raw.split_whitespace().collect();
             let session = args
                 .get(2)
                 .filter(|x| !x.is_empty())
                 .cloned()
                 .or_else(session_from_env)
                 .context("Claude Code session unavailable")?;
-            match command.trim() {
-                "on" => {
-                    let provider = window_sub_provider()?;
+            match parts.as_slice() {
+                ["on"] => {
+                    // Re-enable *this window's* last provider, or the global `sub` if none.
+                    // Do not silently fall back to another backend when preferred auth fails —
+                    // that used to flip grok → codex and clobber `last_provider`.
+                    let preferred = llmtrim::window_sub::last_provider(&session);
+                    let provider = match preferred.as_deref() {
+                        Some(p) => window_sub_provider(Some(p))?,
+                        None => window_sub_provider(None)?,
+                    };
                     llmtrim::window_sub::set(&session, true, Some(&provider))?;
                     println!("Subscription rerouting enabled for this window ({provider}).");
                 }
-                "off" => {
+                ["on", provider_name] => {
+                    let provider = window_sub_provider(Some(provider_name))?;
+                    llmtrim::window_sub::set(&session, true, Some(&provider))?;
+                    println!("Subscription rerouting enabled for this window ({provider}).");
+                }
+                ["off"] => {
                     llmtrim::window_sub::set(&session, false, None)?;
                     println!(
                         "Subscription rerouting disabled for this window; Anthropic compression remains active."
                     );
                 }
-                "status" | "" => match llmtrim::window_sub::status(&session)? {
+                ["status"] | [] => match llmtrim::window_sub::status(&session)? {
                     Some(llmtrim::window_sub::Intent::Enabled { provider }) => {
                         println!("This window: subscription rerouting enabled ({provider}).")
                     }
@@ -871,7 +899,7 @@ fn run_window_sub(args: Vec<String>) -> Result<()> {
                     }
                     None => println!("This window follows the global subscription policy."),
                 },
-                _ => bail!("usage: /sub on|off|status"),
+                _ => bail!("usage: /sub on [codex|kimi|grok] | off | status"),
             }
         }
         _ => bail!("unknown window-sub action"),
@@ -886,7 +914,7 @@ fn main() {
     }
 }
 
-/// Handle `llmtrim <codex|kimi> auth <action>`.
+/// Handle `llmtrim <codex|kimi|grok> auth <action>`.
 #[cfg(feature = "intercept")]
 fn run_auth(provider: &str, action: AuthAction) -> Result<()> {
     use llmtrim::reroute::{SubProvider, auth};
@@ -907,7 +935,11 @@ fn run_auth(provider: &str, action: AuthAction) -> Result<()> {
         }
         ("kimi", AuthAction::Status { .. }) => auth::kimi_status(),
         ("kimi", AuthAction::Logout) => auth::kimi_logout(),
-        (other, _) => anyhow::bail!("unknown provider '{other}' (codex|kimi)"),
+        ("grok", AuthAction::Login) => auth::grok_login(),
+        ("grok", AuthAction::Device) => auth::grok_device(),
+        ("grok", AuthAction::Status { .. }) => auth::grok_status(),
+        ("grok", AuthAction::Logout) => auth::grok_logout(),
+        (other, _) => anyhow::bail!("unknown provider '{other}' (codex|kimi|grok)"),
     }
 }
 
@@ -1056,7 +1088,8 @@ fn run_compact(action: CompactCmd) -> Result<()> {
 fn run_sub(action: SubCmd) -> Result<()> {
     use llmtrim::reroute::{SubProvider, Tier, default_codex_tier_model};
     let parse = |p: &str| {
-        SubProvider::parse(p).ok_or_else(|| anyhow::anyhow!("unknown provider '{p}' (codex|kimi)"))
+        SubProvider::parse(p)
+            .ok_or_else(|| anyhow::anyhow!("unknown provider '{p}' (codex|kimi|grok)"))
     };
     match action {
         SubCmd::Setup { provider } => {
@@ -1080,13 +1113,26 @@ fn run_sub(action: SubCmd) -> Result<()> {
                 Some(provider) => {
                     let p = parse(&provider)?;
                     let mut map = std::collections::BTreeMap::new();
-                    if p == SubProvider::Codex {
-                        for t in Tier::ALL {
-                            map.insert(
-                                t.as_str().to_string(),
-                                default_codex_tier_model(t).to_string(),
-                            );
+                    match p {
+                        SubProvider::Codex => {
+                            for t in Tier::ALL {
+                                map.insert(
+                                    t.as_str().to_string(),
+                                    default_codex_tier_model(t).to_string(),
+                                );
+                            }
                         }
+                        SubProvider::Grok => {
+                            for t in Tier::ALL {
+                                map.insert(
+                                    t.as_str().to_string(),
+                                    llmtrim::reroute::default_grok_tier_model(t).to_string(),
+                                );
+                            }
+                        }
+                        SubProvider::Kimi => {}
+                        // SubProvider is non_exhaustive for semver; new backends need a map here.
+                        _ => {}
                     }
                     llmtrim_core::config::write_sub_mapping(p.as_str(), &map)?;
                     print_reroute_enabled(p)
@@ -1095,7 +1141,7 @@ fn run_sub(action: SubCmd) -> Result<()> {
                 None => {
                     let provider = llmtrim_core::config::sub_reenable_provider().ok_or_else(|| {
                         anyhow::anyhow!(
-                            "no provider to re-enable — run `llmtrim sub on codex` (or kimi) first"
+                            "no provider to re-enable — run `llmtrim sub on codex` (or kimi|grok) first"
                         )
                     })?;
                     let p = parse(&provider)?;
@@ -1235,6 +1281,15 @@ fn run_sub(action: SubCmd) -> Result<()> {
                             )
                         })
                         .collect(),
+                    Some(SubProvider::Grok) => Tier::ALL
+                        .iter()
+                        .map(|t| {
+                            (
+                                t.as_str().to_string(),
+                                llmtrim::reroute::default_grok_tier_model(*t).to_string(),
+                            )
+                        })
+                        .collect(),
                     _ => std::collections::BTreeMap::new(),
                 };
                 for (k, v) in &cfg.sub_tiers {
@@ -1249,6 +1304,7 @@ fn run_sub(action: SubCmd) -> Result<()> {
                     "auth": {
                         "codex": llmtrim::reroute::auth::auth_status_json(SubProvider::Codex),
                         "kimi": llmtrim::reroute::auth::auth_status_json(SubProvider::Kimi),
+                        "grok": llmtrim::reroute::auth::auth_status_json(SubProvider::Grok),
                     },
                 });
                 println!("{}", serde_json::to_string_pretty(&out)?);
@@ -1276,28 +1332,47 @@ fn run_sub(action: SubCmd) -> Result<()> {
                             }
                         );
                     }
-                    if p == SubProvider::Codex {
-                        println!(
-                            "  effort  -> {}",
-                            cfg.sub_effort.as_deref().unwrap_or("none")
-                        );
-                        for t in Tier::ALL {
-                            let model = cfg
-                                .sub_tiers
-                                .get(t.as_str())
-                                .cloned()
-                                .unwrap_or_else(|| default_codex_tier_model(t).to_string());
-                            println!("  {:<7} -> {model}", t.as_str());
-                        }
-                        // Free-form model→model overrides (keys that aren't one of the four tiers).
-                        let tier_keys: [&str; 4] = Tier::ALL.map(|t| t.as_str());
-                        for (from, to) in &cfg.sub_tiers {
-                            if !tier_keys.contains(&from.as_str()) {
-                                println!("  {from} -> {to}");
+                    match p {
+                        SubProvider::Codex => {
+                            println!(
+                                "  effort  -> {}",
+                                cfg.sub_effort.as_deref().unwrap_or("none")
+                            );
+                            for t in Tier::ALL {
+                                let model = cfg
+                                    .sub_tiers
+                                    .get(t.as_str())
+                                    .cloned()
+                                    .unwrap_or_else(|| default_codex_tier_model(t).to_string());
+                                println!("  {:<7} -> {model}", t.as_str());
+                            }
+                            // Free-form model→model overrides (keys that aren't one of the four tiers).
+                            let tier_keys: [&str; 4] = Tier::ALL.map(|t| t.as_str());
+                            for (from, to) in &cfg.sub_tiers {
+                                if !tier_keys.contains(&from.as_str()) {
+                                    println!("  {from} -> {to}");
+                                }
                             }
                         }
-                    } else {
-                        println!("  all tiers -> {}", llmtrim::reroute::KIMI_MODEL);
+                        SubProvider::Grok => {
+                            for t in Tier::ALL {
+                                let model =
+                                    cfg.sub_tiers.get(t.as_str()).cloned().unwrap_or_else(|| {
+                                        llmtrim::reroute::default_grok_tier_model(t).to_string()
+                                    });
+                                println!("  {:<7} -> {model}", t.as_str());
+                            }
+                            let tier_keys: [&str; 4] = Tier::ALL.map(|t| t.as_str());
+                            for (from, to) in &cfg.sub_tiers {
+                                if !tier_keys.contains(&from.as_str()) {
+                                    println!("  {from} -> {to}");
+                                }
+                            }
+                        }
+                        SubProvider::Kimi => {
+                            println!("  all tiers -> {}", llmtrim::reroute::KIMI_MODEL);
+                        }
+                        _ => println!("  (unknown provider)"),
                     }
                     // Auth is what makes reroute actually work — surface it here, not just in JSON.
                     let auth = llmtrim::reroute::auth::auth_status_json(p);

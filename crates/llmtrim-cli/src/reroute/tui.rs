@@ -54,15 +54,23 @@ impl App {
     fn new(provider: SubProvider) -> Self {
         let tiers = Tier::ALL;
         let catalog = catalog::models_for(provider);
-        // Seed each tier from the current config override, else the built-in preset default.
+        // Seed from *this* provider's table — not RuntimeConfig::sub_tiers (active provider only).
+        // Global `sub = codex` must not seed `llmtrim sub setup grok` with gpt-5.6-* ids.
         let rc = llmtrim_core::config::RuntimeConfig::get();
-        let overrides = &rc.sub_tiers;
+        let overrides = llmtrim_core::config::sub_tiers_for(provider.as_str());
+        let in_catalog = |id: &str| catalog.iter().any(|e| e.id == id);
         let chosen = tiers.map(|t| match provider {
             SubProvider::Kimi => super::KIMI_MODEL.to_string(),
             SubProvider::Codex => overrides
                 .get(t.as_str())
+                .filter(|m| in_catalog(m) || m.starts_with("gpt-"))
                 .cloned()
                 .unwrap_or_else(|| default_codex_tier_model(t).to_string()),
+            SubProvider::Grok => overrides
+                .get(t.as_str())
+                .filter(|m| in_catalog(m) || m.starts_with("grok-"))
+                .cloned()
+                .unwrap_or_else(|| super::default_grok_tier_model(t).to_string()),
         });
         Self {
             provider,

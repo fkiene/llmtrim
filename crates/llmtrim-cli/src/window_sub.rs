@@ -52,7 +52,7 @@ fn valid(value: &str) -> bool {
         && !value.contains("..")
 }
 fn valid_provider(value: &str) -> bool {
-    matches!(value, "codex" | "kimi")
+    matches!(value, "codex" | "kimi" | "grok")
 }
 
 pub fn registry_path() -> Result<PathBuf> {
@@ -238,7 +238,7 @@ pub fn set(session: &str, enabled: bool, provider: Option<&str>) -> Result<()> {
             .map(str::to_owned)
             .or_else(|| w.last_provider.clone())
             .context(
-                "no configured subscription provider; run llmtrim sub on codex or kimi first",
+                "no configured subscription provider; run llmtrim sub on codex, kimi, or grok first",
             )?;
         if !valid_provider(&p) {
             bail!("unsupported subscription provider");
@@ -276,6 +276,23 @@ pub fn status(session: &str) -> Result<Option<Intent>> {
     Ok(lookup(Some(session)))
 }
 
+/// Last provider this window successfully enabled, if any (used by bare `/sub on`).
+pub fn last_provider(session: &str) -> Option<String> {
+    if !valid(session) {
+        return None;
+    }
+    let path = registry_path().ok()?;
+    let _lock = lock_registry(&path).ok()?;
+    let r = load_at(&path).ok()?;
+    let token = r.sessions.get(session)?;
+    let window = r.windows.get(token)?;
+    let current = now();
+    if current.saturating_sub(window.touched) > TTL.as_secs() {
+        return None;
+    }
+    window.last_provider.clone()
+}
+
 #[cfg(unix)]
 fn quoted_exe(exe: &str) -> String {
     format!("'{}'", exe.replace('\'', "'\"'\"'"))
@@ -294,7 +311,22 @@ fn quoted_exe(exe: &str) -> String {
 pub fn command_markdown(exe: &str) -> String {
     let exe = quoted_exe(exe);
     format!(
-        "---\ndescription: Toggle llmtrim subscription rerouting for this Claude Code window only.\ndisable-model-invocation: true\nargument-hint: \"on|off|status\"\n---\n\n<!-- llmtrim-owned-window-sub -->\n!`{exe} window-sub slash \"$ARGUMENTS\" \"$CLAUDE_CODE_SESSION_ID\"`\n"
+        "---\n\
+         description: Toggle llmtrim subscription rerouting for this Claude Code window only.\n\
+         disable-model-invocation: true\n\
+         argument-hint: \"on [codex|kimi|grok]|off|status\"\n\
+         ---\n\
+         \n\
+         <!-- llmtrim-owned-window-sub -->\n\
+         Window-local subscription override (does not change other windows or the global\n\
+         `llmtrim sub` setting).\n\
+         \n\
+         - `/sub on` — enable using the last provider for this window, or the global `sub`\n\
+         - `/sub on codex` / `/sub on kimi` / `/sub on grok` — enable a specific provider\n\
+         - `/sub off` — force Anthropic (with compression) for this window\n\
+         - `/sub status` — show this window's override\n\
+         \n\
+         !`{exe} window-sub slash \"$ARGUMENTS\" \"$CLAUDE_CODE_SESSION_ID\"`\n"
     )
 }
 fn settings_path() -> Result<PathBuf> {
@@ -537,6 +569,23 @@ mod tests {
         let text = command_markdown("llmtrim");
         assert!(text.contains("CLAUDE_CODE_SESSION_ID"));
         assert!(!text.contains("LLMTRIM_CLAUDE_WINDOW_TOKEN"));
+        assert!(
+            text.contains("on [codex|kimi|grok]"),
+            "argument-hint should list providers: {text}"
+        );
+        assert!(
+            text.contains("/sub on grok"),
+            "skill body should document explicit provider: {text}"
+        );
+    }
+
+    #[test]
+    fn accepts_all_subscription_providers() {
+        assert!(valid_provider("codex"));
+        assert!(valid_provider("kimi"));
+        assert!(valid_provider("grok"));
+        assert!(!valid_provider("anthropic"));
+        assert!(!valid_provider("openai"));
     }
 
     #[test]

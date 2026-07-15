@@ -8,7 +8,7 @@
 use once_cell::sync::Lazy;
 use serde_json::Value;
 
-use crate::reroute::{CODEX_MODELS, KIMI_MODEL, SubProvider};
+use crate::reroute::{CODEX_MODELS, GROK_MODELS, KIMI_MODEL, SubProvider};
 
 /// The models.dev pricing snapshot, embedded at build time. Ids are provider-prefixed, e.g.
 /// `"openai/gpt-5.5"` or `"moonshotai/kimi-k2.7-code"`.
@@ -37,6 +37,10 @@ pub fn models_for(provider: SubProvider) -> Vec<CatalogEntry> {
         SubProvider::Kimi => {
             vec![entry_for(KIMI_MODEL, &["moonshotai/", "moonshot/"])]
         }
+        SubProvider::Grok => GROK_MODELS
+            .iter()
+            .map(|id| entry_for(id, &["x-ai/", "xai/"]))
+            .collect(),
     }
 }
 
@@ -113,6 +117,15 @@ mod tests {
         let entries = models_for(SubProvider::Kimi);
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].id, KIMI_MODEL);
+    }
+
+    #[test]
+    fn grok_returns_curated_ids() {
+        let ids: Vec<String> = models_for(SubProvider::Grok)
+            .into_iter()
+            .map(|e| e.id)
+            .collect();
+        assert_eq!(ids, GROK_MODELS.to_vec());
     }
 
     #[test]

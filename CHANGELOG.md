@@ -6,6 +6,12 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Breaking
+
+- **`SubProvider` / `StreamReducer` gain a `Grok` variant** and are marked `#[non_exhaustive]` so
+  further backends can land without a major bump. External exhaustive `match`es need a `_` arm.
+  Workspace version is **0.11.0** (0.x minor = semver-breaking).
+
 ### Added
 
 - **`llmtrim ensure`:** bring this machine to the recommended state. Installs or refreshes owned
@@ -19,6 +25,25 @@ All notable changes to this project are documented here. The format follows
   missing (optional; default off when non-interactive).
 - **One-time subscription onboarding in the status TUI** (`s` for login steps, `n` to dismiss)
   when Claude Code is present and `sub` is not configured.
+- **Subscription reroute: Grok (SuperGrok / Grok Build).** `llmtrim sub auth grok login` signs in
+  via OAuth against `auth.x.ai` (browser PKCE); `llmtrim sub use grok` maps Claude tiers to
+  `grok-4.5` (opus/sonnet/fable) and `grok-composer-2.5-fast` (haiku) and routes Claude Code's
+  Anthropic `/v1/messages` traffic to `cli-chat-proxy.grok.com/v1/responses`. Tokens live at
+  `~/.llmtrim/grok/auth.json`. Works with `sub mode fallback` chains (`codex,kimi,grok`) and the
+  window `/sub` command. Device-code login is not available yet (browser only).
+- **Window `/sub on <provider>`.** The Claude Code slash command accepts an explicit backend:
+  `/sub on codex`, `/sub on kimi`, or `/sub on grok`. Bare `/sub on` still re-enables the last
+  window provider or the global `sub` setting.
+- **Status line shows window `/sub` overrides immediately.** Mid-session `/sub on grok` (or any
+  provider) now paints `→grok-4.5` even when earlier turns were Anthropic and global `sub` is
+  `off`. Window overrides are treated as always-mode for the arrow (matching the proxy), and a
+  policy switch overrides a stale ledger backend until the new one serves a turn.
+- **Window `/sub` no longer inherits another provider's tier map.** With global `llmtrim sub on
+  codex` and a Claude Code `/sub on grok`, the proxy was already routing to Grok but still applied
+  `[sub.codex.tiers]` (e.g. `opus → gpt-5.6-terra`) on the Grok request. Tiers are now loaded per
+  serving provider, and foreign model ids in overrides are ignored. After upgrading, run
+  **`llmtrim ensure`** (or **`f`** in `status`) so owned `/sub` hooks refresh and a version-skewed
+  daemon restarts onto the new binary.
 
 ### Changed
 
@@ -1106,7 +1131,8 @@ bill, never a broken call.
   (6 targets with SLSA build provenance), CI on Linux/macOS/Windows with secret
   scanning, license compliance, and MSRV gates.
 
-[Unreleased]: https://github.com/fkiene/llmtrim/compare/v0.10.2...HEAD
+[Unreleased]: https://github.com/fkiene/llmtrim/compare/v0.11.0...HEAD
+[0.11.0]: https://github.com/fkiene/llmtrim/compare/v0.10.2...v0.11.0
 [0.10.2]: https://github.com/fkiene/llmtrim/compare/v0.10.1...v0.10.2
 [0.10.1]: https://github.com/fkiene/llmtrim/compare/v0.10.0...v0.10.1
 [0.10.0]: https://github.com/fkiene/llmtrim/compare/v0.9.4...v0.10.0
