@@ -779,8 +779,8 @@ fn window_sub_provider(requested: Option<&str>) -> Result<String> {
                 "no provider to re-enable — pass one (`/sub on grok`) or run `llmtrim sub on codex|kimi|grok` first",
             )?,
     };
-    let provider = SubProvider::parse(&configured)
-        .context("configured subscription provider is invalid")?;
+    let provider =
+        SubProvider::parse(&configured).context("configured subscription provider is invalid")?;
     let logged_in = llmtrim::reroute::auth::auth_status_json(provider)
         .get("logged_in")
         .and_then(serde_json::Value::as_bool)
@@ -1356,11 +1356,8 @@ fn run_sub(action: SubCmd) -> Result<()> {
                         }
                         SubProvider::Grok => {
                             for t in Tier::ALL {
-                                let model = cfg
-                                    .sub_tiers
-                                    .get(t.as_str())
-                                    .cloned()
-                                    .unwrap_or_else(|| {
+                                let model =
+                                    cfg.sub_tiers.get(t.as_str()).cloned().unwrap_or_else(|| {
                                         llmtrim::reroute::default_grok_tier_model(t).to_string()
                                     });
                                 println!("  {:<7} -> {model}", t.as_str());

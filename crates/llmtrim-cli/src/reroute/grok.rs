@@ -458,11 +458,9 @@ impl Reducer {
     fn emit_remaining_tools(&mut self, out: &mut Vec<ReduceEvent>) {
         let order = self.tool_order.clone();
         for id in order {
-            if self
-                .tools
-                .get(&id)
-                .is_some_and(|t| !t.stopped && (t.started || !t.buf.is_empty() || !t.name.is_empty()))
-            {
+            if self.tools.get(&id).is_some_and(|t| {
+                !t.stopped && (t.started || !t.buf.is_empty() || !t.name.is_empty())
+            }) {
                 // Close thinking/text first so nesting stays valid.
                 if matches!(self.open, Open::Thinking | Open::Text) {
                     self.close_open(out);
@@ -480,7 +478,10 @@ impl Reducer {
     }
 
     fn resolve_call_id(&self, v: &Value) -> Option<String> {
-        if let Some(id) = v.get("call_id").and_then(Value::as_str).filter(|s| !s.is_empty())
+        if let Some(id) = v
+            .get("call_id")
+            .and_then(Value::as_str)
+            .filter(|s| !s.is_empty())
         {
             return Some(id.to_string());
         }
@@ -624,7 +625,8 @@ impl Reducer {
                 // Stream deltas live only for the currently open Anthropic tool block.
                 if self.open == Open::Tool && self.open_tool.as_deref() == Some(call_id.as_str()) {
                     // Keep buffering; flush happens on done so sanitize_read_args sees full JSON.
-                } else if self.open != Open::Tool && !matches!(self.open, Open::Thinking | Open::Text)
+                } else if self.open != Open::Tool
+                    && !matches!(self.open, Open::Thinking | Open::Text)
                 {
                     self.open_tool_stream(&call_id, out);
                 }
@@ -935,7 +937,11 @@ mod tests {
             "data: {\"type\":\"response.output_item.done\",\"item\":{\"type\":\"web_search_call\"}}\n\n",
             "data: {\"type\":\"response.completed\",\"response\":{\"usage\":{\"input_tokens\":1,\"output_tokens\":2}}}\n\n",
         );
-        let events: Vec<_> = r.push(chunk.as_bytes()).into_iter().chain(r.finish()).collect();
+        let events: Vec<_> = r
+            .push(chunk.as_bytes())
+            .into_iter()
+            .chain(r.finish())
+            .collect();
         let starts: Vec<_> = events
             .iter()
             .filter_map(|e| match e {

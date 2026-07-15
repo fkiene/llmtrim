@@ -548,11 +548,7 @@ fn reroute_resolved_model(
         "grok" => SubProvider::Grok,
         _ => return None,
     };
-    Some(crate::reroute::resolve_model(
-        sp,
-        incoming_model_id,
-        tiers,
-    ))
+    Some(crate::reroute::resolve_model(sp, incoming_model_id, tiers))
 }
 
 #[cfg(not(feature = "intercept"))]

@@ -2208,9 +2208,7 @@ mod imp {
 
             // Backend accepted this turn (content committed, no pre-output fatal): refresh the
             // last-known-good snapshot and clear any prior must_compact latch.
-            if committed
-                && let Some(snap) = info.anthropic_snapshot.as_ref()
-            {
+            if committed && let Some(snap) = info.anthropic_snapshot.as_ref() {
                 crate::reroute::context_limit::record_accepted(info.session_id.as_deref(), snap);
             }
 
@@ -2444,9 +2442,7 @@ mod imp {
             }
             enc.finish_if_open(&mut out);
 
-            if committed
-                && let Some(snap) = info.anthropic_snapshot.as_ref()
-            {
+            if committed && let Some(snap) = info.anthropic_snapshot.as_ref() {
                 crate::reroute::context_limit::record_accepted(info.session_id.as_deref(), snap);
             }
 
@@ -4591,7 +4587,10 @@ mod imp {
             assert!(
                 !pre_output_context_limit(&[
                     (true, ""),
-                    (false, "Your input exceeds the context window of this model."),
+                    (
+                        false,
+                        "Your input exceeds the context window of this model."
+                    ),
                 ]),
                 "content commit before error: do not mark must_compact"
             );

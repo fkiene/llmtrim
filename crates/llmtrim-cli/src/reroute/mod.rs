@@ -532,10 +532,7 @@ mod tests {
             resolve_model(SubProvider::Grok, "claude-opus-4-8", &ov),
             "grok-4.5"
         );
-        assert_eq!(
-            resolve_model(SubProvider::Grok, "sonnet", &ov),
-            "grok-4.5"
-        );
+        assert_eq!(resolve_model(SubProvider::Grok, "sonnet", &ov), "grok-4.5");
         assert_eq!(
             resolve_model(SubProvider::Grok, "haiku", &ov),
             "grok-composer-2.5-fast"

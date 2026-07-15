@@ -82,8 +82,8 @@ pub fn get_token(provider: SubProvider) -> Result<TokenSet> {
             })
         }
         SubProvider::Grok => {
-            let stored =
-                read_grok().context("no Grok credentials — run `llmtrim sub auth grok login` first")?;
+            let stored = read_grok()
+                .context("no Grok credentials — run `llmtrim sub auth grok login` first")?;
             let now = now_ms();
             let stored = if needs_refresh(stored.expires, now) {
                 grok_refresh(&stored)?
@@ -115,8 +115,7 @@ const KIMI_CLI_VERSION: &str = "1.37.0";
 /// Grok CLI public OAuth client (same as Grok Build / claude-code-proxy).
 const GROK_ISSUER: &str = "https://auth.x.ai";
 const GROK_CLIENT_ID: &str = "b1a00492-073a-47ea-816f-4c329264a828";
-const GROK_SCOPES: &str =
-    "openid profile email offline_access grok-cli:access api:access conversations:read conversations:write";
+const GROK_SCOPES: &str = "openid profile email offline_access grok-cli:access api:access conversations:read conversations:write";
 
 /// Refresh anything within 5 minutes of expiry.
 const REFRESH_MARGIN_MS: u64 = 5 * 60 * 1000;
@@ -1174,12 +1173,7 @@ pub fn grok_login() -> Result<()> {
     println!("Waiting for the authorization callback (up to 5 minutes)...");
 
     let code = wait_for_grok_callback(listener, &state)?;
-    let tr = grok_exchange_code(
-        &discovery.token_endpoint,
-        &code,
-        &redirect_uri,
-        &verifier,
-    )?;
+    let tr = grok_exchange_code(&discovery.token_endpoint, &code, &redirect_uri, &verifier)?;
     let stored = grok_stored_from(tr, true, None)?;
     write_grok(&stored)?;
     println!("Grok login complete.");

@@ -562,9 +562,10 @@ mod tests {
     #[test]
     fn pre_output_helper_requires_no_content_commit() {
         let _lock = test_lock();
-        assert!(pre_output_context_limit(&[
-            (false, "context_length_exceeded"),
-        ]));
+        assert!(pre_output_context_limit(&[(
+            false,
+            "context_length_exceeded"
+        ),]));
         assert!(!pre_output_context_limit(&[
             (true, ""),
             (false, "context_length_exceeded"),
