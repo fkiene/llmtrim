@@ -29,10 +29,12 @@ Prebuilt binary for your platform — no Rust. Prefer the global install over `n
 curl -fsSL https://raw.githubusercontent.com/fkiene/llmtrim/main/install.sh | sh
 ```
 
-Installs into `~/.local/bin` and runs `setup` for you. Overrides:
+Installs into `~/.local/bin` and runs `setup` for you. Optional overrides (omit either to keep the default):
 
 ```bash
-LLMTRIM_INSTALL_DIR=/usr/local/bin LLMTRIM_VERSION=v0.10.2 \
+# pin a release tag from https://github.com/fkiene/llmtrim/releases  (e.g. v0.10.2)
+# and/or install outside ~/.local/bin
+LLMTRIM_INSTALL_DIR=/usr/local/bin LLMTRIM_VERSION=vX.Y.Z \
   curl -fsSL https://raw.githubusercontent.com/fkiene/llmtrim/main/install.sh | sh
 ```
 
@@ -51,7 +53,7 @@ irm https://raw.githubusercontent.com/fkiene/llmtrim/main/install.ps1 | iex
 Binary lands in `%LOCALAPPDATA%\llmtrim\bin` (user `PATH` updated). Overrides:
 
 ```powershell
-$env:LLMTRIM_VERSION = "v0.10.2"   # pin a release
+$env:LLMTRIM_VERSION = "vX.Y.Z"    # pin a release tag (see GitHub Releases)
 $env:LLMTRIM_NO_SETUP = "1"        # binary only; run setup yourself later
 irm https://raw.githubusercontent.com/fkiene/llmtrim/main/install.ps1 | iex
 ```
