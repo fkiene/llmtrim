@@ -1017,8 +1017,8 @@ pub fn sync_owned() -> Result<SyncOutcome> {
         Err(_) => Value::Object(Default::default()),
     };
     match owned_status_of(&settings) {
-        OwnedStatus::Foreign => return Ok(SyncOutcome::SkippedForeign),
-        OwnedStatus::Current => return Ok(SyncOutcome::AlreadyCurrent),
+        OwnedStatus::Foreign => Ok(SyncOutcome::SkippedForeign),
+        OwnedStatus::Current => Ok(SyncOutcome::AlreadyCurrent),
         OwnedStatus::Missing => {
             set_statusline(&mut settings, &path)?;
             write_settings(&path, &settings)?;

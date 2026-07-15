@@ -513,7 +513,7 @@ pub fn run(requested: Option<u16>, force: bool) -> Result<()> {
         ));
         crate::ensure::Report::default()
     });
-    let compact_changed = ensure_report.applied.iter().any(|id| *id == "compact");
+    let compact_changed = ensure_report.applied.contains(&"compact");
     rows.extend(ensure_report.rows);
 
     // 4. Reconcile the interceptor. If a healthy daemon is already serving the resolved port,

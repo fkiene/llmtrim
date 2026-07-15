@@ -202,16 +202,15 @@ fn probe_with(state: &State) -> Vec<Gap> {
     }
 
     // Version skew: daemon older than this binary.
-    if let Some(d) = crate::daemon::running() {
-        if let Some(v) = d.version.as_deref() {
-            if v != CURRENT {
-                gaps.push(Gap {
-                    id: "daemon",
-                    label: "Daemon".into(),
-                    detail: format!("running v{v}, binary is v{CURRENT}"),
-                });
-            }
-        }
+    if let Some(d) = crate::daemon::running()
+        && let Some(v) = d.version.as_deref()
+        && v != CURRENT
+    {
+        gaps.push(Gap {
+            id: "daemon",
+            label: "Daemon".into(),
+            detail: format!("running v{v}, binary is v{CURRENT}"),
+        });
     }
 
     // Tray binary appeared but login entry never enabled (and user did not opt out).
@@ -496,25 +495,22 @@ pub fn apply(opts: Options) -> Result<Report> {
     }
 
     // Daemon version skew.
-    if opts.restart_daemon {
-        if let Some(d) = crate::daemon::running() {
-            if d.version.as_deref().is_some_and(|v| v != CURRENT) {
-                match crate::update::restart_daemon_silent() {
-                    Ok(()) => {
-                        report.applied.push("daemon");
-                        report.rows.push((
-                            ui::OK,
-                            "Daemon".into(),
-                            format!("restarted on v{CURRENT}"),
-                        ));
-                    }
-                    Err(e) => report.rows.push((
-                        ui::WARN,
-                        "Daemon".into(),
-                        format!("restart failed: {e:#} — try `llmtrim start --force`"),
-                    )),
-                }
+    if opts.restart_daemon
+        && let Some(d) = crate::daemon::running()
+        && d.version.as_deref().is_some_and(|v| v != CURRENT)
+    {
+        match crate::update::restart_daemon_silent() {
+            Ok(()) => {
+                report.applied.push("daemon");
+                report
+                    .rows
+                    .push((ui::OK, "Daemon".into(), format!("restarted on v{CURRENT}")));
             }
+            Err(e) => report.rows.push((
+                ui::WARN,
+                "Daemon".into(),
+                format!("restart failed: {e:#} — try `llmtrim start --force`"),
+            )),
         }
     }
 

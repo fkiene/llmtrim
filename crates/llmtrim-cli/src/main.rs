@@ -1594,10 +1594,8 @@ fn run() -> Result<()> {
             None => llmtrim::statusline::run()?,
             Some(StatuslineCmd::Install { print }) => {
                 llmtrim::statusline::install(print)?;
-                if !print {
-                    if let Err(e) = llmtrim::ensure::set_opt_out("statusline", false) {
-                        eprintln!("llmtrim: could not clear statusline opt-out: {e:#}");
-                    }
+                if !print && let Err(e) = llmtrim::ensure::set_opt_out("statusline", false) {
+                    eprintln!("llmtrim: could not clear statusline opt-out: {e:#}");
                 }
             }
             Some(StatuslineCmd::Uninstall) => {
@@ -1613,10 +1611,8 @@ fn run() -> Result<()> {
             None => std::process::exit(llmtrim::guard::run()),
             Some(GuardCmd::Install { print }) => {
                 llmtrim::guard::install(print)?;
-                if !print {
-                    if let Err(e) = llmtrim::ensure::set_opt_out("guard", false) {
-                        eprintln!("llmtrim: could not clear guard opt-out: {e:#}");
-                    }
+                if !print && let Err(e) = llmtrim::ensure::set_opt_out("guard", false) {
+                    eprintln!("llmtrim: could not clear guard opt-out: {e:#}");
                 }
             }
             Some(GuardCmd::Uninstall) => {
