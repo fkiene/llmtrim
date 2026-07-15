@@ -27,8 +27,7 @@ All notable changes to this project are documented here. The format follows
   window `/sub` command. Device-code login is not available yet (browser only).
 - **Window `/sub on <provider>`.** The Claude Code slash command accepts an explicit backend:
   `/sub on codex`, `/sub on kimi`, or `/sub on grok`. Bare `/sub on` still re-enables the last
-  window provider or the global `sub` setting. Re-run `llmtrim window-sub install` (or
-  `llmtrim setup` / `ensure`) to refresh the skill text.
+  window provider or the global `sub` setting.
 - **Status line shows window `/sub` overrides immediately.** Mid-session `/sub on grok` (or any
   provider) now paints `→grok-4.5` even when earlier turns were Anthropic and global `sub` is
   `off`. Window overrides are treated as always-mode for the arrow (matching the proxy), and a
@@ -36,9 +35,9 @@ All notable changes to this project are documented here. The format follows
 - **Window `/sub` no longer inherits another provider's tier map.** With global `llmtrim sub on
   codex` and a Claude Code `/sub on grok`, the proxy was already routing to Grok but still applied
   `[sub.codex.tiers]` (e.g. `opus → gpt-5.6-terra`) on the Grok request. Tiers are now loaded per
-  serving provider, and foreign model ids in overrides are ignored. After upgrading, re-run
-  `llmtrim window-sub install` **and** `llmtrim start --force` so hooks and the daemon both know
-  the new `grok` provider.
+  serving provider, and foreign model ids in overrides are ignored. After upgrading, run
+  **`llmtrim ensure`** (or **`f`** in `status`) so owned `/sub` hooks refresh and a version-skewed
+  daemon restarts onto the new binary.
 
 ### Changed
 

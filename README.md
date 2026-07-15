@@ -313,7 +313,7 @@ This window only (installed with ensure; includes subagents; survives `/clear`):
 /sub status
 ```
 
-Tokens: `~/.llmtrim/<provider>/auth.json` (mode 0600). Env: `LLMTRIM_SUB`, `LLMTRIM_SUB_MODE`, `LLMTRIM_SUB_CHAIN`. After upgrading, `llmtrim ensure` (or `window-sub install` + `start --force`) so hooks and the daemon know `grok`.
+Tokens: `~/.llmtrim/<provider>/auth.json` (mode 0600). Env: `LLMTRIM_SUB`, `LLMTRIM_SUB_MODE`, `LLMTRIM_SUB_CHAIN`. After upgrading, run **`llmtrim ensure`** (or **`f`** in `status`) so owned `/sub` hooks refresh and the daemon picks up the new binary (including `grok`).
 
 </details>
 
