@@ -1757,12 +1757,8 @@ mod imp {
             let mut compact_candidates = crate::compact::detect(&anthropic)
                 .filter(|_| !self.compact_models.is_empty())
                 .map(|original| {
-                    crate::compact::plan(
-                        &self.compact_models,
-                        &original,
-                        Some(sub),
-                        &self.sub_tiers,
-                    )
+                    let tiers = llmtrim_core::config::sub_tiers_for(sub.as_str());
+                    crate::compact::plan(&self.compact_models, &original, Some(sub), &tiers)
                 })
                 .unwrap_or_default();
             let max_tokens = anthropic
@@ -1873,11 +1869,15 @@ mod imp {
                 Err(_) => return anthropic_error(500, "llmtrim: auth task failed").into(),
             };
 
+            // Tiers must match the provider actually serving this turn. A window `/sub on grok`
+            // with global `sub = codex` must use `[sub.grok.tiers]` (or Grok defaults), not the
+            // Codex mapping snapshotted into `self.sub_tiers` at daemon start.
+            let tiers = llmtrim_core::config::sub_tiers_for(sub.as_str());
             let rewrite = match crate::reroute::build_upstream_for_model(
                 sub,
                 &translate_value,
                 compact_current.as_ref().map(|c| c.logical_model.as_str()),
-                &self.sub_tiers,
+                &tiers,
                 &token,
                 session_id.as_deref(),
             ) {
@@ -2627,11 +2627,12 @@ mod imp {
                     .await
                     .map_err(|_| "auth task failed".to_string())?
                     .map_err(|e| format!("not authenticated ({e})"))?;
+            let tiers = llmtrim_core::config::sub_tiers_for(provider.as_str());
             let rewrite = crate::reroute::build_upstream_for_model(
                 provider,
                 anthropic,
                 logical_model,
-                &self.sub_tiers,
+                &tiers,
                 &token,
                 session_id,
             )

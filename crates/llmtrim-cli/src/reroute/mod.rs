@@ -1,22 +1,23 @@
 //! Subscription reroute: send intercepted Anthropic `/v1/messages` traffic to a *different*
-//! subscription's backend (ChatGPT/Codex or Kimi) instead of Anthropic, translating the request
-//! and streamed response between wire shapes.
+//! subscription's backend (ChatGPT/Codex, Kimi, or Grok) instead of Anthropic, translating the
+//! request and streamed response between wire shapes.
 //!
-//! This is opt-in (`sub = "codex"|"kimi"` in the config, off by default) and rides the existing
-//! MITM path: [`crate::serve`] rewrites the intercepted request's URI authority to the provider
-//! host and swaps in the translated body + provider auth, so hudsucker forwards it over the same
-//! client and `handle_response` streams the translated reply back. Nothing here opens its own
-//! socket except the one-time OAuth flows in [`auth`].
+//! This is opt-in (`sub = "codex"|"kimi"|"grok"` in the config, off by default) and rides the
+//! existing MITM path: [`crate::serve`] rewrites the intercepted request's URI authority to the
+//! provider host and swaps in the translated body + provider auth, so hudsucker forwards it over
+//! the same client and `handle_response` streams the translated reply back. Nothing here opens its
+//! own socket except the one-time OAuth flows in [`auth`].
 //!
-//! **Terms of service:** driving a ChatGPT/Kimi *subscription* through a non-official client is a
-//! gray area and can get that account restricted. Reroute is off by default and the `auth login`
-//! commands print this warning. Use at your own risk.
+//! **Terms of service:** driving a ChatGPT/Kimi/Grok *subscription* through a non-official client
+//! is a gray area and can get that account restricted. Reroute is off by default and the
+//! `auth login` commands print this warning. Use at your own risk.
 
 pub mod auth;
 pub mod catalog;
 pub mod codex;
 pub mod context_limit;
 pub mod continuation;
+pub mod grok;
 pub mod kimi;
 pub mod read_rewrite;
 pub mod sse;
@@ -86,6 +87,11 @@ pub(crate) fn build_upstream_for_model(
             let h = kimi::request_headers(&token.access, token.account_id.as_deref(), session_id);
             (kimi::HOST, kimi::PATH, serde_json::to_vec(&b)?, h)
         }
+        SubProvider::Grok => {
+            let b = grok::build_request_body(anthropic_body, &model, session_id)?;
+            let h = grok::request_headers(&token.access, token.account_id.as_deref(), session_id);
+            (grok::HOST, grok::PATH, serde_json::to_vec(&b)?, h)
+        }
     };
     Ok(UpstreamRewrite {
         host: host.to_string(),
@@ -102,6 +108,7 @@ pub(crate) fn build_upstream_for_model(
 pub enum StreamReducer {
     Codex(codex::Reducer),
     Kimi(kimi::Reducer),
+    Grok(grok::Reducer),
 }
 
 impl StreamReducer {
@@ -109,6 +116,7 @@ impl StreamReducer {
         match provider {
             SubProvider::Codex => StreamReducer::Codex(codex::Reducer::new(model)),
             SubProvider::Kimi => StreamReducer::Kimi(kimi::Reducer::new(model)),
+            SubProvider::Grok => StreamReducer::Grok(grok::Reducer::new(model)),
         }
     }
 
@@ -116,6 +124,7 @@ impl StreamReducer {
         match self {
             StreamReducer::Codex(r) => r.push(chunk),
             StreamReducer::Kimi(r) => r.push(chunk),
+            StreamReducer::Grok(r) => r.push(chunk),
         }
     }
 
@@ -123,16 +132,17 @@ impl StreamReducer {
         match self {
             StreamReducer::Codex(r) => r.finish(),
             StreamReducer::Kimi(r) => r.finish(),
+            StreamReducer::Grok(r) => r.finish(),
         }
     }
 
     /// For Codex continuation: take the assistant output items (text + function calls)
     /// accumulated during reduction for this turn, to append to the transcript for next-turn
-    /// delta detection. Safe no-op for Kimi.
+    /// delta detection. Safe no-op for Kimi/Grok.
     pub fn take_codex_output_items(&mut self) -> Vec<Value> {
         match self {
             StreamReducer::Codex(r) => r.take_output_items(),
-            StreamReducer::Kimi(_) => vec![],
+            StreamReducer::Kimi(_) | StreamReducer::Grok(_) => vec![],
         }
     }
 }
@@ -194,6 +204,7 @@ fn count_text_tokens(text: &str, model: Option<&str>) -> i64 {
 pub enum SubProvider {
     Codex,
     Kimi,
+    Grok,
 }
 
 impl SubProvider {
@@ -203,6 +214,7 @@ impl SubProvider {
         match s.trim().to_ascii_lowercase().as_str() {
             "codex" | "chatgpt" | "openai" => Some(SubProvider::Codex),
             "kimi" | "moonshot" => Some(SubProvider::Kimi),
+            "grok" | "xai" | "x-ai" => Some(SubProvider::Grok),
             _ => None,
         }
     }
@@ -211,6 +223,7 @@ impl SubProvider {
         match self {
             SubProvider::Codex => "codex",
             SubProvider::Kimi => "kimi",
+            SubProvider::Grok => "grok",
         }
     }
 }
@@ -272,8 +285,20 @@ pub fn default_codex_tier_model(tier: Tier) -> &'static str {
     }
 }
 
+/// Built-in Grok tier preset: flagship for heavy tiers, composer-fast for Haiku (background
+/// title/token calls).
+pub fn default_grok_tier_model(tier: Tier) -> &'static str {
+    match tier {
+        Tier::Opus | Tier::Sonnet | Tier::Fable => "grok-4.5",
+        Tier::Haiku => "grok-composer-2.5-fast",
+    }
+}
+
 /// Kimi exposes a single wire model; every tier and alias collapses to it.
 pub const KIMI_MODEL: &str = "kimi-for-coding";
+
+/// Grok models the CLI subscription endpoint accepts.
+pub const GROK_MODELS: [&str; 2] = ["grok-4.5", "grok-composer-2.5-fast"];
 
 /// Resolve the incoming Anthropic model id to the upstream provider model for `provider`, applying
 /// (in order): an exact-id override, then the tier's override, then the preset default. `overrides`
@@ -287,31 +312,64 @@ pub fn resolve_model(
     incoming: &str,
     overrides: &std::collections::BTreeMap<String, String>,
 ) -> String {
-    let (base, _fast) = normalize_incoming(incoming);
+    let (base, fast) = normalize_incoming(incoming);
+    // Codex uses a trailing `-fast` as a service-tier hint. Grok model ids include it literally
+    // (`grok-composer-2.5-fast`), so reattach it for Grok before any lookup/passthrough.
+    let base = if provider == SubProvider::Grok && fast {
+        format!("{base}-fast")
+    } else {
+        base
+    };
     if provider == SubProvider::Kimi {
         return KIMI_MODEL.to_string();
     }
     let key = base.to_ascii_lowercase();
-    // 1. Exact-id override.
-    if let Some(m) = overrides.get(&key) {
+    // 1. Exact-id override (only if it is a model this provider can actually serve — a window
+    //    `/sub on grok` with global `sub = codex` must not apply `opus = "gpt-5.6-terra"`).
+    if let Some(m) = overrides.get(&key)
+        && model_ok_for(provider, m)
+    {
         return m.clone();
     }
     // 2. Tier override, then preset default.
     if let Some(tier) = classify_tier(&base) {
-        if let Some(m) = overrides.get(tier.as_str()) {
+        if let Some(m) = overrides.get(tier.as_str())
+            && model_ok_for(provider, m)
+        {
             return m.clone();
         }
-        return default_codex_tier_model(tier).to_string();
+        return match provider {
+            SubProvider::Codex => default_codex_tier_model(tier).to_string(),
+            SubProvider::Grok => default_grok_tier_model(tier).to_string(),
+            SubProvider::Kimi => KIMI_MODEL.to_string(),
+        };
     }
-    // 3. Not a Claude tier: if it already looks like a Codex model, pass it through; otherwise fall
-    //    back to the sonnet tier (conservative, always-works default).
-    if is_codex_model(&base) {
-        return base;
+    // 3. Not a Claude tier: pass through known provider ids; otherwise fall back to sonnet.
+    match provider {
+        SubProvider::Codex if is_codex_model(&base) => base,
+        SubProvider::Grok if is_grok_model(&base) => base,
+        SubProvider::Codex => overrides
+            .get(Tier::Sonnet.as_str())
+            .filter(|m| model_ok_for(SubProvider::Codex, m))
+            .cloned()
+            .unwrap_or_else(|| default_codex_tier_model(Tier::Sonnet).to_string()),
+        SubProvider::Grok => overrides
+            .get(Tier::Sonnet.as_str())
+            .filter(|m| model_ok_for(SubProvider::Grok, m))
+            .cloned()
+            .unwrap_or_else(|| default_grok_tier_model(Tier::Sonnet).to_string()),
+        SubProvider::Kimi => KIMI_MODEL.to_string(),
     }
-    overrides
-        .get(Tier::Sonnet.as_str())
-        .cloned()
-        .unwrap_or_else(|| default_codex_tier_model(Tier::Sonnet).to_string())
+}
+
+/// Whether `model` is a wire id the given subscription backend can accept. Foreign ids (Codex
+/// models under a Grok window override, etc.) are rejected so the tier preset fills in instead.
+fn model_ok_for(provider: SubProvider, model: &str) -> bool {
+    match provider {
+        SubProvider::Codex => is_codex_model(model),
+        SubProvider::Grok => is_grok_model(model),
+        SubProvider::Kimi => model == KIMI_MODEL || model.starts_with("kimi"),
+    }
 }
 
 /// System text blocks beginning with this marker are Claude Code billing metadata smuggled as a
@@ -359,6 +417,11 @@ pub const CODEX_MODELS: [&str; 9] = [
 fn is_codex_model(m: &str) -> bool {
     let m = m.to_ascii_lowercase();
     CODEX_MODELS.contains(&m.as_str()) || m.starts_with("gpt-")
+}
+
+fn is_grok_model(m: &str) -> bool {
+    let m = m.to_ascii_lowercase();
+    GROK_MODELS.contains(&m.as_str()) || m.starts_with("grok-")
 }
 
 /// Strip Claude Code's local `[1m]` context-window hint and a trailing `-fast` service-tier
@@ -458,6 +521,68 @@ mod tests {
             KIMI_MODEL
         );
         assert_eq!(resolve_model(SubProvider::Kimi, "gpt-5.5", &ov), KIMI_MODEL);
+    }
+
+    #[test]
+    fn default_grok_preset_maps_tiers() {
+        let ov = BTreeMap::new();
+        assert_eq!(
+            resolve_model(SubProvider::Grok, "claude-opus-4-8", &ov),
+            "grok-4.5"
+        );
+        assert_eq!(
+            resolve_model(SubProvider::Grok, "sonnet", &ov),
+            "grok-4.5"
+        );
+        assert_eq!(
+            resolve_model(SubProvider::Grok, "haiku", &ov),
+            "grok-composer-2.5-fast"
+        );
+        assert_eq!(
+            resolve_model(SubProvider::Grok, "grok-composer-2.5-fast", &ov),
+            "grok-composer-2.5-fast"
+        );
+    }
+
+    #[test]
+    fn parse_accepts_grok_aliases() {
+        assert_eq!(SubProvider::parse("grok"), Some(SubProvider::Grok));
+        assert_eq!(SubProvider::parse("xai"), Some(SubProvider::Grok));
+        assert_eq!(SubProvider::as_str(SubProvider::Grok), "grok");
+    }
+
+    #[test]
+    fn grok_ignores_codex_tier_overrides() {
+        // Global `sub on codex` writes opus→gpt-5.6-terra; a window `/sub on grok` must not
+        // forward that Codex model id to the Grok backend.
+        let mut ov = BTreeMap::new();
+        ov.insert("opus".to_string(), "gpt-5.6-terra".to_string());
+        ov.insert("sonnet".to_string(), "gpt-5.6-luna".to_string());
+        ov.insert("haiku".to_string(), "gpt-5.4-mini".to_string());
+        assert_eq!(
+            resolve_model(SubProvider::Grok, "claude-opus-4-8", &ov),
+            "grok-4.5"
+        );
+        assert_eq!(
+            resolve_model(SubProvider::Grok, "haiku", &ov),
+            "grok-composer-2.5-fast"
+        );
+        // A legitimate Grok override still wins.
+        ov.insert("opus".to_string(), "grok-4.5".to_string());
+        assert_eq!(
+            resolve_model(SubProvider::Grok, "claude-opus-4-8", &ov),
+            "grok-4.5"
+        );
+    }
+
+    #[test]
+    fn codex_ignores_grok_tier_overrides() {
+        let mut ov = BTreeMap::new();
+        ov.insert("opus".to_string(), "grok-4.5".to_string());
+        assert_eq!(
+            resolve_model(SubProvider::Codex, "claude-opus-4-8", &ov),
+            "gpt-5.6-terra"
+        );
     }
 
     #[test]

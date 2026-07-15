@@ -68,6 +68,7 @@ const REFRESH_INTERVAL_SECS: i64 = 300;
 const BRAND: &str = "38;2;153;204;255"; // llmtrim accent blue
 const CYAN: &str = "36"; // codex
 const VIOLET: &str = "38;2;181;137;255"; // kimi
+const YELLOW: &str = "33"; // grok
 const GREEN: &str = "32";
 const AMBER: &str = "33";
 const ORANGE: &str = "38;2;255;140;0"; // true orange, distinct from amber quota tiers
@@ -282,7 +283,15 @@ fn ledger_snapshot(cc: &CcInput) -> Led {
     let arrow = if matches!(window_intent, Some(crate::window_sub::Intent::Disabled)) {
         ArrowSource::None
     } else {
-        arrow_source(configured.as_deref(), cfg.sub_fallback, row.as_ref())
+        // A window `/sub on <provider>` always reroutes that window (see serve.rs), even when the
+        // global policy is `fallback`. Treat it as always-mode for the arrow so the status line
+        // shows `→grok` as soon as the user flips the override — not only after a sub turn lands.
+        let window_forces = matches!(
+            window_intent,
+            Some(crate::window_sub::Intent::Enabled { .. })
+        );
+        let effective_fallback = cfg.sub_fallback && !window_forces;
+        arrow_source(configured.as_deref(), effective_fallback, row.as_ref())
     };
     let (reroute, reroute_window, resolved_model) = match arrow {
         // Truth: the backend that answered the last turn, and the model recorded on it.
@@ -293,12 +302,16 @@ fn ledger_snapshot(cc: &CcInput) -> Led {
             let shown = model.filter(|_| provider != "kimi");
             (Some(provider), window, shown)
         }
-        // Prediction (always mode, no turn yet): resolve from the configured tier mapping.
-        ArrowSource::Predicted(provider) => (
-            Some(provider.clone()),
-            reroute_real_window(&provider, &cc.model_id, &cfg.sub_tiers),
-            reroute_resolved_model(&provider, &cc.model_id, &cfg.sub_tiers),
-        ),
+        // Prediction (always mode, no turn yet / policy switch): resolve from *this* provider's
+        // tier table, not the global active one (window `/sub on grok` while global is codex).
+        ArrowSource::Predicted(provider) => {
+            let tiers = llmtrim_core::config::sub_tiers_for(&provider);
+            (
+                Some(provider.clone()),
+                reroute_real_window(&provider, &cc.model_id, &tiers),
+                reroute_resolved_model(&provider, &cc.model_id, &tiers),
+            )
+        }
         ArrowSource::None => (None, None, None),
     };
 
@@ -351,31 +364,46 @@ enum ArrowSource {
 
 /// Decide what the reroute arrow may claim.
 ///
-/// The ledger wins whenever it has a turn for this session, because only it knows who actually
-/// answered. Config is consulted solely to bridge the gap before the first turn lands, and only in
-/// `always` mode — where every turn reroutes, so the prediction is sound and the arrow doesn't have
-/// to blink in late on a fresh session.
-///
-/// In `fallback` mode config predicts nothing: the chain fires only when Anthropic actually fails.
-/// Claiming a reroute there would be a lie on every healthy turn (and would rescale the context
-/// gauge to the wrong backend's window), so the arrow stays off until the ledger shows a turn a
-/// backend really served.
+/// - When the ledger recorded a *subscription* backend on the last turn, that is ground truth
+///   (`Served`) — unless the operator has since switched the policy to a different provider
+///   (window `/sub on grok` after a codex turn), in which case we predict the new target so the
+///   line doesn't keep advertising a backend that will no longer answer.
+/// - When the last turn was Anthropic (`last_sub_provider` absent) or there is no row yet, config
+///   predicts in non-fallback mode: every future turn will reroute, so showing `→grok` after
+///   `/sub on grok` mid-session is correct even if earlier turns were Anthropic.
+/// - In pure `fallback` mode config predicts nothing: the chain fires only when Anthropic fails,
+///   and claiming a reroute on healthy turns would be a lie (and would rescale the gauge).
 fn arrow_source(
     configured: Option<&str>,
     fallback_mode: bool,
     row: Option<&SessionLedgerRow>,
 ) -> ArrowSource {
+    let predict = |p: &str| ArrowSource::Predicted(p.to_string());
     match row {
         Some(r) => match &r.last_sub_provider {
-            Some(provider) => ArrowSource::Served {
-                provider: provider.clone(),
-                model: r.last_model.clone(),
+            Some(provider) => {
+                // Policy switched under us (window override / global sub change): prefer the new
+                // target until a turn from that backend overwrites the ledger.
+                if let Some(p) = configured
+                    && !fallback_mode
+                    && p != provider.as_str()
+                {
+                    return predict(p);
+                }
+                ArrowSource::Served {
+                    provider: provider.clone(),
+                    model: r.last_model.clone(),
+                }
+            }
+            // Last turn was Anthropic. Still predict when policy says every turn will reroute
+            // (always mode or a window `/sub on` override treated as always).
+            None => match configured {
+                Some(p) if !fallback_mode => predict(p),
+                _ => ArrowSource::None,
             },
-            // A recorded turn that no backend served: Anthropic answered it.
-            None => ArrowSource::None,
         },
         None => match configured {
-            Some(p) if !fallback_mode => ArrowSource::Predicted(p.to_string()),
+            Some(p) if !fallback_mode => predict(p),
             _ => ArrowSource::None,
         },
     }
@@ -473,6 +501,7 @@ fn reroute_real_window(
     let sp = match provider {
         "codex" => SubProvider::Codex,
         "kimi" => SubProvider::Kimi,
+        "grok" => SubProvider::Grok,
         _ => return None,
     };
     upstream_window(&crate::reroute::resolve_model(sp, incoming_model_id, tiers))
@@ -505,8 +534,8 @@ fn reroute_real_window(
 }
 
 /// Parallel to [`reroute_real_window`]: returns the concrete upstream model id (e.g.
-/// "gpt-5.6-terra") chosen by tier mapping for the status line. `None` for Kimi, whose tiers all
-/// collapse to one internal wire id: the shortname is what a reader wants there.
+/// "gpt-5.6-terra" / "grok-4.5") chosen by tier mapping for the status line. `None` for Kimi,
+/// whose tiers all collapse to one internal wire id: the shortname is what a reader wants there.
 #[cfg(feature = "intercept")]
 fn reroute_resolved_model(
     provider: &str,
@@ -514,11 +543,13 @@ fn reroute_resolved_model(
     tiers: &std::collections::BTreeMap<String, String>,
 ) -> Option<String> {
     use crate::reroute::SubProvider;
-    if provider != "codex" {
-        return None;
-    }
+    let sp = match provider {
+        "codex" => SubProvider::Codex,
+        "grok" => SubProvider::Grok,
+        _ => return None,
+    };
     Some(crate::reroute::resolve_model(
-        SubProvider::Codex,
+        sp,
         incoming_model_id,
         tiers,
     ))
@@ -601,6 +632,7 @@ fn model_segment(cc: &CcInput, led: &Led, color: bool) -> String {
     if let (Health::Healthy, Some(p)) = (led.health, &led.reroute) {
         let code = match p.as_str() {
             "kimi" => VIOLET,
+            "grok" => YELLOW,
             _ => CYAN,
         };
         let tail = led.resolved_model.clone().unwrap_or_else(|| p.clone());
@@ -1381,6 +1413,17 @@ mod tests {
         );
     }
 
+    #[test]
+    fn grok_reroute_shows_resolved_model_when_healthy() {
+        let tiers = std::collections::BTreeMap::new();
+        let mut l = led(Health::Healthy);
+        l.reroute = Some("grok".to_string());
+        l.resolved_model = reroute_resolved_model("grok", "claude-opus-4-8", &tiers);
+        assert_eq!(l.resolved_model.as_deref(), Some("grok-4.5"));
+        let out = render_line(&cc(72_000), &l, 0, true);
+        assert!(out.contains("→grok-4.5"), "grok arrow shows model: {out}");
+    }
+
     fn ledger_row(sub: Option<&str>, model: Option<&str>) -> SessionLedgerRow {
         SessionLedgerRow {
             input_before: 1000,
@@ -1402,6 +1445,38 @@ mod tests {
             arrow_source(Some("codex"), true, Some(&row)),
             ArrowSource::None
         ));
+    }
+
+    #[test]
+    fn always_mode_predicts_after_anthropic_turns() {
+        // Mid-session `/sub on grok` (or global always): earlier Anthropic turns leave a ledger
+        // row with no sub provider. The next turn will reroute — show the prediction.
+        let row = ledger_row(None, Some("claude-opus-4-8"));
+        let ArrowSource::Predicted(p) = arrow_source(Some("grok"), false, Some(&row)) else {
+            panic!("always mode must predict after Anthropic-only history");
+        };
+        assert_eq!(p, "grok");
+    }
+
+    #[test]
+    fn always_mode_predicts_switched_provider_over_stale_served() {
+        // Window was on codex (ledger still says codex); user ran `/sub on grok`.
+        let row = ledger_row(Some("codex"), Some("gpt-5.6-terra"));
+        let ArrowSource::Predicted(p) = arrow_source(Some("grok"), false, Some(&row)) else {
+            panic!("switched provider must override stale Served");
+        };
+        assert_eq!(p, "grok");
+    }
+
+    #[test]
+    fn fallback_mode_keeps_stale_served_until_ledger_moves() {
+        // In fallback, a prior codex fire is still truth; config must not invent a new target.
+        let row = ledger_row(Some("codex"), Some("gpt-5.6-terra"));
+        let ArrowSource::Served { provider, .. } = arrow_source(Some("grok"), true, Some(&row))
+        else {
+            panic!("fallback keeps Served");
+        };
+        assert_eq!(provider, "codex");
     }
 
     #[test]
@@ -1430,14 +1505,16 @@ mod tests {
     }
 
     #[test]
-    fn ledger_truth_overrides_a_stale_config_prediction() {
-        // `sub` says kimi, but the last turn was actually served by codex — show what happened.
+    fn ledger_truth_wins_when_it_matches_policy() {
+        // Last turn was codex and policy still says codex: advertise what just served.
         let row = ledger_row(Some("codex"), Some("gpt-5.6-terra"));
-        let ArrowSource::Served { provider, .. } = arrow_source(Some("kimi"), false, Some(&row))
+        let ArrowSource::Served { provider, model } =
+            arrow_source(Some("codex"), false, Some(&row))
         else {
-            panic!("the ledger outranks config");
+            panic!("matching policy keeps Served");
         };
         assert_eq!(provider, "codex");
+        assert_eq!(model.as_deref(), Some("gpt-5.6-terra"));
     }
 
     #[test]

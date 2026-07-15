@@ -812,7 +812,7 @@ pub struct RuntimeConfig {
     /// name (`mocha`/`macchiato`/`frappe`/`latte`). The `t` key persists the user's choice
     /// here via [`save_theme`]. The TUI validates the name and falls back to its default.
     pub theme: Option<String>,
-    /// Subscription reroute target (env `LLMTRIM_SUB` / file `sub`): `codex` or `kimi` reroutes
+    /// Subscription reroute target (env `LLMTRIM_SUB` / file `sub`): `codex`, `kimi`, or `grok` reroutes
     /// intercepted Anthropic `/v1/messages` traffic to that subscription's backend instead of
     /// Anthropic (translating the request/response wire shapes). `off`/unset keeps the
     /// transparent compress-and-forward behavior. Lowercased; an unknown value is left as-is
@@ -968,13 +968,39 @@ fn resolve_sub_tiers(
     env: &impl Fn(&str) -> Option<String>,
     file: Option<&toml::Value>,
 ) -> std::collections::BTreeMap<String, String> {
+    let Some(provider) = resolve_sub_provider(env, file) else {
+        return std::collections::BTreeMap::new();
+    };
+    sub_tiers_from_file(file, &provider)
+}
+
+/// Read `[sub.<provider>.tiers]` for a *specific* provider, independent of who is currently
+/// active. Used when a window `/sub on grok` overrides a global `sub = codex`: the request is
+/// routed to Grok and must map tiers from `[sub.grok.tiers]` (or Grok defaults), never from
+/// Codex's mapping (which would send `gpt-5.6-terra` to the Grok backend).
+pub fn sub_tiers_for(provider: &str) -> std::collections::BTreeMap<String, String> {
+    let provider = provider.trim().to_ascii_lowercase();
+    if provider.is_empty() || provider == "off" {
+        return std::collections::BTreeMap::new();
+    }
+    let file = config_path()
+        .filter(|p| p.exists())
+        .and_then(|p| std::fs::read_to_string(p).ok())
+        .and_then(|s| toml::from_str::<toml::Value>(&s).ok());
+    sub_tiers_from_file(file.as_ref(), &provider)
+}
+
+fn sub_tiers_from_file(
+    file: Option<&toml::Value>,
+    provider: &str,
+) -> std::collections::BTreeMap<String, String> {
     let mut map = std::collections::BTreeMap::new();
-    let (Some(provider), Some(file)) = (resolve_sub_provider(env, file), file) else {
+    let Some(file) = file else {
         return map;
     };
     if let Some(tiers) = file
         .get("sub")
-        .and_then(|v| v.get(&provider))
+        .and_then(|v| v.get(provider))
         .and_then(|v| v.get("tiers"))
         .and_then(toml::Value::as_table)
     {
