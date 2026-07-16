@@ -16,6 +16,14 @@
 </p>
 
 <p align="center">
+  <sub>
+    Using <b>Claude Code</b>? One install also gets you a live <a href="#claude-code">status line</a>,
+    a <a href="#claude-code">cold-cache guard</a>, cheaper <a href="#claude-code"><code>/compact</code></a>,
+    and <a href="#claude-code"><code>/sub</code></a> to serve it from a Codex / Kimi / SuperGrok plan.
+  </sub>
+</p>
+
+<p align="center">
   <sub>Proxy · CLI · MCP · library (Python · Ruby · Swift · Kotlin · JS/WASM)</sub>
 </p>
 
@@ -67,6 +75,8 @@ llmtrim sits on your machine as a local proxy, trims the waste, and forwards a s
 ```
 
 Compression cannot raise your bill or break a request; worst case is zero savings. Everything runs locally, nothing is sent to us. [In action →](#in-action)
+
+For Claude Code the same install goes further: a status line with live trim % and rate limits, a guard that warns before an expired prompt cache re-bills your whole context, `/compact` on a cheaper model, and `/sub` to route sessions through another subscription. [Details →](#claude-code)
 
 ---
 
