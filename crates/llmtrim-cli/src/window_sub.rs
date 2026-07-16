@@ -278,11 +278,10 @@ fn session_end_at(path: &Path, session: &str, reason: &str) -> Result<()> {
             .get(session)
             .cloned()
             .or_else(|| r.cleared.get(session).map(|c| c.token.clone()))
+            && r.windows.contains_key(&token)
         {
-            if r.windows.contains_key(&token) {
-                r.cleared
-                    .insert(session.to_owned(), Cleared { token, touched: t });
-            }
+            r.cleared
+                .insert(session.to_owned(), Cleared { token, touched: t });
         }
     } else if let Some(token) = r.sessions.remove(session) {
         r.windows.remove(&token);
