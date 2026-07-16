@@ -308,13 +308,24 @@ fn quoted_exe(exe: &str) -> String {
     exe.to_string()
 }
 
+/// Bash permission rule that auto-allows the skill's inline `!`…`` shell line.
+///
+/// Claude Code skill expansion requires `behavior: "allow"` and cannot prompt;
+/// without this, `/sub` fails with "This command requires approval".
+pub fn slash_bash_allow_rule(exe: &str) -> String {
+    // Wildcard form (not legacy `:*`) — matches after `$ARGUMENTS` is substituted.
+    format!("Bash({} window-sub slash *)", quoted_exe(exe))
+}
+
 pub fn command_markdown(exe: &str) -> String {
-    let exe = quoted_exe(exe);
+    let exe_q = quoted_exe(exe);
+    let allow = slash_bash_allow_rule(exe);
     format!(
         "---\n\
          description: Toggle llmtrim subscription rerouting for this Claude Code window only.\n\
          disable-model-invocation: true\n\
          argument-hint: \"on [codex|kimi|grok]|off|status\"\n\
+         allowed-tools: {allow}\n\
          ---\n\
          \n\
          <!-- llmtrim-owned-window-sub -->\n\
@@ -326,8 +337,98 @@ pub fn command_markdown(exe: &str) -> String {
          - `/sub off` — force Anthropic (with compression) for this window\n\
          - `/sub status` — show this window's override\n\
          \n\
-         !`{exe} window-sub slash \"$ARGUMENTS\" \"$CLAUDE_CODE_SESSION_ID\"`\n"
+         !`{exe_q} window-sub slash \"$ARGUMENTS\"`\n"
     )
+}
+
+/// True for Bash allow rules llmtrim itself wrote for `/sub`.
+///
+/// Shape: `Bash(<llmtrim-path> window-sub slash *)` (or legacy `:*`). The path
+/// token must basename to `llmtrim` / `llmtrim.exe` so a hand-written
+/// `Bash(echo window-sub slash *)` is never treated as owned.
+fn is_owned_slash_allow_rule(rule: &str) -> bool {
+    let r = rule.trim();
+    let Some(inner) = r.strip_prefix("Bash(").and_then(|s| s.strip_suffix(')')) else {
+        return false;
+    };
+    // Path may be bare, single-quoted, or double-quoted. On Windows the path can
+    // contain backslashes (`C:\bin\llmtrim.exe`); treat `\` as a path char, not an
+    // escape of the closing quote.
+    let (path, tail) = if let Some(rest) = inner.strip_prefix('\'') {
+        let Some(end) = rest.find('\'') else {
+            return false;
+        };
+        (&rest[..end], &rest[end + 1..])
+    } else if let Some(rest) = inner.strip_prefix('"') {
+        let Some(end) = rest.find('"') else {
+            return false;
+        };
+        (&rest[..end], &rest[end + 1..])
+    } else {
+        let Some(sp) = inner.find(' ') else {
+            return false;
+        };
+        (&inner[..sp], &inner[sp..])
+    };
+    // `Path::file_name` is OS-separator-sensitive; rules may use the other OS's
+    // separators when inspected cross-platform, so split on both.
+    let basename = path
+        .rsplit(['/', '\\'])
+        .next()
+        .unwrap_or(path);
+    if basename != "llmtrim" && !basename.eq_ignore_ascii_case("llmtrim.exe") {
+        return false;
+    }
+    matches!(
+        tail,
+        " window-sub slash *" | " window-sub slash:*"
+    )
+}
+
+fn slash_allow_rule_present(root: &serde_json::Value, exe: &str) -> bool {
+    let rule = slash_bash_allow_rule(exe);
+    root.pointer("/permissions/allow")
+        .and_then(serde_json::Value::as_array)
+        .is_some_and(|allow| allow.iter().any(|v| v.as_str() == Some(rule.as_str())))
+}
+
+fn ensure_slash_allow_rule(root: &mut serde_json::Value, exe: &str) -> Result<()> {
+    let obj = root
+        .as_object_mut()
+        .context("Claude settings root must be an object")?;
+    let permissions = obj
+        .entry("permissions")
+        .or_insert_with(|| serde_json::json!({}))
+        .as_object_mut()
+        .context("Claude permissions must be an object")?;
+    let allow = permissions
+        .entry("allow")
+        .or_insert_with(|| serde_json::json!([]))
+        .as_array_mut()
+        .context("Claude permissions.allow must be an array")?;
+    allow.retain(|v| {
+        v.as_str()
+            .map(|s| !is_owned_slash_allow_rule(s))
+            .unwrap_or(true)
+    });
+    let rule = slash_bash_allow_rule(exe);
+    if !allow.iter().any(|v| v.as_str() == Some(rule.as_str())) {
+        allow.push(serde_json::Value::String(rule));
+    }
+    Ok(())
+}
+
+fn remove_slash_allow_rule(root: &mut serde_json::Value) {
+    if let Some(allow) = root
+        .pointer_mut("/permissions/allow")
+        .and_then(serde_json::Value::as_array_mut)
+    {
+        allow.retain(|v| {
+            v.as_str()
+                .map(|s| !is_owned_slash_allow_rule(s))
+                .unwrap_or(true)
+        });
+    }
 }
 fn settings_path() -> Result<PathBuf> {
     let h = std::env::var_os("CLAUDE_CONFIG_DIR")
@@ -388,10 +489,8 @@ pub fn owned_status() -> OwnedStatus {
     else {
         return OwnedStatus::Missing;
     };
-    if !fs::read_to_string(&skill)
-        .unwrap_or_default()
-        .contains("llmtrim-owned-window-sub")
-    {
+    let skill_text = fs::read_to_string(&skill).unwrap_or_default();
+    if !skill_text.contains("llmtrim-owned-window-sub") {
         return OwnedStatus::Missing;
     }
     let Some(root) = fs::read_to_string(&p)
@@ -405,6 +504,7 @@ pub fn owned_status() -> OwnedStatus {
     };
     let desired = crate::statusline::stable_exe_string();
     let desired_quoted = quoted_exe(&desired);
+    let desired_allow = slash_bash_allow_rule(&desired);
     let mut saw = false;
     let mut current = true;
     for event in ["SessionStart", "SessionEnd"] {
@@ -435,6 +535,15 @@ pub fn owned_status() -> OwnedStatus {
     }
     if !saw {
         return OwnedStatus::Missing;
+    }
+    // Pre-approval for skill bash is required; missing/stale → ensure reinstalls.
+    if !slash_allow_rule_present(&root, &desired) {
+        current = false;
+    }
+    // Skill body must match the current template (no shell-expanded session id;
+    // allowed-tools frontmatter present for this binary).
+    if skill_text.contains("CLAUDE_CODE_SESSION_ID") || !skill_text.contains(&desired_allow) {
+        current = false;
     }
     if current {
         OwnedStatus::Current
@@ -493,6 +602,8 @@ pub fn install(exe: &str) -> Result<()> {
         remove_owned_hooks(arr);
         arr.push(serde_json::json!({"hooks":[{"type":"command","command":command,"timeout":10}]}));
     }
+    // Skill inline `!`…`` cannot prompt — pre-approve the slash command's Bash pattern.
+    ensure_slash_allow_rule(&mut root, exe)?;
     let dir = p.parent().context("settings has no parent")?;
     fs::create_dir_all(dir)?;
     let tmp = p.with_extension("json.tmp");
@@ -516,6 +627,7 @@ pub fn uninstall() -> Result<()> {
                 }
             }
         }
+        remove_slash_allow_rule(&mut r);
         fs::write(&p, serde_json::to_vec_pretty(&r)?)?;
     }
     let skill = settings_path()?
@@ -567,7 +679,22 @@ mod tests {
     #[test]
     fn skill_uses_session_environment_without_exposing_it() {
         let text = command_markdown("llmtrim");
-        assert!(text.contains("CLAUDE_CODE_SESSION_ID"));
+        // Session id must come from the process env (window-sub slash falls back to
+        // CLAUDE_CODE_SESSION_ID). Putting `$CLAUDE_CODE_SESSION_ID` on the skill
+        // command line is rejected by Claude Code's skill-bash permission check as
+        // `Contains simple_expansion` — skills cannot prompt for approval.
+        assert!(
+            !text.contains("CLAUDE_CODE_SESSION_ID"),
+            "skill command must not shell-expand session id: {text}"
+        );
+        assert!(
+            text.contains("window-sub slash \"$ARGUMENTS\""),
+            "skill command should only pass $ARGUMENTS: {text}"
+        );
+        assert!(
+            text.contains(&format!("allowed-tools: {}", slash_bash_allow_rule("llmtrim"))),
+            "skill must pre-approve its Bash pattern (skills cannot prompt): {text}"
+        );
         assert!(!text.contains("LLMTRIM_CLAUDE_WINDOW_TOKEN"));
         assert!(
             text.contains("on [codex|kimi|grok]"),
@@ -577,6 +704,86 @@ mod tests {
             text.contains("/sub on grok"),
             "skill body should document explicit provider: {text}"
         );
+    }
+
+    #[test]
+    fn slash_allow_rule_is_scoped_to_window_sub_slash() {
+        let rule = slash_bash_allow_rule("/opt/llmtrim");
+        assert_eq!(rule, "Bash('/opt/llmtrim' window-sub slash *)");
+        assert!(is_owned_slash_allow_rule(&rule));
+        assert!(is_owned_slash_allow_rule(
+            "Bash('/old/path/llmtrim' window-sub slash *)"
+        ));
+        assert!(is_owned_slash_allow_rule(
+            "Bash(llmtrim window-sub slash:*)"
+        ));
+        assert!(is_owned_slash_allow_rule(
+            r#"Bash("C:\bin\llmtrim.exe" window-sub slash *)"#
+        ));
+        // Not ours: wrong basename, wrong subcommand, or bare tool allow.
+        assert!(!is_owned_slash_allow_rule(
+            "Bash(echo window-sub slash *)"
+        ));
+        assert!(!is_owned_slash_allow_rule(
+            "Bash('/opt/other' window-sub slash *)"
+        ));
+        assert!(!is_owned_slash_allow_rule("Bash(llmtrim *)"));
+        assert!(!is_owned_slash_allow_rule("Bash(git:*)"));
+        assert!(!is_owned_slash_allow_rule(
+            "Bash('/opt/llmtrim' window-sub hook-start *)"
+        ));
+    }
+
+    #[test]
+    fn ensure_slash_allow_rule_replaces_stale_owned_entry() {
+        let mut root = serde_json::json!({
+            "permissions": {
+                "allow": [
+                    "Bash(git:*)",
+                    "Bash(echo window-sub slash *)",
+                    "Bash('/old/llmtrim' window-sub slash *)"
+                ]
+            }
+        });
+        ensure_slash_allow_rule(&mut root, "/new/llmtrim").unwrap();
+        let allow = root["permissions"]["allow"].as_array().unwrap();
+        let rules: Vec<&str> = allow.iter().filter_map(|v| v.as_str()).collect();
+        assert_eq!(
+            rules,
+            vec![
+                "Bash(git:*)",
+                "Bash(echo window-sub slash *)",
+                "Bash('/new/llmtrim' window-sub slash *)"
+            ]
+        );
+        assert!(slash_allow_rule_present(&root, "/new/llmtrim"));
+        assert!(!slash_allow_rule_present(&root, "/old/llmtrim"));
+        remove_slash_allow_rule(&mut root);
+        let rules: Vec<&str> = root["permissions"]["allow"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|v| v.as_str())
+            .collect();
+        assert_eq!(
+            rules,
+            vec!["Bash(git:*)", "Bash(echo window-sub slash *)"]
+        );
+    }
+
+    #[test]
+    fn slash_allow_rule_present_requires_exact_current_rule() {
+        let root = serde_json::json!({
+            "permissions": {
+                "allow": ["Bash('/opt/llmtrim' window-sub slash *)"]
+            }
+        });
+        assert!(slash_allow_rule_present(&root, "/opt/llmtrim"));
+        assert!(!slash_allow_rule_present(&root, "/other/llmtrim"));
+        assert!(!slash_allow_rule_present(
+            &serde_json::json!({}),
+            "/opt/llmtrim"
+        ));
     }
 
     #[test]
