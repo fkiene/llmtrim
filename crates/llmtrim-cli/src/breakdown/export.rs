@@ -145,6 +145,7 @@ mod tests {
             tokens: 12_345,
             cache_hit: 0.5,
             bill_micros: 1_230_000,
+            saved_micros: 400_000,
             input_before: 1000,
             input_after: 600,
             last_ts: "2026-06-19T00:00:00+00:00".to_string(),

@@ -61,7 +61,8 @@ pub enum StatusKind {
 #[derive(Clone, Default)]
 pub struct OverviewData {
     pub status: StatusLine,
-    /// Money figures (`None` when no model on the screen is priced).
+    /// Money figures from frozen `breakdown_turns.bill_micros` (`None` when no billed turns
+    /// yet, or compressions exist but attribution has not landed — see `money_coverage`).
     pub paid_usd: Option<f64>,
     pub would_have_usd: Option<f64>,
     pub saved_usd: Option<f64>,
@@ -77,7 +78,7 @@ pub struct OverviewData {
     pub requests: i64,
     /// Net $ saved per day, oldest→newest, last 7 days (for the sparkline).
     pub trend_daily_usd: Vec<f64>,
-    /// Top-3 models by $ saved: (friendly name, $ saved).
+    /// Top models by $ saved (frozen-rate blend). Footer Total is all-time, not sum of rows.
     pub savers: Vec<(String, f64)>,
     /// Expert strip (behind `m`): raw input before/after, output billed, output est %.
     pub input_before: i64,
@@ -105,6 +106,12 @@ impl OverviewData {
         } else {
             self.pct_less
         }
+    }
+
+    /// No proxy bills despite traffic — do not paint `$0.00` as truth.
+    /// Derived from existing Option fields (keeps the public struct SemVer-stable).
+    pub(crate) fn money_unavailable(&self) -> bool {
+        self.has_traffic && self.paid_usd.is_none() && self.saved_usd.is_none()
     }
 }
 
@@ -441,9 +448,11 @@ impl App {
         } else {
             0.0
         };
+        let saved_m: i64 = rows.iter().map(|r| r.saved_micros).sum();
         self.sessions.footer = Some(vec![
             "total".into(),
             format!("${:.2}", bill as f64 / 1_000_000.0),
+            format!("${:.2}", saved_m as f64 / 1_000_000.0),
             format!("{saved:.0}%"),
             String::new(),
             turns.to_string(),
@@ -965,8 +974,9 @@ fn render_help_overlay(f: &mut Frame, tray: bool) {
         Line::from("  u                  update / restart stale daemon"),
         Line::from("  s / n              sub setup / dismiss (when shown)"),
         Line::from(""),
-        Line::from("  \"would have cost\" = the price at your provider's"),
-        Line::from("   normal rate; \"you paid\" is after llmtrim trimmed it."),
+        Line::from("  \"you paid\" = what the proxy billed (same as Sessions)."),
+        Line::from("  \"saved$\" = input $ off at rates locked per turn."),
+        Line::from("  \"trim\" = token size % (not dollars)."),
         Line::from("  ? quit this help   q quit the app"),
     ]);
     let block = Block::default()
@@ -1200,8 +1210,30 @@ fn sheep_dizzy(secs: u64) -> &'static str {
 /// the joke never lies; rotates by the clock so the banner feels alive without any state.
 fn sheep_quip(ov: &OverviewData, secs: u64) -> String {
     // Pick the line first, then format only that one (was building all 21 strings per frame).
-    const N: u64 = 21;
     let pct = ov.pct_less * 100.0;
+    // When billing is unavailable, never say "$0.00 saved" — stay on token/fluff quips only.
+    if ov.money_unavailable() || ov.saved_usd.is_none() {
+        const N: u64 = 8;
+        return match (secs / 12) % N {
+            0 => format!("Shorn {pct:.0}% of the fluff off your prompts"),
+            1 => format!(
+                "Trimmed the dead weight off {} requests",
+                group(ov.requests)
+            ),
+            2 => format!("Fleece gone, answers intact — {pct:.0}% lighter prompts"),
+            3 => format!(
+                "{} prompts through the shears, not one bleat",
+                group(ov.requests)
+            ),
+            4 => "Wool off, wisdom on.".to_string(),
+            5 => {
+                format!("Sheared {pct:.0}% off your prompts — wool's on the floor, answers aren't")
+            }
+            6 => "Less wool in, same wisdom out".to_string(),
+            _ => format!("Shears down. {pct:.0}% gone. Nothing important bleated."),
+        };
+    }
+    const N: u64 = 21;
     // One line every 12s — fast enough to feel alive, slow enough to actually read.
     match (secs / 12) % N {
         0 => format!("Shorn {pct:.0}% of the fluff off your prompts"),
@@ -1275,6 +1307,31 @@ fn render_kpis(f: &mut Frame, area: Rect, ov: &OverviewData) {
     let white_b = Style::default()
         .fg(palette::text())
         .add_modifier(Modifier::BOLD);
+    let warn_b = Style::default()
+        .fg(palette::warn())
+        .add_modifier(Modifier::BOLD);
+
+    // Compressions without breakdown bills / all unpriced: never paint "$0.00" as truth.
+    if ov.money_unavailable() {
+        let block = card("BILLING", false);
+        let cell = block.inner(area);
+        f.render_widget(block, area);
+        f.render_widget(
+            Paragraph::new(vec![
+                Line::from(Span::styled(
+                    "No session bill yet — token savings still count",
+                    warn_b,
+                )),
+                Line::from(Span::styled(
+                    "Dollars need traffic through the proxy (not CLI/MCP alone)",
+                    dim,
+                )),
+                Line::from(Span::styled("no proxy-attributed turns yet", dim)),
+            ]),
+            cell,
+        );
+        return;
+    }
 
     let saved = ov.saved_usd.unwrap_or(0.0);
     let paid = ov.paid_usd.unwrap_or(0.0);
@@ -1289,32 +1346,32 @@ fn render_kpis(f: &mut Frame, area: Rect, ov: &OverviewData) {
     let delta = today - yesterday;
     let week: f64 = ov.trend_daily_usd.iter().sum();
 
-    // (title, value, value-style, subtitle) — built in display (mockup) order.
+    // Plain-language subtitles. Money % = saved / would-have (would-have includes output).
     let tiles: [(String, String, Style, String); 5] = [
         (
             "TOTAL SAVED".into(),
             money(saved),
             green_b,
-            format!("{:.0}% less than raw", saved_pct(ov)),
+            format!("{:.0}% less than without trim", saved_pct(ov)),
         ),
         (
             "YOU PAID".into(),
             money(paid),
             blue_b,
-            "after discounts".into(),
+            "what the proxy billed".into(),
         ),
         (
             "WOULD HAVE COST".into(),
             money(would),
             white_b,
-            "Without llmtrim".into(),
+            "without input trim".into(),
         ),
         (
             "SAVED TODAY".into(),
             money(today),
             green_b,
             format!(
-                "{}{} vs yest.",
+                "{}{} vs yest. (UTC)",
                 if delta < 0.0 { "-" } else { "+" },
                 money(delta.abs())
             ),
@@ -1323,7 +1380,7 @@ fn render_kpis(f: &mut Frame, area: Rect, ov: &OverviewData) {
             "SAVED THIS WEEK".into(),
             money(week),
             green_b,
-            "7 days total".into(),
+            "7 days (UTC)".into(),
         ),
     ];
     // Priority when we can't fit all five (keep saved/today/week first).
@@ -1365,6 +1422,17 @@ fn render_trend(f: &mut Frame, area: Rect, ov: &OverviewData) {
     let block = card("SAVINGS TREND · $/DAY", false);
     let inner = block.inner(area);
     f.render_widget(block, area);
+    if ov.money_unavailable() || ov.saved_usd.is_none() {
+        f.render_widget(
+            Paragraph::new(Line::from(Span::styled(
+                "— needs proxy bills",
+                Style::default().fg(palette::muted_gray()),
+            )))
+            .alignment(Alignment::Center),
+            inner,
+        );
+        return;
+    }
     if ov.trend_daily_usd.is_empty() || inner.width == 0 {
         return;
     }
@@ -1507,6 +1575,17 @@ fn render_savers(f: &mut Frame, area: Rect, ov: &OverviewData) {
     let block = card("TOP MODELS", false);
     let inner = block.inner(area);
     f.render_widget(block, area);
+    if ov.money_unavailable() || ov.saved_usd.is_none() {
+        f.render_widget(
+            Paragraph::new(Line::from(Span::styled(
+                "— needs proxy bills",
+                Style::default().fg(palette::muted_gray()),
+            )))
+            .alignment(Alignment::Center),
+            inner,
+        );
+        return;
+    }
     let split = Layout::vertical([Constraint::Min(1), Constraint::Length(1)]).split(inner);
 
     let max = ov.savers.iter().map(|(_, v)| *v).fold(0.0_f64, f64::max);
@@ -1545,12 +1624,12 @@ fn render_savers(f: &mut Frame, area: Rect, ov: &OverviewData) {
     );
     f.render_widget(table, split[0]);
 
-    // Total row, right-aligned $, reconciling to all-time saved.
+    // "All models" (not sum of visible top-N rows) — all-time saved from MoneyTotals.
     let total = ov.saved_usd.unwrap_or(0.0);
     let tcols = Layout::horizontal([Constraint::Min(1), Constraint::Length(amt_w)]).split(split[1]);
     f.render_widget(
         Paragraph::new(Line::from(Span::styled(
-            "Total",
+            "All models",
             Style::default()
                 .fg(palette::muted_gray())
                 .add_modifier(Modifier::BOLD),
@@ -1808,19 +1887,15 @@ fn render_overview_empty(f: &mut Frame, inner: Rect, ov: &OverviewData) {
 // ── column definitions ──────────────────────────────────────────────────────────
 
 fn session_columns() -> Vec<Column> {
-    // Decision metric (cost) leads, right after the name; `when` for recency; `hit` only
-    // carries a value on session leaves (blank on rollups, where it isn't meaningful).
-    // Plain words: what you spent, how much we saved, when, how many messages, how much was
-    // reused from cache. Cost + saved are the two numbers a user actually cares about, so they
-    // carry the only two hues: cost = blue (the bill, a fact), saved = green (the win — the
-    // reason anyone opens this tab). The rest ride neutral body text; header + position carry
-    // their meaning, and spending a hue on every metric is the rainbow we cut.
+    // Decision metric (cost) leads; `saved$` is money (frozen blend); `trim` is token size %
+    // (never called "saved" — that word is dollars elsewhere). `reuse` is cache hit on leaves.
     vec![
-        Column::left("agent · project · session", 34),
+        Column::left("agent · project · session", 32),
         Column::right("cost", 9).colored(palette::blue()),
-        Column::right("saved", 6).colored(palette::green()),
+        Column::right("saved$", 8).colored(palette::green()),
+        Column::right("trim", 5),
         Column::right("when", 6),
-        Column::right("msgs", 6),
+        Column::right("msgs", 5),
         Column::right("reuse", 6),
     ]
 }
@@ -1916,7 +1991,8 @@ fn build_session_tree(rows: &[SessionRow]) -> Vec<TreeNode<Node>> {
 fn session_cols(s: &SessionRow) -> Vec<String> {
     vec![
         format!("${:.2}", s.bill_usd()),
-        format!("{:.0}%", s.saved_pct()),
+        format!("${:.2}", s.saved_usd()),
+        format!("{:.0}%", s.trim_pct()),
         rel_time(&s.last_ts),
         s.turns.to_string(),
         format!("{:.0}%", s.cache_hit * 100.0),
@@ -1926,9 +2002,10 @@ fn session_cols(s: &SessionRow) -> Vec<String> {
 fn agg_cols(rows: &[&SessionRow]) -> Vec<String> {
     let turns: i64 = rows.iter().map(|r| r.turns).sum();
     let bill: i64 = rows.iter().map(|r| r.bill_micros).sum();
+    let saved_m: i64 = rows.iter().map(|r| r.saved_micros).sum();
     let before: i64 = rows.iter().map(|r| r.input_before).sum();
     let after: i64 = rows.iter().map(|r| r.input_after).sum();
-    let saved = if before > 0 {
+    let trim = if before > 0 {
         (before - after).max(0) as f64 / before as f64 * 100.0
     } else {
         0.0
@@ -1937,7 +2014,8 @@ fn agg_cols(rows: &[&SessionRow]) -> Vec<String> {
     let latest = rows.iter().map(|r| r.last_ts.as_str()).max().unwrap_or("");
     vec![
         format!("${:.2}", bill as f64 / 1_000_000.0),
-        format!("{saved:.0}%"),
+        format!("${:.2}", saved_m as f64 / 1_000_000.0),
+        format!("{trim:.0}%"),
         rel_time(latest),
         turns.to_string(),
         // Cache reuse is only meaningful per session, so it's left blank at the rollup level.
@@ -2000,14 +2078,29 @@ fn compute_detail(db: &BreakdownDb, session_id: &str) -> DetailData {
         ]);
     }
     if let Ok(rows) = db.cost(session_id) {
-        let bill: f64 = rows.iter().map(|r| r.usd).sum();
+        // Canonical paid = SUM(bill_micros); block rows allocate that bill (may residual).
+        let bill = db
+            .session_bill_micros(session_id)
+            .map(|m| m as f64 / 1_000_000.0)
+            .unwrap_or_else(|_| rows.iter().map(|r| r.usd).sum());
+        let read: f64 = rows.iter().map(|r| r.read_usd).sum();
+        let write: f64 = rows.iter().map(|r| r.write_usd).sum();
+        let new: f64 = rows.iter().map(|r| r.new_usd).sum();
+        let blocks = read + write + new;
         data.cost_roots = build_cost_tree(&rows, bill);
+        // When block realloc ≠ bill (e.g. empty blocks), keep bill as ground truth and
+        // mark the component sum so %bill does not silently over-claim.
+        let bill_label = if (blocks - bill).abs() > 0.005 && bill > 0.0 {
+            format!("${bill:.2}*")
+        } else {
+            format!("${bill:.2}")
+        };
         data.cost_footer = Some(vec![
             "bill".into(),
-            format!("${bill:.2}"),
-            format!("${:.2}", rows.iter().map(|r| r.read_usd).sum::<f64>()),
-            format!("${:.2}", rows.iter().map(|r| r.write_usd).sum::<f64>()),
-            format!("${:.2}", rows.iter().map(|r| r.new_usd).sum::<f64>()),
+            bill_label,
+            format!("${read:.2}"),
+            format!("${write:.2}"),
+            format!("${new:.2}"),
             "—".into(),
         ]);
     }
@@ -2462,6 +2555,7 @@ mod tests {
             tokens: 1000,
             cache_hit: 0.5,
             bill_micros: bill,
+            saved_micros: bill / 4,
             input_before: 1000,
             input_after: 600,
             last_ts: "2026-06-19T00:00:00+00:00".to_string(),
@@ -2488,8 +2582,8 @@ mod tests {
         // one project under claude-code, two sessions under it
         assert_eq!(claude.children.len(), 1);
         assert_eq!(claude.children[0].children.len(), 2);
-        // columns are [cost, saved, when, msgs, reuse]; rolled-up turns = 5 (msgs, index 3).
-        assert_eq!(claude.cols[3], "5");
+        // columns: [cost, saved$, trim, when, msgs, reuse]; rolled-up turns = 5 (msgs, index 4).
+        assert_eq!(claude.cols[4], "5");
     }
 
     #[test]

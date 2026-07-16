@@ -2768,7 +2768,6 @@ fn render_snapshot(
 ) -> Result<(String, monitor::Health)> {
     let summary = tracker.summary()?;
     let models = monitor::model_views(tracker)?;
-    let cost = monitor::monitor_cost(tracker);
     let daemon = daemon_view(&summary);
     let health = monitor::health(&daemon);
     // Last (up to) 7 days of input tokens saved, oldest→newest, for the 7-DAY TREND sparkline.
@@ -2781,13 +2780,15 @@ fn render_snapshot(
         .rev()
         .map(|r| (r.input_before - r.input_after).max(0))
         .collect();
+    // Frozen breakdown money for hero — same source as Overview (never live cost_estimate).
+    let (hero_saved, today_saved) = monitor::hero_money(tracker);
     let mut out = monitor::snapshot(
         color,
         Some(&daemon),
         &summary,
         &models,
-        cost.as_ref(),
-        monitor::today_saved_usd(tracker),
+        hero_saved,
+        today_saved,
         &trend,
         cache_included,
         split_marker,
@@ -2947,12 +2948,13 @@ fn run_monitor(
             let s = tracker.summary()?;
             let models = monitor::model_views(&tracker)?;
             let daemon = daemon_view(&s);
-            let out = monitor::export_json(
+            let out = monitor::export_json_with_money(
                 &s,
                 &models,
                 monitor::monitor_cost(&tracker).as_ref(),
                 &rows,
                 Some(&daemon),
+                monitor::money_json(&tracker),
             );
             println!("{}", merge_breakdown_json(out, breakdown));
         } else {
