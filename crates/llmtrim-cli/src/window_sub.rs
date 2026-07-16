@@ -372,17 +372,11 @@ fn is_owned_slash_allow_rule(rule: &str) -> bool {
     };
     // `Path::file_name` is OS-separator-sensitive; rules may use the other OS's
     // separators when inspected cross-platform, so split on both.
-    let basename = path
-        .rsplit(['/', '\\'])
-        .next()
-        .unwrap_or(path);
+    let basename = path.rsplit(['/', '\\']).next().unwrap_or(path);
     if basename != "llmtrim" && !basename.eq_ignore_ascii_case("llmtrim.exe") {
         return false;
     }
-    matches!(
-        tail,
-        " window-sub slash *" | " window-sub slash:*"
-    )
+    matches!(tail, " window-sub slash *" | " window-sub slash:*")
 }
 
 fn slash_allow_rule_present(root: &serde_json::Value, exe: &str) -> bool {
@@ -692,7 +686,10 @@ mod tests {
             "skill command should only pass $ARGUMENTS: {text}"
         );
         assert!(
-            text.contains(&format!("allowed-tools: {}", slash_bash_allow_rule("llmtrim"))),
+            text.contains(&format!(
+                "allowed-tools: {}",
+                slash_bash_allow_rule("llmtrim")
+            )),
             "skill must pre-approve its Bash pattern (skills cannot prompt): {text}"
         );
         assert!(!text.contains("LLMTRIM_CLAUDE_WINDOW_TOKEN"));
@@ -721,9 +718,7 @@ mod tests {
             r#"Bash("C:\bin\llmtrim.exe" window-sub slash *)"#
         ));
         // Not ours: wrong basename, wrong subcommand, or bare tool allow.
-        assert!(!is_owned_slash_allow_rule(
-            "Bash(echo window-sub slash *)"
-        ));
+        assert!(!is_owned_slash_allow_rule("Bash(echo window-sub slash *)"));
         assert!(!is_owned_slash_allow_rule(
             "Bash('/opt/other' window-sub slash *)"
         ));
@@ -765,10 +760,7 @@ mod tests {
             .iter()
             .filter_map(|v| v.as_str())
             .collect();
-        assert_eq!(
-            rules,
-            vec!["Bash(git:*)", "Bash(echo window-sub slash *)"]
-        );
+        assert_eq!(rules, vec!["Bash(git:*)", "Bash(echo window-sub slash *)"]);
     }
 
     #[test]
