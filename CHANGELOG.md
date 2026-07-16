@@ -6,6 +6,15 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Fixed
+
+- **Window `/sub` survives Claude Code `/clear` (and `/compact`) without the env token.**
+  Retention used to depend only on `LLMTRIM_CLAUDE_WINDOW_TOKEN` surviving into the next
+  `SessionStart` hook. Claude Code often drops that env on clear, so `/sub on grok` was lost and
+  the next turn fell back to Anthropic. SessionEnd now keeps the live session map and a
+  short-lived `cleared` backup; SessionStart reattaches via session map, that backup, or the
+  env token last (so a stale token from another window cannot override this session).
+
 ## [0.11.1] - 2026-07-16
 
 ### Changed
