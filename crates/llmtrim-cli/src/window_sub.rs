@@ -705,11 +705,19 @@ mod tests {
 
     #[test]
     fn slash_allow_rule_is_scoped_to_window_sub_slash() {
+        // quoted_exe is platform-specific ('…' on Unix, "…" on Windows).
         let rule = slash_bash_allow_rule("/opt/llmtrim");
-        assert_eq!(rule, "Bash('/opt/llmtrim' window-sub slash *)");
+        assert_eq!(
+            rule,
+            format!("Bash({} window-sub slash *)", quoted_exe("/opt/llmtrim"))
+        );
         assert!(is_owned_slash_allow_rule(&rule));
+        // Ownership matches both quote styles (rules may be written on another OS).
         assert!(is_owned_slash_allow_rule(
             "Bash('/old/path/llmtrim' window-sub slash *)"
+        ));
+        assert!(is_owned_slash_allow_rule(
+            r#"Bash("/old/path/llmtrim" window-sub slash *)"#
         ));
         assert!(is_owned_slash_allow_rule(
             "Bash(llmtrim window-sub slash:*)"
@@ -731,12 +739,14 @@ mod tests {
 
     #[test]
     fn ensure_slash_allow_rule_replaces_stale_owned_entry() {
+        let old = slash_bash_allow_rule("/old/llmtrim");
+        let new = slash_bash_allow_rule("/new/llmtrim");
         let mut root = serde_json::json!({
             "permissions": {
                 "allow": [
                     "Bash(git:*)",
                     "Bash(echo window-sub slash *)",
-                    "Bash('/old/llmtrim' window-sub slash *)"
+                    old
                 ]
             }
         });
@@ -748,7 +758,7 @@ mod tests {
             vec![
                 "Bash(git:*)",
                 "Bash(echo window-sub slash *)",
-                "Bash('/new/llmtrim' window-sub slash *)"
+                new.as_str()
             ]
         );
         assert!(slash_allow_rule_present(&root, "/new/llmtrim"));
@@ -765,9 +775,10 @@ mod tests {
 
     #[test]
     fn slash_allow_rule_present_requires_exact_current_rule() {
+        let current = slash_bash_allow_rule("/opt/llmtrim");
         let root = serde_json::json!({
             "permissions": {
-                "allow": ["Bash('/opt/llmtrim' window-sub slash *)"]
+                "allow": [current]
             }
         });
         assert!(slash_allow_rule_present(&root, "/opt/llmtrim"));
