@@ -755,11 +755,7 @@ mod tests {
         let rules: Vec<&str> = allow.iter().filter_map(|v| v.as_str()).collect();
         assert_eq!(
             rules,
-            vec![
-                "Bash(git:*)",
-                "Bash(echo window-sub slash *)",
-                new.as_str()
-            ]
+            vec!["Bash(git:*)", "Bash(echo window-sub slash *)", new.as_str()]
         );
         assert!(slash_allow_rule_present(&root, "/new/llmtrim"));
         assert!(!slash_allow_rule_present(&root, "/old/llmtrim"));
