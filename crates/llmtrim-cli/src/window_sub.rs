@@ -8,7 +8,7 @@ use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use anyhow::{Context, Result, bail};
+use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
 
 const TTL: Duration = Duration::from_secs(30 * 60);
@@ -21,6 +21,13 @@ struct Registry {
     windows: BTreeMap<String, Window>,
     #[serde(default)]
     sessions: BTreeMap<String, String>,
+    /// Session → window backup for `/clear` / `/compact` when Claude drops the env token.
+    ///
+    /// `SessionEnd(reason=clear|compact)` keeps the live `sessions` map (Start may already have
+    /// reattached) and also records here so a later Start can recover if something else unmapped
+    /// the session. True quits drop window + session + this entry.
+    #[serde(default)]
+    cleared: BTreeMap<String, Cleared>,
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct Window {
@@ -29,6 +36,11 @@ struct Window {
     touched: u64,
     #[serde(default)]
     last_provider: Option<String>,
+}
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct Cleared {
+    token: String,
+    touched: u64,
 }
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -147,6 +159,47 @@ fn prune(registry: &mut Registry, current: u64) {
     registry
         .sessions
         .retain(|_, t| registry.windows.contains_key(t));
+    registry.cleared.retain(|_, c| {
+        current.saturating_sub(c.touched) <= TTL.as_secs()
+            && registry.windows.contains_key(&c.token)
+    });
+}
+
+/// Token to keep across `/clear` / `/compact`, if any.
+///
+/// Preference order (first hit with a live window wins):
+/// 1. live `sessions` map for this session id (authoritative; not another TTY's env token),
+/// 2. `cleared` side table (backup if the session map was dropped),
+/// 3. env `LLMTRIM_CLAUDE_WINDOW_TOKEN` only when neither session-scoped map has a live hit
+///    (stale env from another window must not override this session's intent).
+fn resolve_retained_token(
+    registry: &Registry,
+    source: &str,
+    session: &str,
+    existing: Option<&str>,
+) -> Option<String> {
+    if !matches!(source, "clear" | "compact") {
+        return None;
+    }
+    if let Some(token) = registry
+        .sessions
+        .get(session)
+        .filter(|t| registry.windows.contains_key(*t))
+        .cloned()
+    {
+        return Some(token);
+    }
+    if let Some(token) = registry
+        .cleared
+        .get(session)
+        .filter(|c| registry.windows.contains_key(&c.token))
+        .map(|c| c.token.clone())
+    {
+        return Some(token);
+    }
+    existing
+        .filter(|x| valid(x) && registry.windows.contains_key(*x))
+        .map(str::to_owned)
 }
 fn token() -> String {
     let mut b = [0u8; 24];
@@ -171,22 +224,26 @@ fn token() -> String {
 }
 /// Register a fresh startup/resume window, or retain its token across clear/compact.
 pub fn session_start(session: &str, source: &str, existing: Option<&str>) -> Result<String> {
+    let path = registry_path()?;
+    session_start_at(&path, session, source, existing)
+}
+
+fn session_start_at(
+    path: &Path,
+    session: &str,
+    source: &str,
+    existing: Option<&str>,
+) -> Result<String> {
     if !valid(session) {
         bail!("invalid Claude session id");
     }
-    let path = registry_path()?;
-    let _lock = lock_registry(&path)?;
-    let mut r = load_at(&path)?;
+    let _lock = lock_registry(path)?;
+    let mut r = load_at(path)?;
     let t = now();
     prune(&mut r, t);
-    let token = if matches!(source, "clear" | "compact") {
-        existing
-            .filter(|x| valid(x) && r.windows.contains_key(*x))
-            .map(str::to_owned)
-            .unwrap_or_else(token)
-    } else {
-        token()
-    };
+    let token = resolve_retained_token(&r, source, session, existing).unwrap_or_else(token);
+    // Consumed: either reattached or about to mint a fresh window for this session.
+    r.cleared.remove(session);
     r.windows
         .entry(token.clone())
         .or_insert(Window {
@@ -196,24 +253,44 @@ pub fn session_start(session: &str, source: &str, existing: Option<&str>) -> Res
         })
         .touched = t;
     r.sessions.insert(session.to_owned(), token.clone());
-    save_at(&path, &r)?;
+    save_at(path, &r)?;
     Ok(token)
 }
+
 pub fn session_end(session: &str, reason: &str) -> Result<()> {
+    let path = registry_path()?;
+    session_end_at(&path, session, reason)
+}
+
+fn session_end_at(path: &Path, session: &str, reason: &str) -> Result<()> {
     if !valid(session) {
         return Ok(());
     }
-    let path = registry_path()?;
-    let _lock = lock_registry(&path)?;
-    let mut r = load_at(&path)?;
-    if let Some(token) = r.sessions.remove(session)
-        && reason != "clear"
-    {
+    let _lock = lock_registry(path)?;
+    let mut r = load_at(path)?;
+    let t = now();
+    if matches!(reason, "clear" | "compact") {
+        // Keep window + live sessions map. SessionStart may already have reattached the same
+        // session id; unmapping here would drop /sub until the next clear. Still snapshot into
+        // `cleared` so Start can recover if the session map is empty for any other reason.
+        if let Some(token) = r
+            .sessions
+            .get(session)
+            .cloned()
+            .or_else(|| r.cleared.get(session).map(|c| c.token.clone()))
+        {
+            if r.windows.contains_key(&token) {
+                r.cleared
+                    .insert(session.to_owned(), Cleared { token, touched: t });
+            }
+        }
+    } else if let Some(token) = r.sessions.remove(session) {
         r.windows.remove(&token);
         r.sessions.retain(|_, mapped| mapped != &token);
+        r.cleared.retain(|_, c| c.token != token);
     }
-    prune(&mut r, now());
-    save_at(&path, &r)
+    prune(&mut r, t);
+    save_at(path, &r)
 }
 pub fn set(session: &str, enabled: bool, provider: Option<&str>) -> Result<()> {
     if !valid(session) {
@@ -654,7 +731,7 @@ mod tests {
     }
 
     #[test]
-    fn registry_prunes_expired_window_and_session() {
+    fn registry_prunes_expired_window_session_and_cleared() {
         let mut r = Registry::default();
         r.windows.insert(
             "token".into(),
@@ -665,9 +742,311 @@ mod tests {
             },
         );
         r.sessions.insert("session".into(), "token".into());
+        r.cleared.insert(
+            "cleared-session".into(),
+            Cleared {
+                token: "token".into(),
+                touched: 1,
+            },
+        );
         prune(&mut r, TTL.as_secs() + 2);
         assert!(r.windows.is_empty());
         assert!(r.sessions.is_empty());
+        assert!(r.cleared.is_empty());
+    }
+
+    #[test]
+    fn resolve_retained_token_prefers_session_then_cleared_then_env() {
+        let mut r = Registry::default();
+        r.windows.insert(
+            "from-env".into(),
+            Window {
+                intent: None,
+                touched: now(),
+                last_provider: None,
+            },
+        );
+        r.windows.insert(
+            "from-session".into(),
+            Window {
+                intent: None,
+                touched: now(),
+                last_provider: None,
+            },
+        );
+        r.windows.insert(
+            "from-cleared".into(),
+            Window {
+                intent: None,
+                touched: now(),
+                last_provider: None,
+            },
+        );
+        r.sessions.insert("sess".into(), "from-session".into());
+        r.cleared.insert(
+            "sess".into(),
+            Cleared {
+                token: "from-cleared".into(),
+                touched: now(),
+            },
+        );
+        // Session map beats a (possibly foreign) env token.
+        assert_eq!(
+            resolve_retained_token(&r, "clear", "sess", Some("from-env")).as_deref(),
+            Some("from-session")
+        );
+        assert_eq!(
+            resolve_retained_token(&r, "clear", "sess", None).as_deref(),
+            Some("from-session")
+        );
+        r.sessions.remove("sess");
+        // Cleared beats env once the session map is empty.
+        assert_eq!(
+            resolve_retained_token(&r, "clear", "sess", Some("from-env")).as_deref(),
+            Some("from-cleared")
+        );
+        assert_eq!(
+            resolve_retained_token(&r, "compact", "sess", None).as_deref(),
+            Some("from-cleared")
+        );
+        r.cleared.remove("sess");
+        // Env is last resort only.
+        assert_eq!(
+            resolve_retained_token(&r, "clear", "sess", Some("from-env")).as_deref(),
+            Some("from-env")
+        );
+        // startup never reuses
+        assert_eq!(
+            resolve_retained_token(&r, "startup", "sess", Some("from-env")),
+            None
+        );
+        // dead env tokens are skipped
+        assert_eq!(
+            resolve_retained_token(&r, "clear", "sess", Some("missing")),
+            None
+        );
+    }
+
+    #[test]
+    fn clear_reattaches_via_cleared_table_when_env_token_missing() {
+        let dir = std::env::temp_dir().join(format!(
+            "llmtrim-window-sub-clear-{}-{}",
+            std::process::id(),
+            now()
+        ));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("claude-window-sub.json");
+
+        // Cold start + /sub on grok.
+        let token = session_start_at(&path, "sess-1", "startup", None).unwrap();
+        {
+            let _lock = lock_registry(&path).unwrap();
+            let mut r = load_at(&path).unwrap();
+            let w = r.windows.get_mut(&token).unwrap();
+            w.intent = Some(Intent::Enabled {
+                provider: "grok".into(),
+            });
+            w.last_provider = Some("grok".into());
+            save_at(&path, &r).unwrap();
+        }
+
+        // SessionEnd(clear): keep live sessions map + window; also snapshot into `cleared`.
+        session_end_at(&path, "sess-1", "clear").unwrap();
+        {
+            let r = load_at(&path).unwrap();
+            assert_eq!(
+                r.sessions.get("sess-1").map(String::as_str),
+                Some(token.as_str())
+            );
+            assert!(r.windows.contains_key(&token));
+            assert_eq!(
+                r.cleared.get("sess-1").map(|c| c.token.as_str()),
+                Some(token.as_str())
+            );
+            assert_eq!(
+                r.windows.get(&token).and_then(|w| w.intent.clone()),
+                Some(Intent::Enabled {
+                    provider: "grok".into()
+                })
+            );
+        }
+
+        // Simulate a lost session map (older End behavior / external wipe) — Start still
+        // reattaches via `cleared` with no env token.
+        {
+            let _lock = lock_registry(&path).unwrap();
+            let mut r = load_at(&path).unwrap();
+            r.sessions.remove("sess-1");
+            save_at(&path, &r).unwrap();
+        }
+        let again = session_start_at(&path, "sess-1", "clear", None).unwrap();
+        assert_eq!(again, token);
+        {
+            let r = load_at(&path).unwrap();
+            assert_eq!(
+                r.sessions.get("sess-1").map(String::as_str),
+                Some(token.as_str())
+            );
+            assert!(!r.cleared.contains_key("sess-1"));
+            assert_eq!(
+                r.windows.get(&token).and_then(|w| w.intent.clone()),
+                Some(Intent::Enabled {
+                    provider: "grok".into()
+                })
+            );
+        }
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn clear_session_end_after_start_keeps_live_session_map() {
+        let dir = std::env::temp_dir().join(format!(
+            "llmtrim-window-sub-start-end-{}-{}",
+            std::process::id(),
+            now()
+        ));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("claude-window-sub.json");
+
+        let token = session_start_at(&path, "sess-race", "startup", None).unwrap();
+        {
+            let _lock = lock_registry(&path).unwrap();
+            let mut r = load_at(&path).unwrap();
+            r.windows.get_mut(&token).unwrap().intent = Some(Intent::Enabled {
+                provider: "grok".into(),
+            });
+            save_at(&path, &r).unwrap();
+        }
+
+        // Start reattaches first (Claude order can go either way), then End runs.
+        let again = session_start_at(&path, "sess-race", "clear", None).unwrap();
+        assert_eq!(again, token);
+        session_end_at(&path, "sess-race", "clear").unwrap();
+
+        // lookup path is sessions → windows; End must not have unmapped it.
+        let r = load_at(&path).unwrap();
+        assert_eq!(
+            r.sessions.get("sess-race").map(String::as_str),
+            Some(token.as_str())
+        );
+        assert_eq!(
+            r.windows.get(&token).and_then(|w| w.intent.clone()),
+            Some(Intent::Enabled {
+                provider: "grok".into()
+            })
+        );
+        assert_eq!(
+            r.cleared.get("sess-race").map(|c| c.token.as_str()),
+            Some(token.as_str())
+        );
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn clear_ignores_stale_env_token_from_another_window() {
+        let dir = std::env::temp_dir().join(format!(
+            "llmtrim-window-sub-stale-env-{}-{}",
+            std::process::id(),
+            now()
+        ));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("claude-window-sub.json");
+
+        let mine = session_start_at(&path, "sess-mine", "startup", None).unwrap();
+        let other = session_start_at(&path, "sess-other", "startup", None).unwrap();
+        {
+            let _lock = lock_registry(&path).unwrap();
+            let mut r = load_at(&path).unwrap();
+            r.windows.get_mut(&mine).unwrap().intent = Some(Intent::Enabled {
+                provider: "grok".into(),
+            });
+            r.windows.get_mut(&other).unwrap().intent = Some(Intent::Enabled {
+                provider: "codex".into(),
+            });
+            save_at(&path, &r).unwrap();
+        }
+
+        // Clear for mine must not adopt the foreign env token.
+        let again = session_start_at(&path, "sess-mine", "clear", Some(&other)).unwrap();
+        assert_eq!(again, mine);
+        let r = load_at(&path).unwrap();
+        assert_eq!(
+            r.windows.get(&mine).and_then(|w| w.intent.clone()),
+            Some(Intent::Enabled {
+                provider: "grok".into()
+            })
+        );
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn clear_reattaches_via_live_session_when_session_end_skipped() {
+        let dir = std::env::temp_dir().join(format!(
+            "llmtrim-window-sub-live-{}-{}",
+            std::process::id(),
+            now()
+        ));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("claude-window-sub.json");
+
+        let token = session_start_at(&path, "sess-2", "startup", None).unwrap();
+        {
+            let _lock = lock_registry(&path).unwrap();
+            let mut r = load_at(&path).unwrap();
+            r.windows.get_mut(&token).unwrap().intent = Some(Intent::Disabled);
+            save_at(&path, &r).unwrap();
+        }
+
+        // No SessionEnd — SessionStart(clear) still reuses via sessions map.
+        let again = session_start_at(&path, "sess-2", "clear", None).unwrap();
+        assert_eq!(again, token);
+        {
+            let r = load_at(&path).unwrap();
+            assert_eq!(
+                r.windows.get(&token).and_then(|w| w.intent.clone()),
+                Some(Intent::Disabled)
+            );
+        }
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn non_clear_session_end_drops_window_and_cleared() {
+        let dir = std::env::temp_dir().join(format!(
+            "llmtrim-window-sub-end-{}-{}",
+            std::process::id(),
+            now()
+        ));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("claude-window-sub.json");
+
+        let token = session_start_at(&path, "sess-3", "startup", None).unwrap();
+        session_end_at(&path, "sess-3", "logout").unwrap();
+        {
+            let r = load_at(&path).unwrap();
+            assert!(!r.sessions.contains_key("sess-3"));
+            assert!(!r.windows.contains_key(&token));
+            assert!(!r.cleared.contains_key("sess-3"));
+        }
+
+        // Next clear for same session id must mint a fresh empty window.
+        let fresh = session_start_at(&path, "sess-3", "clear", None).unwrap();
+        assert_ne!(fresh, token);
+        {
+            let r = load_at(&path).unwrap();
+            assert!(r.windows.get(&fresh).unwrap().intent.is_none());
+        }
+
+        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]
