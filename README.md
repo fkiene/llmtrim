@@ -36,15 +36,37 @@
 </p>
 
 <p align="center">
+  <a href="#what-it-does">What it does</a> &bull;
   <a href="#get-started">Install</a> &bull;
   <a href="#day-to-day">Day to day</a> &bull;
-  <a href="#what-it-does">How it works</a> &bull;
+  <a href="#in-action">In action</a> &bull;
   <a href="#works-with">Works with</a> &bull;
   <a href="#claude-code">Claude Code</a> &bull;
   <a href="#the-numbers">Numbers</a> &bull;
   <a href="#configuration">Config</a> &bull;
   <a href="#use-it-as-a-cli-mcp-or-library">CLI &amp; library</a>
 </p>
+
+---
+
+## What it does
+
+You run Claude Code, Codex, Cursor, or your own app. Every turn, the tool sends a large request: system prompt, tools, history, raw command output. You pay for every token of that, including the parts that do not help the model.
+
+A 200-line build log with two errors. Tool schemas resent on every call. JSON with hundreds of near-identical rows. That bulk is still billed.
+
+llmtrim sits on your machine as a local proxy, trims the waste, and forwards a smaller request. The reply is unchanged. You keep the same tools and answers; you spend less.
+
+```
+  before:  your tool ───── full request ─────▶  OpenAI / Anthropic / …
+                    ◀──────── reply ──────────
+
+  after:   your tool ──▶ llmtrim ──smaller──▶  OpenAI / Anthropic / …
+                            (on your machine)
+                    ◀──────── reply ──────────  (same answer)
+```
+
+Compression cannot raise your bill or break a request; worst case is zero savings. Everything runs locally, nothing is sent to us. [In action →](#in-action)
 
 ---
 
@@ -139,33 +161,11 @@ Time series: `llmtrim status --daily` · `--weekly` · `--monthly` · `--json` �
 
 ---
 
-## What it does
+## In action
 
-You run Claude Code, Codex, Cursor, or your own app. Each request carries a large blob: system prompt, tools, history, and raw tool output. You pay for that on every turn.
+An agent ran a build. The tool returned 58 lines; two were errors. All 58 would have been billed.
 
-A lot of it is noise. A 200-line build log with two errors. Tool schemas resent fifty times. JSON with hundreds of near-identical rows. The model does not need the bulk to answer well.
-
-llmtrim strips that noise on your machine before the request hits the provider. Your tool stays the same, the reply stays the same, the bill shrinks.
-
-```
-  before:  your tool ───── full request ─────▶  OpenAI / Anthropic / …
-                    ◀──────── reply ──────────
-
-  after:   your tool ──▶ llmtrim ──smaller──▶  OpenAI / Anthropic / …
-                            (on your machine)
-                    ◀──────── reply ──────────  (same answer)
-```
-
-> [!IMPORTANT]
-> Compression cannot raise your bill or break a request. Each step is re-measured with the provider's real tokenizer and undone if it does not save tokens. If the provider rejects the compressed body, the original is resent. Worst case is zero savings.
-
-Everything runs locally. Nothing is sent to us.
-
-### In action
-
-Real agent build log: 58 lines, two of them errors. Keep the errors, drop the rest.
-
-Before (4,662 chars) → after (978 chars, −79%):
+4,662 chars → 978 (−79%). Errors stay verbatim. Repeated INFO lines fold into a template plus the values (lossless when the range is regular).
 
 ```text
 # before (noise + signal)
@@ -184,11 +184,13 @@ Before (4,662 chars) → after (978 chars, −79%):
 [2026-06-13T10:03:02Z] INFO  build failed, 2 errors
 ```
 
-Try any request body:
+Try it on a request body of your own:
 
 ```bash
 echo '{"model":"gpt-4o","messages":[...]}' | llmtrim compress --provider openai
 ```
+
+Log folding is one stage. Others kick in on different waste:
 
 | Waste | What happens |
 |---|---|
@@ -199,10 +201,15 @@ echo '{"model":"gpt-4o","messages":[...]}' | llmtrim compress --provider openai
 | Huge JSON arrays | Compact table (TOON) or sample |
 | Verbose model replies | Ask for terser output where safe |
 
+> [!IMPORTANT]
+> Compression cannot raise your bill or break a request. Each stage is re-measured with the provider's real tokenizer and undone if it does not save tokens. If the provider rejects the compressed body, the original is resent. Worst case is zero savings.
+
+Prompt-cache prefixes (`cache_control`) are left alone.
+
 <details>
 <summary><b>All 10 compressors</b></summary>
 
-Stages run in savings order. Nothing under a `cache_control` marker is ever rewritten.
+Stages run in savings order. Nothing under a `cache_control` marker is rewritten.
 
 | Stage | What it does | When it runs |
 |---|---|---|
