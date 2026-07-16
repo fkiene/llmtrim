@@ -75,10 +75,10 @@ pub struct MoneyCoverage {
 
 impl MoneyCoverage {
     pub fn compute(compressions_events: i64, breakdown_turns: i64) -> Self {
+        // No compressions → ratio 1.0 (empty or breakdown-only is fine). With compressions,
+        // ratio is turns/events clamped to [0, 1].
         let coverage_ratio = if compressions_events > 0 {
             (breakdown_turns as f64 / compressions_events as f64).clamp(0.0, 1.0)
-        } else if breakdown_turns > 0 {
-            1.0
         } else {
             1.0
         };
@@ -132,18 +132,22 @@ pub fn turn_pct(input_before: Option<i64>, input_after: Option<i64>) -> f64 {
     (cut / before as f64).clamp(0.0, PCT_CLAMP)
 }
 
+/// Frozen input-side rates for one turn (USD per 1M tokens), plus usage counts for pricing.
+#[derive(Debug, Clone, Copy)]
+pub struct TurnInputBill {
+    pub fresh_input: i64,
+    pub cache_read: i64,
+    pub cache_write: i64,
+    pub input_rate: f64,
+    pub cache_read_rate: f64,
+    pub cache_write_rate: f64,
+}
+
 /// Input-side bill in micro-USD from frozen rates (excludes output).
-pub fn input_bill_micros(
-    fresh_input: i64,
-    cache_read: i64,
-    cache_write: i64,
-    input_rate: f64,
-    cache_read_rate: f64,
-    cache_write_rate: f64,
-) -> i64 {
-    (fresh_input as f64 * input_rate
-        + cache_read as f64 * cache_read_rate
-        + cache_write as f64 * cache_write_rate)
+pub fn input_bill_micros(b: TurnInputBill) -> i64 {
+    (b.fresh_input as f64 * b.input_rate
+        + b.cache_read as f64 * b.cache_read_rate
+        + b.cache_write as f64 * b.cache_write_rate)
         .round() as i64
 }
 
@@ -155,25 +159,13 @@ pub fn input_bill_micros(
 pub fn turn_saved_micros(
     input_before: Option<i64>,
     input_after: Option<i64>,
-    fresh_input: i64,
-    cache_read: i64,
-    cache_write: i64,
-    input_rate: f64,
-    cache_read_rate: f64,
-    cache_write_rate: f64,
+    bill: TurnInputBill,
 ) -> i64 {
     let pct = turn_pct(input_before, input_after);
     if pct <= 0.0 {
         return 0;
     }
-    let input_bill = input_bill_micros(
-        fresh_input,
-        cache_read,
-        cache_write,
-        input_rate,
-        cache_read_rate,
-        cache_write_rate,
-    ) as f64;
+    let input_bill = input_bill_micros(bill) as f64;
     if input_bill <= 0.0 {
         return 0;
     }
@@ -437,39 +429,58 @@ mod tests {
     use super::*;
     use crate::tracking::{BreakdownBlock, BreakdownTurn, Tracker};
 
-    fn turn(
-        session: &str,
-        model: &str,
+    struct SeedTurn {
+        session: &'static str,
+        model: &'static str,
         bill: i64,
         before: i64,
         after: i64,
         fresh: i64,
         cache_read: i64,
-        cache_write: i64,
         out: i64,
         rates: (f64, f64, f64, f64),
-    ) -> BreakdownTurn {
+    }
+
+    fn turn(s: SeedTurn) -> BreakdownTurn {
         BreakdownTurn {
-            session_id: session.into(),
+            session_id: s.session.into(),
             cc_session_id: None,
             agent: "claude-code".into(),
             project: Some("/proj".into()),
             session_name: Some("s".into()),
             provider: "anthropic".into(),
-            model: Some(model.into()),
+            model: Some(s.model.into()),
             sub_provider: None,
             window: 200_000,
+            fresh_input: s.fresh,
+            cache_read: s.cache_read,
+            cache_write: 0,
+            output_tok: s.out,
+            input_rate: s.rates.0,
+            output_rate: s.rates.1,
+            cache_read_rate: s.rates.2,
+            cache_write_rate: s.rates.3,
+            bill_micros: s.bill,
+            input_before: s.before,
+            input_after: s.after,
+        }
+    }
+
+    fn bill(
+        fresh: i64,
+        cache_read: i64,
+        cache_write: i64,
+        input_rate: f64,
+        cache_read_rate: f64,
+        cache_write_rate: f64,
+    ) -> TurnInputBill {
+        TurnInputBill {
             fresh_input: fresh,
             cache_read,
             cache_write,
-            output_tok: out,
-            input_rate: rates.0,
-            output_rate: rates.1,
-            cache_read_rate: rates.2,
-            cache_write_rate: rates.3,
-            bill_micros: bill,
-            input_before: before,
-            input_after: after,
+            input_rate,
+            cache_read_rate,
+            cache_write_rate,
         }
     }
 
@@ -494,13 +505,21 @@ mod tests {
         // Asymmetric cache mixes make sum(per-turn) diverge from formula-on-sums.
         // Turn A: heavy cache, small cut. Turn B: all-fresh, large cut.
         let r = (3.0, 15.0, 0.3, 3.75);
-        let s1 = turn_saved_micros(Some(100_000), Some(95_000), 5_000, 90_000, 0, r.0, r.2, r.3);
-        let s2 = turn_saved_micros(Some(100_000), Some(40_000), 40_000, 0, 0, r.0, r.2, r.3);
+        let s1 = turn_saved_micros(
+            Some(100_000),
+            Some(95_000),
+            bill(5_000, 90_000, 0, r.0, r.2, r.3),
+        );
+        let s2 = turn_saved_micros(
+            Some(100_000),
+            Some(40_000),
+            bill(40_000, 0, 0, r.0, r.2, r.3),
+        );
         let sum = s1 + s2;
         // Wrong aggregate: sum tokens then one pct.
         let before = 200_000.0;
         let after = 135_000.0;
-        let agg_bill = input_bill_micros(45_000, 90_000, 0, r.0, r.2, r.3) as f64;
+        let agg_bill = input_bill_micros(bill(45_000, 90_000, 0, r.0, r.2, r.3)) as f64;
         let agg_pct = (before - after) / before;
         let agg = (agg_bill * agg_pct / (1.0 - agg_pct)).round() as i64;
         assert_ne!(
@@ -519,12 +538,7 @@ mod tests {
         let saved = turn_saved_micros(
             Some(110_000),
             Some(100_000),
-            10_000,
-            90_000,
-            0,
-            input_rate,
-            cache_read_rate,
-            0.0,
+            bill(10_000, 90_000, 0, input_rate, cache_read_rate, 0.0),
         );
         let live_true = (10_000.0 * input_rate).round() as i64; // cut at full rate
         assert!(
@@ -551,8 +565,28 @@ mod tests {
         seed(
             &t,
             &[
-                turn("s1", "m1", bill1, 100_000, 50_000, 50_000, 0, 0, 100, rates),
-                turn("s2", "m1", bill2, 100_000, 80_000, 80_000, 0, 0, 200, rates),
+                turn(SeedTurn {
+                    session: "s1",
+                    model: "m1",
+                    bill: bill1,
+                    before: 100_000,
+                    after: 50_000,
+                    fresh: 50_000,
+                    cache_read: 0,
+                    out: 100,
+                    rates,
+                }),
+                turn(SeedTurn {
+                    session: "s2",
+                    model: "m1",
+                    bill: bill2,
+                    before: 100_000,
+                    after: 80_000,
+                    fresh: 80_000,
+                    cache_read: 0,
+                    out: 200,
+                    rates,
+                }),
             ],
         );
         let db = BreakdownDb::from_connection(t.into_connection());
@@ -566,22 +600,12 @@ mod tests {
         let s1 = turn_saved_micros(
             Some(100_000),
             Some(50_000),
-            50_000,
-            0,
-            0,
-            rates.0,
-            rates.2,
-            rates.3,
+            bill(50_000, 0, 0, rates.0, rates.2, rates.3),
         );
         let s2 = turn_saved_micros(
             Some(100_000),
             Some(80_000),
-            80_000,
-            0,
-            0,
-            rates.0,
-            rates.2,
-            rates.3,
+            bill(80_000, 0, 0, rates.0, rates.2, rates.3),
         );
         assert_eq!(m.saved_micros, s1 + s2);
     }
@@ -590,20 +614,29 @@ mod tests {
     fn unpriced_and_premeter() {
         let t = Tracker::open_in_memory().unwrap();
         // Unpriced: usage but bill 0, rates 0
-        let unpriced = turn(
-            "s1",
-            "mystery",
-            0,
-            1000,
-            500,
-            500,
-            0,
-            0,
-            10,
-            (0.0, 0.0, 0.0, 0.0),
-        );
+        let unpriced = turn(SeedTurn {
+            session: "s1",
+            model: "mystery",
+            bill: 0,
+            before: 1000,
+            after: 500,
+            fresh: 500,
+            cache_read: 0,
+            out: 10,
+            rates: (0.0, 0.0, 0.0, 0.0),
+        });
         // Premeter-like: no compression meters (0 before → pct 0), but has bill
-        let mut premeter = turn("s2", "m1", 1000, 0, 0, 100, 0, 0, 0, (3.0, 15.0, 0.3, 3.75));
+        let mut premeter = turn(SeedTurn {
+            session: "s2",
+            model: "m1",
+            bill: 1000,
+            before: 0,
+            after: 0,
+            fresh: 100,
+            cache_read: 0,
+            out: 0,
+            rates: (3.0, 15.0, 0.3, 3.75),
+        });
         premeter.input_before = 0;
         premeter.input_after = 0;
         seed(&t, &[unpriced, premeter]);
@@ -632,10 +665,30 @@ mod tests {
         let bill = 12_345;
         seed(
             &t,
-            &[turn("sess-a", "m1", bill, 1000, 800, 800, 0, 0, 0, rates)],
+            &[turn(SeedTurn {
+                session: "sess-a",
+                model: "m1",
+                bill,
+                before: 1000,
+                after: 800,
+                fresh: 800,
+                cache_read: 0,
+                out: 0,
+                rates,
+            })],
         );
         // Also write a block that would reprice differently if Detail used block sum only
-        let tr = turn("sess-a", "m1", bill, 1000, 800, 800, 0, 0, 0, rates);
+        let tr = turn(SeedTurn {
+            session: "sess-a",
+            model: "m1",
+            bill,
+            before: 1000,
+            after: 800,
+            fresh: 800,
+            cache_read: 0,
+            out: 0,
+            rates,
+        });
         // re-open path: second turn same session
         let t2 = Tracker::open_in_memory().unwrap();
         let block = BreakdownBlock {
@@ -663,8 +716,28 @@ mod tests {
         seed(
             &t,
             &[
-                turn("s1", "cheap", b, 100_000, 90_000, 50_000, 0, 0, 0, rates),
-                turn("s2", "saver", b, 100_000, 40_000, 50_000, 0, 0, 0, rates),
+                turn(SeedTurn {
+                    session: "s1",
+                    model: "cheap",
+                    bill: b,
+                    before: 100_000,
+                    after: 90_000,
+                    fresh: 50_000,
+                    cache_read: 0,
+                    out: 0,
+                    rates,
+                }),
+                turn(SeedTurn {
+                    session: "s2",
+                    model: "saver",
+                    bill: b,
+                    before: 100_000,
+                    after: 40_000,
+                    fresh: 50_000,
+                    cache_read: 0,
+                    out: 0,
+                    rates,
+                }),
             ],
         );
         let db = BreakdownDb::from_connection(t.into_connection());
@@ -697,8 +770,28 @@ mod tests {
         seed(
             &t,
             &[
-                turn("s1", "m1", bill1, 100_000, 50_000, 50_000, 0, 0, 100, rates),
-                turn("s2", "m1", bill2, 40_000, 20_000, 20_000, 0, 0, 0, rates),
+                turn(SeedTurn {
+                    session: "s1",
+                    model: "m1",
+                    bill: bill1,
+                    before: 100_000,
+                    after: 50_000,
+                    fresh: 50_000,
+                    cache_read: 0,
+                    out: 100,
+                    rates,
+                }),
+                turn(SeedTurn {
+                    session: "s2",
+                    model: "m1",
+                    bill: bill2,
+                    before: 40_000,
+                    after: 20_000,
+                    fresh: 20_000,
+                    cache_read: 0,
+                    out: 0,
+                    rates,
+                }),
             ],
         );
         let conn = t.into_connection();

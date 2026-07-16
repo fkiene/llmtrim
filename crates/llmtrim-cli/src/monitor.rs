@@ -833,9 +833,20 @@ pub fn hero_money(tracker: &Tracker) -> (Option<f64>, Option<f64>) {
 
 /// Full snapshot as JSON (for Grafana/Prometheus/scripts).
 ///
-/// When `money` is provided, emits additive frozen-breakdown bills alongside legacy `cost`
-/// (compressions + live list prices). Do not silently redefine `cost.*` fields.
+/// Dual-run: legacy `cost` (compressions + live list prices) plus optional additive `money`
+/// (frozen breakdown). Pass `money` via [`export_json_with_money`] or [`stats_json`].
 pub fn export_json(
+    s: &Summary,
+    models: &[ModelView],
+    cost: Option<&Cost>,
+    periods: &[PeriodRow],
+    daemon: Option<&DaemonView>,
+) -> String {
+    export_json_with_money(s, models, cost, periods, daemon, None)
+}
+
+/// Like [`export_json`], with an optional additive `money` object (frozen breakdown bills).
+pub fn export_json_with_money(
     s: &Summary,
     models: &[ModelView],
     cost: Option<&Cost>,
@@ -924,7 +935,7 @@ pub fn stats_json(tracker: &Tracker, daemon: Option<&DaemonView>) -> Result<Stri
     let models = model_views(tracker)?;
     let cost = monitor_cost(tracker);
     let periods = tracker.by_period(Period::Day)?;
-    Ok(export_json(
+    Ok(export_json_with_money(
         &summary,
         &models,
         cost.as_ref(),
@@ -1211,7 +1222,6 @@ pub fn overview_data(
         update_available: crate::update::check(false),
         coverage_compressions: coverage.compressions_events,
         coverage_turns: coverage.breakdown_turns,
-        coverage_ratio: coverage.coverage_ratio,
         turns_unpriced: totals.turns_unpriced,
         money_unavailable,
     }
@@ -1703,7 +1713,7 @@ mod tests {
 
     #[test]
     fn export_json_roundtrips() {
-        let out = export_json(&summ(), &[], None, &[], None, None);
+        let out = export_json(&summ(), &[], None, &[], None);
         let v: serde_json::Value = serde_json::from_str(&out).unwrap();
         assert_eq!(v["requests"], 1204);
         assert_eq!(v["cost"], serde_json::Value::Null);
@@ -2225,7 +2235,7 @@ mod tests {
 
     #[test]
     fn export_json_carries_daemon_health() {
-        let out = export_json(&summ(), &[], None, &[], Some(&dv()), None);
+        let out = export_json(&summ(), &[], None, &[], Some(&dv()));
         let v: serde_json::Value = serde_json::from_str(&out).unwrap();
         assert_eq!(v["daemon"]["running"], true);
         assert_eq!(v["daemon"]["health"], "healthy");
@@ -2241,7 +2251,7 @@ mod tests {
             env_port: None,
             ..dv()
         };
-        let out = export_json(&summ(), &[], None, &[], Some(&stopped), None);
+        let out = export_json(&summ(), &[], None, &[], Some(&stopped));
         let v: serde_json::Value = serde_json::from_str(&out).unwrap();
         assert_eq!(v["daemon"]["running"], false);
         assert_eq!(v["daemon"]["health"], "stopped");

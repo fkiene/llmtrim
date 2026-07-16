@@ -95,13 +95,13 @@ pub struct OverviewData {
     /// meta bar; `u` then runs the updater.
     pub update_available: Option<String>,
     /// Compressions events vs breakdown turns — drives partial/empty money UX.
-    pub coverage_compressions: i64,
-    pub coverage_turns: i64,
-    pub coverage_ratio: f64,
+    /// `pub(crate)` so adding these is not a SemVer break for external struct literals.
+    pub(crate) coverage_compressions: i64,
+    pub(crate) coverage_turns: i64,
     /// Turns with usage but zero bill (unpriced model).
-    pub turns_unpriced: i64,
+    pub(crate) turns_unpriced: i64,
     /// True when compressions exist but no breakdown bills — do not show $0 as truth.
-    pub money_unavailable: bool,
+    pub(crate) money_unavailable: bool,
 }
 
 impl OverviewData {
@@ -2394,7 +2394,6 @@ mod tests {
             update_available: None,
             coverage_compressions: 1204,
             coverage_turns: 1204,
-            coverage_ratio: 1.0,
             turns_unpriced: 0,
             money_unavailable: false,
         }

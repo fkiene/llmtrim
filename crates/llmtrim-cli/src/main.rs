@@ -2945,7 +2945,7 @@ fn run_monitor(
             let s = tracker.summary()?;
             let models = monitor::model_views(&tracker)?;
             let daemon = daemon_view(&s);
-            let out = monitor::export_json(
+            let out = monitor::export_json_with_money(
                 &s,
                 &models,
                 monitor::monitor_cost(&tracker).as_ref(),
