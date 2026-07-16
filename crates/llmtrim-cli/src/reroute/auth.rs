@@ -18,9 +18,10 @@
 //! Storage: `~/.llmtrim/{codex,kimi,grok}/auth.json` (dir `0700`, file `0600` on unix), written
 //! atomically (temp file + rename).
 
-use std::io::{Read, Write};
+use std::io::{BufRead, Read, Write};
 use std::path::PathBuf;
 use std::sync::Mutex;
+use std::sync::mpsc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result, anyhow, bail};
@@ -1017,7 +1018,7 @@ pub fn kimi_logout() -> Result<()> {
 }
 
 // ---------------------------------------------------------------------------
-// Grok — OIDC discovery + PKCE browser login
+// Grok — OIDC discovery + PKCE browser login + device-code / paste fallback
 // ---------------------------------------------------------------------------
 
 #[derive(Debug, Deserialize)]
@@ -1025,6 +1026,9 @@ struct GrokDiscovery {
     issuer: String,
     authorization_endpoint: String,
     token_endpoint: String,
+    /// Present when the issuer supports RFC 8628 device authorization.
+    #[serde(default)]
+    device_authorization_endpoint: Option<String>,
 }
 
 fn grok_discover() -> Result<GrokDiscovery> {
@@ -1048,7 +1052,14 @@ fn grok_discover() -> Result<GrokDiscovery> {
         bail!("Grok OIDC discovery issuer mismatch");
     }
     // Endpoints must stay on auth.x.ai.
-    for endpoint in [&discovery.authorization_endpoint, &discovery.token_endpoint] {
+    let mut endpoints = vec![
+        discovery.authorization_endpoint.as_str(),
+        discovery.token_endpoint.as_str(),
+    ];
+    if let Some(ref d) = discovery.device_authorization_endpoint {
+        endpoints.push(d.as_str());
+    }
+    for endpoint in endpoints {
         if !endpoint.starts_with(GROK_ISSUER) {
             bail!("Grok OIDC endpoint is outside the canonical issuer: {endpoint}");
         }
@@ -1140,6 +1151,11 @@ fn grok_refresh(stored: &GrokStored) -> Result<GrokStored> {
 }
 
 /// PKCE browser flow against `auth.x.ai` with an ephemeral loopback callback.
+///
+/// When the browser cannot reach this machine (SSH, container, remote desktop),
+/// xAI may show a one-time code (or a `http://127.0.0.1.../callback?...` URL).
+/// Paste that into the terminal — same pattern as pi-grok-cli / Hermes paste
+/// fallback. For fully headless machines prefer [`grok_device`].
 pub fn grok_login() -> Result<()> {
     print!("{TOS_WARNING}");
 
@@ -1170,7 +1186,12 @@ pub fn grok_login() -> Result<()> {
 
     println!("Open this URL in your browser to authorize llmtrim:\n\n  {authorize}\n");
     try_open_browser(&authorize);
-    println!("Waiting for the authorization callback (up to 5 minutes)...");
+    println!(
+        "Waiting for the authorization callback (up to 5 minutes)...\n\
+         If the browser cannot reach this machine, paste the full callback URL\n\
+         or the one-time code xAI shows (\"copy into Grok Build\") and press Enter.\n\
+         Headless alternative: `llmtrim sub auth grok device`.\n"
+    );
 
     let code = wait_for_grok_callback(listener, &state)?;
     let tr = grok_exchange_code(&discovery.token_endpoint, &code, &redirect_uri, &verifier)?;
@@ -1181,17 +1202,40 @@ pub fn grok_login() -> Result<()> {
 }
 
 /// Same shape as Codex's callback waiter, but the path is `/callback` (Grok OIDC convention)
-/// rather than `/auth/callback`.
+/// rather than `/auth/callback`. Also accepts a pasted callback URL or bare authorization
+/// code from stdin so remote users can finish login on their own device.
 fn wait_for_grok_callback(listener: std::net::TcpListener, expected_state: &str) -> Result<String> {
     listener
         .set_nonblocking(true)
         .context("failed to set Grok callback listener non-blocking")?;
     let deadline = std::time::Instant::now() + FLOW_TIMEOUT;
 
+    // Background stdin reader: paste races the loopback callback; first valid wins.
+    let paste_rx = spawn_stdin_line_reader();
+
     loop {
         if std::time::Instant::now() >= deadline {
             bail!("timed out waiting for the Grok OAuth callback after 5 minutes");
         }
+
+        // Manual paste (callback URL, query string, or bare code) from the other device.
+        match paste_rx.try_recv() {
+            Ok(line) => match parse_grok_manual_paste(line.trim(), expected_state) {
+                Ok(code) => return Ok(code),
+                Err(err) => {
+                    eprintln!("Ignored pasted input: {err}");
+                    eprintln!(
+                        "Paste the complete callback URL (http://127.0.0.1.../callback?code=...)\n\
+                         or the one-time code xAI showed, then press Enter."
+                    );
+                }
+            },
+            Err(mpsc::TryRecvError::Empty) => {}
+            Err(mpsc::TryRecvError::Disconnected) => {
+                // Stdin closed (EOF); loopback callback can still finish the flow.
+            }
+        }
+
         match listener.accept() {
             Ok((mut stream, _addr)) => {
                 let _ = stream.set_read_timeout(Some(Duration::from_secs(5)));
@@ -1225,16 +1269,45 @@ fn wait_for_grok_callback(listener: std::net::TcpListener, expected_state: &str)
     }
 }
 
+/// Spawn a thread that forwards non-empty stdin lines until EOF or the receiver drops.
+fn spawn_stdin_line_reader() -> mpsc::Receiver<String> {
+    let (tx, rx) = mpsc::channel();
+    std::thread::spawn(move || {
+        let stdin = std::io::stdin();
+        let mut stdin = stdin.lock();
+        loop {
+            let mut line = String::new();
+            match stdin.read_line(&mut line) {
+                Ok(0) => break, // EOF
+                Ok(_) if line.trim().is_empty() => continue,
+                Ok(_) => {
+                    if tx.send(line).is_err() {
+                        break;
+                    }
+                }
+                Err(_) => break,
+            }
+        }
+    });
+    rx
+}
+
 /// Parse `/callback?code=X&state=Y` into `(code, state)`.
 fn parse_grok_callback(target: &str) -> Option<(String, String)> {
     let (path, query) = target.split_once('?')?;
     if path != "/callback" {
         return None;
     }
+    parse_grok_callback_query(query)
+}
+
+fn parse_grok_callback_query(query: &str) -> Option<(String, String)> {
     let mut code = None;
     let mut state = None;
     for pair in query.split('&') {
-        let (k, v) = pair.split_once('=')?;
+        let Some((k, v)) = pair.split_once('=') else {
+            continue;
+        };
         match k {
             "code" => code = Some(urldecode(v)),
             "state" => state = Some(urldecode(v)),
@@ -1245,9 +1318,201 @@ fn parse_grok_callback(target: &str) -> Option<(String, String)> {
     Some((code?, state.unwrap_or_default()))
 }
 
-/// Device-code login is not supported for Grok yet (browser PKCE only).
+/// Accept a pasted callback URL, `?code=&state=` query, or bare authorization code.
+///
+/// Matches pi-grok-cli / Hermes remote paste: when xAI cannot redirect to loopback it
+/// shows a one-time code (French UI: "copiez le code dans Grok Build") for the CLI.
+fn parse_grok_manual_paste(input: &str, expected_state: &str) -> Result<String> {
+    let value = input.trim();
+    if value.is_empty() {
+        bail!("pasted input was empty");
+    }
+
+    // Full URL: http://127.0.0.1:PORT/callback?code=...&state=...
+    if value.starts_with("http://") || value.starts_with("https://") {
+        let after_scheme = value
+            .split_once("://")
+            .map(|(_, rest)| rest)
+            .unwrap_or(value);
+        let path_and_query = after_scheme
+            .find('/')
+            .map(|i| &after_scheme[i..])
+            .unwrap_or("/");
+        let (code, state) = parse_grok_callback(path_and_query)
+            .ok_or_else(|| anyhow!("pasted URL is not a Grok /callback with code="))?;
+        if !state.is_empty() && state != expected_state {
+            bail!("OAuth state mismatch (possible CSRF); aborting");
+        }
+        return Ok(code);
+    }
+
+    // Query fragment: code=...&state=...  (optional leading ?)
+    let as_query = value.strip_prefix('?').unwrap_or(value);
+    if as_query.contains("code=") {
+        let (code, state) = parse_grok_callback_query(as_query)
+            .ok_or_else(|| anyhow!("pasted query did not contain a valid code="))?;
+        if !state.is_empty() && state != expected_state {
+            bail!("OAuth state mismatch (possible CSRF); aborting");
+        }
+        return Ok(code);
+    }
+
+    // Bare one-time authorization code (xAI "copy into Grok Build" page).
+    if is_plausible_oauth_code(value) {
+        return Ok(value.to_string());
+    }
+
+    bail!("unrecognized paste — expected a callback URL, code=... query, or one-time auth code")
+}
+
+/// Heuristic for a bare OAuth authorization code (not a short device user_code like ABCD-1234).
+fn is_plausible_oauth_code(s: &str) -> bool {
+    let len = s.len();
+    (32..=2048).contains(&len)
+        && s.chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-' | '~'))
+}
+
+/// True for `https://x.ai/...` or `https://*.x.ai/...` (with optional port). Used to reject
+/// open redirects from a compromised discovery/device response.
+fn is_trusted_xai_https_url(url: &str) -> bool {
+    let Some(rest) = url.strip_prefix("https://") else {
+        return false;
+    };
+    let host_port = rest.split(['/', '?', '#']).next().unwrap_or("");
+    let host = host_port
+        .rsplit_once('@')
+        .map(|(_, h)| h)
+        .unwrap_or(host_port);
+    // Drop port; IPv6 literals are not expected for xAI hosts.
+    let host = host.split(':').next().unwrap_or(host).to_ascii_lowercase();
+    host == "x.ai" || host.ends_with(".x.ai")
+}
+
+#[derive(Debug, Deserialize)]
+struct GrokDeviceStart {
+    device_code: String,
+    user_code: String,
+    verification_uri: String,
+    #[serde(default)]
+    verification_uri_complete: Option<String>,
+    #[serde(default, deserialize_with = "de_opt_u64")]
+    expires_in: Option<u64>,
+    #[serde(default, deserialize_with = "de_opt_u64")]
+    interval: Option<u64>,
+}
+
+#[derive(Debug, Deserialize)]
+struct GrokPollError {
+    error: String,
+}
+
+/// RFC 8628 device-code login for headless / remote machines.
+///
+/// Prints a verification URL + user code; the user completes sign-in on any
+/// browser (laptop/phone). llmtrim polls `auth.x.ai` until approved — no
+/// localhost callback required. Same public client id as Grok Build / OpenClaw /
+/// pi-grok-cli (consent UI may still say "Grok Build").
 pub fn grok_device() -> Result<()> {
-    bail!("Grok device login is unavailable — use `llmtrim sub auth grok login` (browser OAuth)")
+    print!("{TOS_WARNING}");
+
+    let discovery = grok_discover()?;
+    let device_endpoint = discovery
+        .device_authorization_endpoint
+        .as_deref()
+        .ok_or_else(|| {
+            anyhow!(
+                "Grok OIDC discovery has no device_authorization_endpoint — \
+                 use `llmtrim sub auth grok login` instead"
+            )
+        })?;
+
+    let (status, body) = post_form(
+        device_endpoint,
+        &[],
+        &[
+            ("client_id", GROK_CLIENT_ID.to_string()),
+            ("scope", GROK_SCOPES.to_string()),
+        ],
+    )?;
+    if !(200..300).contains(&status) {
+        bail!("Grok device authorization failed (HTTP {status}): {body}");
+    }
+    let start: GrokDeviceStart = serde_json::from_str(&body)
+        .context("failed to parse Grok device-authorization response")?;
+
+    let verify_url = start
+        .verification_uri_complete
+        .as_deref()
+        .filter(|u| !u.is_empty())
+        .unwrap_or(start.verification_uri.as_str());
+    if !is_trusted_xai_https_url(verify_url) {
+        bail!("Grok device verification URI is outside a trusted xAI host: {verify_url}");
+    }
+    // Base verification_uri is also user-visible if complete URI is used only for open.
+    if !is_trusted_xai_https_url(&start.verification_uri) {
+        bail!(
+            "Grok device verification_uri is outside a trusted xAI host: {}",
+            start.verification_uri
+        );
+    }
+
+    println!(
+        "To authorize llmtrim on any device, open:\n\n  {verify_url}\n\n\
+         and confirm the code: {}\n\n\
+         Waiting for approval (up to 5 minutes)...\n",
+        start.user_code
+    );
+    try_open_browser(verify_url);
+
+    let mut interval = start.interval.unwrap_or(5).max(1);
+    let deadline = std::time::Instant::now()
+        + start
+            .expires_in
+            .map(|s| Duration::from_secs(s.min(FLOW_TIMEOUT.as_secs())))
+            .unwrap_or(FLOW_TIMEOUT);
+
+    // Poll immediately, then back off (same shape as OpenClaw / RFC 8628 clients).
+    let tr: TokenResponse = loop {
+        if std::time::Instant::now() >= deadline {
+            bail!("timed out waiting for Grok device authorization");
+        }
+        let (status, body) = post_form(
+            &discovery.token_endpoint,
+            &[],
+            &[
+                ("client_id", GROK_CLIENT_ID.to_string()),
+                ("device_code", start.device_code.clone()),
+                (
+                    "grant_type",
+                    "urn:ietf:params:oauth:grant-type:device_code".to_string(),
+                ),
+            ],
+        )?;
+        if (200..300).contains(&status) {
+            break serde_json::from_str(&body).context("failed to parse Grok token response")?;
+        }
+        match serde_json::from_str::<GrokPollError>(&body) {
+            Ok(e) => match e.error.as_str() {
+                "authorization_pending" => {}
+                "slow_down" => interval = interval.saturating_add(5),
+                "expired_token" => bail!("Grok device code expired; run login again"),
+                "access_denied" | "authorization_denied" => {
+                    bail!("Grok device authorization was denied")
+                }
+                other => bail!("Grok authorization failed: {other}"),
+            },
+            Err(_) => bail!("Grok device poll failed (HTTP {status}): {body}"),
+        }
+        std::thread::sleep(
+            Duration::from_secs(interval).saturating_add(Duration::from_millis(500)),
+        );
+    };
+
+    let stored = grok_stored_from(tr, true, None)?;
+    write_grok(&stored)?;
+    println!("Grok login complete.");
+    Ok(())
 }
 
 pub fn grok_status() -> Result<()> {
@@ -1563,5 +1828,65 @@ mod tests {
     fn first_request_target_parses_get_line() {
         let req = "GET /auth/callback?code=1 HTTP/1.1\r\nHost: x\r\n\r\n";
         assert_eq!(first_request_target(req), Some("/auth/callback?code=1"));
+    }
+
+    #[test]
+    fn grok_callback_path_parses() {
+        let (code, state) =
+            parse_grok_callback("/callback?code=tok&state=st").expect("should parse");
+        assert_eq!(code, "tok");
+        assert_eq!(state, "st");
+        assert!(parse_grok_callback("/auth/callback?code=tok&state=st").is_none());
+    }
+
+    #[test]
+    fn grok_manual_paste_accepts_url_query_and_bare_code() {
+        let state = "expected-state";
+        let code = "a".repeat(40);
+
+        let url = format!("http://127.0.0.1:4242/callback?code={code}&state={state}");
+        assert_eq!(parse_grok_manual_paste(&url, state).unwrap(), code);
+
+        let query = format!("code={code}&state={state}");
+        assert_eq!(parse_grok_manual_paste(&query, state).unwrap(), code);
+
+        assert_eq!(parse_grok_manual_paste(&code, state).unwrap(), code);
+
+        // Short device-style codes are not authorization codes.
+        assert!(parse_grok_manual_paste("ABCD-12", state).is_err());
+
+        // State mismatch on URL paste is rejected.
+        let bad = format!("http://127.0.0.1:1/callback?code={code}&state=other");
+        assert!(parse_grok_manual_paste(&bad, state).is_err());
+    }
+
+    #[test]
+    fn grok_device_start_accepts_string_or_number_fields() {
+        let raw = r#"{
+            "device_code": "dc",
+            "user_code": "WDJB-MJHT",
+            "verification_uri": "https://auth.x.ai/device",
+            "verification_uri_complete": "https://auth.x.ai/device?user_code=WDJB-MJHT",
+            "expires_in": "600",
+            "interval": "5"
+        }"#;
+        let s: GrokDeviceStart = serde_json::from_str(raw).unwrap();
+        assert_eq!(s.user_code, "WDJB-MJHT");
+        assert_eq!(s.expires_in, Some(600));
+        assert_eq!(s.interval, Some(5));
+        assert!(s.verification_uri_complete.unwrap().contains("user_code"));
+    }
+
+    #[test]
+    fn trusted_xai_https_url_allows_issuer_hosts_only() {
+        assert!(is_trusted_xai_https_url("https://auth.x.ai/oauth2/device"));
+        assert!(is_trusted_xai_https_url(
+            "https://accounts.x.ai/device?user_code=X"
+        ));
+        assert!(is_trusted_xai_https_url("https://x.ai/device"));
+        assert!(!is_trusted_xai_https_url("http://auth.x.ai/device"));
+        assert!(!is_trusted_xai_https_url("https://evil.com/"));
+        assert!(!is_trusted_xai_https_url("https://evil.x.ai.attacker.com/"));
+        assert!(!is_trusted_xai_https_url("https://notx.ai/"));
     }
 }
