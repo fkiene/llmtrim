@@ -32,7 +32,9 @@ All notable changes to this project are documented here. The format follows
   `grok-4.5` (opus/sonnet/fable) and `grok-composer-2.5-fast` (haiku) and routes Claude Code's
   Anthropic `/v1/messages` traffic to `cli-chat-proxy.grok.com/v1/responses`. Tokens live at
   `~/.llmtrim/grok/auth.json`. Works with `sub mode fallback` chains (`codex,kimi,grok`) and the
-  window `/sub` command. Device-code login is not available yet (browser only).
+  window `/sub` command. Remote / headless machines can finish login by pasting the callback URL
+  or xAI one-time code into `grok login`, or with RFC 8628
+  `llmtrim sub auth grok device` (no localhost callback).
 - **Window `/sub on <provider>`.** The Claude Code slash command accepts an explicit backend:
   `/sub on codex`, `/sub on kimi`, or `/sub on grok`. Bare `/sub on` still re-enables the last
   window provider or the global `sub` setting.

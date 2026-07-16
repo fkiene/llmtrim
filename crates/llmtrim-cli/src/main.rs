@@ -565,9 +565,12 @@ enum CompactCmd {
 /// OAuth management for a subscription provider (codex / kimi).
 #[derive(Subcommand)]
 enum AuthAction {
-    /// Sign in (browser OAuth for codex; device-code for kimi).
+    /// Sign in (browser OAuth for codex/grok; device-code for kimi).
+    ///
+    /// Grok also accepts a pasted callback URL or one-time code when the browser
+    /// cannot reach this machine (SSH / remote).
     Login,
-    /// Device-code sign-in for headless machines (codex only).
+    /// Device-code sign-in for headless machines (codex / grok).
     Device,
     /// Show stored credentials + token expiry. `--json` for machine output.
     Status {
