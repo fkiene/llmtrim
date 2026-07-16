@@ -94,14 +94,6 @@ pub struct OverviewData {
     /// A newer release version if the (cached, opt-out) update check found one — shown in the
     /// meta bar; `u` then runs the updater.
     pub update_available: Option<String>,
-    /// Compressions events vs breakdown turns — drives partial/empty money UX.
-    /// `pub(crate)` so adding these is not a SemVer break for external struct literals.
-    pub(crate) coverage_compressions: i64,
-    pub(crate) coverage_turns: i64,
-    /// Turns with usage but zero bill (unpriced model).
-    pub(crate) turns_unpriced: i64,
-    /// True when compressions exist but no breakdown bills — do not show $0 as truth.
-    pub(crate) money_unavailable: bool,
 }
 
 impl OverviewData {
@@ -114,6 +106,12 @@ impl OverviewData {
         } else {
             self.pct_less
         }
+    }
+
+    /// No proxy bills despite traffic — do not paint `$0.00` as truth.
+    /// Derived from existing Option fields (keeps the public struct SemVer-stable).
+    pub(crate) fn money_unavailable(&self) -> bool {
+        self.has_traffic && self.paid_usd.is_none() && self.saved_usd.is_none()
     }
 }
 
@@ -1214,7 +1212,7 @@ fn sheep_quip(ov: &OverviewData, secs: u64) -> String {
     // Pick the line first, then format only that one (was building all 21 strings per frame).
     let pct = ov.pct_less * 100.0;
     // When billing is unavailable, never say "$0.00 saved" — stay on token/fluff quips only.
-    if ov.money_unavailable || ov.saved_usd.is_none() {
+    if ov.money_unavailable() || ov.saved_usd.is_none() {
         const N: u64 = 8;
         return match (secs / 12) % N {
             0 => format!("Shorn {pct:.0}% of the fluff off your prompts"),
@@ -1314,20 +1312,10 @@ fn render_kpis(f: &mut Frame, area: Rect, ov: &OverviewData) {
         .add_modifier(Modifier::BOLD);
 
     // Compressions without breakdown bills / all unpriced: never paint "$0.00" as truth.
-    if ov.money_unavailable {
+    if ov.money_unavailable() {
         let block = card("BILLING", false);
         let cell = block.inner(area);
         f.render_widget(block, area);
-        let chip = if ov.coverage_turns == 0 && ov.coverage_compressions > 0 {
-            format!(
-                "0 proxy turns billed · {} compression log events",
-                ov.coverage_compressions
-            )
-        } else if ov.turns_unpriced > 0 {
-            format!("{} turns unpriced (unknown model rates)", ov.turns_unpriced)
-        } else {
-            "no proxy-attributed turns yet".into()
-        };
         f.render_widget(
             Paragraph::new(vec![
                 Line::from(Span::styled(
@@ -1338,7 +1326,7 @@ fn render_kpis(f: &mut Frame, area: Rect, ov: &OverviewData) {
                     "Dollars need traffic through the proxy (not CLI/MCP alone)",
                     dim,
                 )),
-                Line::from(Span::styled(chip, dim)),
+                Line::from(Span::styled("no proxy-attributed turns yet", dim)),
             ]),
             cell,
         );
@@ -1357,19 +1345,6 @@ fn render_kpis(f: &mut Frame, area: Rect, ov: &OverviewData) {
     };
     let delta = today - yesterday;
     let week: f64 = ov.trend_daily_usd.iter().sum();
-    let coverage_note = if ov.coverage_compressions > 0
-        && ov.coverage_turns > 0
-        && ov.coverage_turns < ov.coverage_compressions
-    {
-        format!(
-            " · {}/{} attributed",
-            ov.coverage_turns, ov.coverage_compressions
-        )
-    } else if ov.turns_unpriced > 0 {
-        format!(" · {} unpriced", ov.turns_unpriced)
-    } else {
-        String::new()
-    };
 
     // Plain-language subtitles. Money % = saved / would-have (would-have includes output).
     let tiles: [(String, String, Style, String); 5] = [
@@ -1377,10 +1352,7 @@ fn render_kpis(f: &mut Frame, area: Rect, ov: &OverviewData) {
             "TOTAL SAVED".into(),
             money(saved),
             green_b,
-            format!(
-                "{:.0}% less than without trim{coverage_note}",
-                saved_pct(ov)
-            ),
+            format!("{:.0}% less than without trim", saved_pct(ov)),
         ),
         (
             "YOU PAID".into(),
@@ -1450,7 +1422,7 @@ fn render_trend(f: &mut Frame, area: Rect, ov: &OverviewData) {
     let block = card("SAVINGS TREND · $/DAY", false);
     let inner = block.inner(area);
     f.render_widget(block, area);
-    if ov.money_unavailable || ov.saved_usd.is_none() {
+    if ov.money_unavailable() || ov.saved_usd.is_none() {
         f.render_widget(
             Paragraph::new(Line::from(Span::styled(
                 "— needs proxy bills",
@@ -1603,7 +1575,7 @@ fn render_savers(f: &mut Frame, area: Rect, ov: &OverviewData) {
     let block = card("TOP MODELS", false);
     let inner = block.inner(area);
     f.render_widget(block, area);
-    if ov.money_unavailable || ov.saved_usd.is_none() {
+    if ov.money_unavailable() || ov.saved_usd.is_none() {
         f.render_widget(
             Paragraph::new(Line::from(Span::styled(
                 "— needs proxy bills",
@@ -2392,10 +2364,6 @@ mod tests {
             approximate: false,
             sessions: 42,
             update_available: None,
-            coverage_compressions: 1204,
-            coverage_turns: 1204,
-            turns_unpriced: 0,
-            money_unavailable: false,
         }
     }
 

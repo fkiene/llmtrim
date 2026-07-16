@@ -1220,10 +1220,6 @@ pub fn overview_data(
         // Filled by App::reload from the single sessions() scan it already runs.
         sessions: 0,
         update_available: crate::update::check(false),
-        coverage_compressions: coverage.compressions_events,
-        coverage_turns: coverage.breakdown_turns,
-        turns_unpriced: totals.turns_unpriced,
-        money_unavailable,
     }
 }
 
@@ -1802,7 +1798,7 @@ mod tests {
         let ov = overview_data(&tracker, |_, _| {
             crate::breakdown::app::StatusLine::default()
         });
-        assert!(!ov.money_unavailable);
+        assert!(!ov.money_unavailable());
         assert_eq!(ov.paid_usd, Some(money.paid_usd()));
         assert_eq!(ov.saved_usd, Some(money.saved_usd()));
         assert_eq!(ov.would_have_usd, Some(money.would_have_usd()));
@@ -1839,7 +1835,7 @@ mod tests {
         let (hero, today) = hero_money(&t2);
         assert!(hero.is_none() && today.is_none());
         let ov2 = overview_data(&t2, |_, _| crate::breakdown::app::StatusLine::default());
-        assert!(ov2.money_unavailable);
+        assert!(ov2.money_unavailable());
         assert!(ov2.paid_usd.is_none());
     }
 
