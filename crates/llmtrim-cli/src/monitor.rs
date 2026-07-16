@@ -467,15 +467,19 @@ fn render_header(color: bool, d: &DaemonView) -> String {
 
 /// The savings dashboard: daemon header + health chain, a hero panel (cost / round-trip /
 /// requests), per-axis bars, and a per-model table. Returned as a string for the plain-text
-/// snapshot path (piped output, `--json/--csv`, non-TTY). `today_saved_usd` is the priced saving for today (UTC),
-/// shown next to the all-time hero when it is non-trivial.
+/// snapshot path (piped output, `--json/--csv`, non-TTY).
+///
+/// `hero_saved_usd` is the **frozen breakdown** all-time input savings (same source as Overview
+/// / Sessions). Pass `None` when money is unavailable (CLI-only compressions) so the hero falls
+/// back to token % — never mix live `cost_estimate` with breakdown "today".
+/// `today_saved_usd` is the same path for today (UTC), shown next to the hero when non-trivial.
 #[allow(clippy::too_many_arguments)]
 pub fn snapshot(
     color: bool,
     daemon: Option<&DaemonView>,
     s: &Summary,
     models: &[ModelView],
-    cost: Option<&Cost>,
+    hero_saved_usd: Option<f64>,
     today_saved_usd: Option<f64>,
     trend: &[i64],
     // When true, the input SAVINGS axis is measured over ALL input (the frozen cached prefix
@@ -511,44 +515,31 @@ pub fn snapshot(
         return o;
     }
 
-    // Hero box — one dominant figure, supporting facts demoted to a second line. The
-    // headline is the MEASURED input-side saving (real, per-row): every request's input is
-    // compressed and re-tokenized, so it is honest for all traffic. The output side is NOT
-    // in the headline — the proxy never sees the un-instructed reply, so any output saving
-    // is a benchmark projection that only holds when output is actually shaped (projecting
-    // it onto agent traffic would overstate ~2.7×); it is surfaced separately, below.
+    // Hero box — one dominant figure, supporting facts demoted to a second line.
+    // Dollars (when present) are frozen breakdown savings — same source as Overview/Sessions.
+    // No dollars → token % (CLI-only or unattributed traffic), never a mixed-base line.
     o.push('\n');
-    let (line1, line2) = match cost {
-        Some(c) => {
+    let (line1, line2) = match hero_saved_usd {
+        Some(saved) => {
             // Anchor the all-time number in the present: "what did it do for me today?"
-            // Hidden when today has no priced saving — a perpetual $0.00 reads like fake data.
+            // Same money path as all-time (breakdown frozen). Hidden when trivial.
             let today = today_saved_usd
                 .filter(|t| *t >= 0.005)
                 .map(|t| {
                     format!(
                         " {} {}",
                         ui::paint(color, Tone::Dim, "·"),
-                        // "saved today", not a bare "↑ $X" — an up-arrow next to a dollar on a
-                        // billing screen reads as spend going up, the opposite of the truth.
                         ui::paint(color, Tone::Accent, &format!("${t:.2} saved today")),
                     )
                 })
                 .unwrap_or_default();
-            // The headline is the MEASURED figure that came off the real, cache-discounted
-            // bill — the conservative truth, so it owns "off your real bill". The list-rate
-            // value and the higher live-zone estimate are upside, shown dim below as an
-            // ascending ladder, never as the hero (a headline above its own list ceiling
-            // reads as cooked).
             (
                 format!(
                     "{} {}{}",
-                    ui::hero(color, &format!("${:.2}", c.net_saved)),
-                    ui::paint(color, Tone::Dim, "off your real bill"),
+                    ui::hero(color, &format!("${saved:.2}")),
+                    ui::paint(color, Tone::Dim, "saved on proxy bills"),
                     today,
                 ),
-                // No input % here: the SAVINGS axis below carries the honest figure (over
-                // the compressible surface). Repeating the diluted all-input % would
-                // contradict it.
                 format!(
                     "{} tokens trimmed {} {} requests",
                     ui::human(s.saved()),
@@ -734,25 +725,8 @@ pub fn snapshot(
             &format!(" + ~{:.0} ms/req · compression overhead\n", us / 1000.0),
         ));
     }
-    if let Some(c) = cost {
-        // Surface the output-side projection separately and clearly as an estimate — never
-        // folded into the measured headline above. Projected ONLY onto the spend that
-        // actually carried the shaping instruction; unshaped (agent) output is billed at
-        // its own baseline, so there is nothing to project there.
-        // Only when the projection is real money — a perpetual "$0.01 more" footnote costs
-        // a line for no information (the output axis already carries the "est · if shaped"
-        // caveat, covering the shaping-off case too).
-        let extra = c.projected_saved() - c.saved;
-        if extra >= 1.0 {
-            o.push_str(&ui::paint(
-                color,
-                Tone::Dim,
-                &format!(
-                    " ~ + est. ${extra:.2} more saved by output shaping (A/B bench −73%); estimated, excluded from the headline.\n"
-                ),
-            ));
-        }
-    }
+    // Output-shaping projection stays on the SAVINGS output axis as "(estimate)" — not a
+    // second dollar hero that could reintroduce a live-price basis next to frozen bills.
     o
 }
 
@@ -803,13 +777,71 @@ pub fn period_report(color: bool, label: &str, rows: &[PeriodRow]) -> String {
 
 // ── machine-readable export ─────────────────────────────────────────────────────
 
+/// Build the additive `money` JSON object from a tracker (frozen breakdown bills).
+///
+/// When compressions exist but there are no proxy-attributed turns, `unavailable` is true and
+/// dollar fields are JSON `null` — consumers must not treat `0.0` as "you paid nothing".
+pub fn money_json(tracker: &Tracker) -> Option<serde_json::Value> {
+    use llmtrim_ledger::money::{money_coverage, money_totals, today_start_utc};
+    let c = tracker.connection();
+    let totals = money_totals(c, None).ok()?;
+    let today = money_totals(c, Some(&today_start_utc())).ok()?;
+    let coverage = money_coverage(c).ok()?;
+    let unavailable = coverage.empty_money_with_traffic() || totals.all_unpriced();
+    let dollars = |v: f64| {
+        if unavailable {
+            serde_json::Value::Null
+        } else {
+            json!(v)
+        }
+    };
+    Some(json!({
+        "source": "breakdown_turns",
+        "unavailable": unavailable,
+        "paid_usd": dollars(totals.paid_usd()),
+        "saved_usd": dollars(totals.saved_usd()),
+        "would_have_usd": dollars(totals.would_have_usd()),
+        "saved_today_usd": dollars(today.saved_usd()),
+        "turns": totals.turns,
+        "turns_unpriced": totals.turns_unpriced,
+        "coverage": {
+            "compressions_events": coverage.compressions_events,
+            "breakdown_turns": coverage.breakdown_turns,
+            "ratio": coverage.coverage_ratio,
+            "note": "heuristic event counts (compressions vs turns), not a per-request join; different retention caps apply",
+        },
+        "note": "prefer money over cost.* for spend matching Overview/Sessions; when unavailable is true, dollar fields are null"
+    }))
+}
+
+/// All-time + today savings from frozen breakdown for the text hero / Overview.
+/// Returns `(all_time_saved, today_saved)` — both `None` when money is unavailable so callers
+/// fall back to token heroes instead of painting `$0.00` or mixing live list prices.
+pub fn hero_money(tracker: &Tracker) -> (Option<f64>, Option<f64>) {
+    use llmtrim_ledger::money::{money_coverage, money_totals, today_start_utc};
+    let c = tracker.connection();
+    let coverage = money_coverage(c).unwrap_or_default();
+    let totals = money_totals(c, None).unwrap_or_default();
+    if coverage.empty_money_with_traffic() || totals.turns == 0 || totals.all_unpriced() {
+        return (None, None);
+    }
+    let today = money_totals(c, Some(&today_start_utc())).unwrap_or_default();
+    let all = (totals.saved_micros > 0 || totals.paid_micros > 0).then_some(totals.saved_usd());
+    let tod = (today.saved_micros > 0 && today.saved_usd() >= 0.005).then_some(today.saved_usd());
+    (all, tod)
+}
+
 /// Full snapshot as JSON (for Grafana/Prometheus/scripts).
+///
+/// When `money` is provided, emits additive frozen-breakdown bills alongside legacy `cost`
+/// (compressions + live list prices). Do not silently redefine `cost.*` fields.
 pub fn export_json(
     s: &Summary,
     models: &[ModelView],
     cost: Option<&Cost>,
     periods: &[PeriodRow],
     daemon: Option<&DaemonView>,
+    money: Option<serde_json::Value>,
 ) -> String {
     let reroute = {
         let cfg = llmtrim_core::config::RuntimeConfig::get();
@@ -842,10 +874,13 @@ pub fn export_json(
         "input": { "before": s.input_before, "after": s.input_after, "saved_pct": s.saved_pct() },
         "output": { "before": s.output_before, "after": s.output_after,
                     "events": s.output_events, "saved_pct": s.output_saved_pct() },
+        // Legacy: compressions + live list prices. Prefer `money` for paid/saved that match Sessions.
         "cost": cost.map(|c| json!({ "saved_usd": c.saved, "spend_usd": c.spend, "round_trip_pct": c.pct(),
                                      "net_saved_usd": c.net_saved, "out_spend_usd": c.out_spend,
                                      "out_spend_shaped_usd": c.out_spend_shaped,
-                                     "projected_saved_usd": c.projected_saved(), "projected_round_trip_pct": c.projected_pct() })),
+                                     "projected_saved_usd": c.projected_saved(), "projected_round_trip_pct": c.projected_pct(),
+                                     "source": "compressions_live_prices" })),
+        "money": money,
         "added_latency_ms": s.avg_compress_micros.map(|us| us / 1000.0),
         "cache_read_tokens": s.cache_read_tokens,
         "approximate": s.any_approximate,
@@ -881,6 +916,9 @@ pub fn export_csv(periods: &[PeriodRow]) -> String {
 /// emits. The MCP server returns this verbatim so a tool call and the dashboard never
 /// disagree. `daemon` is `None` for callers that don't inspect the proxy (the MCP tool),
 /// which renders as `"daemon": null`.
+///
+/// Dual money: legacy `cost` is still compressions + live list prices; additive `money` is
+/// frozen `breakdown_turns` (same source as Overview/Sessions). Prefer `money` for paid/saved.
 pub fn stats_json(tracker: &Tracker, daemon: Option<&DaemonView>) -> Result<String> {
     let summary = tracker.summary()?;
     let models = model_views(tracker)?;
@@ -892,6 +930,7 @@ pub fn stats_json(tracker: &Tracker, daemon: Option<&DaemonView>) -> Result<Stri
         cost.as_ref(),
         &periods,
         daemon,
+        money_json(tracker),
     ))
 }
 
@@ -957,8 +996,9 @@ pub fn model_views_from(rows: &[ModelRow]) -> Vec<ModelView> {
 /// to match the text hero's all-time figure: a list-rate "today" next to a net all-time total
 /// is what made today exceed the total (issue #100).
 pub fn today_saved_usd(tracker: &Tracker) -> Option<f64> {
-    let models = tracker.by_model_today().ok()?;
-    cost_estimate(&models).map(|c| c.net_saved)
+    use llmtrim_ledger::money::{money_totals, today_start_utc};
+    let t = money_totals(tracker.connection(), Some(&today_start_utc())).ok()?;
+    (t.saved_micros > 0).then_some(t.saved_usd())
 }
 
 /// Per-1M-token rates for one turn, frozen into the breakdown ledger so a historical session
@@ -1071,31 +1111,52 @@ pub fn cost_estimate(models: &[ModelRow]) -> Option<Cost> {
 /// Assemble the breakdown TUI's Overview view-model from the ledger. The `status` closure builds
 /// the health line from the single summary scan plus whether there's traffic, so the binary can
 /// supply the live daemon-derived status and the SVG exporter a forced-healthy one — without
-/// either re-deriving the (subtle) numeric fields. The ledger is scanned once for the summary
-/// and once for `by_model`. `sessions` is filled later by the caller's single `sessions()` scan.
+/// either re-deriving the (subtle) numeric fields.
+///
+/// **Dollars** come from frozen `breakdown_turns.bill_micros` ([`llmtrim_ledger::money`]) so
+/// Overview "You paid" matches Sessions total cost. **Token % / requests / latency** still come
+/// from `compressions` via [`Tracker::summary`].
 #[cfg(feature = "breakdown")]
 pub fn overview_data(
     tracker: &Tracker,
     status: impl FnOnce(&crate::tracking::Summary, bool) -> crate::breakdown::app::StatusLine,
 ) -> crate::breakdown::app::OverviewData {
     use crate::breakdown::app::OverviewData;
-    use crate::tracking::Period;
+    use llmtrim_ledger::money::{
+        money_by_day, money_by_model, money_coverage, money_totals, pad_daily_saved,
+        today_start_utc,
+    };
 
     let summary = tracker.summary().unwrap_or_default();
     let has_traffic = summary.events > 0;
-    let model_rows = tracker.by_model().unwrap_or_default();
-    let models = model_views_from(&model_rows);
-    let cost = cost_estimate(&model_rows);
     let status = status(&summary, has_traffic);
+    let conn = tracker.connection();
 
-    // One honest basis: cache-discounted bill and the real saving off it, so
-    // would_have − paid == saved and the savers reconcile to it.
-    let paid_usd = cost.as_ref().map(|c| c.net_spend);
-    let saved_usd = cost.as_ref().map(|c| c.net_saved);
-    let would_have_usd = match (paid_usd, saved_usd) {
-        (Some(p), Some(s)) => Some(p + s),
-        _ => None,
-    };
+    // Canonical money path (frozen rates). Empty when only compressions exist (CLI/MCP) or
+    // attribution has not landed yet — UI must not treat that as "$0 paid".
+    let coverage = money_coverage(conn).unwrap_or_default();
+    let totals = money_totals(conn, None).unwrap_or_default();
+    let today = money_totals(conn, Some(&today_start_utc())).unwrap_or_default();
+    // No proxy bills (CLI-only) or every turn unpriced → never paint $0.00 as truth.
+    let money_unavailable = coverage.empty_money_with_traffic()
+        || (totals.turns == 0 && coverage.compressions_events > 0)
+        || totals.all_unpriced();
+    let show_money = totals.turns > 0 && !money_unavailable;
+    let paid_usd = show_money.then_some(totals.paid_usd());
+    let saved_usd = show_money.then_some(totals.saved_usd());
+    let would_have_usd = show_money.then_some(totals.would_have_usd());
+    let saved_today_usd = (show_money && today.saved_micros > 0 && today.saved_usd() >= 0.005)
+        .then_some(today.saved_usd());
+
+    let by_day = money_by_day(conn, 7).unwrap_or_default();
+    let trend_daily_usd = pad_daily_saved(&by_day, 7);
+
+    let savers: Vec<(String, f64)> = money_by_model(conn, 8)
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|m| m.saved_micros > 0)
+        .map(|m| (m.model, m.saved_micros as f64 / 1_000_000.0))
+        .collect();
 
     // Savings fraction over the compressible (non-frozen) surface — the honest basis.
     let new_before = summary.metered_input_before - summary.frozen_input_tokens;
@@ -1126,46 +1187,12 @@ pub fn overview_data(
         0.0
     };
 
-    // Daily $ trend: scale the daily token-savings series by the blended $/token rate.
-    let blend = match cost.as_ref() {
-        Some(c) if summary.saved() > 0 => c.net_saved / summary.saved() as f64,
-        _ => 0.0,
-    };
-    let trend_daily_usd: Vec<f64> = tracker
-        .by_period(Period::Day)
-        .unwrap_or_default()
-        .iter()
-        .rev()
-        .take(7)
-        .rev()
-        .map(|r| (r.input_before - r.input_after).max(0) as f64 * blend)
-        .collect();
-
-    // Biggest savers: priced models by $ saved, scaled to the net-of-cache basis.
-    let net_ratio = cost
-        .as_ref()
-        .map(|c| {
-            if c.saved > 0.0 {
-                c.net_saved / c.saved
-            } else {
-                0.0
-            }
-        })
-        .unwrap_or(0.0);
-    let mut savers: Vec<(String, f64)> = models
-        .iter()
-        .filter_map(|m| m.cost_saved.map(|s| (m.name.clone(), s * net_ratio)))
-        .filter(|(_, s)| *s > 0.0)
-        .collect();
-    savers.sort_by(|a, b| b.1.total_cmp(&a.1));
-    savers.truncate(8);
-
     OverviewData {
         status,
         paid_usd,
         would_have_usd,
         saved_usd,
-        saved_today_usd: today_saved_usd(tracker).filter(|t| *t >= 0.005),
+        saved_today_usd,
         pct_less,
         pct_less_whole,
         added_ms: summary.avg_compress_micros.map(|us| us / 1000.0),
@@ -1182,6 +1209,11 @@ pub fn overview_data(
         // Filled by App::reload from the single sessions() scan it already runs.
         sessions: 0,
         update_available: crate::update::check(false),
+        coverage_compressions: coverage.compressions_events,
+        coverage_turns: coverage.breakdown_turns,
+        coverage_ratio: coverage.coverage_ratio,
+        turns_unpriced: totals.turns_unpriced,
+        money_unavailable,
     }
 }
 
@@ -1292,10 +1324,30 @@ mod tests {
         s.metered_input_before = 1_000_000;
         s.metered_input_after = 933_000;
         let c = priced();
-        let excluded = snapshot(false, None, &s, &[], Some(&c), None, &[], false, false);
+        let excluded = snapshot(
+            false,
+            None,
+            &s,
+            &[],
+            Some(c.net_saved),
+            None,
+            &[],
+            false,
+            false,
+        );
         assert!(excluded.contains("(cache excluded)"));
         assert!(excluded.contains("-67%"), "cache-excluded axis: {excluded}");
-        let included = snapshot(false, None, &s, &[], Some(&c), None, &[], true, false);
+        let included = snapshot(
+            false,
+            None,
+            &s,
+            &[],
+            Some(c.net_saved),
+            None,
+            &[],
+            true,
+            false,
+        );
         assert!(included.contains("(all input · cache)"));
         assert!(included.contains("-7%"), "cache-included axis: {included}");
     }
@@ -1309,7 +1361,7 @@ mod tests {
             None,
             &summ(),
             &[],
-            Some(&c),
+            Some(c.net_saved),
             None,
             &[0, 20, 80],
             false,
@@ -1328,7 +1380,7 @@ mod tests {
             None,
             &summ(),
             &[],
-            Some(&c),
+            Some(c.net_saved),
             None,
             &[80, 10],
             false,
@@ -1344,7 +1396,7 @@ mod tests {
             None,
             &summ(),
             &[],
-            Some(&c),
+            Some(c.net_saved),
             None,
             &[5],
             false,
@@ -1373,7 +1425,7 @@ mod tests {
             None,
             &summ(),
             &models,
-            Some(&priced()),
+            Some(priced().net_saved),
             None,
             &[],
             false,
@@ -1420,7 +1472,7 @@ mod tests {
             None,
             &summ(),
             &models,
-            Some(&cost),
+            Some(cost.net_saved),
             None,
             &[],
             false,
@@ -1429,7 +1481,7 @@ mod tests {
         // Headline shows the MEASURED figures (tokens trimmed + real-bill $), not a
         // projection that assumes shaping.
         assert!(
-            out.contains("tokens trimmed") && out.contains("$12.47 off your real bill"),
+            out.contains("tokens trimmed") && out.contains("$12.47 saved on proxy bills"),
             "hero shows measured trimmed tokens + real-bill saving"
         );
         assert!(out.contains("1,204 requests"), "request count");
@@ -1470,19 +1522,19 @@ mod tests {
             None,
             &summ(),
             &[],
-            Some(&cost),
+            Some(cost.net_saved),
             None,
             &[],
             false,
             false,
         );
         assert!(
-            out.contains("$10.00 off your real bill"),
+            out.contains("$10.00 saved on proxy bills"),
             "headline = measured net saving"
         );
         assert!(
             !out.contains(&format!(
-                "${:.2} off your real bill",
+                "${:.2} saved on proxy bills",
                 cost.projected_saved()
             )),
             "projected total ({:.2}) is not the headline",
@@ -1521,7 +1573,17 @@ mod tests {
             out_spend_shaped: 0.0,
         };
         assert!((c.projected_saved() - c.saved).abs() < 1e-9);
-        let out = snapshot(false, None, &summ(), &[], Some(&c), None, &[], false, false);
+        let out = snapshot(
+            false,
+            None,
+            &summ(),
+            &[],
+            Some(c.net_saved),
+            None,
+            &[],
+            false,
+            false,
+        );
         // No footnote either way: the output axis' "(est · if output shaped)" tag carries
         // the caveat; a dedicated line only appears when the projection is ≥ $1.
         assert!(!out.contains("more saved by output shaping"));
@@ -1541,9 +1603,19 @@ mod tests {
             live_saved: 130.0,
             out_spend_shaped: 0.0,
         };
-        let out = snapshot(false, None, &summ(), &[], Some(&c), None, &[], false, false);
+        let out = snapshot(
+            false,
+            None,
+            &summ(),
+            &[],
+            Some(c.net_saved),
+            None,
+            &[],
+            false,
+            false,
+        );
         assert!(
-            out.contains("$25.00 off your real bill"),
+            out.contains("$25.00 saved on proxy bills"),
             "hero is the measured real-bill figure: {out}"
         );
         assert!(
@@ -1569,9 +1641,19 @@ mod tests {
             out_spend_shaped: 0.0,
             live_saved: 130.0,
         };
-        let out = snapshot(false, None, &s, &[], Some(&c), None, &[], false, false);
+        let out = snapshot(
+            false,
+            None,
+            &s,
+            &[],
+            Some(c.net_saved),
+            None,
+            &[],
+            false,
+            false,
+        );
         assert!(
-            out.contains("$25.00 off your real bill"),
+            out.contains("$25.00 saved on proxy bills"),
             "hero is the measured real-bill figure: {out}"
         );
         assert!(
@@ -1588,7 +1670,17 @@ mod tests {
         );
 
         // No metered rows → fall back to the all-input axis (pre-meter ledgers unchanged).
-        let out = snapshot(false, None, &summ(), &[], Some(&c), None, &[], false, false);
+        let out = snapshot(
+            false,
+            None,
+            &summ(),
+            &[],
+            Some(c.net_saved),
+            None,
+            &[],
+            false,
+            false,
+        );
         assert!(!out.contains("cache excluded"));
         assert!(out.contains("2.1M ─✂─▶ 1.2M"), "fallback axis: {out}");
     }
@@ -1611,7 +1703,7 @@ mod tests {
 
     #[test]
     fn export_json_roundtrips() {
-        let out = export_json(&summ(), &[], None, &[], None);
+        let out = export_json(&summ(), &[], None, &[], None, None);
         let v: serde_json::Value = serde_json::from_str(&out).unwrap();
         assert_eq!(v["requests"], 1204);
         assert_eq!(v["cost"], serde_json::Value::Null);
@@ -1648,6 +1740,97 @@ mod tests {
         assert_eq!(v["requests"], 2);
         assert_eq!(v["daemon"], serde_json::Value::Null);
         assert!(v["by_model"].as_array().is_some_and(|m| !m.is_empty()));
+    }
+
+    #[test]
+    fn overview_money_matches_sum_of_session_bills() {
+        use crate::tracking::{BreakdownTurn, Tracker};
+        use llmtrim_ledger::money::money_totals;
+
+        let tracker = Tracker::open_in_memory().unwrap();
+        let rates = (3.0, 15.0, 0.3, 3.75);
+        let bill1 = (50_000.0_f64 * 3.0 + 100.0 * 15.0).round() as i64;
+        let bill2 = (20_000.0_f64 * 3.0).round() as i64;
+        let turn = |session: &str, bill: i64, before: i64, after: i64, fresh: i64, out: i64| {
+            BreakdownTurn {
+                session_id: session.into(),
+                cc_session_id: None,
+                agent: "claude-code".into(),
+                project: Some("/p".into()),
+                session_name: None,
+                provider: "anthropic".into(),
+                model: Some("claude-sonnet-4".into()),
+                sub_provider: None,
+                window: 200_000,
+                fresh_input: fresh,
+                cache_read: 0,
+                cache_write: 0,
+                output_tok: out,
+                input_rate: rates.0,
+                output_rate: rates.1,
+                cache_read_rate: rates.2,
+                cache_write_rate: rates.3,
+                bill_micros: bill,
+                input_before: before,
+                input_after: after,
+            }
+        };
+        tracker
+            .record_breakdown(&turn("s1", bill1, 100_000, 50_000, 50_000, 100), &[])
+            .unwrap();
+        tracker
+            .record_breakdown(&turn("s2", bill2, 40_000, 20_000, 20_000, 0), &[])
+            .unwrap();
+
+        let money = money_totals(tracker.connection(), None).unwrap();
+        assert_eq!(money.paid_micros, bill1 + bill2);
+        assert_eq!(
+            money.would_have_micros,
+            money.paid_micros + money.saved_micros
+        );
+
+        let ov = overview_data(&tracker, |_, _| {
+            crate::breakdown::app::StatusLine::default()
+        });
+        assert!(!ov.money_unavailable);
+        assert_eq!(ov.paid_usd, Some(money.paid_usd()));
+        assert_eq!(ov.saved_usd, Some(money.saved_usd()));
+        assert_eq!(ov.would_have_usd, Some(money.would_have_usd()));
+
+        // Dual-run JSON exposes money without redefining legacy cost.
+        let v: serde_json::Value =
+            serde_json::from_str(&stats_json(&tracker, None).unwrap()).unwrap();
+        assert_eq!(v["money"]["source"], "breakdown_turns");
+        assert_eq!(v["money"]["unavailable"], false);
+        assert_eq!(v["money"]["paid_usd"].as_f64().unwrap(), money.paid_usd());
+
+        // Compressions-only: money is unavailable (null dollars), not $0 truth.
+        let t2 = Tracker::open_in_memory().unwrap();
+        t2.record(&crate::tracking::Record {
+            provider: "openai".into(),
+            model: Some("gpt-4o".into()),
+            tokenizer: "tiktoken".into(),
+            exact: true,
+            input_before: 1000,
+            input_after: 600,
+            output_before: None,
+            output_after: None,
+            compress_micros: None,
+            cache_read_tokens: None,
+            fresh_input_tokens: None,
+            cache_write_tokens: None,
+            output_shaped: Some(false),
+            frozen_input_tokens: Some(0),
+        })
+        .unwrap();
+        let v2: serde_json::Value = serde_json::from_str(&stats_json(&t2, None).unwrap()).unwrap();
+        assert_eq!(v2["money"]["unavailable"], true);
+        assert!(v2["money"]["paid_usd"].is_null());
+        let (hero, today) = hero_money(&t2);
+        assert!(hero.is_none() && today.is_none());
+        let ov2 = overview_data(&t2, |_, _| crate::breakdown::app::StatusLine::default());
+        assert!(ov2.money_unavailable);
+        assert!(ov2.paid_usd.is_none());
     }
 
     #[test]
@@ -2006,7 +2189,7 @@ mod tests {
             None,
             &summ(),
             &[],
-            Some(&cost),
+            Some(cost.net_saved),
             Some(1.84),
             &[],
             false,
@@ -2019,7 +2202,7 @@ mod tests {
             None,
             &summ(),
             &[],
-            Some(&cost),
+            Some(cost.net_saved),
             Some(0.0),
             &[],
             false,
@@ -2031,7 +2214,7 @@ mod tests {
             None,
             &summ(),
             &[],
-            Some(&cost),
+            Some(cost.net_saved),
             None,
             &[],
             false,
@@ -2042,7 +2225,7 @@ mod tests {
 
     #[test]
     fn export_json_carries_daemon_health() {
-        let out = export_json(&summ(), &[], None, &[], Some(&dv()));
+        let out = export_json(&summ(), &[], None, &[], Some(&dv()), None);
         let v: serde_json::Value = serde_json::from_str(&out).unwrap();
         assert_eq!(v["daemon"]["running"], true);
         assert_eq!(v["daemon"]["health"], "healthy");
@@ -2058,7 +2241,7 @@ mod tests {
             env_port: None,
             ..dv()
         };
-        let out = export_json(&summ(), &[], None, &[], Some(&stopped));
+        let out = export_json(&summ(), &[], None, &[], Some(&stopped), None);
         let v: serde_json::Value = serde_json::from_str(&out).unwrap();
         assert_eq!(v["daemon"]["running"], false);
         assert_eq!(v["daemon"]["health"], "stopped");

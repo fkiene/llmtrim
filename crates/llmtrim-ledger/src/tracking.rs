@@ -329,6 +329,13 @@ impl Tracker {
         self.conn
     }
 
+    /// Shared connection for read-side money / breakdown queries that live outside `Tracker`
+    /// (e.g. [`crate::money::money_totals`]). Prefer this over re-opening the file so in-memory
+    /// test ledgers and the daemon's live path stay on one SQLite handle.
+    pub fn connection(&self) -> &Connection {
+        &self.conn
+    }
+
     /// In-memory ledger (tests).
     pub fn open_in_memory() -> Result<Self> {
         let conn = Connection::open_in_memory().context("failed to open in-memory ledger")?;
@@ -413,6 +420,8 @@ impl Tracker {
                 CREATE INDEX IF NOT EXISTS idx_breakdown_blocks_turn ON breakdown_blocks(turn_id);
                 -- Serves sessions()'s GROUP BY + per-session ROW_NUMBER ordering and latest_turn().
                 CREATE INDEX IF NOT EXISTS idx_breakdown_turns_group ON breakdown_turns(session_id, agent, project, id);
+                -- Money range queries (today / week) and prune-friendly scans.
+                CREATE INDEX IF NOT EXISTS idx_breakdown_turns_ts ON breakdown_turns(ts);
                 -- Lets the day-scoped aggregate (by_model_today) range-seek instead of scanning.
                 CREATE INDEX IF NOT EXISTS idx_compressions_ts ON compressions(ts);",
             )

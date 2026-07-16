@@ -34,7 +34,10 @@ pub struct SessionRow {
     pub last_input_tokens: i64,
     /// Total bill in micro-USD (frozen per turn, summed).
     pub bill_micros: i64,
-    /// Input tokens before / after compression, summed — the session's savings.
+    /// Input-side counterfactual savings in micro-USD (blend, frozen rates), summed.
+    /// Same formula as [`crate::money::turn_saved_micros`]; 0 when meters missing.
+    pub saved_micros: i64,
+    /// Input tokens before / after compression, summed — the session's size trim.
     pub input_before: i64,
     pub input_after: i64,
     /// rfc3339 timestamp of the most recent turn, for sorting newest-first.
@@ -54,12 +57,22 @@ impl SessionRow {
     }
 
     /// Percentage of input tokens llmtrim trimmed this session (0 when nothing measured).
+    /// Token size reduction — not dollars. Prefer the name [`Self::trim_pct`].
     pub fn saved_pct(&self) -> f64 {
+        self.trim_pct()
+    }
+
+    /// Token size trim % (before→after). Distinct from money savings (`saved_micros`).
+    pub fn trim_pct(&self) -> f64 {
         if self.input_before > 0 {
             (self.input_before - self.input_after).max(0) as f64 / self.input_before as f64 * 100.0
         } else {
             0.0
         }
+    }
+
+    pub fn saved_usd(&self) -> f64 {
+        self.saved_micros as f64 / 1_000_000.0
     }
 }
 
@@ -114,57 +127,63 @@ impl BreakdownDb {
 
     /// All sessions with at least one recorded turn, newest activity first.
     pub fn sessions(&self) -> Result<Vec<SessionRow>> {
+        // Shared formula with money_totals — bare columns inside the CTE select list.
+        let saved_expr = crate::money::saved_micros_sql("");
+        let sql = format!(
+            // One pass, two rankings — instead of correlated subqueries that re-scanned the
+            // table once per session group. `rn` prefers a *named* row (so the session keeps
+            // its latest `session_name`), while `recent` is strictly newest-first: the backend
+            // that served the last turn must come from the newest row, not the newest *named*
+            // one.
+            "WITH ranked AS (
+                 SELECT session_id, cc_session_id, agent, project, session_name, ts, id,
+                        fresh_input, cache_read, cache_write, output_tok,
+                        bill_micros, input_before, input_after, sub_provider, model,
+                        input_rate, cache_read_rate, cache_write_rate,
+                        ({saved_expr}) AS saved_micros,
+                        ROW_NUMBER() OVER (
+                            PARTITION BY session_id, cc_session_id, agent, project
+                            ORDER BY (session_name IS NOT NULL) DESC, id DESC
+                        ) AS rn,
+                        ROW_NUMBER() OVER (
+                            PARTITION BY session_id, cc_session_id, agent, project
+                            ORDER BY id DESC
+                        ) AS recent
+                 FROM breakdown_turns
+             )
+             SELECT session_id, agent, project,
+                    MAX(CASE WHEN rn = 1 THEN session_name END),
+                    COUNT(*),
+                    COALESCE(SUM(fresh_input + cache_read + cache_write + output_tok), 0),
+                    COALESCE(SUM(cache_read), 0),
+                    COALESCE(SUM(fresh_input + cache_read + cache_write), 0),
+                    COALESCE(SUM(bill_micros), 0),
+                    COALESCE(SUM(saved_micros), 0),
+                    COALESCE(SUM(input_before), 0),
+                    COALESCE(SUM(input_after), 0),
+                    MAX(ts),
+                    cc_session_id,
+                    MAX(CASE WHEN recent = 1 THEN sub_provider END),
+                    MAX(CASE WHEN recent = 1 THEN model END),
+                    COALESCE(MAX(CASE WHEN recent = 1 THEN cache_read END), 0),
+                    COALESCE(
+                        MAX(CASE WHEN recent = 1 THEN fresh_input + cache_read + cache_write END),
+                        0
+                    )
+             FROM ranked
+             GROUP BY session_id, cc_session_id, agent, project
+             ORDER BY MAX(ts) DESC"
+        );
         let mut stmt = self
             .conn
-            .prepare(
-                // One pass, two rankings — instead of correlated subqueries that re-scanned the
-                // table once per session group. `rn` prefers a *named* row (so the session keeps
-                // its latest `session_name`), while `recent` is strictly newest-first: the backend
-                // that served the last turn must come from the newest row, not the newest *named*
-                // one.
-                "WITH ranked AS (
-                     SELECT session_id, cc_session_id, agent, project, session_name, ts, id,
-                            fresh_input, cache_read, cache_write, output_tok,
-                            bill_micros, input_before, input_after, sub_provider, model,
-                            ROW_NUMBER() OVER (
-                                PARTITION BY session_id, cc_session_id, agent, project
-                                ORDER BY (session_name IS NOT NULL) DESC, id DESC
-                            ) AS rn,
-                            ROW_NUMBER() OVER (
-                                PARTITION BY session_id, cc_session_id, agent, project
-                                ORDER BY id DESC
-                            ) AS recent
-                     FROM breakdown_turns
-                 )
-                 SELECT session_id, agent, project,
-                        MAX(CASE WHEN rn = 1 THEN session_name END),
-                        COUNT(*),
-                        COALESCE(SUM(fresh_input + cache_read + cache_write + output_tok), 0),
-                        COALESCE(SUM(cache_read), 0),
-                        COALESCE(SUM(fresh_input + cache_read + cache_write), 0),
-                        COALESCE(SUM(bill_micros), 0),
-                        COALESCE(SUM(input_before), 0),
-                        COALESCE(SUM(input_after), 0),
-                        MAX(ts),
-                        cc_session_id,
-                        MAX(CASE WHEN recent = 1 THEN sub_provider END),
-                        MAX(CASE WHEN recent = 1 THEN model END),
-                        COALESCE(MAX(CASE WHEN recent = 1 THEN cache_read END), 0),
-                        COALESCE(
-                            MAX(CASE WHEN recent = 1 THEN fresh_input + cache_read + cache_write END),
-                            0
-                        )
-                 FROM ranked
-                 GROUP BY session_id, cc_session_id, agent, project
-                 ORDER BY MAX(ts) DESC",
-            )
+            .prepare(&sql)
             .context("failed to prepare sessions query")?;
         let rows = stmt
             .query_map([], |r| {
                 let cache_read: i64 = r.get(6)?;
                 let total_in: i64 = r.get(7)?;
-                let last_read: i64 = r.get(15)?;
-                let last_total_in: i64 = r.get(16)?;
+                let last_read: i64 = r.get(16)?;
+                let last_total_in: i64 = r.get(17)?;
                 Ok(SessionRow {
                     session_id: r.get(0)?,
                     agent: r.get(1)?,
@@ -181,12 +200,13 @@ impl BreakdownDb {
                         .then(|| last_read as f64 / last_total_in as f64),
                     last_input_tokens: last_total_in,
                     bill_micros: r.get(8)?,
-                    input_before: r.get(9)?,
-                    input_after: r.get(10)?,
-                    last_ts: r.get(11)?,
-                    cc_session_id: r.get(12)?,
-                    last_sub_provider: r.get(13)?,
-                    last_model: r.get(14)?,
+                    saved_micros: r.get(9)?,
+                    input_before: r.get(10)?,
+                    input_after: r.get(11)?,
+                    last_ts: r.get(12)?,
+                    cc_session_id: r.get(13)?,
+                    last_sub_provider: r.get(14)?,
+                    last_model: r.get(15)?,
                 })
             })
             .context("failed to query sessions")?;

@@ -109,6 +109,24 @@ pub fn gather() -> Report {
         ));
         report.problems += 1;
     }
+    // Money coverage: only the empty case is a real problem (CLI/MCP-only or attribution never
+    // ran). Partial ratio is a weak heuristic (different tables + retention caps), so we do
+    // not WARN on partial pure-proxy installs.
+    if let Ok(t) = crate::tracking::Tracker::open_reader()
+        && let Ok(cov) = llmtrim_ledger::money::money_coverage(t.connection())
+        && cov.empty_money_with_traffic()
+    {
+        report.rows.push((
+            ui::WARN,
+            "money coverage".into(),
+            format!(
+                "{} compressions, 0 proxy turns — dollars need proxy attribution \
+                 (CLI/MCP-only has no session bill)",
+                cov.compressions_events
+            ),
+        ));
+        report.problems += 1;
+    }
     report
 }
 

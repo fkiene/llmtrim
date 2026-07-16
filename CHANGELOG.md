@@ -14,8 +14,28 @@ All notable changes to this project are documented here. The format follows
   further backends can land without a major bump. External exhaustive `match`es need a `_` arm.
   Workspace version is **0.11.0** (0.x minor = semver-breaking).
 
+### Changed
+
+- **Overview and non-TTY status dollars match Sessions (frozen proxy bills).** KPI "You paid" /
+  "Total saved" / today / week / trend / top models, and the piped `status` hero, read
+  `breakdown_turns.bill_micros` plus a per-turn frozen-rate input counterfactual
+  (`llmtrim-ledger::money`) — not live re-pricing of `compressions`. Lifetime $ may drop vs
+  older builds when breakdown retention is shorter than compressions, or for CLI/MCP-only
+  traffic (no session bill). Token % gauge is unchanged. When there is no proxy bill yet, the
+  UI shows a billing notice (not `$0.00`).
+- **Sessions columns:** `saved` → **`saved$`** (money) + **`trim`** (token size %). Detail bill
+  footer uses `SUM(bill_micros)` (blocks allocate; `*` when they residual).
+- **`status --json` / MCP `llmtrim_stats`:** additive **`money`** object with `unavailable` +
+  null dollars when there is no proxy attribution. Legacy **`cost`** remains compressions +
+  live list prices with `"source": "compressions_live_prices"` — prefer `money` when
+  `unavailable` is false.
+
 ### Added
 
+- **Money coverage UX** on Overview (and doctor empty-case only) when compressions exist but no
+  breakdown bills — banner instead of fake `$0.00`.
+- **`llmtrim-ledger::money`:** shared `MoneyTotals` / coverage / per-day / per-model queries;
+  shared `saved_micros` SQL for Overview and Sessions.
 - **`llmtrim ensure`:** bring this machine to the recommended state. Installs or refreshes owned
   Claude Code integrations (statusline, cold-cache guard, window-local `/sub`, default compact
   model chain), tray login when the GUI binary is present, and restarts a version-skewed daemon.
