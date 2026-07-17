@@ -602,20 +602,33 @@ fn system_text(body: &Value, kind: ProviderKind) -> Option<String> {
     if let Some(v) = field {
         return Some(flatten_text(v));
     }
-    // OpenAI chat / Responses: first system/developer message.
+    // OpenAI chat / Responses: concatenate every system/developer *message*. Modern
+    // Responses bodies (Codex 0.144+, #193) carry no `instructions` and interleave
+    // non-message developer items (e.g. `additional_tools` registrations) before the
+    // identity message, so taking only the first system/developer item would flatten tool
+    // schemas instead of the identity. Only items whose `type` is "message" (or absent —
+    // chat-completions messages carry no `type`) count: tool registrations aren't identity
+    // text and can vary turn-to-turn, which would also destabilize `stable_hash(system)`
+    // and thus the session id; the developer *message* preamble is static per session.
     let items = body
         .get("messages")
         .or_else(|| body.get("input"))
         .and_then(Value::as_array)?;
-    items
+    let text = items
         .iter()
-        .find(|m| {
+        .filter(|m| {
             matches!(
                 m.get("role").and_then(Value::as_str),
                 Some("system") | Some("developer")
+            ) && matches!(
+                m.get("type").and_then(Value::as_str),
+                None | Some("message")
             )
         })
         .map(|m| flatten_text(m.get("content").unwrap_or(m)))
+        .collect::<Vec<_>>()
+        .join("");
+    (!text.is_empty()).then_some(text)
 }
 
 /// Collect every string in a value (string, array of blocks, or object with `text`).
@@ -675,7 +688,14 @@ static AGENTS: &[AgentFingerprint] = &[
     },
     AgentFingerprint {
         label: "codex",
-        markers: &["running as a coding agent in the Codex CLI", "Codex CLI"],
+        // Codex 0.144+ instructions open with "You are Codex, an agent based on GPT-5..."
+        // and no longer contain either legacy phrase; keep both for older CLI versions.
+        // Not bare "Codex": too broad — it would fire on any prompt merely mentioning it.
+        markers: &[
+            "running as a coding agent in the Codex CLI",
+            "Codex CLI",
+            "You are Codex",
+        ],
     },
     AgentFingerprint {
         label: "cursor",
@@ -961,6 +981,77 @@ mod tests {
                 agent.label
             );
         }
+    }
+
+    #[test]
+    fn identity_from_codex_responses_instructions() {
+        // Live Codex 0.144.1: instructions open with "You are Codex, ..." and carry neither
+        // legacy marker (#193). Responses-shaped body, OpenAI provider.
+        let body = json!({
+            "model": "gpt-5.6-sol",
+            "instructions": "You are Codex, an agent based on GPT-5. You and the user share one workspace...",
+            "input": [{"role": "user", "content": "hi"}]
+        });
+        assert_eq!(
+            extract_identity(&body, ProviderKind::OpenAi)
+                .agent
+                .as_deref(),
+            Some("codex")
+        );
+    }
+
+    #[test]
+    fn identity_from_codex_real_input_shape() {
+        // The shape actually seen on the wire from Codex 0.144.1 (#193): no `instructions`;
+        // `input` opens with a non-message `additional_tools` developer item, and the
+        // identity lives in the developer *message* after it. Taking only the first
+        // system/developer item would flatten the tool schemas and miss the marker.
+        let body = json!({
+            "model": "gpt-5.6-sol",
+            "input": [
+                {
+                    "type": "additional_tools",
+                    "role": "developer",
+                    "tools": [{
+                        "type": "custom",
+                        "name": "exec",
+                        "description": "Run JavaScript code to orchestrate/compose tool calls"
+                    }]
+                },
+                {
+                    "type": "message",
+                    "role": "developer",
+                    "content": [{
+                        "type": "input_text",
+                        "text": "You are Codex, an agent based on GPT-5. You and the user share one workspace..."
+                    }]
+                },
+                {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "hi"}]}
+            ]
+        });
+        assert_eq!(
+            extract_identity(&body, ProviderKind::OpenAi)
+                .agent
+                .as_deref(),
+            Some("codex")
+        );
+    }
+
+    #[test]
+    fn claude_code_via_sub_reroute_does_not_fingerprint_as_codex() {
+        // The sub reroute flattens Claude Code's system prompt into `instructions`; the
+        // claude-code entry precedes codex in AGENTS, so it must win — pin that ordering.
+        let body = json!({
+            "model": "gpt-5.6-sol",
+            "instructions": "You are Claude Code, Anthropic's CLI. Route via Codex backend.",
+            "input": [{"role": "user", "content": "hi"}]
+        });
+        assert_eq!(
+            extract_identity(&body, ProviderKind::OpenAi)
+                .agent
+                .as_deref(),
+            Some("claude-code")
+        );
     }
 
     #[test]
