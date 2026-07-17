@@ -16,6 +16,22 @@ All notable changes to this project are documented here. The format follows
   Claude numbers stay so the segment isn't blank. Kimi/Grok share the cache schema; their usage
   endpoints are not wired yet.
 
+### Fixed
+
+- **Codex traffic is compressed and tracked again.** Codex CLI 0.144+ sends its request bodies
+  with `Content-Encoding: zstd`, which the interceptor could not parse, so every Codex turn was
+  forwarded verbatim and never reached the ledger — `llmtrim status` showed no Codex activity at
+  all (#193). The interceptor now decodes zstd- and gzip-encoded request bodies (capped at
+  256 MB) before compression and attribution, and forwards the body as plain JSON. A body it
+  cannot decode still passes through verbatim, so a decode problem can never break the call.
+- **Codex sessions are labeled `codex` in the cost breakdown again.** Two attribution gaps hid
+  them: the fingerprint markers predated Codex 0.144's system prompt (which opens with "You are
+  Codex" and no longer says "Codex CLI"), and identity extraction read only the *first*
+  system/developer item of a Responses body — Codex now leads with a non-message
+  `additional_tools` item, so the identity message behind it was skipped. The fingerprint gained
+  the current marker and identity extraction concatenates every system/developer *message*,
+  skipping tool registrations (whose schemas would also destabilize the session hash).
+
 ## [0.11.3] - 2026-07-17
 
 ### Fixed

@@ -267,6 +267,41 @@ mod imp {
             .unwrap_or(false)
     }
 
+    /// Decode a request body sent with `Content-Encoding: zstd` or `gzip` (#193: Codex CLI
+    /// 0.144+ zstd-compresses its `/backend-api/codex/responses` bodies; without decoding,
+    /// `compress_blocking` can't parse the JSON, so the turn is forwarded verbatim and never
+    /// reaches the ledger). Returns the decoded bytes, or `None` when the header is
+    /// absent/`identity` (body already plain) or the encoding is unsupported (multi-codec
+    /// lists), corrupt, or over the size cap — the caller forwards verbatim in every `None`
+    /// case, so a decode problem can never break the call. After a successful decode the
+    /// caller must strip `content-encoding` so the forwarded body goes out as plain JSON.
+    fn decode_request_body(headers: &header::HeaderMap, bytes: &[u8]) -> Option<Vec<u8>> {
+        use std::io::Read;
+        // Cap the decompressed size so a corrupt or malicious stream can't OOM the proxy.
+        const MAX_DECODED: u64 = 256 * 1024 * 1024;
+        let encoding = headers
+            .get(header::CONTENT_ENCODING)?
+            .to_str()
+            .ok()?
+            .trim()
+            .to_ascii_lowercase();
+        let mut out = Vec::new();
+        match encoding.as_str() {
+            "zstd" => {
+                // Read one byte past the cap so an exactly-at-cap stream still succeeds while
+                // an over-cap one is detected (rather than silently truncated and forwarded).
+                let decoder = zstd::stream::read::Decoder::new(bytes).ok()?;
+                decoder.take(MAX_DECODED + 1).read_to_end(&mut out).ok()?;
+            }
+            "gzip" => {
+                let decoder = flate2::read::GzDecoder::new(bytes);
+                decoder.take(MAX_DECODED + 1).read_to_end(&mut out).ok()?;
+            }
+            _ => return None,
+        }
+        (out.len() as u64 <= MAX_DECODED).then_some(out)
+    }
+
     /// True if `req` is a WebSocket upgrade attempt — either an HTTP/1.1 `Upgrade: websocket`
     /// handshake or an HTTP/2 Extended CONNECT (RFC 8441, the `:protocol` pseudo-header set to
     /// `websocket`). We refuse these on intercepted LLM hosts (see `handle_request_inner`): a
@@ -1452,7 +1487,7 @@ mod imp {
             if is_body_signed(req.headers()) {
                 return req.into();
             }
-            let (parts, body) = req.into_parts();
+            let (mut parts, body) = req.into_parts();
             let cc_session_id = parts
                 .headers
                 .get("x-claude-code-session-id")
@@ -1466,6 +1501,16 @@ mod imp {
             // Always-sub is gated inside `reroute_messages`; this covers the compress+forward
             // path so a blocked session cannot keep compressing/overflowing after a sub latch.
             let mut bytes = bytes;
+            // Codex CLI 0.144+ zstd-compresses its request bodies (#193). Decode here so the
+            // whole pipeline below (compression, attribution, ledger, replay capture) sees
+            // parseable JSON, and strip `content-encoding` so the forwarded — possibly
+            // llmtrim-rewritten — body is correctly sent as identity. On any decode failure
+            // the header stays and the still-encoded body is forwarded verbatim, exactly as
+            // before this fix: never break the call.
+            if let Some(decoded) = decode_request_body(&parts.headers, &bytes) {
+                bytes = Bytes::from(decoded);
+                parts.headers.remove(header::CONTENT_ENCODING);
+            }
             if provider == ProviderKind::Anthropic
                 && let Some(mut anthropic) = std::str::from_utf8(&bytes)
                     .ok()
@@ -1674,7 +1719,6 @@ mod imp {
                     session_id,
                 });
             }
-            let mut parts = parts;
             // Length changed; drop it so hyper recomputes (and never streams a stale value).
             parts.headers.remove(header::CONTENT_LENGTH);
             // When we'll tee + measure this response, force identity encoding so the body is
@@ -5205,6 +5249,56 @@ mod imp {
         #[test]
         fn codex_responses_path_is_compressible() {
             assert!(is_compressible_path("/backend-api/codex/responses"));
+        }
+
+        #[test]
+        fn decode_request_body_zstd_roundtrips() {
+            // Codex CLI 0.144+ sends `Content-Encoding: zstd` request bodies (#193).
+            let json = br#"{"model":"gpt-5.6-sol","input":[{"role":"user","content":"hi"}]}"#;
+            let compressed = zstd::stream::encode_all(&json[..], 0).unwrap();
+            let mut h = header::HeaderMap::new();
+            h.insert(header::CONTENT_ENCODING, "zstd".parse().unwrap());
+            assert_eq!(
+                decode_request_body(&h, &compressed).as_deref(),
+                Some(&json[..])
+            );
+        }
+
+        #[test]
+        fn decode_request_body_gzip_roundtrips() {
+            use std::io::Write;
+            let json = br#"{"model":"gpt-5.6-sol","input":[]}"#;
+            let mut enc = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+            enc.write_all(json).unwrap();
+            let compressed = enc.finish().unwrap();
+            let mut h = header::HeaderMap::new();
+            h.insert(header::CONTENT_ENCODING, "GZip".parse().unwrap()); // case-insensitive
+            assert_eq!(
+                decode_request_body(&h, &compressed).as_deref(),
+                Some(&json[..])
+            );
+        }
+
+        #[test]
+        fn decode_request_body_garbage_zstd_declines() {
+            // Corrupt stream → None; the caller forwards the request verbatim (never break
+            // the call).
+            let mut h = header::HeaderMap::new();
+            h.insert(header::CONTENT_ENCODING, "zstd".parse().unwrap());
+            assert_eq!(decode_request_body(&h, b"not a zstd stream"), None);
+        }
+
+        #[test]
+        fn decode_request_body_identity_or_absent_leaves_body_alone() {
+            let h = header::HeaderMap::new();
+            assert_eq!(decode_request_body(&h, b"{\"plain\":true}"), None);
+            let mut h = header::HeaderMap::new();
+            h.insert(header::CONTENT_ENCODING, "identity".parse().unwrap());
+            assert_eq!(decode_request_body(&h, b"{\"plain\":true}"), None);
+            // Multi-codec lists are unsupported by design — treated as passthrough.
+            let mut h = header::HeaderMap::new();
+            h.insert(header::CONTENT_ENCODING, "gzip, zstd".parse().unwrap());
+            assert_eq!(decode_request_body(&h, b"whatever"), None);
         }
 
         #[test]
