@@ -7,7 +7,7 @@ headroom-ai==0.26.0  # Headroom's Python library (pinned latest release; pulls l
 # Headroom's ML Kompress (ModernBERT) path - the [ml] extra. Without these the run falls
 # back to Headroom's deterministic compressors and meta.headroom_ml_fired is false. See the
 # snapshot README "Enabling Headroom's ML path" for the headroom._core build step.
-torch==2.12.0        # exact version used for the committed snapshot run
+torch==2.13.0        # exact version used for the committed snapshot run
 transformers==5.10.1 # exact version used for the committed snapshot run
 openai==2.41.1       # only used by --live (OpenRouter is OpenAI-compatible)
 rouge-score==0.1.2   # ROUGE-L for summarization corpora (cnn, gov_report, multi_news)
