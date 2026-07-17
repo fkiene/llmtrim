@@ -171,10 +171,11 @@ fn window_from_usage_json(win: &Value) -> Option<RateWindow> {
                 .filter(|&s| s > 0)
                 .map(|s| s as u64)
         });
-    let resets_at = win
-        .get("reset_at")
-        .and_then(Value::as_i64)
-        .or_else(|| win.get("reset_at").and_then(Value::as_u64).map(|u| u as i64));
+    let resets_at = win.get("reset_at").and_then(Value::as_i64).or_else(|| {
+        win.get("reset_at")
+            .and_then(Value::as_u64)
+            .map(|u| u as i64)
+    });
     Some(RateWindow {
         used_percent: used,
         resets_at,
@@ -208,7 +209,7 @@ pub fn classify_window(limit_window_seconds: Option<u64>) -> WindowKind {
 /// Fallback label when `resets_at` is missing: `5h` / `7d` / `Nh` / `Nd` from window size.
 pub fn size_label(limit_window_seconds: Option<u64>) -> String {
     match limit_window_seconds {
-        Some(s) if s > 0 && s < 3600 => format!("{}m", (s + 59) / 60),
+        Some(s) if s > 0 && s < 3600 => format!("{}m", s.div_ceil(60)),
         Some(s) if s < 12 * 3600 => {
             let h = (s + 1800) / 3600;
             if h <= 1 {
@@ -301,14 +302,15 @@ pub fn fetch_codex_usage(access_token: &str, account_id: Option<&str>) -> Option
 /// Fire-and-forget a throttled Codex usage poll on a detached thread.
 ///
 /// Safe to call on every Codex sub turn: process-local gate + on-disk `fetched_at` keep it to
-/// roughly one live GET per [`POLL_MIN_INTERVAL_SECS`]. Never blocks the caller for network I/O.
+/// roughly one live GET per minute. Never blocks the caller for network I/O.
 pub fn maybe_schedule_codex_poll(access_token: String, account_id: Option<String>) {
     if access_token.is_empty() || account_id.as_deref().unwrap_or("").is_empty() {
         return;
     }
     // Disk freshness: skip even scheduling if a recent snapshot already exists.
     if load_raw().is_some_and(|s| {
-        s.provider == "codex" && now_secs().saturating_sub(s.fetched_at) < POLL_MIN_INTERVAL_SECS as i64
+        s.provider == "codex"
+            && now_secs().saturating_sub(s.fetched_at) < POLL_MIN_INTERVAL_SECS as i64
     }) {
         return;
     }
@@ -336,10 +338,10 @@ pub fn maybe_schedule_codex_poll(access_token: String, account_id: Option<String
                 gate.inflight = false;
             }
         });
-    if spawn.is_err() {
-        if let Ok(mut gate) = POLL_GATE.lock() {
-            gate.inflight = false;
-        }
+    if spawn.is_err()
+        && let Ok(mut gate) = POLL_GATE.lock()
+    {
+        gate.inflight = false;
     }
 }
 

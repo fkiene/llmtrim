@@ -228,9 +228,12 @@ struct Led {
     /// short (~5h) window and the weekly window; either may be `None`. When the proxy is healthy
     /// and at least one is present these replace Claude Code's Anthropic blob; otherwise the
     /// blob is used (predicted always-mode before the first poll, or a degraded/stopped proxy).
-    sub_five: Option<(String, f64)>,
-    sub_seven: Option<(String, f64)>,
+    sub_five: Option<QuotaSlot>,
+    sub_seven: Option<QuotaSlot>,
 }
+
+/// One rate-limit window ready for the status line: display label + used %.
+type QuotaSlot = (String, f64);
 
 /// Minimal [`DaemonView`] for the health check — mirrors `main::daemon_view` but fills only
 /// the fields [`monitor::health`] reads (running/pid/port/port_accepting/env_port/ca), since
@@ -352,7 +355,7 @@ fn ledger_snapshot(cc: &CcInput) -> Led {
 /// Load the provider quota snapshot the proxy cached for the status line, if it matches the
 /// active reroute. Returns `(short_window, weekly_window)` as `(label, used_percent)`.
 #[cfg(feature = "intercept")]
-fn sub_quota_for(reroute: Option<&str>) -> (Option<(String, f64)>, Option<(String, f64)>) {
+fn sub_quota_for(reroute: Option<&str>) -> (Option<QuotaSlot>, Option<QuotaSlot>) {
     let Some(provider) = reroute else {
         return (None, None);
     };
@@ -366,11 +369,7 @@ fn sub_quota_for(reroute: Option<&str>) -> (Option<(String, f64)>, Option<(Strin
     let label = |w: &crate::reroute::quota::RateWindow, fallback: &str| {
         remaining_time_label(w.resets_at).unwrap_or_else(|| {
             let s = crate::reroute::quota::size_label(w.limit_window_seconds);
-            if s == "?" {
-                fallback.to_string()
-            } else {
-                s
-            }
+            if s == "?" { fallback.to_string() } else { s }
         })
     };
     (
@@ -380,7 +379,7 @@ fn sub_quota_for(reroute: Option<&str>) -> (Option<(String, f64)>, Option<(Strin
 }
 
 #[cfg(not(feature = "intercept"))]
-fn sub_quota_for(_reroute: Option<&str>) -> (Option<(String, f64)>, Option<(String, f64)>) {
+fn sub_quota_for(_reroute: Option<&str>) -> (Option<QuotaSlot>, Option<QuotaSlot>) {
     (None, None)
 }
 
@@ -777,7 +776,7 @@ fn trim_or_health_segment(led: &Led, color: bool) -> Option<String> {
 ///   minutes on a fresh login;
 /// - a degraded/stopped proxy is not actually rerouting, so Anthropic's numbers are the
 ///   ones that will matter on the next turn (and the arrow is already hidden).
-fn quota_windows(cc: &CcInput, led: &Led) -> (Option<(String, f64)>, Option<(String, f64)>) {
+fn quota_windows(cc: &CcInput, led: &Led) -> (Option<QuotaSlot>, Option<QuotaSlot>) {
     if led.health == Health::Healthy
         && led.reroute.is_some()
         && (led.sub_five.is_some() || led.sub_seven.is_some())
@@ -823,12 +822,8 @@ fn extra_segments(cc: &CcInput, led: &Led, color: bool) -> Vec<String> {
                 quota(&seven_label, d)
             ));
         }
-        (Some((five_label, h)), None) => {
-            out.push(format!("{glyph} {}", quota(&five_label, h)))
-        }
-        (None, Some((seven_label, d))) => {
-            out.push(format!("{glyph} {}", quota(&seven_label, d)))
-        }
+        (Some((five_label, h)), None) => out.push(format!("{glyph} {}", quota(&five_label, h))),
+        (None, Some((seven_label, d))) => out.push(format!("{glyph} {}", quota(&seven_label, d))),
         (None, None) => {}
     }
     if led.cache_cold {
