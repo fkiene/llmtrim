@@ -6,6 +6,16 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- **Status line shows the active `/sub` plan's rate limits (Codex first).** Under a Codex
+  reroute the `◔` segment now reads the ChatGPT plan's windows (weekly always; 5h when the plan
+  reports one) from `GET /backend-api/wham/usage`, cached at `~/.llmtrim/sub-rate-limits.json` by
+  the proxy on each throttled turn. A matching snapshot replaces Claude Code's Anthropic blob
+  only while the proxy is healthy; until the first poll lands (or if the proxy is down) the
+  Claude numbers stay so the segment isn't blank. Kimi/Grok share the cache schema; their usage
+  endpoints are not wired yet.
+
 ## [0.11.3] - 2026-07-17
 
 ### Fixed

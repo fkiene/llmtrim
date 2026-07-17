@@ -19,6 +19,7 @@ pub mod context_limit;
 pub mod continuation;
 pub mod grok;
 pub mod kimi;
+pub mod quota;
 pub mod read_rewrite;
 pub mod sse;
 #[cfg(feature = "breakdown")]

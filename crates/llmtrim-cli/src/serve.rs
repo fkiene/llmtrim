@@ -1882,6 +1882,15 @@ mod imp {
                 Err(_) => return anthropic_error(500, "llmtrim: auth task failed").into(),
             };
 
+            // Refresh the Codex plan's rate-limit windows for the status line (throttled,
+            // fire-and-forget). Claude Code's stdin blob only carries Anthropic quotas.
+            if sub == crate::reroute::SubProvider::Codex {
+                crate::reroute::quota::maybe_schedule_codex_poll(
+                    token.access.clone(),
+                    token.account_id.clone(),
+                );
+            }
+
             // Tiers must match the provider actually serving this turn. A window `/sub on grok`
             // with global `sub = codex` must use `[sub.grok.tiers]` (or Grok defaults), not the
             // Codex mapping snapshotted into `self.sub_tiers` at daemon start.
@@ -2636,6 +2645,12 @@ mod imp {
                     .await
                     .map_err(|_| "auth task failed".to_string())?
                     .map_err(|e| format!("not authenticated ({e})"))?;
+            if provider == crate::reroute::SubProvider::Codex {
+                crate::reroute::quota::maybe_schedule_codex_poll(
+                    token.access.clone(),
+                    token.account_id.clone(),
+                );
+            }
             let tiers = llmtrim_core::config::sub_tiers_for(provider.as_str());
             let rewrite = crate::reroute::build_upstream_for_model(
                 provider,

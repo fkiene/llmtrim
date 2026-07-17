@@ -261,7 +261,7 @@ When `~/.claude` exists, `setup`, `update`, and `ensure` wire these. No separate
 Claude Code [custom status line](https://code.claude.com/docs/en/statusline). The arrow is the backend that answered the last turn (not merely what is configured). In `sub` fallback mode it stays off while Anthropic serves and shows up when a chain provider does.
 
 - `✂`: trim for this session (`✂ –` until something is saved)
-- `◔`: Claude.ai rate-limit windows (time left · % used)
+- `◔`: rate-limit windows (time left · % used) — Claude.ai when Anthropic is serving; under `/sub` the active plan's windows (Codex today: weekly always, 5h when the plan reports one). Kimi/Grok fill in when their usage APIs are wired
 - Context gauge: fill of the serving model's real window (green under 40%, orange 40-65%, red above)
 - `♻`: prompt-cache reuse; becomes `♻ cache cold` after the cache TTL
 

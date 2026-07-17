@@ -18,6 +18,13 @@
 //! gone cold, where the cache segment becomes `♻ cache cold`. Segments whose data is
 //! absent — no reroute, an API-key user with no rate limits — simply don't render.
 //!
+//! Under `sub`, the quota segment prefers the active provider's windows (cached under
+//! `~/.llmtrim/sub-rate-limits.json` by the proxy when a Codex turn fires) over Claude Code's
+//! Anthropic blob, but only once a matching snapshot exists and the proxy is healthy —
+//! otherwise the Claude blob stays so a fresh always-mode session isn't blank for minutes.
+//! Weekly is always shown when known; the short (~5h) window only appears when the provider
+//! reports one. Kimi/Grok fill in later.
+//!
 //! Under `sub` the arrow shows the concrete model that served the last turn (e.g.
 //! `→gpt-5.6-terra`) for Codex reroutes; Kimi shows the provider shortname (`→kimi`), since all
 //! its tiers collapse to one internal wire id. The arrow is read from the ledger — what actually
@@ -26,7 +33,8 @@
 //! a backend really served, and the gauge keeps Claude's window until one does.
 //!
 //! `install` wires it into `~/.claude/settings.json`; rendering itself never touches the
-//! network or API tokens.
+//! network or API tokens (the proxy polls usage on the request path; this process only reads
+//! the resulting cache file).
 
 use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
@@ -215,6 +223,13 @@ struct Led {
     /// Input tokens of that same turn — stands in for the blob's `total_input_tokens` while a
     /// turn is in flight, so the gauge doesn't empty. See [`ctx_tokens_for`].
     last_ctx_tokens: i64,
+    /// Under `sub`, the active provider's rate-limit windows from
+    /// `~/.llmtrim/sub-rate-limits.json` (populated by the proxy). `(label, used_percent)` for the
+    /// short (~5h) window and the weekly window; either may be `None`. When the proxy is healthy
+    /// and at least one is present these replace Claude Code's Anthropic blob; otherwise the
+    /// blob is used (predicted always-mode before the first poll, or a degraded/stopped proxy).
+    sub_five: Option<(String, f64)>,
+    sub_seven: Option<(String, f64)>,
 }
 
 /// Minimal [`DaemonView`] for the health check — mirrors `main::daemon_view` but fills only
@@ -315,6 +330,8 @@ fn ledger_snapshot(cc: &CcInput) -> Led {
         ArrowSource::None => (None, None, None),
     };
 
+    let (sub_five, sub_seven) = sub_quota_for(reroute.as_deref());
+
     Led {
         health,
         trim_pct,
@@ -327,7 +344,44 @@ fn ledger_snapshot(cc: &CcInput) -> Led {
             .and_then(|r| r.last_cache_hit)
             .map(|f| f * 100.0),
         last_ctx_tokens: row.as_ref().map_or(0, |r| r.last_input_tokens),
+        sub_five,
+        sub_seven,
     }
+}
+
+/// Load the provider quota snapshot the proxy cached for the status line, if it matches the
+/// active reroute. Returns `(short_window, weekly_window)` as `(label, used_percent)`.
+#[cfg(feature = "intercept")]
+fn sub_quota_for(reroute: Option<&str>) -> (Option<(String, f64)>, Option<(String, f64)>) {
+    let Some(provider) = reroute else {
+        return (None, None);
+    };
+    let Some(snap) = crate::reroute::quota::load_fresh() else {
+        return (None, None);
+    };
+    if snap.provider != provider {
+        return (None, None);
+    }
+    let (short, weekly) = crate::reroute::quota::split_short_weekly(&snap);
+    let label = |w: &crate::reroute::quota::RateWindow, fallback: &str| {
+        remaining_time_label(w.resets_at).unwrap_or_else(|| {
+            let s = crate::reroute::quota::size_label(w.limit_window_seconds);
+            if s == "?" {
+                fallback.to_string()
+            } else {
+                s
+            }
+        })
+    };
+    (
+        short.map(|w| (label(w, "5h"), w.used_percent)),
+        weekly.map(|w| (label(w, "7d"), w.used_percent)),
+    )
+}
+
+#[cfg(not(feature = "intercept"))]
+fn sub_quota_for(_reroute: Option<&str>) -> (Option<(String, f64)>, Option<(String, f64)>) {
+    (None, None)
 }
 
 /// Resolve the context occupancy the gauge fills against. Claude Code reports
@@ -714,6 +768,37 @@ fn trim_or_health_segment(led: &Led, color: bool) -> Option<String> {
     }
 }
 
+/// Resolve which rate-limit windows to render.
+///
+/// Prefer the provider snapshot the proxy cached into `Led` (Codex today) only when the
+/// proxy is healthy *and* we actually have a matching snapshot. Otherwise fall back to
+/// Claude Code's 5h/7d blob:
+/// - predicted always-mode before the first poll would otherwise blank the segment for
+///   minutes on a fresh login;
+/// - a degraded/stopped proxy is not actually rerouting, so Anthropic's numbers are the
+///   ones that will matter on the next turn (and the arrow is already hidden).
+fn quota_windows(cc: &CcInput, led: &Led) -> (Option<(String, f64)>, Option<(String, f64)>) {
+    if led.health == Health::Healthy
+        && led.reroute.is_some()
+        && (led.sub_five.is_some() || led.sub_seven.is_some())
+    {
+        return (led.sub_five.clone(), led.sub_seven.clone());
+    }
+    let five = cc.five_hour_pct.map(|p| {
+        (
+            remaining_time_label(cc.five_hour_resets_at).unwrap_or_else(|| "5h".to_string()),
+            p,
+        )
+    });
+    let seven = cc.seven_day_pct.map(|p| {
+        (
+            remaining_time_label(cc.seven_day_resets_at).unwrap_or_else(|| "7d".to_string()),
+            p,
+        )
+    });
+    (five, seven)
+}
+
 /// Build the ordered extra segments (quota, then this session's cache); later ones drop first on
 /// a narrow terminal.
 fn extra_segments(cc: &CcInput, led: &Led, color: bool) -> Vec<String> {
@@ -730,20 +815,20 @@ fn extra_segments(cc: &CcInput, led: &Led, color: bool) -> Vec<String> {
     };
     let glyph = paint(color, DIM, "◔");
     let sep = paint(color, DIM, "·");
-    let five_label =
-        remaining_time_label(cc.five_hour_resets_at).unwrap_or_else(|| "5h".to_string());
-    let seven_label =
-        remaining_time_label(cc.seven_day_resets_at).unwrap_or_else(|| "7d".to_string());
-    match (cc.five_hour_pct, cc.seven_day_pct) {
-        (Some(h), Some(d)) => {
+    match quota_windows(cc, led) {
+        (Some((five_label, h)), Some((seven_label, d))) => {
             out.push(format!(
                 "{glyph} {} {sep} {}",
                 quota(&five_label, h),
                 quota(&seven_label, d)
             ));
         }
-        (Some(h), None) => out.push(format!("{glyph} {}", quota(&five_label, h))),
-        (None, Some(d)) => out.push(format!("{glyph} {}", quota(&seven_label, d))),
+        (Some((five_label, h)), None) => {
+            out.push(format!("{glyph} {}", quota(&five_label, h)))
+        }
+        (None, Some((seven_label, d))) => {
+            out.push(format!("{glyph} {}", quota(&seven_label, d)))
+        }
         (None, None) => {}
     }
     if led.cache_cold {
@@ -1182,6 +1267,10 @@ mod tests {
             cache_cold: false,
             last_cache_pct: None,
             last_ctx_tokens: 0,
+            // Tests that exercise the Claude blob path clear reroute; tests that keep the
+            // codex arrow inject sub windows explicitly (or inherit these placeholders).
+            sub_five: Some(("5h".into(), 24.0)),
+            sub_seven: Some(("7d".into(), 12.0)),
         }
     }
 
@@ -1335,6 +1424,7 @@ mod tests {
 
     #[test]
     fn quota_labels_show_time_remaining_until_reset() {
+        // Claude blob path (no sub): labels come from resets_at on the stdin payload.
         let mut c = cc(48_000);
         c.five_hour_resets_at = Some(
             (chrono::Utc::now() + chrono::Duration::hours(3) + chrono::Duration::minutes(30))
@@ -1344,7 +1434,12 @@ mod tests {
             (chrono::Utc::now() + chrono::Duration::days(4) + chrono::Duration::hours(12))
                 .timestamp(),
         );
-        let out = render_line(&c, &led(Health::Healthy), 0, false);
+        let mut l = led(Health::Healthy);
+        l.reroute = None;
+        l.resolved_model = None;
+        l.sub_five = None;
+        l.sub_seven = None;
+        let out = render_line(&c, &l, 0, false);
         assert!(out.contains("◔ 3h·24% · 4d·12%"), "remaining labels: {out}");
     }
 
@@ -1359,10 +1454,10 @@ mod tests {
     #[test]
     fn quota_windows_colour_independently() {
         // A maxed 5h next to a comfortable 7d: 5h red, 7d green — not both painted by the worse.
-        let mut c = cc(48_000);
-        c.five_hour_pct = Some(95.0);
-        c.seven_day_pct = Some(12.0);
-        let segs = extra_segments(&c, &led(Health::Healthy), true);
+        let mut l = led(Health::Healthy);
+        l.sub_five = Some(("5h".into(), 95.0));
+        l.sub_seven = Some(("7d".into(), 12.0));
+        let segs = extra_segments(&cc(48_000), &l, true);
         let quota = segs
             .iter()
             .find(|s| s.contains("5h"))
@@ -1405,12 +1500,67 @@ mod tests {
         // Both windows in one `◔` segment; only one present ⇒ just that one.
         let out = render_line(&cc(48_000), &led(Health::Healthy), 0, false);
         assert!(out.contains("◔ 5h·24% · 7d·12%"), "both windows: {out}");
-        let mut c = cc(48_000);
-        c.seven_day_pct = None;
-        let out = render_line(&c, &led(Health::Healthy), 0, false);
+        let mut l = led(Health::Healthy);
+        l.sub_seven = None;
+        let out = render_line(&cc(48_000), &l, 0, false);
         assert!(
             out.contains("◔ 5h·24%") && !out.contains("7d"),
             "5h only: {out}"
+        );
+    }
+
+    #[test]
+    fn sub_weekly_only_omits_invented_five_hour() {
+        // Plus-style Codex plan: only a weekly window. Must not paint a fake 5h.
+        let mut l = led(Health::Healthy);
+        l.sub_five = None;
+        l.sub_seven = Some(("7d".into(), 1.0));
+        let out = render_line(&cc(48_000), &l, 0, false);
+        assert!(out.contains("◔ 7d·1%"), "weekly shown: {out}");
+        assert!(!out.contains("5h"), "no invented 5h: {out}");
+    }
+
+    #[test]
+    fn sub_without_snapshot_falls_back_to_claude_blob() {
+        // Predicted always-mode / first turn before the proxy poll lands: keep Claude's
+        // numbers rather than a blank segment. Once a snapshot exists it wins (see
+        // `sub_weekly_only_omits_invented_five_hour`).
+        let mut l = led(Health::Healthy);
+        l.sub_five = None;
+        l.sub_seven = None;
+        let out = render_line(&cc(48_000), &l, 0, false);
+        assert!(
+            out.contains("◔ 5h·24% · 7d·12%"),
+            "claude blob until sub cache arrives: {out}"
+        );
+    }
+
+    #[test]
+    fn degraded_proxy_falls_back_to_claude_blob_even_with_sub_cache() {
+        // Unhealthy proxy is not intercepting, so the arrow is hidden and Anthropic will
+        // serve — prefer its blob over a stale codex snapshot.
+        let mut l = led(Health::Degraded);
+        l.sub_five = Some(("5h".into(), 95.0));
+        l.sub_seven = Some(("7d".into(), 1.0));
+        let out = render_line(&cc(48_000), &l, 0, false);
+        assert!(
+            out.contains("◔ 5h·24% · 7d·12%"),
+            "claude blob when degraded: {out}"
+        );
+        assert!(!out.contains("95%"), "stale sub 5h not shown: {out}");
+    }
+
+    #[test]
+    fn off_sub_still_uses_claude_blob_quota() {
+        let mut l = led(Health::Healthy);
+        l.reroute = None;
+        l.resolved_model = None;
+        l.sub_five = None;
+        l.sub_seven = None;
+        let out = render_line(&cc(48_000), &l, 0, false);
+        assert!(
+            out.contains("◔ 5h·24% · 7d·12%"),
+            "claude blob when not rerouted: {out}"
         );
     }
 
@@ -1606,9 +1756,10 @@ mod tests {
     fn quota_and_cache_floor_not_round() {
         // 99.9% cache is not 100%; 89.9% quota is not 90%.
         let mut c = cc(48_000);
-        c.five_hour_pct = Some(89.9);
         c.cache_pct = Some(99.9);
-        let out = render_line(&c, &led(Health::Healthy), 0, false);
+        let mut l = led(Health::Healthy);
+        l.sub_five = Some(("5h".into(), 89.9));
+        let out = render_line(&c, &l, 0, false);
         assert!(out.contains("5h·89%"), "quota floored: {out}");
         assert!(out.contains("♻ 99% cached"), "cache floored: {out}");
     }
