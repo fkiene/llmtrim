@@ -472,6 +472,8 @@ pub(crate) fn session_sub_model(session_id: &str) -> Option<String> {
 /// model beats a cold read/write on a cheaper redirect target. Fails safe: an unknown cache (no
 /// session row, an unparseable timestamp, or a build without the `breakdown` feature) returns
 /// `false`, so the redirect proceeds exactly as before — only a *proven* warm cache suppresses it.
+/// Only the proxy (`intercept`) consults this, to gate the `/compact` redirect.
+#[cfg(feature = "intercept")]
 pub(crate) fn session_cache_warm(session_id: &str) -> bool {
     session_row(session_id).is_some_and(|r| ts_within_ttl(&r.last_ts))
 }
@@ -480,6 +482,7 @@ pub(crate) fn session_cache_warm(session_id: &str) -> bool {
 /// [`cache_cold`]'s test, but note the *opposite* fail-safe on a bad timestamp: `cache_cold`
 /// treats unparseable as not-cold (don't warn on a glitch), whereas here unparseable is not-*warm*
 /// — the two gate opposite actions, and both must fail toward "act as if the cache is cold".
+#[cfg(feature = "intercept")]
 fn ts_within_ttl(last_ts: &str) -> bool {
     chrono::DateTime::parse_from_rfc3339(last_ts)
         .map(|t| chrono::Utc::now().signed_duration_since(t).num_seconds() < CACHE_TTL_SECS)
@@ -1804,6 +1807,7 @@ mod tests {
         assert!(cache_cold(&stale), "past the TTL ⇒ cold");
     }
 
+    #[cfg(feature = "intercept")]
     #[test]
     fn ts_within_ttl_gates_the_compact_redirect() {
         // The predicate behind `session_cache_warm` (its DB lookup isn't unit-testable). It must be
