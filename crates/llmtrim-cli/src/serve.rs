@@ -1494,8 +1494,16 @@ mod imp {
             }
             // Compact turns use an isolated candidate plan. Every attempt is rebuilt from these
             // (possibly LKG-rewritten) client bytes; ordinary requests never enter this path.
+            // The `/compact` model redirect only pays off once the original model's prompt cache
+            // has gone cold: while it's warm, a cache-read on the original model is cheaper than a
+            // cold read on the (cheaper-per-token) redirect target. So suppress the redirect for a
+            // session we can prove is still warm; unknown freshness falls through to redirect.
+            let compact_cache_warm = cc_session_id
+                .as_deref()
+                .is_some_and(crate::statusline::session_cache_warm);
             let compact_plan = if provider == ProviderKind::Anthropic
                 && !self.compact_models.is_empty()
+                && !compact_cache_warm
             {
                 std::str::from_utf8(&bytes)
                     .ok()
@@ -1754,8 +1762,13 @@ mod imp {
                 .and_then(Value::as_str)
                 .unwrap_or_default()
                 .to_string();
+            // See the non-sub path: the compact redirect only rents once the cache is cold, so a
+            // proven-warm session keeps the original model and skips the candidate plan.
+            let compact_cache_warm = session_id
+                .as_deref()
+                .is_some_and(crate::statusline::session_cache_warm);
             let mut compact_candidates = crate::compact::detect(&anthropic)
-                .filter(|_| !self.compact_models.is_empty())
+                .filter(|_| !self.compact_models.is_empty() && !compact_cache_warm)
                 .map(|original| {
                     let tiers = llmtrim_core::config::sub_tiers_for(sub.as_str());
                     crate::compact::plan(&self.compact_models, &original, Some(sub), &tiers)

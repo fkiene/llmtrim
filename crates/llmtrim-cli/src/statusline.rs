@@ -466,6 +466,26 @@ pub(crate) fn session_sub_model(session_id: &str) -> Option<String> {
     row.last_model
 }
 
+/// Whether this session's prompt cache is *known* to still be warm: a recorded turn whose
+/// `last_ts` is within the TTL. Used to suppress the `/compact` model redirect, which only pays
+/// off once the original model's cache has gone cold — a warm cache-read (`0.1×`) on the original
+/// model beats a cold read/write on a cheaper redirect target. Fails safe: an unknown cache (no
+/// session row, an unparseable timestamp, or a build without the `breakdown` feature) returns
+/// `false`, so the redirect proceeds exactly as before — only a *proven* warm cache suppresses it.
+pub(crate) fn session_cache_warm(session_id: &str) -> bool {
+    session_row(session_id).is_some_and(|r| ts_within_ttl(&r.last_ts))
+}
+
+/// Whether an rfc3339 timestamp is newer than the cache TTL. The strict complement of
+/// [`cache_cold`]'s test, but note the *opposite* fail-safe on a bad timestamp: `cache_cold`
+/// treats unparseable as not-cold (don't warn on a glitch), whereas here unparseable is not-*warm*
+/// — the two gate opposite actions, and both must fail toward "act as if the cache is cold".
+fn ts_within_ttl(last_ts: &str) -> bool {
+    chrono::DateTime::parse_from_rfc3339(last_ts)
+        .map(|t| chrono::Utc::now().signed_duration_since(t).num_seconds() < CACHE_TTL_SECS)
+        .unwrap_or(false)
+}
+
 /// Decide the trim figure: this session's own savings when we have its row; idle (`None`) for a
 /// known Claude Code session with no recorded turn yet — *not* the lifetime figure, which would
 /// flash a misleading number for a beat before the first turn lands; and only the lifetime figure
@@ -1782,6 +1802,35 @@ mod tests {
         let stale =
             (chrono::Utc::now() - chrono::Duration::seconds(CACHE_TTL_SECS + 60)).to_rfc3339();
         assert!(cache_cold(&stale), "past the TTL ⇒ cold");
+    }
+
+    #[test]
+    fn ts_within_ttl_gates_the_compact_redirect() {
+        // The predicate behind `session_cache_warm` (its DB lookup isn't unit-testable). It must be
+        // the strict complement of `cache_cold` inside the TTL, but fail the *opposite* way on a bad
+        // timestamp: unknown ⇒ not warm ⇒ redirect still fires.
+        assert!(
+            !ts_within_ttl("garbage"),
+            "unparseable ⇒ not warm (redirect)"
+        );
+        assert!(
+            ts_within_ttl(&chrono::Utc::now().to_rfc3339()),
+            "just now ⇒ warm"
+        );
+        let stale =
+            (chrono::Utc::now() - chrono::Duration::seconds(CACHE_TTL_SECS + 60)).to_rfc3339();
+        assert!(!ts_within_ttl(&stale), "past the TTL ⇒ not warm (redirect)");
+        // Every point inside the TTL is warm here and not cold there — no boundary gap/overlap.
+        let fresh =
+            (chrono::Utc::now() - chrono::Duration::seconds(CACHE_TTL_SECS - 60)).to_rfc3339();
+        assert!(
+            ts_within_ttl(&fresh) && !cache_cold(&fresh),
+            "within TTL: warm, not cold"
+        );
+        assert!(
+            !ts_within_ttl(&stale) && cache_cold(&stale),
+            "past TTL: not warm, cold"
+        );
     }
 
     #[test]
