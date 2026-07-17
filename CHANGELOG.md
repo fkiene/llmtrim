@@ -6,6 +6,16 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Fixed
+
+- **`/compact` redirects to a cheaper model only when the prompt cache is cold.** The redirect
+  used to run on every `/compact`. But `/compact` re-sends the conversation Claude Code has been
+  caching against your selected model, so while that cache is warm a cache-read there is cheaper
+  than a cold read on a smaller model, so redirecting a warm compact cost more, not less. The
+  redirect now stays on your selected model when the session's last turn is within the cache TTL.
+  Unknown freshness (no session row yet, or a build without the `breakdown` feature) still
+  redirects, so the feature is never silently disabled.
+
 ## [0.11.2] - 2026-07-16
 
 ### Fixed

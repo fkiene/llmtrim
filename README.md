@@ -248,7 +248,7 @@ When `~/.claude` exists, `setup`, `update`, and `ensure` wire these. No separate
 |---|---|
 | Status line | Model, context gauge, trim %, rate limits, cache warm/cold |
 | Guard | Blocks one turn if a cold-cache resume would rewrite a huge context (and bill for it) |
-| `/compact` models | Prefer Haiku → Sonnet before your selected model |
+| `/compact` models | Prefer Haiku → Sonnet before your selected model, but only when the prompt cache is cold |
 | `/sub` | Per-window: `/sub on [optional:codex\|kimi\|grok]` · `/sub off` · `/sub status` |
 
 ```text
@@ -300,6 +300,8 @@ models = ["haiku", "sonnet"]
 ```
 
 Candidates run in order when they fit the compressed request. Claude's selected model is always the last fallback (do not put it in the list). Empty `models = []` records opt-out.
+
+The redirect only fires once the prompt cache has gone cold. `/compact` re-sends the conversation Claude Code has been caching against your selected model, so while that cache is warm a cache-read there costs less than a cold read on a smaller model, and the compact stays home. After the cache expires the cheaper model wins, so that is when the redirect takes over.
 
 </details>
 
