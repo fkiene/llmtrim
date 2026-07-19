@@ -570,12 +570,8 @@ pub fn run(requested: Option<u16>, force: bool) -> Result<()> {
     if manual_env {
         println!();
         println!("Export these in your shell yourself:");
-        println!("    export HTTPS_PROXY={proxy}");
-        println!("    export NO_PROXY={NO_PROXY}");
-        println!("    export NODE_EXTRA_CA_CERTS={ca}");
-        if let Some(b) = bundle.as_deref() {
-            println!("    export SSL_CERT_FILE={b}");
-            println!("    export CURL_CA_BUNDLE={b}");
+        for line in manual_env_lines(&proxy, &ca, bundle.as_deref()) {
+            println!("    {line}");
         }
     }
 
@@ -1586,6 +1582,66 @@ fn env_block(proxy: &str, ca: &str, bundle: Option<&str>, syntax: Syntax) -> Str
     }
 }
 
+/// The interceptor env as standalone, ungated shell lines — one `export`/`$env:` assignment
+/// per variable, no `BEGIN`/`END` markers and no `llmtrim _alive` liveness gate (unlike
+/// [`env_block`], this isn't a persisted block that must self-disable when the daemon later
+/// stops; it's a one-shot snippet the caller evals or copies immediately). Shared by `run`'s
+/// "no profile found" fallback and `print_env`, so both always report the same variables.
+fn manual_env_lines(proxy: &str, ca: &str, bundle: Option<&str>) -> Vec<String> {
+    #[cfg(not(windows))]
+    {
+        let mut lines = vec![
+            format!("export HTTPS_PROXY=\"{proxy}\""),
+            format!("export HTTP_PROXY=\"{proxy}\""),
+            format!("export NO_PROXY=\"{NO_PROXY}\""),
+            format!("export no_proxy=\"{NO_PROXY}\""),
+            format!("export NODE_EXTRA_CA_CERTS=\"{ca}\""),
+        ];
+        if let Some(b) = bundle {
+            lines.push(format!("export SSL_CERT_FILE=\"{b}\""));
+            lines.push(format!("export CURL_CA_BUNDLE=\"{b}\""));
+        }
+        lines
+    }
+    #[cfg(windows)]
+    {
+        let _ = bundle; // no combined bundle on Windows — see env_block's PowerShell arm
+        vec![
+            format!("$env:HTTPS_PROXY = \"{proxy}\""),
+            format!("$env:HTTP_PROXY = \"{proxy}\""),
+            format!("$env:NO_PROXY = \"{NO_PROXY}\""),
+            format!("$env:NODE_EXTRA_CA_CERTS = \"{ca}\""),
+        ]
+    }
+}
+
+/// `llmtrim setup --env` — print the interceptor environment variables `setup` would wire,
+/// then exit. No shell profile, autostart, or daemon changes; the CA (and, on POSIX, the
+/// combined CA bundle) are generated if missing so the printed paths are valid immediately.
+/// Port resolution mirrors `run`'s real precedence (`--port` > running daemon > already-
+/// configured env > scan from default) via [`resolve_port`], but skips the orphaned-port
+/// reclaim dance in `run` — that's tied to actually taking over a port to start a daemon,
+/// not to printing.
+pub fn print_env(requested: Option<u16>) -> Result<()> {
+    let running = crate::daemon::running();
+    let port = resolve_port(requested, running.as_ref().map(|s| s.port))?;
+    crate::serve::ensure_ca()?;
+    let ca_path = crate::serve::ca_cert_path()?;
+    let ca = ca_path.to_string_lossy().into_owned();
+    let proxy = format!("http://127.0.0.1:{port}");
+    #[cfg(not(windows))]
+    let bundle = ensure_ca_bundle(&ca_path)
+        .ok()
+        .flatten()
+        .map(|p| p.to_string_lossy().into_owned());
+    #[cfg(windows)]
+    let bundle: Option<String> = None;
+    for line in manual_env_lines(&proxy, &ca, bundle.as_deref()) {
+        println!("{line}");
+    }
+    Ok(())
+}
+
 /// Inner seam for [`write_profile_block`]: write into a profile file named by `shell` (the
 /// basename of `$SHELL`, e.g. `"bash"` → `.bashrc`, `"zsh"` → `.zshrc`) under `base` as the
 /// home directory. Sweeps stale blocks from all other candidates under `base` first, then
@@ -2012,6 +2068,52 @@ mod tests {
         assert!(b.contains("export SSL_CERT_FILE=\"/home/u/.llmtrim/ca-bundle.pem\""));
         assert!(b.contains("export CURL_CA_BUNDLE=\"/home/u/.llmtrim/ca-bundle.pem\""));
         assert!(b.trim_end().ends_with(END));
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn manual_env_lines_posix_omits_bundle_vars_when_none() {
+        let lines = manual_env_lines("http://127.0.0.1:8787", "/home/u/ca.pem", None);
+        assert!(lines.contains(&"export HTTPS_PROXY=\"http://127.0.0.1:8787\"".to_string()));
+        assert!(lines.contains(&"export HTTP_PROXY=\"http://127.0.0.1:8787\"".to_string()));
+        assert!(lines.contains(&format!("export NO_PROXY=\"{NO_PROXY}\"")));
+        assert!(lines.contains(&format!("export no_proxy=\"{NO_PROXY}\"")));
+        assert!(lines.contains(&"export NODE_EXTRA_CA_CERTS=\"/home/u/ca.pem\"".to_string()));
+        assert!(!lines.iter().any(|l| l.contains("SSL_CERT_FILE")));
+        assert!(!lines.iter().any(|l| l.contains("CURL_CA_BUNDLE")));
+        // Unlike env_block, this is a standalone eval-able snippet: no BEGIN/END markers,
+        // no `llmtrim _alive` liveness gate.
+        assert!(!lines.iter().any(|l| l.contains(BEGIN) || l.contains("_alive")));
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn manual_env_lines_posix_includes_bundle_vars_when_present() {
+        let lines = manual_env_lines(
+            "http://127.0.0.1:8787",
+            "/home/u/.llmtrim/ca.pem",
+            Some("/home/u/.llmtrim/ca-bundle.pem"),
+        );
+        assert!(
+            lines.contains(&"export SSL_CERT_FILE=\"/home/u/.llmtrim/ca-bundle.pem\"".to_string())
+        );
+        assert!(
+            lines
+                .contains(&"export CURL_CA_BUNDLE=\"/home/u/.llmtrim/ca-bundle.pem\"".to_string())
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn manual_env_lines_windows_uses_env_assignment_and_ignores_bundle() {
+        let lines = manual_env_lines(
+            "http://127.0.0.1:8787",
+            "C:\\Users\\u\\.llmtrim\\ca.pem",
+            Some("C:\\Users\\u\\.llmtrim\\ca-bundle.pem"),
+        );
+        assert!(lines.contains(&"$env:HTTPS_PROXY = \"http://127.0.0.1:8787\"".to_string()));
+        assert!(!lines.iter().any(|l| l.contains("SSL_CERT_FILE")));
+        assert!(!lines.iter().any(|l| l.contains("CURL_CA_BUNDLE")));
     }
 
     #[cfg(not(windows))] // system_ca_bundle/ensure_ca_bundle are POSIX-only (Windows uses the cert store)

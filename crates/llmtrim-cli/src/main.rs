@@ -168,6 +168,11 @@ enum Commands {
         /// up a new binary). By default setup leaves a healthy same-port daemon running.
         #[arg(long)]
         force: bool,
+        /// Print the environment variables setup would wire, then exit — no profile,
+        /// autostart, or daemon changes (the CA is still generated if missing, so the
+        /// printed paths are valid).
+        #[arg(long)]
+        env: bool,
     },
     /// Bring this machine to the recommended current state
     ///
@@ -1507,7 +1512,13 @@ fn run() -> Result<()> {
                 llmtrim::serve::run(port, force)?;
             }
         }
-        Commands::Setup { port, force } => llmtrim::setup::run(port, force)?,
+        Commands::Setup { port, force, env } => {
+            if env {
+                llmtrim::setup::print_env(port)?
+            } else {
+                llmtrim::setup::run(port, force)?
+            }
+        }
         Commands::Ensure { quiet } => llmtrim::ensure::run_cli(quiet)?,
         Commands::Uninstall { purge, keep_binary } => {
             llmtrim::setup::uninstall(purge, keep_binary)?
