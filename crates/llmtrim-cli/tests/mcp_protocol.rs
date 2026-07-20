@@ -17,8 +17,13 @@ async fn initialize_list_and_call_over_jsonrpc() {
 
     // The server side: spawn the real handler the `llmtrim mcp` command serves. We start
     // it through the same public entry the binary uses, over the duplex instead of stdio.
+    // Isolate the config too: a fixed built-in preset, so the test never reads (or fails on)
+    // the developer's `~/.llmtrim` config file. CI has no such file; a malformed local one
+    // used to fail this test while CI stayed green.
+    let config = llmtrim_core::config::DenseConfig::preset("auto").expect("built-in preset");
+
     let server = tokio::spawn(async move {
-        let service = llmtrim::mcp::test_server(db)
+        let service = llmtrim::mcp::test_server(db, config)
             .serve(server_transport)
             .await
             .expect("server handshake");
@@ -69,8 +74,8 @@ async fn initialize_list_and_call_over_jsonrpc() {
     }
 
     // llmtrim_compress: a real-shaped request comes back compressed with token deltas. We
-    // don't assert the input shrinks (the server honors ~/.llmtrim config, whose `auto`
-    // default may add an output-shaping instruction); the deterministic mapping is unit-tested.
+    // don't assert the input shrinks (the `auto` config may add an output-shaping
+    // instruction); the deterministic mapping is unit-tested.
     let request_body = json!({
         "model": "gpt-4o",
         "messages": [

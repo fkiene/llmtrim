@@ -23,12 +23,17 @@ pub use imp::{install, run};
 
 /// The MCP handler the `mcp` command serves, for protocol-level tests that drive it over
 /// an in-memory transport instead of stdio. `db` is an isolated ledger path so the test
-/// never writes to the user's real savings DB. Not a stable API: it exists only for the
-/// `tests/mcp_protocol.rs` integration test (which can't reach the private `mod imp`).
+/// never writes to the user's real savings DB, and `config` is a fixed compression config so
+/// the test never reads the developer's `~/.llmtrim` (a malformed one used to fail it). Not a
+/// stable API: it exists only for the `tests/mcp_protocol.rs` integration test (which can't
+/// reach the private `mod imp`).
 #[doc(hidden)]
 #[cfg(feature = "mcp")]
-pub fn test_server(db: std::path::PathBuf) -> impl rmcp::ServerHandler + Clone {
-    imp::server_at(db)
+pub fn test_server(
+    db: std::path::PathBuf,
+    config: llmtrim_core::config::DenseConfig,
+) -> impl rmcp::ServerHandler + Clone {
+    imp::server_at(db, config)
 }
 
 #[cfg(feature = "mcp")]
@@ -104,17 +109,35 @@ mod imp {
     #[derive(Clone)]
     pub(super) struct LlmtrimServer {
         db: Option<PathBuf>,
+        /// The compression config: `None` is the real one (`DenseConfig::load`, honoring
+        /// `~/.llmtrim` like every other front-end); `Some(c)` is a fixed config for tests,
+        /// so the protocol test never depends on the developer's config file.
+        config: Option<DenseConfig>,
     }
 
     pub(super) fn server() -> LlmtrimServer {
-        LlmtrimServer { db: None }
+        LlmtrimServer {
+            db: None,
+            config: None,
+        }
     }
 
-    pub(super) fn server_at(db: PathBuf) -> LlmtrimServer {
-        LlmtrimServer { db: Some(db) }
+    pub(super) fn server_at(db: PathBuf, config: DenseConfig) -> LlmtrimServer {
+        LlmtrimServer {
+            db: Some(db),
+            config: Some(config),
+        }
     }
 
     impl LlmtrimServer {
+        /// The config to compress under: the injected one, else the on-disk one.
+        fn config(&self) -> Result<DenseConfig, McpError> {
+            match &self.config {
+                Some(c) => Ok(c.clone()),
+                None => DenseConfig::load().map_err(internal),
+            }
+        }
+
         fn tracker(&self) -> Result<Tracker> {
             match &self.db {
                 Some(p) => Tracker::open_at(p),
@@ -139,7 +162,11 @@ mod imp {
             &self,
             Parameters(args): Parameters<CompressArgs>,
         ) -> Result<CallToolResult, McpError> {
-            let result = compress(&args.request.into_body(), args.provider.as_deref())?;
+            let result = compress_with(
+                &args.request.into_body(),
+                args.provider.as_deref(),
+                &self.config()?,
+            )?;
             self.record(&ledger_record(&result));
             ok_json(&compress_payload(&result))
         }
@@ -175,16 +202,21 @@ mod imp {
     )]
     impl ServerHandler for LlmtrimServer {}
 
-    /// Run the engine once, honoring `~/.llmtrim` config like the proxy and CLI. Pure: the
-    /// caller records the savings. A bad provider hint or malformed request comes back as a
+    /// Run the engine once against an explicit config. The seam the config-independent
+    /// callers use: no file is read, so a caller that already has a config (or a test that
+    /// wants a fixed one) never depends on the machine's `~/.llmtrim`. Pure: the caller
+    /// records the savings. A bad provider hint or malformed request comes back as a
     /// JSON-RPC error, never a panic.
-    fn compress(request: &str, provider: Option<&str>) -> Result<CompressResult, McpError> {
+    fn compress_with(
+        request: &str,
+        provider: Option<&str>,
+        config: &DenseConfig,
+    ) -> Result<CompressResult, McpError> {
         let kind = provider
             .map(ProviderKind::from_str)
             .transpose()
             .map_err(|e| McpError::invalid_params(e.to_string(), None))?;
-        let config = DenseConfig::load().map_err(internal)?;
-        llmtrim_core::compress_with_config(request, kind, &config)
+        llmtrim_core::compress_with_config(request, kind, config)
             .map_err(|e| McpError::invalid_params(e.to_string(), None))
     }
 
@@ -543,13 +575,17 @@ mod imp {
 
         #[test]
         fn bad_provider_is_invalid_params_not_panic() {
-            let err = compress(&req(), Some("not-a-provider")).unwrap_err();
+            let config = DenseConfig::preset("auto").expect("built-in preset");
+            let err = compress_with(&req(), Some("not-a-provider"), &config).unwrap_err();
             assert_eq!(err.code, rmcp::model::ErrorCode::INVALID_PARAMS);
         }
 
         #[test]
         fn malformed_request_is_an_error() {
-            let err = compress("{ not json", None).unwrap_err();
+            // A fixed config, not `DenseConfig::load()`: this test is about malformed JSON,
+            // not config loading, so it must not read (or fail on) the machine's config file.
+            let config = DenseConfig::preset("auto").expect("built-in preset");
+            let err = compress_with("{ not json", None, &config).unwrap_err();
             assert_eq!(err.code, rmcp::model::ErrorCode::INVALID_PARAMS);
         }
 
