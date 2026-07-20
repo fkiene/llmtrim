@@ -6,6 +6,13 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- **`llmtrim setup --env` creates CA files (if needed) and prints envvars** When this option is
+  used, setup ensures the local CA (and, on POSIX, the combined OS-trust bundle) exist, then
+  prints an evaluatable snippet — `export` lines on POSIX, `$env:` assignments on Windows — to
+  wire the interceptor into your current shell.
+
 ## [0.11.4] - 2026-07-18
 
 ### Added
