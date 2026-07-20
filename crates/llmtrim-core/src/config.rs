@@ -1202,6 +1202,53 @@ pub fn compact_models_configured() -> bool {
         .is_some()
 }
 
+/// Net `[` minus `]` on one TOML line, ignoring brackets that sit inside a string or after a
+/// `#` comment. Used to tell an open multi-line array (`models = [`) from a closed one
+/// (`models = ["haiku"]`) and to find where the open one ends.
+///
+/// Deliberately small: it handles basic (`"…"`, with `\` escapes) and literal (`'…'`, no
+/// escapes) strings, which is everything the value of `compact.models` can contain. Multi-line
+/// basic strings (`"""`) would need a cross-line state machine; a model name can't contain one,
+/// and mis-parsing one only means we copy a stale line through rather than corrupt the file.
+///
+/// This prevents *new* corruption; it does not repair a file already corrupted by the old
+/// writer. There the `models` line is itself complete, so nothing marks the orphaned tail as
+/// array leftovers rather than real config, and guessing risks deleting a user's keys. Such a
+/// file no longer parses, so llmtrim reports it and the user edits it by hand.
+fn bracket_depth_delta(line: &str) -> i32 {
+    let mut depth = 0i32;
+    let mut chars = line.chars();
+    while let Some(c) = chars.next() {
+        match c {
+            '#' => break,
+            '[' => depth += 1,
+            ']' => depth -= 1,
+            '"' => {
+                // Basic string: honor backslash escapes so `"a\"]"` doesn't end early.
+                while let Some(s) = chars.next() {
+                    match s {
+                        '\\' => {
+                            chars.next();
+                        }
+                        '"' => break,
+                        _ => {}
+                    }
+                }
+            }
+            '\'' => {
+                // Literal string: no escapes, runs to the next quote.
+                for s in chars.by_ref() {
+                    if s == '\'' {
+                        break;
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    depth
+}
+
 fn write_compact_models_at(path: &std::path::Path, models: &[String]) -> Result<()> {
     use anyhow::Context;
     if let Some(parent) = path.parent() {
@@ -1230,8 +1277,17 @@ fn write_compact_models_at(path: &std::path::Path, models: &[String]) -> Result<
     let mut in_compact = false;
     let mut compact_found = false;
     let mut replaced = false;
+    // Depth still owed by an old multi-line `models = [` we are replacing. While non-zero we
+    // swallow the continuation lines instead of copying them through: the replacement is a
+    // complete single-line array, so leaving `"haiku",` / `]` behind would strand them after it
+    // and make the file unparseable.
+    let mut pending_array = 0i32;
     let mut out = Vec::new();
     for raw in existing.lines() {
+        if pending_array > 0 {
+            pending_array += bracket_depth_delta(raw);
+            continue;
+        }
         let trimmed = raw.trim();
         let section = trimmed.split('#').next().unwrap_or_default().trim();
         if section.starts_with('[') {
@@ -1250,6 +1306,9 @@ fn write_compact_models_at(path: &std::path::Path, models: &[String]) -> Result<
         {
             out.push(line.clone());
             replaced = true;
+            // Only the value side counts: `models = [` opens an array, `models = ["a"]` doesn't.
+            let value = trimmed.split_once('=').map(|(_, v)| v).unwrap_or_default();
+            pending_array = bracket_depth_delta(value).max(0);
         } else {
             out.push(raw.to_string());
         }
@@ -2056,6 +2115,54 @@ mod tests {
         assert!(text.contains("# keep me"));
         assert!(text.find("models =").unwrap() < text.find("[sub]").unwrap());
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Rewriting a *multi-line* `models` array must consume its continuation lines. Replacing
+    /// only the `models = [` line strands `"haiku",` / `]` after the new single-line value and
+    /// produces a config llmtrim can no longer parse — which is how a real install ended up
+    /// with an unreadable file.
+    #[test]
+    fn compact_models_replaces_a_multiline_array_without_stranding_lines() {
+        let dir = std::env::temp_dir().join(format!(
+            "llmtrim-cfg-multiline-{}-{}",
+            std::process::id(),
+            line!()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("config.toml");
+        std::fs::write(
+            &path,
+            "capture_dir = \"/tmp/cap\"\n\n[compact]\nmodels = [\n    \"haiku\",\n    \"sonnet\",\n]\n\n[sub]\nactive = \"off\"\n",
+        )
+        .unwrap();
+        write_compact_models_at(&path, &["haiku".into(), "sonnet".into()]).unwrap();
+        let text = std::fs::read_to_string(&path).unwrap();
+        // Parses (the whole point) and holds the new value.
+        let file: toml::Value = toml::from_str(&text)
+            .unwrap_or_else(|e| panic!("rewritten config must parse, got {e}\n---\n{text}"));
+        assert_eq!(resolve_compact_models(Some(&file)), vec!["haiku", "sonnet"]);
+        // The old array's continuation lines are gone, not stranded below the replacement.
+        assert!(!text.contains("    \"haiku\","), "stranded line: {text}");
+        assert!(!text.contains("\n]"), "stranded bracket: {text}");
+        assert_eq!(text.matches("models =").count(), 1);
+        // Neighbouring keys and sections survive the surgical edit.
+        assert!(text.contains("capture_dir = \"/tmp/cap\""));
+        assert!(text.contains("[sub]") && text.contains("active = \"off\""));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn bracket_depth_delta_ignores_brackets_in_strings_and_comments() {
+        assert_eq!(bracket_depth_delta("models = ["), 1);
+        assert_eq!(bracket_depth_delta("models = [\"haiku\"]"), 0);
+        assert_eq!(bracket_depth_delta("]"), -1);
+        // Brackets inside strings and comments don't count.
+        assert_eq!(bracket_depth_delta("models = [\"a]b\"]"), 0);
+        assert_eq!(bracket_depth_delta("models = [] # [not an array]"), 0);
+        assert_eq!(bracket_depth_delta("x = 'a]b'"), 0);
+        // Escaped quote doesn't end the string early, so its `]` stays inert.
+        assert_eq!(bracket_depth_delta("x = \"a\\\"]\""), 0);
+        assert_eq!(bracket_depth_delta("nested = [[1], [2]]"), 0);
     }
 
     #[test]
