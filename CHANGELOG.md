@@ -6,6 +6,15 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Fixed
+
+- **`compact.models` no longer corrupts the config when it was written as a multi-line array.**
+  The writer replaced the single `models = [` line and left the array's continuation lines
+  behind, stranding `"haiku",` / `]` after the new value and producing a `config.toml` that
+  llmtrim could no longer parse. It now consumes the whole array. A file already damaged this
+  way still needs a manual edit: once the tail is orphaned nothing distinguishes it from real
+  config, so repairing it automatically would risk deleting keys.
+
 ### Added
 
 - **`llmtrim setup --env` creates CA files (if needed) and prints envvars** When this option is
