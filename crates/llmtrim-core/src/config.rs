@@ -1202,14 +1202,28 @@ pub fn compact_models_configured() -> bool {
         .is_some()
 }
 
+/// Whether `line` is a table header (`[compact]`, `[sub.codex.tiers]`) rather than array
+/// content. Used as a hard stop while skipping a multi-line array: an array left unterminated
+/// is already-invalid TOML, and bracket counting alone can never recover from it because a
+/// header nets to zero depth, so the skip would run to EOF and delete every later section.
+///
+/// A trailing comma or an unclosed bracket disqualifies, which is what separates a header from
+/// an array element line like `[1, 2],`.
+fn is_section_header(line: &str) -> bool {
+    let s = line.trim();
+    let s = s.split('#').next().unwrap_or_default().trim();
+    s.len() > 2 && s.starts_with('[') && s.ends_with(']') && !s.contains(',')
+}
+
 /// Net `[` minus `]` on one TOML line, ignoring brackets that sit inside a string or after a
 /// `#` comment. Used to tell an open multi-line array (`models = [`) from a closed one
 /// (`models = ["haiku"]`) and to find where the open one ends.
 ///
 /// Deliberately small: it handles basic (`"…"`, with `\` escapes) and literal (`'…'`, no
-/// escapes) strings, which is everything the value of `compact.models` can contain. Multi-line
-/// basic strings (`"""`) would need a cross-line state machine; a model name can't contain one,
-/// and mis-parsing one only means we copy a stale line through rather than corrupt the file.
+/// escapes) strings, which is everything the value of `compact.models` can contain. It is not a
+/// TOML parser. A multi-line basic string (`"""`) holding a `]` closes the count early and can
+/// strand a line — the same outcome the old writer had for that input, unreachable for a list
+/// of model names, and bounded by the [`is_section_header`] stop either way.
 ///
 /// This prevents *new* corruption; it does not repair a file already corrupted by the old
 /// writer. There the `models` line is itself complete, so nothing marks the orphaned tail as
@@ -1285,8 +1299,15 @@ fn write_compact_models_at(path: &std::path::Path, models: &[String]) -> Result<
     let mut out = Vec::new();
     for raw in existing.lines() {
         if pending_array > 0 {
-            pending_array += bracket_depth_delta(raw);
-            continue;
+            // A section header ends the swallow no matter what the brackets say. An array left
+            // unterminated (already-invalid TOML) would otherwise run to EOF and delete every
+            // later section: `[sub]` nets to zero depth, so counting alone never recovers.
+            if is_section_header(raw) {
+                pending_array = 0;
+            } else {
+                pending_array += bracket_depth_delta(raw);
+                continue;
+            }
         }
         let trimmed = raw.trim();
         let section = trimmed.split('#').next().unwrap_or_default().trim();
@@ -2149,6 +2170,76 @@ mod tests {
         assert!(text.contains("capture_dir = \"/tmp/cap\""));
         assert!(text.contains("[sub]") && text.contains("active = \"off\""));
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// An array left unterminated is already-invalid TOML, but the rewrite must still not eat
+    /// the rest of the file: a table header stops the skip, so later sections survive. Bracket
+    /// counting alone can't do this — `[sub]` nets to zero depth.
+    #[test]
+    fn compact_models_unterminated_array_stops_at_the_next_section() {
+        let dir = std::env::temp_dir().join(format!(
+            "llmtrim-cfg-unterminated-{}-{}",
+            std::process::id(),
+            line!()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("config.toml");
+        std::fs::write(
+            &path,
+            "[compact]\nmodels = [\n    \"haiku\",\n\n[sub]\nactive = \"off\"\nlast = \"grok\"\n",
+        )
+        .unwrap();
+        write_compact_models_at(&path, &["sonnet".into()]).unwrap();
+        let text = std::fs::read_to_string(&path).unwrap();
+        // The later section and every key under it survive.
+        assert!(text.contains("[sub]"), "later section deleted: {text}");
+        assert!(text.contains("active = \"off\""), "key deleted: {text}");
+        assert!(text.contains("last = \"grok\""), "key deleted: {text}");
+        let file: toml::Value = toml::from_str(&text)
+            .unwrap_or_else(|e| panic!("rewrite must parse, got {e}\n---\n{text}"));
+        assert_eq!(resolve_compact_models(Some(&file)), vec!["sonnet"]);
+    }
+
+    /// A file already damaged by the old writer is left exactly as-is apart from the value: the
+    /// orphaned tail is neither repaired nor deleted. The CHANGELOG promises this; pin it.
+    #[test]
+    fn compact_models_leaves_an_already_corrupted_tail_alone() {
+        let dir = std::env::temp_dir().join(format!(
+            "llmtrim-cfg-corrupt-{}-{}",
+            std::process::id(),
+            line!()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("config.toml");
+        std::fs::write(
+            &path,
+            "[compact]\nmodels = [\"haiku\", \"sonnet\"]\n    \"haiku\",\n]\n\n[sub]\nactive = \"off\"\n",
+        )
+        .unwrap();
+        write_compact_models_at(&path, &["opus".into()]).unwrap();
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(
+            text.contains("models = [\"opus\"]"),
+            "value not set: {text}"
+        );
+        // Untouched: no silent deletion of lines we can't classify.
+        assert!(text.contains("    \"haiku\","), "tail deleted: {text}");
+        assert!(text.contains("[sub]") && text.contains("active = \"off\""));
+    }
+
+    #[test]
+    fn is_section_header_accepts_tables_and_rejects_array_content() {
+        assert!(is_section_header("[compact]"));
+        assert!(is_section_header("  [sub.codex.tiers]  "));
+        assert!(is_section_header("[compact] # routing policy"));
+        assert!(!is_section_header("models = ["));
+        assert!(!is_section_header("    \"haiku\","));
+        assert!(
+            !is_section_header("[1, 2],"),
+            "array element is not a header"
+        );
+        assert!(!is_section_header("]"));
+        assert!(!is_section_header(""));
     }
 
     #[test]
