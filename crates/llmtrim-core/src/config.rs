@@ -1273,10 +1273,22 @@ fn write_compact_models_at(path: &std::path::Path, models: &[String]) -> Result<
     // vivifies as an *inline* table (`compact = { models = [...] }`). That parses, but it isn't
     // the shape the rest of the file uses, so seed a real table and mark it explicit to get a
     // written-out `[compact]` header instead.
-    if !doc.as_table().contains_key("compact") {
-        let mut table = toml_edit::Table::new();
-        table.set_implicit(false);
-        doc["compact"] = toml_edit::Item::Table(table);
+    // A `compact` that exists but isn't table-like (`compact = "haiku"`, `compact = 5`,
+    // `[[compact]]`) can't hold a `models` key. Indexing into it panics rather than returning
+    // `Item::None`, so refuse the same way an unparseable file is refused — `ensure` relies on
+    // getting an `Err` it can downgrade to a warning, and a panic would abort the whole run.
+    match doc.as_table().get("compact") {
+        Some(item) if !item.is_table_like() => anyhow::bail!(
+            "{} has a `compact` key that is not a table, so I can't set `compact.models`; \
+             fix it by hand",
+            path.display()
+        ),
+        Some(_) => {}
+        None => {
+            let mut table = toml_edit::Table::new();
+            table.set_implicit(false);
+            doc["compact"] = toml_edit::Item::Table(table);
+        }
     }
     let slot = &mut doc["compact"]["models"];
     // Reuse the old value's decor so a trailing comment on the key line survives the swap.
@@ -2272,6 +2284,41 @@ active = \"off\"
     /// on and produced plausible-looking output from them. `toml_edit` parses for real, so the
     /// writer now refuses and says so, and leaves the file byte-for-byte alone rather than
     /// guessing at a repair. Surfacing the breakage beats silently reshaping it.
+    /// A `compact` key that exists but can't hold `models` must come back as an error, not a
+    /// panic: `ensure` downgrades an `Err` to a warning, and a panic would abort the run.
+    #[test]
+    fn compact_models_refuses_a_non_table_compact_key() {
+        for (name, content) in [
+            ("string", "compact = \"haiku\"\n"),
+            ("integer", "compact = 5\n"),
+            ("array-of-tables", "[[compact]]\nx = 1\n"),
+        ] {
+            let dir = std::env::temp_dir().join(format!(
+                "llmtrim-cfg-nontable-{name}-{}-{}",
+                std::process::id(),
+                line!()
+            ));
+            std::fs::create_dir_all(&dir).unwrap();
+            let path = dir.join("config.toml");
+            std::fs::write(&path, content).unwrap();
+            let err = match write_compact_models_at(&path, &["opus".into()]) {
+                Ok(()) => panic!("{name}: must be an Err, not a rewrite"),
+                Err(e) => format!("{e:#}"),
+            };
+            assert!(
+                err.contains("not a table"),
+                "{name}: unexpected error: {err}"
+            );
+            // Refused means untouched.
+            assert_eq!(
+                std::fs::read_to_string(&path).unwrap(),
+                content,
+                "{name}: file was modified"
+            );
+            let _ = std::fs::remove_dir_all(&dir);
+        }
+    }
+
     #[test]
     fn compact_models_refuses_to_rewrite_an_unparseable_file() {
         for (name, content) in [
@@ -2292,8 +2339,10 @@ active = \"off\"
             std::fs::create_dir_all(&dir).unwrap();
             let path = dir.join("config.toml");
             std::fs::write(&path, content).unwrap();
-            let err = write_compact_models_at(&path, &["opus".into()])
-                .expect_err("{name}: invalid TOML must not be rewritten");
+            let err = match write_compact_models_at(&path, &["opus".into()]) {
+                Ok(()) => panic!("{name}: invalid TOML must not be rewritten"),
+                Err(e) => e,
+            };
             assert!(
                 format!("{err:#}").contains("not valid TOML"),
                 "{name}: unhelpful error: {err:#}"
