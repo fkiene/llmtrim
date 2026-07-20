@@ -40,6 +40,10 @@ serde = { version = "1.0.228", features = ["derive"] }
 serde_json = { version = "1.0.150", features = ["preserve_order", "arbitrary_precision"] }
 tiktoken-rs = "0.12.0"
 toml = "1.1.2"
+# Format-preserving TOML editor. Used by the config writers so an edit keeps the user's
+# comments, key order and whitespace. Version chosen to unify with the copy `toml` already
+# pulls in, so this is a direct dep on a crate that was already in the graph.
+toml_edit = "0.25.12"
 
 [workspace.lints.rust]
 # The compression core is pure-safe Rust; keep it that way (CI denies warnings).

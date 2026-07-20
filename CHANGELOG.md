@@ -8,6 +8,17 @@ All notable changes to this project are documented here. The format follows
 
 ### Fixed
 
+- **The config writers now preserve comments and key order, and no longer corrupt the file.**
+  All three (`compact.models`, `theme`, and the `sub` reroute editors) go through `toml_edit`,
+  a format-preserving TOML editor, instead of hand-rolled line edits and a full re-serialize.
+  Three bugs go with it: `compact.models = [...]` written in TOML's dotted top-level form was
+  invisible to the writer, which appended a second `[compact]` section and left the key defined
+  twice so the file stopped parsing; `llmtrim sub` re-serialized the whole document and silently
+  deleted every comment while reordering keys; and `theme` was matched anywhere in the file
+  rather than only at the top level. A writer handed a file that doesn't parse now reports it
+  and leaves the file untouched, rather than editing it blind and producing plausible-looking
+  output from an already-broken config.
+
 - **`compact.models` no longer corrupts the config when it was written as a multi-line array.**
   The writer replaced the single `models = [` line and left the array's continuation lines
   behind, stranding `"haiku",` / `]` after the new value and producing a `config.toml` that
