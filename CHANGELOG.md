@@ -8,6 +8,11 @@ All notable changes to this project are documented here. The format follows
 
 ### Fixed
 
+- **A legacy `sub` value keeps its formatting when migrated to a `[sub]` table.** Coercing
+  `sub = "codex"` or an inline `sub = { … }` emitted the header as `[sub ]`, leaking the space
+  that sat before the old `=`, and dropped a trailing comment on the line. The header is now
+  clean and the comment moves to its own line above it.
+
 - **The config writers now preserve comments and key order, and no longer corrupt the file.**
   All three (`compact.models`, `theme`, and the `sub` reroute editors) go through `toml_edit`,
   a format-preserving TOML editor, instead of hand-rolled line edits and a full re-serialize.

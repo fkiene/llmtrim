@@ -655,6 +655,32 @@ fn edit_sub_table_at(
         )
     })?;
 
+    // Salvage the old key's formatting before coercing it, while the key still exists. A
+    // `sub = "codex"  # my usual` becomes a `[sub]` header, and the header renders as the key's
+    // own repr: any whitespace the key carried (the space before `=`) would leak into it as
+    // `[sub ]`, and the trailing comment, which belongs to the *value*, would vanish with the
+    // value it is attached to. Clear the one and move the other above the new header.
+    let mut rescued_comment = String::new();
+    if let Some((mut key, item)) = doc.as_table_mut().get_key_value_mut("sub")
+        && !item.is_table()
+    {
+        let mut trailing = key
+            .leaf_decor()
+            .suffix()
+            .and_then(|s| s.as_str())
+            .unwrap_or_default()
+            .to_string();
+        if let Some(value) = item.as_value()
+            && let Some(s) = value.decor().suffix().and_then(|s| s.as_str())
+        {
+            trailing.push_str(s);
+        }
+        if let Some(hash) = trailing.find('#') {
+            rescued_comment = trailing[hash..].trim_end().to_string();
+        }
+        key.leaf_decor_mut().set_suffix("");
+    }
+
     let sub = doc
         .as_table_mut()
         .entry("sub")
@@ -678,6 +704,18 @@ fn edit_sub_table_at(
     let Some(sub_tbl) = sub.as_table_mut() else {
         anyhow::bail!("sub is not a table");
     };
+    // Re-attach a comment rescued from the coerced key, on its own line above the header.
+    if !rescued_comment.is_empty() {
+        let prefix = sub_tbl
+            .decor()
+            .prefix()
+            .and_then(|p| p.as_str())
+            .unwrap_or_default()
+            .to_string();
+        sub_tbl
+            .decor_mut()
+            .set_prefix(format!("{prefix}{rescued_comment}\n"));
+    }
     // A table holding only sub-tables stays implicit (no `[sub]` header emitted) unless asked.
     sub_tbl.set_implicit(false);
     edit(sub_tbl);
@@ -1525,6 +1563,58 @@ mod tests {
         let tiers = resolve_sub_tiers(&no_env, Some(&file));
         assert_eq!(tiers.get("opus").map(String::as_str), Some("gpt-5.5"));
         assert_eq!(tiers.get("sonnet").map(String::as_str), Some("gpt-5.4"));
+    }
+
+    /// Coercing a legacy `sub` value into a `[sub]` table must not leak the old key's spacing
+    /// into the header, and must not swallow a trailing comment that sat on the value.
+    #[test]
+    fn sub_coercion_keeps_a_clean_header_and_rescues_a_trailing_comment() {
+        for (name, before, want_comment) in [
+            ("inline", "sub = { active = \"grok\" }\n", None),
+            ("bare", "sub = \"grok\"\n", None),
+            (
+                "bare-with-comment",
+                "sub = \"grok\"  # my usual provider\n",
+                Some("# my usual provider"),
+            ),
+            (
+                "inline-with-comment",
+                "sub = { active = \"grok\" }  # inline one\n",
+                Some("# inline one"),
+            ),
+        ] {
+            let dir = std::env::temp_dir().join(format!(
+                "llmtrim-cfg-coerce-{name}-{}-{}",
+                std::process::id(),
+                line!()
+            ));
+            std::fs::create_dir_all(&dir).unwrap();
+            let path = dir.join("config.toml");
+            std::fs::write(&path, before).unwrap();
+            write_sub_mapping_at(&path, "codex", &Default::default()).unwrap();
+            let text = std::fs::read_to_string(&path).unwrap();
+
+            assert!(
+                !text.contains("[sub ]"),
+                "{name}: stray space leaked into the header:\n{text}"
+            );
+            assert!(text.contains("[sub]"), "{name}: no [sub] header:\n{text}");
+            if let Some(c) = want_comment {
+                assert!(text.contains(c), "{name}: comment lost:\n{text}");
+            }
+            // Still valid TOML with the new selection applied.
+            let parsed: toml::Value = toml::from_str(&text)
+                .unwrap_or_else(|e| panic!("{name}: must reparse, got {e}\n{text}"));
+            assert_eq!(
+                parsed
+                    .get("sub")
+                    .and_then(|s| s.get("active"))
+                    .and_then(toml::Value::as_str),
+                Some("codex"),
+                "{name}: active not set:\n{text}"
+            );
+            let _ = std::fs::remove_dir_all(&dir);
+        }
     }
 
     #[test]
