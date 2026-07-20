@@ -538,10 +538,11 @@ pub fn config_file_path() -> Option<PathBuf> {
 }
 
 /// Persist the subscription reroute selection: set the top-level `sub` key to `provider` and write
-/// the tier→model table under `[sub.<provider>.tiers]`. Other config keys/values are preserved
-/// (the file is parsed as TOML, mutated, and re-serialized — comments and key order are not
-/// preserved, matching a structured rewrite rather than [`save_theme`]'s surgical line edit).
-/// Creates the file and its parent directory if absent.
+/// the tier→model table under `[sub.<provider>.tiers]`. Other config keys/values are preserved, as are the
+/// user's comments, key order and whitespace: the edit goes through `toml_edit`, a
+/// format-preserving TOML editor, so untouched spans are written back verbatim. Creates the
+/// file and its parent directory if absent. Errors rather than rewriting a file that doesn't
+/// parse.
 pub fn write_sub_mapping(
     provider: &str,
     tiers: &std::collections::BTreeMap<String, String>,
@@ -561,14 +562,14 @@ pub fn disable_sub() -> Result<()> {
 
 fn disable_sub_at(path: &std::path::Path) -> Result<()> {
     edit_sub_table_at(path, |t| {
-        if let Some(active) = t.get("active").and_then(toml::Value::as_str)
+        if let Some(active) = t.get("active").and_then(|v| v.as_str())
             && active != "off"
             && !active.is_empty()
         {
             let last = active.to_string();
-            t.insert("last".to_string(), toml::Value::String(last));
+            t["last"] = toml_edit::value(last);
         }
-        t.insert("active".to_string(), toml::Value::String("off".to_string()));
+        t["active"] = toml_edit::value("off");
     })
 }
 
@@ -583,7 +584,7 @@ pub fn enable_sub(provider: &str) -> Result<()> {
 fn enable_sub_at(path: &std::path::Path, provider: &str) -> Result<()> {
     let provider = provider.to_string();
     edit_sub_table_at(path, |t| {
-        t.insert("active".to_string(), toml::Value::String(provider));
+        t["active"] = toml_edit::value(provider);
     })
 }
 
@@ -622,16 +623,18 @@ fn write_sub_mapping_at(
     // `sub` is stored as a table with `active` + per-provider `tiers` (the reader also accepts a
     // bare `sub = "codex"` string). Editing through `edit_sub_table_at` preserves any existing
     // `mode` and other providers' entries when the selection or preset is (re)written.
-    let mut tiers_tbl = toml::Table::new();
+    let mut tiers_tbl = toml_edit::Table::new();
     for (k, v) in tiers {
-        tiers_tbl.insert(k.clone(), toml::Value::String(v.clone()));
+        tiers_tbl[k] = toml_edit::value(v.clone());
     }
     let provider = provider.to_string();
     edit_sub_table_at(path, |t| {
-        t.insert("active".to_string(), toml::Value::String(provider.clone()));
-        let mut prov_tbl = toml::Table::new();
-        prov_tbl.insert("tiers".to_string(), toml::Value::Table(tiers_tbl));
-        t.insert(provider, toml::Value::Table(prov_tbl));
+        t["active"] = toml_edit::value(provider.clone());
+        // Reset this provider's preset wholesale, as documented, but keep the sibling
+        // providers' entries that live elsewhere in the sub table.
+        let mut prov_tbl = toml_edit::Table::new();
+        prov_tbl["tiers"] = toml_edit::Item::Table(tiers_tbl);
+        t[&provider] = toml_edit::Item::Table(prov_tbl);
     })
 }
 
@@ -639,33 +642,51 @@ fn write_sub_mapping_at(
 /// `{ active = "codex" }`, and `"off"` to an empty table), hand that table to `edit`, then write
 /// the whole doc back. Shared by the granular sub editors so each preserves the rest of the sub
 /// table (active provider, mode, other map entries) and the rest of the config file.
-fn edit_sub_table_at(path: &std::path::Path, edit: impl FnOnce(&mut toml::Table)) -> Result<()> {
+fn edit_sub_table_at(
+    path: &std::path::Path,
+    edit: impl FnOnce(&mut toml_edit::Table),
+) -> Result<()> {
     use anyhow::Context;
     let existing = std::fs::read_to_string(path).unwrap_or_default();
-    let mut doc: toml::Table = if existing.trim().is_empty() {
-        toml::Table::new()
-    } else {
-        existing
-            .parse()
-            .context("existing config is not valid TOML")?
+    let mut doc: toml_edit::DocumentMut = existing.parse().with_context(|| {
+        format!(
+            "{} is not valid TOML, so I won't rewrite it blind; fix it by hand",
+            path.display()
+        )
+    })?;
+
+    let sub = doc
+        .as_table_mut()
+        .entry("sub")
+        .or_insert_with(|| toml_edit::Item::Table(toml_edit::Table::new()));
+    if !sub.is_table() {
+        // Coerce the other accepted spellings into a table, in place so the key keeps its
+        // position and surrounding comments. A bare `sub = "codex"` migrates to
+        // `{ active = "codex" }`; `"off"` (and anything that isn't a table) starts empty. An
+        // inline `sub = { … }` converts without losing its entries.
+        let coerced = match sub.as_str() {
+            Some(active) if active != "off" && !active.is_empty() => {
+                let mut table = toml_edit::Table::new();
+                table["active"] = toml_edit::value(active);
+                table
+            }
+            Some(_) => toml_edit::Table::new(),
+            None => sub.clone().into_table().unwrap_or_default(),
+        };
+        *sub = toml_edit::Item::Table(coerced);
+    }
+    let Some(sub_tbl) = sub.as_table_mut() else {
+        anyhow::bail!("sub is not a table");
     };
-    let mut sub_tbl = match doc.remove("sub") {
-        Some(toml::Value::Table(t)) => t,
-        Some(toml::Value::String(s)) if s != "off" && !s.is_empty() => {
-            let mut t = toml::Table::new();
-            t.insert("active".to_string(), toml::Value::String(s));
-            t
-        }
-        _ => toml::Table::new(),
-    };
-    edit(&mut sub_tbl);
-    doc.insert("sub".to_string(), toml::Value::Table(sub_tbl));
+    // A table holding only sub-tables stays implicit (no `[sub]` header emitted) unless asked.
+    sub_tbl.set_implicit(false);
+    edit(sub_tbl);
+
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)
             .with_context(|| format!("creating config dir {}", parent.display()))?;
     }
-    let serialized = toml::to_string_pretty(&doc).context("serializing config")?;
-    std::fs::write(path, serialized).with_context(|| format!("writing {}", path.display()))?;
+    std::fs::write(path, doc.to_string()).with_context(|| format!("writing {}", path.display()))?;
     Ok(())
 }
 
@@ -677,19 +698,19 @@ pub fn write_sub_mode(fallback: bool) -> Result<()> {
     let path = config_path().ok_or_else(|| anyhow::anyhow!("no config path (HOME/XDG unset)"))?;
     let mode = if fallback { "fallback" } else { "always" };
     edit_sub_table_at(&path, |t| {
-        t.insert("mode".to_string(), toml::Value::String(mode.to_string()));
+        t["mode"] = toml_edit::value(mode);
     })
 }
 
 /// Persist the ordered provider chain used by `sub mode fallback`.
 pub fn write_sub_chain(providers: &[String]) -> Result<()> {
     let path = config_path().ok_or_else(|| anyhow::anyhow!("no config path (HOME/XDG unset)"))?;
-    let values = providers
+    let values: toml_edit::Array = providers
         .iter()
-        .map(|p| toml::Value::String(p.trim().to_ascii_lowercase()))
+        .map(|p| p.trim().to_ascii_lowercase())
         .collect();
     edit_sub_table_at(&path, |t| {
-        t.insert("chain".to_string(), toml::Value::Array(values));
+        t["chain"] = toml_edit::value(values);
     })
 }
 
@@ -700,15 +721,15 @@ pub fn write_sub_effort(provider: &str, level: &str) -> Result<()> {
     let (provider, level) = (provider.to_string(), level.to_ascii_lowercase());
     edit_sub_table_at(&path, |t| {
         let prov = t
-            .entry(provider)
-            .or_insert_with(|| toml::Value::Table(toml::Table::new()));
-        let Some(prov) = prov.as_table_mut() else {
+            .entry(&provider)
+            .or_insert_with(|| toml_edit::Item::Table(toml_edit::Table::new()));
+        let Some(prov) = prov.as_table_like_mut() else {
             return;
         };
         if level == "none" || level.is_empty() {
             prov.remove("effort");
         } else {
-            prov.insert("effort".to_string(), toml::Value::String(level));
+            prov.insert("effort", toml_edit::value(level));
         }
     })
 }
@@ -725,16 +746,16 @@ pub fn write_sub_map_entry(provider: &str, from: &str, to: &str) -> Result<()> {
     );
     edit_sub_table_at(&path, |t| {
         let prov = t
-            .entry(provider)
-            .or_insert_with(|| toml::Value::Table(toml::Table::new()));
-        let Some(prov) = prov.as_table_mut() else {
+            .entry(&provider)
+            .or_insert_with(|| toml_edit::Item::Table(toml_edit::Table::new()));
+        let Some(prov) = prov.as_table_like_mut() else {
             return;
         };
         let tiers = prov
-            .entry("tiers".to_string())
-            .or_insert_with(|| toml::Value::Table(toml::Table::new()));
-        if let Some(tiers) = tiers.as_table_mut() {
-            tiers.insert(from, toml::Value::String(to));
+            .entry("tiers")
+            .or_insert_with(|| toml_edit::Item::Table(toml_edit::Table::new()));
+        if let Some(tiers) = tiers.as_table_like_mut() {
+            tiers.insert(&from, toml_edit::value(to));
         }
     })
 }
@@ -746,9 +767,9 @@ pub fn remove_sub_map_entry(provider: &str, from: &str) -> Result<()> {
     edit_sub_table_at(&path, |t| {
         if let Some(tiers) = t
             .get_mut(&provider)
-            .and_then(toml::Value::as_table_mut)
+            .and_then(|p| p.as_table_like_mut())
             .and_then(|p| p.get_mut("tiers"))
-            .and_then(toml::Value::as_table_mut)
+            .and_then(|t| t.as_table_like_mut())
         {
             tiers.remove(&from);
         }
@@ -1202,67 +1223,19 @@ pub fn compact_models_configured() -> bool {
         .is_some()
 }
 
-/// Whether `line` is a table header (`[compact]`, `[sub.codex.tiers]`) rather than array
-/// content. Used as a hard stop while skipping a multi-line array: an array left unterminated
-/// is already-invalid TOML, and bracket counting alone can never recover from it because a
-/// header nets to zero depth, so the skip would run to EOF and delete every later section.
+/// Rewrite the `compact.models` list in `path`, preserving everything else about the file.
 ///
-/// A trailing comma or an unclosed bracket disqualifies, which is what separates a header from
-/// an array element line like `[1, 2],`.
-fn is_section_header(line: &str) -> bool {
-    let s = line.trim();
-    let s = s.split('#').next().unwrap_or_default().trim();
-    s.len() > 2 && s.starts_with('[') && s.ends_with(']') && !s.contains(',')
-}
-
-/// Net `[` minus `]` on one TOML line, ignoring brackets that sit inside a string or after a
-/// `#` comment. Used to tell an open multi-line array (`models = [`) from a closed one
-/// (`models = ["haiku"]`) and to find where the open one ends.
+/// Backed by `toml_edit`, a format-preserving TOML editor: it parses into a real document tree
+/// and writes back the untouched spans verbatim, so comments, key order and whitespace all
+/// survive. An earlier version hand-rolled a line scanner for that same reason, but a scanner
+/// can't see TOML structure, so each spelling of the key needed its own special case and the
+/// dotted top-level form (`compact.models = [...]`) was missed entirely — the writer appended a
+/// second `[compact]` section and left the key defined twice, which TOML rejects. Parsing for
+/// real makes the bare-key, dotted and multi-line-array forms one code path.
 ///
-/// Deliberately small: it handles basic (`"…"`, with `\` escapes) and literal (`'…'`, no
-/// escapes) strings, which is everything the value of `compact.models` can contain. It is not a
-/// TOML parser. A multi-line basic string (`"""`) holding a `]` closes the count early and can
-/// strand a line — the same outcome the old writer had for that input, unreachable for a list
-/// of model names, and bounded by the [`is_section_header`] stop either way.
-///
-/// This prevents *new* corruption; it does not repair a file already corrupted by the old
-/// writer. There the `models` line is itself complete, so nothing marks the orphaned tail as
-/// array leftovers rather than real config, and guessing risks deleting a user's keys. Such a
-/// file no longer parses, so llmtrim reports it and the user edits it by hand.
-fn bracket_depth_delta(line: &str) -> i32 {
-    let mut depth = 0i32;
-    let mut chars = line.chars();
-    while let Some(c) = chars.next() {
-        match c {
-            '#' => break,
-            '[' => depth += 1,
-            ']' => depth -= 1,
-            '"' => {
-                // Basic string: honor backslash escapes so `"a\"]"` doesn't end early.
-                while let Some(s) = chars.next() {
-                    match s {
-                        '\\' => {
-                            chars.next();
-                        }
-                        '"' => break,
-                        _ => {}
-                    }
-                }
-            }
-            '\'' => {
-                // Literal string: no escapes, runs to the next quote.
-                for s in chars.by_ref() {
-                    if s == '\'' {
-                        break;
-                    }
-                }
-            }
-            _ => {}
-        }
-    }
-    depth
-}
-
+/// Returns an error when the file doesn't parse rather than editing it blind. The scanner used
+/// to press on and produce plausible-looking output from an already-broken file; refusing is
+/// both safer and how the user learns the file needs a hand edit.
 fn write_compact_models_at(path: &std::path::Path, models: &[String]) -> Result<()> {
     use anyhow::Context;
     if let Some(parent) = path.parent() {
@@ -1279,72 +1252,54 @@ fn write_compact_models_at(path: &std::path::Path, models: &[String]) -> Result<
             }
             out
         });
-    let line = format!(
-        "models = [{}]",
-        values
-            .iter()
-            .map(|m| format!("{m:?}"))
-            .collect::<Vec<_>>()
-            .join(", ")
-    );
     let existing = std::fs::read_to_string(path).unwrap_or_default();
-    let mut in_compact = false;
-    let mut compact_found = false;
-    let mut replaced = false;
-    // Depth still owed by an old multi-line `models = [` we are replacing. While non-zero we
-    // swallow the continuation lines instead of copying them through: the replacement is a
-    // complete single-line array, so leaving `"haiku",` / `]` behind would strand them after it
-    // and make the file unparseable.
-    let mut pending_array = 0i32;
-    let mut out = Vec::new();
-    for raw in existing.lines() {
-        if pending_array > 0 {
-            // A section header ends the swallow no matter what the brackets say. An array left
-            // unterminated (already-invalid TOML) would otherwise run to EOF and delete every
-            // later section: `[sub]` nets to zero depth, so counting alone never recovers.
-            if is_section_header(raw) {
-                pending_array = 0;
-            } else {
-                pending_array += bracket_depth_delta(raw);
-                continue;
-            }
-        }
-        let trimmed = raw.trim();
-        let section = trimmed.split('#').next().unwrap_or_default().trim();
-        if section.starts_with('[') {
-            if in_compact && !replaced {
-                out.push(line.clone());
-                replaced = true;
-            }
-            in_compact = section == "[compact]";
-            compact_found |= in_compact;
-        }
-        if in_compact
-            && trimmed
-                .split('=')
-                .next()
-                .is_some_and(|key| key.trim() == "models")
-        {
-            out.push(line.clone());
-            replaced = true;
-            // Only the value side counts: `models = [` opens an array, `models = ["a"]` doesn't.
-            let value = trimmed.split_once('=').map(|(_, v)| v).unwrap_or_default();
-            pending_array = bracket_depth_delta(value).max(0);
-        } else {
-            out.push(raw.to_string());
+    let mut doc: toml_edit::DocumentMut = existing.parse().with_context(|| {
+        format!(
+            "{} is not valid TOML, so I won't rewrite it blind; fix it by hand",
+            path.display()
+        )
+    })?;
+
+    let mut array = toml_edit::Array::new();
+    for value in &values {
+        array.push(value.as_str());
+    }
+
+    // `doc["compact"]` resolves the bare `[compact]` table and the dotted `compact.models` form
+    // alike — in the document tree they are the same table, differing only in the rendering
+    // flags toml_edit already carries, so neither spelling needs a special case here.
+    //
+    // Only the absent case needs help: indexing a missing key leaves an `Item::None` that
+    // vivifies as an *inline* table (`compact = { models = [...] }`). That parses, but it isn't
+    // the shape the rest of the file uses, so seed a real table and mark it explicit to get a
+    // written-out `[compact]` header instead.
+    // A `compact` that exists but isn't table-like (`compact = "haiku"`, `compact = 5`,
+    // `[[compact]]`) can't hold a `models` key. Indexing into it panics rather than returning
+    // `Item::None`, so refuse the same way an unparseable file is refused — `ensure` relies on
+    // getting an `Err` it can downgrade to a warning, and a panic would abort the whole run.
+    match doc.as_table().get("compact") {
+        Some(item) if !item.is_table_like() => anyhow::bail!(
+            "{} has a `compact` key that is not a table, so I can't set `compact.models`; \
+             fix it by hand",
+            path.display()
+        ),
+        Some(_) => {}
+        None => {
+            let mut table = toml_edit::Table::new();
+            table.set_implicit(false);
+            doc["compact"] = toml_edit::Item::Table(table);
         }
     }
-    if !replaced {
-        if !out.is_empty() && !out.last().is_some_and(|existing| existing.is_empty()) {
-            out.push(String::new());
-        }
-        if !compact_found {
-            out.push("[compact]".to_string());
-        }
-        out.push(line);
+    let slot = &mut doc["compact"]["models"];
+    // Reuse the old value's decor so a trailing comment on the key line survives the swap.
+    let decor = slot.as_value().map(|v| v.decor().clone());
+    let mut value = toml_edit::Value::Array(array);
+    if let Some(decor) = decor {
+        *value.decor_mut() = decor;
     }
-    std::fs::write(path, format!("{}\n", out.join("\n")))
-        .with_context(|| format!("writing {}", path.display()))
+    *slot = toml_edit::Item::Value(value);
+
+    std::fs::write(path, doc.to_string()).with_context(|| format!("writing {}", path.display()))
 }
 
 /// Persist the breakdown-TUI `theme` choice to the config file's top-level `theme` key,
@@ -1364,25 +1319,22 @@ fn save_theme_at(path: &std::path::Path, name: &str) -> Result<()> {
             .with_context(|| format!("failed to create {}", dir.display()))?;
     }
     let existing = std::fs::read_to_string(path).unwrap_or_default();
-    let line = format!("theme = \"{name}\"");
-    let mut replaced = false;
-    let mut out: Vec<String> = existing
-        .lines()
-        .map(|l| {
-            if l.split('=').next().is_some_and(|k| k.trim() == "theme") {
-                replaced = true;
-                line.clone()
-            } else {
-                l.to_string()
-            }
-        })
-        .collect();
-    if !replaced {
-        out.push(line);
+    let mut doc: toml_edit::DocumentMut = existing.parse().with_context(|| {
+        format!(
+            "{} is not valid TOML, so I won't rewrite it blind; fix it by hand",
+            path.display()
+        )
+    })?;
+    // Reuse the old value's decor so a trailing comment on the key line survives the swap.
+    let slot = &mut doc["theme"];
+    let decor = slot.as_value().map(|v| v.decor().clone());
+    let mut value = toml_edit::Value::from(name);
+    if let Some(decor) = decor {
+        *value.decor_mut() = decor;
     }
-    let mut text = out.join("\n");
-    text.push('\n');
-    std::fs::write(path, text).with_context(|| format!("failed to write {}", path.display()))
+    *slot = toml_edit::Item::Value(value);
+    std::fs::write(path, doc.to_string())
+        .with_context(|| format!("failed to write {}", path.display()))
 }
 
 /// Canonicalize a user-supplied provider name to its wire-shape key (`openai` / `anthropic` /
@@ -1731,10 +1683,7 @@ mod tests {
         tiers.insert("opus".to_string(), "gpt-5.5".to_string());
         write_sub_mapping_at(&path, "codex", &tiers).unwrap();
         edit_sub_table_at(&path, |t| {
-            t.insert(
-                "mode".to_string(),
-                toml::Value::String("fallback".to_string()),
-            );
+            t["mode"] = toml_edit::value("fallback");
         })
         .unwrap();
 
@@ -1744,17 +1693,17 @@ mod tests {
         tt.insert(from.to_string(), to.to_string());
         edit_sub_table_at(&path, |t| {
             let prov = t
-                .entry(provider.to_string())
-                .or_insert_with(|| toml::Value::Table(toml::Table::new()));
+                .entry(provider)
+                .or_insert_with(|| toml_edit::Item::Table(toml_edit::Table::new()));
             let tiers = prov
-                .as_table_mut()
+                .as_table_like_mut()
                 .unwrap()
-                .entry("tiers".to_string())
-                .or_insert_with(|| toml::Value::Table(toml::Table::new()));
+                .entry("tiers")
+                .or_insert_with(|| toml_edit::Item::Table(toml_edit::Table::new()));
             tiers
-                .as_table_mut()
+                .as_table_like_mut()
                 .unwrap()
-                .insert(from.to_string(), toml::Value::String(to.to_string()));
+                .insert(from, toml_edit::value(to));
         })
         .unwrap();
 
@@ -1776,7 +1725,7 @@ mod tests {
         // Disabling reroute (active = "off", what `disable_sub` writes) must NOT wipe the mapping
         // or mode: re-enabling with the provider restores everything.
         edit_sub_table_at(&path, |t| {
-            t.insert("active".to_string(), toml::Value::String("off".to_string()));
+            t["active"] = toml_edit::value("off");
         })
         .unwrap();
         let off_file: toml::Value =
@@ -1787,10 +1736,7 @@ mod tests {
             Some("off")
         );
         edit_sub_table_at(&path, |t| {
-            t.insert(
-                "active".to_string(),
-                toml::Value::String("codex".to_string()),
-            );
+            t["active"] = toml_edit::value("codex");
         })
         .unwrap();
         let back: toml::Value = toml::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
@@ -1836,12 +1782,11 @@ mod tests {
         write_sub_mapping_at(&path, "codex", &tiers).unwrap();
         edit_sub_table_at(&path, |t| {
             let prov = t
-                .entry("codex".to_string())
-                .or_insert_with(|| toml::Value::Table(toml::Table::new()));
-            prov.as_table_mut().unwrap().insert(
-                "effort".to_string(),
-                toml::Value::String("medium".to_string()),
-            );
+                .entry("codex")
+                .or_insert_with(|| toml_edit::Item::Table(toml_edit::Table::new()));
+            prov.as_table_like_mut()
+                .unwrap()
+                .insert("effort", toml_edit::value("medium"));
         })
         .unwrap();
         let f: toml::Value = toml::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
@@ -2175,10 +2120,15 @@ mod tests {
     /// An array left unterminated is already-invalid TOML, but the rewrite must still not eat
     /// the rest of the file: a table header stops the skip, so later sections survive. Bracket
     /// counting alone can't do this — `[sub]` nets to zero depth.
+    /// The bug that started this: `compact.models = [...]` at the top level is the dotted
+    /// spelling of the same key as `models` under `[compact]`. The line scanner only knew the
+    /// bare form, so it appended a second `[compact]` section and left the key defined twice —
+    /// which TOML rejects, making the config unreadable. Parsing for real, the two spellings are
+    /// the same key and this is just an in-place value swap.
     #[test]
-    fn compact_models_unterminated_array_stops_at_the_next_section() {
+    fn compact_models_replaces_a_top_level_dotted_key() {
         let dir = std::env::temp_dir().join(format!(
-            "llmtrim-cfg-unterminated-{}-{}",
+            "llmtrim-cfg-dotted-{}-{}",
             std::process::id(),
             line!()
         ));
@@ -2186,26 +2136,28 @@ mod tests {
         let path = dir.join("config.toml");
         std::fs::write(
             &path,
-            "[compact]\nmodels = [\n    \"haiku\",\n\n[sub]\nactive = \"off\"\nlast = \"grok\"\n",
+            "capture_dir = \"/tmp/cap\"\ncompact.models = [\"haiku\"]\n\n[sub]\nactive = \"off\"\n",
         )
         .unwrap();
         write_compact_models_at(&path, &["sonnet".into()]).unwrap();
         let text = std::fs::read_to_string(&path).unwrap();
-        // The later section and every key under it survive.
-        assert!(text.contains("[sub]"), "later section deleted: {text}");
-        assert!(text.contains("active = \"off\""), "key deleted: {text}");
-        assert!(text.contains("last = \"grok\""), "key deleted: {text}");
         let file: toml::Value = toml::from_str(&text)
-            .unwrap_or_else(|e| panic!("rewrite must parse, got {e}\n---\n{text}"));
+            .unwrap_or_else(|e| panic!("rewritten config must parse, got {e}\n---\n{text}"));
         assert_eq!(resolve_compact_models(Some(&file)), vec!["sonnet"]);
+        // Replaced in place: one definition, and no duplicate `[compact]` appended.
+        assert_eq!(text.matches("models").count(), 1, "{text}");
+        assert!(!text.contains("[compact]"), "appended a section: {text}");
+        assert!(text.contains("capture_dir = \"/tmp/cap\""));
+        assert!(text.contains("[sub]") && text.contains("active = \"off\""));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// A file already damaged by the old writer is left exactly as-is apart from the value: the
-    /// orphaned tail is neither repaired nor deleted. The CHANGELOG promises this; pin it.
+    /// A dotted key's value can be a multi-line array too; it must be replaced whole, with no
+    /// continuation lines stranded after it.
     #[test]
-    fn compact_models_leaves_an_already_corrupted_tail_alone() {
+    fn compact_models_replaces_a_dotted_multiline_array() {
         let dir = std::env::temp_dir().join(format!(
-            "llmtrim-cfg-corrupt-{}-{}",
+            "llmtrim-cfg-dotted-multi-{}-{}",
             std::process::id(),
             line!()
         ));
@@ -2213,47 +2165,192 @@ mod tests {
         let path = dir.join("config.toml");
         std::fs::write(
             &path,
-            "[compact]\nmodels = [\"haiku\", \"sonnet\"]\n    \"haiku\",\n]\n\n[sub]\nactive = \"off\"\n",
+            "compact.models = [\n    \"haiku\",\n    \"sonnet\",\n]\n\n[sub]\nactive = \"off\"\n",
         )
         .unwrap();
-        write_compact_models_at(&path, &["opus".into()]).unwrap();
+        write_compact_models_at(&path, &["sonnet".into()]).unwrap();
         let text = std::fs::read_to_string(&path).unwrap();
-        assert!(
-            text.contains("models = [\"opus\"]"),
-            "value not set: {text}"
-        );
-        // Untouched: no silent deletion of lines we can't classify.
-        assert!(text.contains("    \"haiku\","), "tail deleted: {text}");
+        let file: toml::Value = toml::from_str(&text)
+            .unwrap_or_else(|e| panic!("rewritten config must parse, got {e}\n---\n{text}"));
+        assert_eq!(resolve_compact_models(Some(&file)), vec!["sonnet"]);
+        assert!(!text.contains("\"haiku\""), "stranded element: {text}");
+        assert_eq!(text.matches("models").count(), 1, "{text}");
         assert!(text.contains("[sub]") && text.contains("active = \"off\""));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// Inside a table, `compact.models` means `<table>.compact.models` — a key llmtrim does not
+    /// manage. It must survive untouched, with ours written to the real top-level location.
     #[test]
-    fn is_section_header_accepts_tables_and_rejects_array_content() {
-        assert!(is_section_header("[compact]"));
-        assert!(is_section_header("  [sub.codex.tiers]  "));
-        assert!(is_section_header("[compact] # routing policy"));
-        assert!(!is_section_header("models = ["));
-        assert!(!is_section_header("    \"haiku\","));
-        assert!(
-            !is_section_header("[1, 2],"),
-            "array element is not a header"
+    fn compact_models_ignores_a_dotted_key_inside_another_table() {
+        let dir = std::env::temp_dir().join(format!(
+            "llmtrim-cfg-dotted-nested-{}-{}",
+            std::process::id(),
+            line!()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("config.toml");
+        std::fs::write(&path, "[sub]\ncompact.models = [\"haiku\"]\n").unwrap();
+        write_compact_models_at(&path, &["sonnet".into()]).unwrap();
+        let text = std::fs::read_to_string(&path).unwrap();
+        let file: toml::Value = toml::from_str(&text)
+            .unwrap_or_else(|e| panic!("rewritten config must parse, got {e}\n---\n{text}"));
+        assert_eq!(resolve_compact_models(Some(&file)), vec!["sonnet"]);
+        // The foreign key keeps its value, nested where it was.
+        assert_eq!(
+            file.get("sub")
+                .and_then(|v| v.get("compact"))
+                .and_then(|v| v.get("models"))
+                .and_then(toml::Value::as_array)
+                .map(|a| a.len()),
+            Some(1),
+            "foreign key clobbered: {text}"
         );
-        assert!(!is_section_header("]"));
-        assert!(!is_section_header(""));
+        assert!(text.contains("[compact]"), "{text}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A fixture with comments in every awkward position, run through each of the three config
+    /// writers. Before `toml_edit` the sub writer re-serialized the whole document and dropped
+    /// all of these on the floor; the other two kept them only by never really parsing. Now all
+    /// three preserve comments, key order and the untouched sections verbatim.
+    #[test]
+    fn every_config_writer_preserves_comments_and_key_order() {
+        const FIXTURE: &str = "\
+# llmtrim config — header comment
+capture_dir = \"/tmp/cap\"
+
+# comment directly above the key
+theme = \"dark\" # trailing comment on the key line
+
+[compact]
+models = [
+    \"haiku\", # comment inside the array
+    \"sonnet\",
+]
+
+# comment between two sections
+
+[sub]
+active = \"off\"
+";
+        // Each writer, applied to the same fixture independently.
+        for name in ["compact", "theme", "sub"] {
+            let dir = std::env::temp_dir().join(format!(
+                "llmtrim-cfg-comments-{name}-{}-{}",
+                std::process::id(),
+                line!()
+            ));
+            std::fs::create_dir_all(&dir).unwrap();
+            let path = dir.join("config.toml");
+            std::fs::write(&path, FIXTURE).unwrap();
+            match name {
+                "compact" => write_compact_models_at(&path, &["opus".into()]).unwrap(),
+                "theme" => save_theme_at(&path, "light").unwrap(),
+                _ => {
+                    let mut tiers = std::collections::BTreeMap::new();
+                    tiers.insert("opus".to_string(), "gpt-5.5".to_string());
+                    write_sub_mapping_at(&path, "codex", &tiers).unwrap();
+                }
+            }
+            let text = std::fs::read_to_string(&path).unwrap();
+            toml::from_str::<toml::Value>(&text)
+                .unwrap_or_else(|e| panic!("{name}: must parse, got {e}\n---\n{text}"));
+            for comment in [
+                "# llmtrim config — header comment",
+                "# comment directly above the key",
+                "# trailing comment on the key line",
+                "# comment between two sections",
+            ] {
+                assert!(text.contains(comment), "{name} lost {comment:?}:\n{text}");
+            }
+            // Key order is preserved: nothing got sorted or hoisted.
+            let pos = |needle: &str| {
+                text.find(needle)
+                    .unwrap_or_else(|| panic!("{name}: {needle}"))
+            };
+            assert!(
+                pos("capture_dir") < pos("theme"),
+                "{name} reordered:\n{text}"
+            );
+            assert!(pos("theme") < pos("[compact]"), "{name} reordered:\n{text}");
+            assert!(pos("[compact]") < pos("[sub]"), "{name} reordered:\n{text}");
+            let _ = std::fs::remove_dir_all(&dir);
+        }
+    }
+
+    /// Both of these inputs are already-invalid TOML: an array left unterminated, and a file the
+    /// pre-`toml_edit` writer had corrupted by stranding an array tail. The line scanner pressed
+    /// on and produced plausible-looking output from them. `toml_edit` parses for real, so the
+    /// writer now refuses and says so, and leaves the file byte-for-byte alone rather than
+    /// guessing at a repair. Surfacing the breakage beats silently reshaping it.
+    /// A `compact` key that exists but can't hold `models` must come back as an error, not a
+    /// panic: `ensure` downgrades an `Err` to a warning, and a panic would abort the run.
+    #[test]
+    fn compact_models_refuses_a_non_table_compact_key() {
+        for (name, content) in [
+            ("string", "compact = \"haiku\"\n"),
+            ("integer", "compact = 5\n"),
+            ("array-of-tables", "[[compact]]\nx = 1\n"),
+        ] {
+            let dir = std::env::temp_dir().join(format!(
+                "llmtrim-cfg-nontable-{name}-{}-{}",
+                std::process::id(),
+                line!()
+            ));
+            std::fs::create_dir_all(&dir).unwrap();
+            let path = dir.join("config.toml");
+            std::fs::write(&path, content).unwrap();
+            let err = match write_compact_models_at(&path, &["opus".into()]) {
+                Ok(()) => panic!("{name}: must be an Err, not a rewrite"),
+                Err(e) => format!("{e:#}"),
+            };
+            assert!(
+                err.contains("not a table"),
+                "{name}: unexpected error: {err}"
+            );
+            // Refused means untouched.
+            assert_eq!(
+                std::fs::read_to_string(&path).unwrap(),
+                content,
+                "{name}: file was modified"
+            );
+            let _ = std::fs::remove_dir_all(&dir);
+        }
     }
 
     #[test]
-    fn bracket_depth_delta_ignores_brackets_in_strings_and_comments() {
-        assert_eq!(bracket_depth_delta("models = ["), 1);
-        assert_eq!(bracket_depth_delta("models = [\"haiku\"]"), 0);
-        assert_eq!(bracket_depth_delta("]"), -1);
-        // Brackets inside strings and comments don't count.
-        assert_eq!(bracket_depth_delta("models = [\"a]b\"]"), 0);
-        assert_eq!(bracket_depth_delta("models = [] # [not an array]"), 0);
-        assert_eq!(bracket_depth_delta("x = 'a]b'"), 0);
-        // Escaped quote doesn't end the string early, so its `]` stays inert.
-        assert_eq!(bracket_depth_delta("x = \"a\\\"]\""), 0);
-        assert_eq!(bracket_depth_delta("nested = [[1], [2]]"), 0);
+    fn compact_models_refuses_to_rewrite_an_unparseable_file() {
+        for (name, content) in [
+            (
+                "unterminated",
+                "[compact]\nmodels = [\n    \"haiku\",\n\n[sub]\nactive = \"off\"\nlast = \"grok\"\n",
+            ),
+            (
+                "stranded-tail",
+                "[compact]\nmodels = [\"haiku\", \"sonnet\"]\n    \"haiku\",\n]\n\n[sub]\nactive = \"off\"\n",
+            ),
+        ] {
+            let dir = std::env::temp_dir().join(format!(
+                "llmtrim-cfg-invalid-{name}-{}-{}",
+                std::process::id(),
+                line!()
+            ));
+            std::fs::create_dir_all(&dir).unwrap();
+            let path = dir.join("config.toml");
+            std::fs::write(&path, content).unwrap();
+            let err = match write_compact_models_at(&path, &["opus".into()]) {
+                Ok(()) => panic!("{name}: invalid TOML must not be rewritten"),
+                Err(e) => e,
+            };
+            assert!(
+                format!("{err:#}").contains("not valid TOML"),
+                "{name}: unhelpful error: {err:#}"
+            );
+            // Nothing was written, so no key of the user's was silently dropped or reshaped.
+            assert_eq!(std::fs::read_to_string(&path).unwrap(), content, "{name}");
+            let _ = std::fs::remove_dir_all(&dir);
+        }
     }
 
     #[test]

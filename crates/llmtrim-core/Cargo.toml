@@ -49,6 +49,7 @@ stop-words = "0.10.0"
 # so size-constrained targets (wasm) can drop it and fall back to the estimate tokenizer.
 tiktoken-rs = { workspace = true, optional = true }
 toml.workspace = true
+toml_edit.workspace = true
 # default-features off drops syntect/onig (a C dep pulled only by toon-format's `cli`
 # feature); the library encode/decode path we use is pure Rust and stays intact. Required
 # for the wasm32 build and a smaller dep graph everywhere.
