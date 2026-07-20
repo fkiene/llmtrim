@@ -13,6 +13,14 @@ All notable changes to this project are documented here. The format follows
   prints an evaluatable snippet — `export` lines on POSIX, `$env:` assignments on Windows — to
   wire the interceptor into your current shell.
 
+### Fixed
+
+- **The managed shell-profile block now single-quotes its values.** `setup` interpolated the proxy
+  URL and CA paths into bare double quotes, so a home directory or CA path containing `"`, `$`, a
+  backtick or a backslash produced a profile line that broke or expanded at shell start. Values
+  are now emitted as inert single-quoted literals on both the POSIX and PowerShell paths, matching
+  the quoting `setup --env` already used. Re-run `llmtrim setup` to rewrite an existing block.
+
 ## [0.11.4] - 2026-07-18
 
 ### Added

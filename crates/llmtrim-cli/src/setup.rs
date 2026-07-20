@@ -1553,39 +1553,61 @@ fn env_block(proxy: &str, ca: &str, bundle: Option<&str>, syntax: Syntax) -> Str
             // Indented to sit inside the liveness guard alongside the other exports.
             let native = bundle
                 .map(|b| {
+                    let b = posix_quote(b);
                     format!(
-                        "\x20   export SSL_CERT_FILE=\"{b}\"\n\
-                         \x20   export CURL_CA_BUNDLE=\"{b}\"\n"
+                        "\x20   export SSL_CERT_FILE={b}\n\
+                         \x20   export CURL_CA_BUNDLE={b}\n"
                     )
                 })
                 .unwrap_or_default();
+            let (proxy, ca, no_proxy) =
+                (posix_quote(proxy), posix_quote(ca), posix_quote(NO_PROXY));
             format!(
                 "{BEGIN}\n\
                  if command -v llmtrim >/dev/null 2>&1 && llmtrim _alive 2>/dev/null; then\n\
-                 \x20   export HTTPS_PROXY=\"{proxy}\"\n\
-                 \x20   export HTTP_PROXY=\"{proxy}\"\n\
-                 \x20   export NO_PROXY=\"{NO_PROXY}\"\n\
-                 \x20   export no_proxy=\"{NO_PROXY}\"\n\
-                 \x20   export NODE_EXTRA_CA_CERTS=\"{ca}\"\n\
+                 \x20   export HTTPS_PROXY={proxy}\n\
+                 \x20   export HTTP_PROXY={proxy}\n\
+                 \x20   export NO_PROXY={no_proxy}\n\
+                 \x20   export no_proxy={no_proxy}\n\
+                 \x20   export NODE_EXTRA_CA_CERTS={ca}\n\
                  {native}fi\n\
                  {END}\n"
             )
         }
-        Syntax::PowerShell => format!(
-            "{BEGIN}\n\
-             $env:HTTPS_PROXY = \"{proxy}\"\n\
-             $env:HTTP_PROXY = \"{proxy}\"\n\
-             $env:NO_PROXY = \"{NO_PROXY}\"\n\
-             $env:NODE_EXTRA_CA_CERTS = \"{ca}\"\n\
-             {END}\n"
-        ),
+        Syntax::PowerShell => {
+            let (proxy, ca, no_proxy) = (
+                powershell_quote(proxy),
+                powershell_quote(ca),
+                powershell_quote(NO_PROXY),
+            );
+            format!(
+                "{BEGIN}\n\
+                 $env:HTTPS_PROXY = {proxy}\n\
+                 $env:HTTP_PROXY = {proxy}\n\
+                 $env:NO_PROXY = {no_proxy}\n\
+                 $env:NODE_EXTRA_CA_CERTS = {ca}\n\
+                 {END}\n"
+            )
+        }
     }
 }
 
 /// Escape `s` for a single-quoted PowerShell literal: `'…'`, doubling any embedded `'`.
-#[cfg(windows)]
+/// Deliberately *not* `#[cfg]`-gated: [`env_block`]'s PowerShell arm is compiled and unit-tested
+/// on every platform, so this must exist in a POSIX build too.
 fn powershell_quote(s: &str) -> String {
     format!("'{}'", s.replace('\'', "''"))
+}
+
+/// Escape `s` for a single-quoted POSIX shell literal: `'…'`, closing/reopening around any
+/// embedded `'`. Inside single quotes nothing else is special — `$`, backtick, `\`, `"`, `;`
+/// are all literal — so this is safe for arbitrary paths.
+///
+/// Distinct from [`crate::statusline::shell_quote_path`], which is `#[cfg]`-split and emits
+/// *double* quotes on Windows: [`env_block`] emits POSIX syntax on every platform, so it needs
+/// a quoter that doesn't change shape with the build target.
+fn posix_quote(s: &str) -> String {
+    format!("'{}'", s.replace('\'', "'\"'\"'"))
 }
 
 /// The interceptor env as standalone, ungated shell lines — one `export`/`$env:` assignment
@@ -1593,12 +1615,12 @@ fn powershell_quote(s: &str) -> String {
 /// [`env_block`], this isn't a persisted block that must self-disable when the daemon later
 /// stops; it's a one-shot snippet the caller evals or copies immediately). Shared by `run`'s
 /// "no profile found" fallback and `print_env`, so both always report the same variables.
-/// Values are single-quoted (not `env_block`'s bare double quotes) since this snippet exists
-/// specifically to be `eval`'d.
+/// Values are single-quoted (as in `env_block`) since this snippet exists specifically to be
+/// `eval`'d.
 fn manual_env_lines(proxy: &str, ca: &str, bundle: Option<&str>) -> Vec<String> {
     #[cfg(not(windows))]
     {
-        use crate::statusline::shell_quote_path as q;
+        use self::posix_quote as q;
         let mut lines = vec![
             format!("export HTTPS_PROXY={}", q(proxy)),
             format!("export HTTP_PROXY={}", q(proxy)),
@@ -2072,11 +2094,11 @@ mod tests {
             None,
             Syntax::Posix,
         );
-        assert!(b.contains("export HTTPS_PROXY=\"http://127.0.0.1:8787\""));
-        assert!(b.contains("export NODE_EXTRA_CA_CERTS=\"/home/u/ca.pem\""));
+        assert!(b.contains("export HTTPS_PROXY='http://127.0.0.1:8787'"));
+        assert!(b.contains("export NODE_EXTRA_CA_CERTS='/home/u/ca.pem'"));
         // LAN/local bypass travels with the proxy, in both casings tools read.
-        assert!(b.contains(&format!("export NO_PROXY=\"{NO_PROXY}\"")));
-        assert!(b.contains(&format!("export no_proxy=\"{NO_PROXY}\"")));
+        assert!(b.contains(&format!("export NO_PROXY='{NO_PROXY}'")));
+        assert!(b.contains(&format!("export no_proxy='{NO_PROXY}'")));
         assert!(b.starts_with(BEGIN) && b.trim_end().ends_with(END));
         // No bundle → native TLS vars are omitted (a CA-only file would break tunneled hosts).
         assert!(!b.contains("SSL_CERT_FILE"));
@@ -2092,9 +2114,9 @@ mod tests {
             Syntax::Posix,
         );
         // Node keeps NODE_EXTRA_CA_CERTS; native clients (curl, rustls) get the full bundle.
-        assert!(b.contains("export NODE_EXTRA_CA_CERTS=\"/home/u/.llmtrim/ca.pem\""));
-        assert!(b.contains("export SSL_CERT_FILE=\"/home/u/.llmtrim/ca-bundle.pem\""));
-        assert!(b.contains("export CURL_CA_BUNDLE=\"/home/u/.llmtrim/ca-bundle.pem\""));
+        assert!(b.contains("export NODE_EXTRA_CA_CERTS='/home/u/.llmtrim/ca.pem'"));
+        assert!(b.contains("export SSL_CERT_FILE='/home/u/.llmtrim/ca-bundle.pem'"));
+        assert!(b.contains("export CURL_CA_BUNDLE='/home/u/.llmtrim/ca-bundle.pem'"));
         assert!(b.trim_end().ends_with(END));
     }
 
@@ -2254,6 +2276,72 @@ mod tests {
         );
     }
 
+    /// A CA path or home dir carrying shell metacharacters must land in the profile as an inert
+    /// literal — no command substitution, no variable expansion, no statement break.
+    #[test]
+    fn env_block_posix_quotes_hostile_values() {
+        let hostile = "/home/$(whoami)/`id`/a;b/it's/\"q\"/back\\slash/ca.pem";
+        let b = env_block(
+            "http://127.0.0.1:8787",
+            hostile,
+            Some(hostile),
+            Syntax::Posix,
+        );
+        // Every occurrence sits inside single quotes, with embedded `'` broken out and back in.
+        let quoted = "'/home/$(whoami)/`id`/a;b/it'\"'\"'s/\"q\"/back\\slash/ca.pem'";
+        assert!(
+            b.contains(&format!("export NODE_EXTRA_CA_CERTS={quoted}")),
+            "hostile CA path not safely quoted: {b}"
+        );
+        assert!(b.contains(&format!("export SSL_CERT_FILE={quoted}")));
+        // No bare interpolation survived anywhere in the block.
+        assert!(
+            !b.contains("=\"/home/"),
+            "value emitted in double quotes: {b}"
+        );
+        // And a real shell agrees: the block parses, and the value comes back byte-identical
+        // (no substitution, no expansion, no statement break).
+        let line = b
+            .lines()
+            .find(|l| l.trim_start().starts_with("export NODE_EXTRA_CA_CERTS="))
+            .expect("CA export present");
+        if let Ok(out) = std::process::Command::new("sh")
+            .arg("-c")
+            .arg(format!("{line}\nprintf %s \"$NODE_EXTRA_CA_CERTS\""))
+            .output()
+        {
+            assert!(out.status.success(), "sh rejected {line:?}");
+            assert_eq!(String::from_utf8_lossy(&out.stdout), hostile);
+        }
+    }
+
+    /// The same hostile values through the PowerShell arm: single-quoted literals with `'`
+    /// doubled, so `$(...)`, backticks and `;` stay inert.
+    #[test]
+    fn env_block_powershell_quotes_hostile_values() {
+        let hostile = "C:\\Users\\$(whoami)\\`id`\\a;b\\it's\\\"q\"\\ca.pem";
+        let b = env_block("http://127.0.0.1:8787", hostile, None, Syntax::PowerShell);
+        let quoted = "'C:\\Users\\$(whoami)\\`id`\\a;b\\it''s\\\"q\"\\ca.pem'";
+        assert!(
+            b.contains(&format!("$env:NODE_EXTRA_CA_CERTS = {quoted}")),
+            "hostile CA path not safely quoted: {b}"
+        );
+        assert!(
+            !b.contains(" = \"C:"),
+            "value emitted in double quotes: {b}"
+        );
+    }
+
+    /// The port must still be readable back out of a single-quoted block — `parse_proxy_port`
+    /// keys off `127.0.0.1:`, which quoting doesn't touch.
+    #[test]
+    fn parse_proxy_port_reads_single_quoted_block() {
+        for syntax in [Syntax::Posix, Syntax::PowerShell] {
+            let b = env_block("http://127.0.0.1:8787", "/home/u/ca.pem", None, syntax);
+            assert_eq!(parse_proxy_port(&b), Some(8787));
+        }
+    }
+
     #[test]
     fn env_block_powershell_uses_env_assignment() {
         let b = env_block(
@@ -2262,9 +2350,9 @@ mod tests {
             None,
             Syntax::PowerShell,
         );
-        assert!(b.contains("$env:HTTPS_PROXY = \"http://127.0.0.1:8787\""));
-        assert!(b.contains("$env:NODE_EXTRA_CA_CERTS = \"C:\\Users\\u\\ca.pem\""));
-        assert!(b.contains(&format!("$env:NO_PROXY = \"{NO_PROXY}\"")));
+        assert!(b.contains("$env:HTTPS_PROXY = 'http://127.0.0.1:8787'"));
+        assert!(b.contains("$env:NODE_EXTRA_CA_CERTS = 'C:\\Users\\u\\ca.pem'"));
+        assert!(b.contains(&format!("$env:NO_PROXY = '{NO_PROXY}'")));
         assert!(!b.contains("export ")); // no posix syntax leaked in
     }
 
@@ -2520,11 +2608,11 @@ mod tests {
         assert!(content.contains(END), "END marker missing");
         // POSIX export syntax.
         assert!(
-            content.contains(&format!("export HTTPS_PROXY=\"{proxy}\"")),
+            content.contains(&format!("export HTTPS_PROXY='{proxy}'")),
             "proxy export missing"
         );
         assert!(
-            content.contains(&format!("export NODE_EXTRA_CA_CERTS=\"{ca}\"")),
+            content.contains(&format!("export NODE_EXTRA_CA_CERTS='{ca}'")),
             "CA export missing"
         );
     }
@@ -2692,9 +2780,9 @@ mod tests {
 
     // ── env_block syntax verification ───────────────────────────────────────────────
 
-    /// POSIX block: the env lines are valid `export KEY="value"` lines, wrapped in the daemon
+    /// POSIX block: the env lines are valid `export KEY='value'` lines, wrapped in the daemon
     /// liveness guard (`if … ; then` / `fi`). Every non-marker line is either the guard, the
-    /// closing `fi`, or an export.
+    /// closing `fi`, or an export. Values are single-quoted so hostile paths can't expand.
     #[test]
     fn env_block_posix_all_lines_are_valid_exports() {
         let proxy = "http://127.0.0.1:8787";
@@ -2707,7 +2795,7 @@ mod tests {
         for line in &inner {
             let trimmed = line.trim_start();
             let is_guard = trimmed.starts_with("if ") || trimmed == "fi";
-            let is_export = trimmed.starts_with("export ") && trimmed.contains("=\"");
+            let is_export = trimmed.starts_with("export ") && trimmed.contains("='");
             assert!(
                 is_guard || is_export,
                 "line is neither the liveness guard nor a valid export: {line:?}"
@@ -2727,7 +2815,7 @@ mod tests {
         assert!(!inner.is_empty(), "no inner lines in PowerShell block");
         for line in &inner {
             assert!(
-                line.starts_with("$env:") && line.contains(" = \""),
+                line.starts_with("$env:") && line.contains(" = '"),
                 "line is not a valid PowerShell env assignment: {line:?}"
             );
             assert!(
