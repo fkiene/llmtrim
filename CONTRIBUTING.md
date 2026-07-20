@@ -64,6 +64,15 @@ Stages implement the `Transform` trait (`src/gate.rs`) and are assembled in
 
 Lossy stages stay **off by default** and are quality-checked offline (see README §6).
 
+## Editing the user's config file
+
+Read with `toml`, write with `toml_edit`, and never write back a parsed `toml::Value`.
+
+`config.toml` is hand-edited, so it carries comments, key order, and spacing that belong to
+the user. `toml_edit` edits the document in place and keeps them; parsing to `toml::Value` and
+re-serializing throws them away. That failure is silent, since the output is valid TOML that
+round-trips cleanly, so tests pass while the user's comments disappear.
+
 ## Before a large change
 
 Open an issue first for anything beyond a small fix. Describe the problem and the approach

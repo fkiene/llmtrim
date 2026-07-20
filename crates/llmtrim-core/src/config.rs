@@ -3,6 +3,20 @@
 //! Config resolves from `LLMTRIM_PRESET` / a `preset = "<name>"` key (a named profile) or the
 //! per-stage flags in a TOML file (`LLMTRIM_CONFIG` or the platform config dir); with neither,
 //! the default is `auto` (shape-routing). See [`DenseConfig::load`].
+//!
+//! # Two TOML crates, on purpose
+//!
+//! **Read with `toml`. Write with `toml_edit`. Never write back a parsed `toml::Value`.**
+//!
+//! Reads use `toml`, which has serde integration and an ergonomic `Value` API. Writes go
+//! through `toml_edit`, which edits a document in place and so preserves the comments, key
+//! order, and spacing a hand-edited config file carries.
+//!
+//! The rule exists because breaking it is silent. Parsing to `toml::Value` and re-serializing
+//! with `to_string_pretty` produces valid TOML and passes any round-trip test, while deleting
+//! every comment the user wrote. `edit_sub_table_at` did exactly that on every `llmtrim sub`
+//! invocation until #200, and its own doc comment recorded the loss as if it were a design
+//! choice. A new writer that copies the surrounding read code will reintroduce it.
 
 use std::path::PathBuf;
 use std::str::FromStr;
