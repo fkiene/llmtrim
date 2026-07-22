@@ -128,8 +128,9 @@ pub fn run(raw: Vec<String>) -> Result<()> {
     }
 
     // The child inherits our environment as-is: post-setup that already contains
-    // HTTPS_PROXY + the CA trust vars, which is the entire interception mechanism. We add
-    // nothing agent-specific.
+    // HTTPS_PROXY + the CA trust vars, which is the entire interception mechanism.
+    // When global sub is always-on, also inject a dummy Anthropic auth token so Claude
+    // Code skips OAuth (same idea as claude-code-proxy's ANTHROPIC_AUTH_TOKEN=unused).
     eprintln!(
         "{}",
         ui::paint(color, Tone::Dim, &format!("llmtrim wrap → {}", inv.agent))
@@ -138,28 +139,48 @@ pub fn run(raw: Vec<String>) -> Result<()> {
     exec_agent(&inv)
 }
 
+/// True when the agent binary looks like Claude Code (not Codex/Gemini/etc.).
+fn agent_is_claude(agent: &str) -> bool {
+    let base = agent
+        .rsplit(['/', '\\'])
+        .next()
+        .unwrap_or(agent)
+        .to_ascii_lowercase();
+    base == "claude" || base.starts_with("claude-") || base == "claude.exe"
+}
+
 /// Launch the agent and propagate its exit code. This is the real-IO entrypoint (it spawns
 /// a subprocess), so it is left uncovered by unit tests — the testable logic lives in
 /// `parse_invocation` / `readiness`, which are tested below.
 fn exec_agent(inv: &WrapInvocation) -> Result<()> {
-    let status = std::process::Command::new(&inv.agent)
-        .args(&inv.args)
-        .status()
-        .with_context(|| {
-            if KNOWN_AGENTS.contains(&inv.agent.as_str()) {
-                format!(
-                    "failed to launch `{}`: is it installed and on your PATH?",
-                    inv.agent
-                )
-            } else {
-                format!(
-                    "failed to launch `{}`: not found on PATH (pass an installed binary, \
-                     e.g. one of: {})",
-                    inv.agent,
-                    KNOWN_AGENTS.join(", ")
-                )
-            }
-        })?;
+    let mut cmd = std::process::Command::new(&inv.agent);
+    cmd.args(&inv.args);
+    // Always-sub skip-login: Claude Code must not require a live Anthropic OAuth session.
+    // Only inject for Claude-ish binaries — never pollute codex/gemini/etc.
+    // Prefer an already-set user value; only inject when missing so a real key still wins.
+    if llmtrim_core::config::sub_skip_anthropic_login() && agent_is_claude(&inv.agent) {
+        if std::env::var_os("ANTHROPIC_AUTH_TOKEN").is_none() {
+            cmd.env(
+                "ANTHROPIC_AUTH_TOKEN",
+                crate::statusline::SUB_AUTH_TOKEN_VALUE,
+            );
+        }
+    }
+    let status = cmd.status().with_context(|| {
+        if KNOWN_AGENTS.contains(&inv.agent.as_str()) {
+            format!(
+                "failed to launch `{}`: is it installed and on your PATH?",
+                inv.agent
+            )
+        } else {
+            format!(
+                "failed to launch `{}`: not found on PATH (pass an installed binary, \
+                 e.g. one of: {})",
+                inv.agent,
+                KNOWN_AGENTS.join(", ")
+            )
+        }
+    })?;
 
     // Per the repo's exit-code rule: mirror the child's status so CI/scripts see the truth.
     std::process::exit(status.code().unwrap_or(1));
@@ -225,5 +246,16 @@ mod tests {
     fn readiness_env_unwired_takes_precedence() {
         assert_eq!(readiness(false, false), Readiness::EnvUnwired);
         assert_eq!(readiness(true, false), Readiness::EnvUnwired);
+    }
+
+    #[test]
+    fn agent_is_claude_matches_claude_binaries_only() {
+        assert!(agent_is_claude("claude"));
+        assert!(agent_is_claude("/usr/bin/claude"));
+        assert!(agent_is_claude("claude-2"));
+        assert!(agent_is_claude(r"C:\Tools\claude.exe"));
+        assert!(!agent_is_claude("codex"));
+        assert!(!agent_is_claude("gemini"));
+        assert!(!agent_is_claude("/usr/bin/aider"));
     }
 }

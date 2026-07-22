@@ -413,6 +413,52 @@ pub fn apply(opts: Options) -> Result<Report> {
             .push((ui::OK, "Compact".into(), "configured".into()));
     }
 
+    // Always-sub skip-login: keep Claude Code's dummy Anthropic auth in sync.
+    if claude {
+        let want = llmtrim_core::config::sub_skip_anthropic_login();
+        match crate::statusline::sync_sub_auth_env(want) {
+            Ok(crate::statusline::SubAuthEnvChange::Injected) => {
+                report.applied.push("sub_auth_env");
+                report.rows.push((
+                    ui::OK,
+                    "Claude auth".into(),
+                    "dummy token set · no Anthropic /login · connectors disabled".into(),
+                ));
+            }
+            Ok(crate::statusline::SubAuthEnvChange::Removed) => {
+                report.applied.push("sub_auth_env");
+                report.rows.push((
+                    ui::OK,
+                    "Claude auth".into(),
+                    "dummy ANTHROPIC_AUTH_TOKEN removed".into(),
+                ));
+            }
+            Ok(crate::statusline::SubAuthEnvChange::Unchanged) if want => {
+                use crate::statusline::SubAuthEnvPresence;
+                let detail = match crate::statusline::sub_auth_env_presence() {
+                    SubAuthEnvPresence::Ours => {
+                        "skip-login active · connectors disabled".to_string()
+                    }
+                    SubAuthEnvPresence::Foreign => {
+                        "skip-login wanted, foreign ANTHROPIC_AUTH_TOKEN left alone".to_string()
+                    }
+                    SubAuthEnvPresence::Absent | SubAuthEnvPresence::Unknown => {
+                        "skip-login wanted, dummy token not in settings yet".to_string()
+                    }
+                };
+                report
+                    .rows
+                    .push((ui::OK, "Claude auth".into(), detail));
+            }
+            Ok(_) => {}
+            Err(e) => report.rows.push((
+                ui::WARN,
+                "Claude auth".into(),
+                format!("could not update settings: {e:#}"),
+            )),
+        }
+    }
+
     // Tray autostart when binary is present (explicit ensure/setup only).
     if opts.install_missing && crate::tray::tray_binary().is_some() && !state.opt_out.tray_autostart
     {

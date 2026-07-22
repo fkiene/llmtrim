@@ -1248,6 +1248,169 @@ pub fn uninstall() -> Result<()> {
     Ok(())
 }
 
+// ── sub always-on: skip Claude Code's Anthropic OAuth ─────────────────────────
+//
+// Claude Code gates every turn (including `/compact`) on a live Anthropic OAuth session even
+// when llmtrim rewrites the request to Grok/Codex/Kimi. claude-code-proxy avoids that by
+// launching Claude with `ANTHROPIC_AUTH_TOKEN=unused`. We do the same via Claude's own
+// `settings.json` `env` block when global `sub` is always-on *and* `sub.anthropic_login = skip`
+// (the default) — Claude never starts the OAuth flow, and the MITM still strips the dummy token
+// and injects the real provider token.
+//
+// Trade-off: Claude Code treats any ANTHROPIC_AUTH_TOKEN / API key as taking precedence over
+// claude.ai login, so **claude.ai connectors are disabled** while our dummy is set. Users who
+// need connectors run `llmtrim sub anthropic-login keep` (and stay logged in to Anthropic).
+//
+// Ownership: only touch the key when missing or already set to our sentinel value. Never
+// overwrite a real API key the user put there, and never remove a foreign value on `sub off`.
+// We deliberately do *not* manage CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC — that flag is a
+// boolean `"1"` we cannot own without risking a user's pre-existing preference.
+
+/// Sentinel written to `settings.json` → `env.ANTHROPIC_AUTH_TOKEN` while always-sub skips login.
+/// Distinctive so we can remove it later without clobbering a user's real key.
+pub const SUB_AUTH_TOKEN_VALUE: &str = "llmtrim-sub";
+
+const SUB_AUTH_TOKEN_KEY: &str = "ANTHROPIC_AUTH_TOKEN";
+
+/// Result of reconciling the Claude Code dummy-auth env with the current sub mode.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SubAuthEnvChange {
+    /// Wrote our sentinel into `env.ANTHROPIC_AUTH_TOKEN`.
+    Injected,
+    /// Removed our sentinel (sub off / fallback / keep-login / uninstall).
+    Removed,
+    /// Already correct, or a foreign value we refuse to touch, or no Claude settings to edit.
+    Unchanged,
+}
+
+/// What is currently in Claude settings regarding our dummy auth (for status output).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SubAuthEnvPresence {
+    /// Our sentinel is set — Claude Code skips Anthropic OAuth; connectors disabled.
+    Ours,
+    /// A non-sentinel ANTHROPIC_AUTH_TOKEN is set — we left it alone.
+    Foreign,
+    /// No ANTHROPIC_AUTH_TOKEN in settings env.
+    Absent,
+    /// Settings file missing / unreadable / not an object.
+    Unknown,
+}
+
+/// Pure mutation of a parsed Claude settings object.
+///
+/// - `want = true`: set `env.ANTHROPIC_AUTH_TOKEN` to [`SUB_AUTH_TOKEN_VALUE`] unless a foreign
+///   (non-sentinel) value is already there.
+/// - `want = false`: remove the key only when it holds our sentinel.
+pub fn apply_sub_auth_env(settings: &mut Value, want: bool) -> Result<SubAuthEnvChange> {
+    let root = settings
+        .as_object_mut()
+        .context("Claude settings root must be an object")?;
+
+    let current = root
+        .get("env")
+        .and_then(Value::as_object)
+        .and_then(|e| e.get(SUB_AUTH_TOKEN_KEY))
+        .and_then(Value::as_str)
+        .map(str::to_string);
+
+    if want {
+        match current.as_deref() {
+            Some(SUB_AUTH_TOKEN_VALUE) => return Ok(SubAuthEnvChange::Unchanged),
+            Some(_) => return Ok(SubAuthEnvChange::Unchanged), // foreign — leave alone
+            None => {
+                let env = root
+                    .entry("env")
+                    .or_insert_with(|| Value::Object(Default::default()));
+                let env_obj = env
+                    .as_object_mut()
+                    .context("Claude settings env must be an object")?;
+                env_obj.insert(
+                    SUB_AUTH_TOKEN_KEY.to_string(),
+                    Value::String(SUB_AUTH_TOKEN_VALUE.to_string()),
+                );
+                return Ok(SubAuthEnvChange::Injected);
+            }
+        }
+    }
+
+    // want = false: remove only our sentinel.
+    if current.as_deref() != Some(SUB_AUTH_TOKEN_VALUE) {
+        return Ok(SubAuthEnvChange::Unchanged);
+    }
+    let Some(env) = root.get_mut("env") else {
+        return Ok(SubAuthEnvChange::Unchanged);
+    };
+    let Some(env_obj) = env.as_object_mut() else {
+        return Ok(SubAuthEnvChange::Unchanged);
+    };
+    env_obj.remove(SUB_AUTH_TOKEN_KEY);
+    // Legacy cleanup: early 0.11.8-dev also wrote CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1
+    // alongside our sentinel. We no longer set that flag (cannot own a bare "1"), but drop it
+    // when tearing down our package so an orphan key does not linger after anthropic-login keep
+    // / sub off. Only remove the exact value we used to write.
+    const LEGACY_NONESSENTIAL_KEY: &str = "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC";
+    if env_obj.get(LEGACY_NONESSENTIAL_KEY).and_then(Value::as_str) == Some("1") {
+        env_obj.remove(LEGACY_NONESSENTIAL_KEY);
+    }
+    if env_obj.is_empty() {
+        root.remove("env");
+    }
+    Ok(SubAuthEnvChange::Removed)
+}
+
+/// Reconcile `~/.claude/settings.json` with whether we should skip Anthropic login.
+/// No-op when Claude Code isn't installed or the settings file is missing and we don't need to inject.
+pub fn sync_sub_auth_env(want: bool) -> Result<SubAuthEnvChange> {
+    let path = claude_settings_path()?;
+    let existing = match std::fs::read_to_string(&path) {
+        Ok(s) => s,
+        Err(_) if !want => return Ok(SubAuthEnvChange::Unchanged),
+        Err(_) => String::from("{}"),
+    };
+    let mut settings: Value = if existing.trim().is_empty() {
+        Value::Object(Default::default())
+    } else {
+        serde_json::from_str(&existing)
+            .with_context(|| format!("{} is not valid JSON", path.display()))?
+    };
+    let change = apply_sub_auth_env(&mut settings, want)?;
+    if matches!(
+        change,
+        SubAuthEnvChange::Injected | SubAuthEnvChange::Removed
+    ) {
+        write_settings(&path, &settings)?;
+    }
+    Ok(change)
+}
+
+/// Drop our sentinel from Claude settings (uninstall / teardown). Idempotent.
+pub fn clear_sub_auth_env() -> Result<SubAuthEnvChange> {
+    sync_sub_auth_env(false)
+}
+
+/// Read-only: is our dummy token (or a foreign one) present in Claude settings?
+pub fn sub_auth_env_presence() -> SubAuthEnvPresence {
+    let Ok(path) = claude_settings_path() else {
+        return SubAuthEnvPresence::Unknown;
+    };
+    let Ok(s) = std::fs::read_to_string(&path) else {
+        return SubAuthEnvPresence::Absent;
+    };
+    let Ok(settings) = serde_json::from_str::<Value>(&s) else {
+        return SubAuthEnvPresence::Unknown;
+    };
+    match settings
+        .get("env")
+        .and_then(Value::as_object)
+        .and_then(|e| e.get(SUB_AUTH_TOKEN_KEY))
+        .and_then(Value::as_str)
+    {
+        Some(SUB_AUTH_TOKEN_VALUE) => SubAuthEnvPresence::Ours,
+        Some(_) => SubAuthEnvPresence::Foreign,
+        None => SubAuthEnvPresence::Absent,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1914,6 +2077,106 @@ mod tests {
         let mut settings = serde_json::json!([1, 2, 3]);
         assert!(set_statusline(&mut settings, p).is_err());
         assert!(clear_statusline(&mut settings, p).is_err());
+    }
+
+    #[test]
+    fn sub_auth_env_injects_sentinel_and_removes_only_ours() {
+        let mut settings = serde_json::json!({ "theme": "dark" });
+        assert_eq!(
+            apply_sub_auth_env(&mut settings, true).unwrap(),
+            SubAuthEnvChange::Injected
+        );
+        assert_eq!(
+            settings["env"]["ANTHROPIC_AUTH_TOKEN"],
+            SUB_AUTH_TOKEN_VALUE
+        );
+        // Idempotent when already ours.
+        assert_eq!(
+            apply_sub_auth_env(&mut settings, true).unwrap(),
+            SubAuthEnvChange::Unchanged
+        );
+        // Remove on want=false.
+        assert_eq!(
+            apply_sub_auth_env(&mut settings, false).unwrap(),
+            SubAuthEnvChange::Removed
+        );
+        assert!(settings.get("env").is_none(), "empty env object dropped");
+        assert_eq!(settings["theme"], "dark");
+    }
+
+    #[test]
+    fn sub_auth_env_never_overwrites_or_removes_a_foreign_token() {
+        let mut settings = serde_json::json!({
+            "env": { "ANTHROPIC_AUTH_TOKEN": "sk-ant-real", "OTHER": "keep" }
+        });
+        assert_eq!(
+            apply_sub_auth_env(&mut settings, true).unwrap(),
+            SubAuthEnvChange::Unchanged
+        );
+        assert_eq!(settings["env"]["ANTHROPIC_AUTH_TOKEN"], "sk-ant-real");
+        assert_eq!(
+            apply_sub_auth_env(&mut settings, false).unwrap(),
+            SubAuthEnvChange::Unchanged
+        );
+        assert_eq!(settings["env"]["ANTHROPIC_AUTH_TOKEN"], "sk-ant-real");
+        assert_eq!(settings["env"]["OTHER"], "keep");
+    }
+
+    #[test]
+    fn sub_auth_env_preserves_sibling_env_keys_when_removing_ours() {
+        let mut settings = serde_json::json!({
+            "env": {
+                "ANTHROPIC_AUTH_TOKEN": SUB_AUTH_TOKEN_VALUE,
+                "CLAUDE_CODE_EFFORT_LEVEL": "low"
+            }
+        });
+        assert_eq!(
+            apply_sub_auth_env(&mut settings, false).unwrap(),
+            SubAuthEnvChange::Removed
+        );
+        assert!(settings["env"].get("ANTHROPIC_AUTH_TOKEN").is_none());
+        assert_eq!(settings["env"]["CLAUDE_CODE_EFFORT_LEVEL"], "low");
+    }
+
+    #[test]
+    fn sub_auth_env_cleans_legacy_nonessential_flag_with_our_token() {
+        let mut settings = serde_json::json!({
+            "env": {
+                "ANTHROPIC_AUTH_TOKEN": SUB_AUTH_TOKEN_VALUE,
+                "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1",
+                "CLAUDE_CODE_EFFORT_LEVEL": "low"
+            }
+        });
+        assert_eq!(
+            apply_sub_auth_env(&mut settings, false).unwrap(),
+            SubAuthEnvChange::Removed
+        );
+        assert!(settings["env"].get("ANTHROPIC_AUTH_TOKEN").is_none());
+        assert!(
+            settings["env"]
+                .get("CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC")
+                .is_none(),
+            "legacy package flag cleaned with our token"
+        );
+        assert_eq!(settings["env"]["CLAUDE_CODE_EFFORT_LEVEL"], "low");
+    }
+
+    #[test]
+    fn sub_auth_env_does_not_touch_nonessential_without_our_token() {
+        let mut settings = serde_json::json!({
+            "env": {
+                "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1"
+            }
+        });
+        assert_eq!(
+            apply_sub_auth_env(&mut settings, false).unwrap(),
+            SubAuthEnvChange::Unchanged
+        );
+        assert_eq!(
+            settings["env"]["CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC"],
+            "1",
+            "user-only flag left alone when our token is absent"
+        );
     }
 
     #[test]

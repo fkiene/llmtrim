@@ -647,6 +647,103 @@ mod imp {
             .unwrap_or_else(|_| Response::new(Body::empty()))
     }
 
+    /// Sentinel values Claude Code may send as Anthropic credentials when always-sub skips OAuth.
+    /// Includes our settings.json value and the claude-code-proxy placeholders.
+    fn is_dummy_anthropic_credential(raw: &str) -> bool {
+        let s = raw.trim();
+        let s = s
+            .strip_prefix("Bearer ")
+            .or_else(|| s.strip_prefix("bearer "))
+            .unwrap_or(s)
+            .trim();
+        matches!(s, "llmtrim-sub" | "unused" | "anything")
+    }
+
+    /// True when the request carries only a dummy Anthropic credential (settings/wrap inject
+    /// `llmtrim-sub`; users/CCP may use `unused`/`anything`). Real OAuth/API keys pass through.
+    fn has_dummy_anthropic_auth(headers: &header::HeaderMap) -> bool {
+        let auth = headers
+            .get(header::AUTHORIZATION)
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("");
+        let xkey = headers
+            .get("x-api-key")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("");
+        is_dummy_anthropic_credential(auth) || is_dummy_anthropic_credential(xkey)
+    }
+
+    /// Classify Anthropic API paths we care about for sub reroute / dummy-auth handling.
+    /// Trailing slashes are ignored so `/v1/messages/` still counts as messages.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    enum AnthropicApiPath {
+        Messages,
+        CountTokens,
+        Other,
+    }
+
+    fn classify_anthropic_api_path(path: &str) -> AnthropicApiPath {
+        // Trim trailing slashes only; keep internal structure so count_tokens stays distinct.
+        let p = path.trim_end_matches('/');
+        if p.ends_with("/v1/messages/count_tokens") {
+            AnthropicApiPath::CountTokens
+        } else if p.ends_with("/v1/messages") {
+            AnthropicApiPath::Messages
+        } else {
+            AnthropicApiPath::Other
+        }
+    }
+
+    /// Local answer for Anthropic traffic that is not `/v1/messages` when the client presented a
+    /// dummy Anthropic credential (always-sub skip-login).
+    ///
+    /// Anything we still forward to Anthropic with that credential comes back as
+    /// `401 Invalid bearer token` and Claude Code renders "Please run /login". Stub known probes;
+    /// unknown paths get an empty 200 so the client continues.
+    ///
+    /// **Must drain the request body** before answering: returning a response while the client is
+    /// still writing a POST body breaks HTTP keep-alive and surfaces as `ECONNRESET` in Claude Code.
+    async fn anthropic_sub_passthrough_stub(req: Request<Body>) -> Response<Body> {
+        let method = req.method().clone();
+        let path = req.uri().path().to_string();
+        // Drop the body fully so the client→proxy half of the connection is clean.
+        let _ = req.into_body().collect().await;
+        let path_for_models = path.trim_end_matches('/');
+        if method == Method::GET && path_for_models.ends_with("/v1/models") {
+            // Anthropic-shaped model list. Claude Code's gateway discovery only surfaces ids that
+            // start with `claude`/`anthropic`; keep a small stable set so /model still works.
+            let body = serde_json::json!({
+                "data": [
+                    { "type": "model", "id": "claude-opus-4-20250514", "display_name": "Opus (sub)" },
+                    { "type": "model", "id": "claude-sonnet-4-20250514", "display_name": "Sonnet (sub)" },
+                    { "type": "model", "id": "claude-haiku-4-20250414", "display_name": "Haiku (sub)" },
+                ],
+                "has_more": false,
+                "first_id": "claude-opus-4-20250514",
+                "last_id": "claude-haiku-4-20250414",
+            })
+            .to_string();
+            return json_response(200, &body);
+        }
+        // Soft no-op: empty JSON object. Prefer this over a 401 that triggers /login.
+        json_response(200, "{}")
+    }
+
+    /// Clear error when dummy Anthropic auth is active but this request will not be rerouted
+    /// (window `/sub off`, sub disabled, etc.). Forwarding would 401 at Anthropic and surface as
+    /// "Please run /login".
+    ///
+    /// Drains the request body first — same keep-alive hazard as [`anthropic_sub_passthrough_stub`].
+    async fn dummy_auth_not_rerouted_error(req: Request<Body>) -> Response<Body> {
+        let _ = req.into_body().collect().await;
+        anthropic_error(
+            400,
+            "llmtrim: dummy Anthropic auth is active (sub anthropic-login=skip) but this request \
+             is not routing to a subscription. Run `/sub on`, or `llmtrim sub anthropic-login keep` \
+             and Anthropic /login if you want real Anthropic in this window.",
+        )
+    }
+
     /// A single-frame Anthropic SSE response (used for reroute error/short-circuit replies).
     fn sse_response(body: String) -> Response<Body> {
         Response::builder()
@@ -1666,9 +1763,14 @@ mod imp {
             // Fallback mode arms a fallback instead of rerouting up front: the turn goes to
             // Anthropic normally, and only replays to the sub provider if Anthropic fails (handled
             // in the response phase). Captured here so we can read the session header and body.
+            //
+            // Dummy Anthropic auth (always-sub + anthropic-login=skip): Claude Code may send
+            // `ANTHROPIC_AUTH_TOKEN=llmtrim-sub`. Non-messages probes must not reach Anthropic
+            // (401 → "Please run /login"). Messages that aren't rerouted (e.g. window `/sub off`)
+            // must not reach Anthropic either — return a clear llmtrim error instead.
             let mut fallback_arm: Option<(Vec<crate::reroute::SubProvider>, Option<String>)> = None;
-            if matches!(provider, Some(ProviderKind::Anthropic)) && req.method() == Method::POST {
-                let path = req.uri().path();
+            if matches!(provider, Some(ProviderKind::Anthropic)) {
+                let path_kind = classify_anthropic_api_path(req.uri().path());
                 // The filesystem registry is consulted per request, keyed by Claude Code's
                 // inbound session header.  A local `off` is authoritative and suppresses both
                 // direct reroute and global fallback; an absent/expired record follows global.
@@ -1687,14 +1789,19 @@ mod imp {
                     matches!(window_intent, Some(crate::window_sub::Intent::Disabled));
                 if !window_disabled && (!self.sub_fallback || window_sub.is_some()) {
                     if let Some(sub) = window_sub.or(self.sub) {
-                        if path.ends_with("/v1/messages/count_tokens") {
+                        if req.method() == Method::POST
+                            && path_kind == AnthropicApiPath::CountTokens
+                        {
                             return self.reroute_count_tokens(req).await;
                         }
-                        if path.ends_with("/v1/messages") {
+                        if req.method() == Method::POST && path_kind == AnthropicApiPath::Messages {
                             return self.reroute_messages(req, sub).await;
                         }
                     }
-                } else if !window_disabled && path.ends_with("/v1/messages") {
+                } else if !window_disabled
+                    && req.method() == Method::POST
+                    && path_kind == AnthropicApiPath::Messages
+                {
                     // A chain is enough to arm the fallback: `sub` selects who serves *every* turn
                     // in `always` mode, but in fallback mode the chain is the whole answer, so
                     // `sub = off` + a chain is a valid configuration.
@@ -1710,6 +1817,24 @@ mod imp {
                             .map(str::to_string);
                         fallback_arm = Some((providers, session_id));
                     }
+                }
+                // Dummy credential handling (token is global in settings.json, so it still
+                // arrives after window `/sub off`). If we already returned from reroute_* above,
+                // we never reach here for a successfully rerouted messages turn.
+                if has_dummy_anthropic_auth(req.headers()) {
+                    let is_messages_post = req.method() == Method::POST
+                        && matches!(
+                            path_kind,
+                            AnthropicApiPath::Messages | AnthropicApiPath::CountTokens
+                        );
+                    if is_messages_post {
+                        // Not rerouted (window off / no sub / fallback-first). Dummy cannot hit
+                        // Anthropic — refuse with a clear error instead of a bare 401.
+                        // Drain body inside the helper (large messages POSTs).
+                        return dummy_auth_not_rerouted_error(req).await.into();
+                    }
+                    // Non-messages: stub (drain body). Do not forward dummy creds to Anthropic.
+                    return anthropic_sub_passthrough_stub(req).await.into();
                 }
             }
             // Only compress POST bodies to a known provider; pass everything else through.
@@ -5875,6 +6000,88 @@ mod imp {
         }
 
         #[test]
+        fn dummy_anthropic_credential_detects_sentinel_and_ccp_placeholders() {
+            assert!(is_dummy_anthropic_credential("llmtrim-sub"));
+            assert!(is_dummy_anthropic_credential("Bearer llmtrim-sub"));
+            assert!(is_dummy_anthropic_credential("unused"));
+            assert!(is_dummy_anthropic_credential("Bearer anything"));
+            assert!(!is_dummy_anthropic_credential("sk-ant-real"));
+            assert!(!is_dummy_anthropic_credential("Bearer sk-ant-real"));
+        }
+
+        #[test]
+        fn classify_anthropic_api_path_trims_trailing_slash() {
+            assert_eq!(
+                classify_anthropic_api_path("/v1/messages"),
+                AnthropicApiPath::Messages
+            );
+            assert_eq!(
+                classify_anthropic_api_path("/v1/messages/"),
+                AnthropicApiPath::Messages
+            );
+            assert_eq!(
+                classify_anthropic_api_path("/v1/messages/count_tokens"),
+                AnthropicApiPath::CountTokens
+            );
+            assert_eq!(
+                classify_anthropic_api_path("/v1/messages/count_tokens/"),
+                AnthropicApiPath::CountTokens
+            );
+            assert_eq!(
+                classify_anthropic_api_path("/v1/models"),
+                AnthropicApiPath::Other
+            );
+        }
+
+        #[tokio::test]
+        async fn always_sub_stub_answers_models_and_soft_noops_the_rest() {
+            let models_req = Request::builder()
+                .method(Method::GET)
+                .uri("https://api.anthropic.com/v1/models")
+                .body(Body::empty())
+                .unwrap();
+            let models = anthropic_sub_passthrough_stub(models_req).await;
+            assert_eq!(models.status().as_u16(), 200);
+
+            let other_req = Request::builder()
+                .method(Method::POST)
+                .uri("https://api.anthropic.com/v1/complete")
+                .body(Body::from(Full::new(Bytes::from_static(b"{\"x\":1}"))))
+                .unwrap();
+            let other = anthropic_sub_passthrough_stub(other_req).await;
+            assert_eq!(other.status().as_u16(), 200);
+        }
+
+        #[tokio::test]
+        async fn dummy_auth_not_rerouted_error_drains_body_and_returns_400() {
+            let req = Request::builder()
+                .method(Method::POST)
+                .uri("https://api.anthropic.com/v1/messages")
+                .body(Body::from(Full::new(Bytes::from_static(
+                    b"{\"model\":\"x\",\"messages\":[]}",
+                ))))
+                .unwrap();
+            let res = dummy_auth_not_rerouted_error(req).await;
+            assert_eq!(res.status().as_u16(), 400);
+        }
+
+        #[test]
+        fn has_dummy_anthropic_auth_reads_authorization_and_x_api_key() {
+            let mut headers = header::HeaderMap::new();
+            assert!(!has_dummy_anthropic_auth(&headers));
+            headers.insert(
+                header::AUTHORIZATION,
+                header::HeaderValue::from_static("Bearer llmtrim-sub"),
+            );
+            assert!(has_dummy_anthropic_auth(&headers));
+            headers.clear();
+            headers.insert("x-api-key", header::HeaderValue::from_static("sk-ant-real"));
+            assert!(!has_dummy_anthropic_auth(&headers));
+            headers.insert("x-api-key", header::HeaderValue::from_static("unused"));
+            assert!(has_dummy_anthropic_auth(&headers));
+        }
+
+        #[test]
         fn ca_is_current_only_when_present_and_sidecar_matches() {
             let want = vec!["a.com".to_string(), "b.com".to_string()];
             assert!(ca_is_current(true, Some(&want), &want));
@@ -6260,6 +6467,36 @@ mod imp {
                 .expect("valid request")
         }
 
+        /// POST with `Authorization: Bearer <token>` (for dummy-auth gate tests).
+        fn post_request_bearer(uri: &str, body: &str, token: &str) -> Request<Body> {
+            Request::builder()
+                .method(Method::POST)
+                .uri(uri)
+                .header(header::CONTENT_TYPE, "application/json")
+                .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                .body(Body::from(body.to_string()))
+                .expect("valid request")
+        }
+
+        fn get_request_bearer(uri: &str, token: &str) -> Request<Body> {
+            Request::builder()
+                .method(Method::GET)
+                .uri(uri)
+                .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                .body(Body::empty())
+                .expect("valid request")
+        }
+
+        async fn response_body_string(res: Response<Body>) -> String {
+            let bytes = res
+                .into_body()
+                .collect()
+                .await
+                .expect("body")
+                .to_bytes();
+            String::from_utf8_lossy(&bytes).into_owned()
+        }
+
         /// Spin up a stub HTTP/1.1 server on an ephemeral loopback port. It accepts
         /// exactly one connection, reads (discards) the request, then writes the given
         /// status line and response body. Returns the bound port immediately.
@@ -6596,6 +6833,115 @@ mod imp {
                 "mixed-case host must still be excluded"
             );
             assert_eq!(drain_body(out_req.into_body()).await, body.as_bytes());
+        }
+
+        // ── dummy Anthropic auth gate (always-sub skip-login) ────────────────
+
+        #[tokio::test]
+        async fn handle_request_inner_stubs_models_when_dummy_auth() {
+            let (mut handler, _rx) = make_interceptor();
+            // No sub required for non-messages stubs — dummy alone is enough.
+            let req = get_request_bearer("https://api.anthropic.com/v1/models", "llmtrim-sub");
+            let result = handler.handle_request_inner(req).await;
+            let RequestOrResponse::Response(res) = result else {
+                panic!("dummy auth on /v1/models must short-circuit, not forward");
+            };
+            assert_eq!(res.status().as_u16(), 200);
+            let body = response_body_string(res).await;
+            assert!(
+                body.contains("claude-opus-4"),
+                "stub model list: {body}"
+            );
+        }
+
+        #[tokio::test]
+        async fn handle_request_inner_stubs_non_messages_post_when_dummy_auth() {
+            let (mut handler, _rx) = make_interceptor();
+            let req = post_request_bearer(
+                "https://api.anthropic.com/v1/complete",
+                r#"{"prompt":"hi"}"#,
+                "llmtrim-sub",
+            );
+            let result = handler.handle_request_inner(req).await;
+            let RequestOrResponse::Response(res) = result else {
+                panic!("dummy auth non-messages must short-circuit");
+            };
+            assert_eq!(res.status().as_u16(), 200);
+            assert_eq!(response_body_string(res).await, "{}");
+        }
+
+        #[tokio::test]
+        async fn handle_request_inner_dummy_messages_without_sub_returns_clear_400() {
+            let (mut handler, _rx) = make_interceptor();
+            handler.sub = None;
+            let body = r#"{"model":"claude-opus-4","messages":[{"role":"user","content":"hi"}],"max_tokens":16}"#;
+            let req =
+                post_request_bearer("https://api.anthropic.com/v1/messages", body, "llmtrim-sub");
+            let result = handler.handle_request_inner(req).await;
+            let RequestOrResponse::Response(res) = result else {
+                panic!("dummy + no sub must not forward to Anthropic");
+            };
+            assert_eq!(res.status().as_u16(), 400);
+            let text = response_body_string(res).await;
+            assert!(
+                text.contains("dummy Anthropic auth"),
+                "expected clear llmtrim error, got {text}"
+            );
+        }
+
+        #[tokio::test]
+        async fn handle_request_inner_dummy_messages_trailing_slash_still_gated() {
+            let (mut handler, _rx) = make_interceptor();
+            handler.sub = None;
+            let body = r#"{"model":"claude-opus-4","messages":[{"role":"user","content":"hi"}],"max_tokens":16}"#;
+            let req =
+                post_request_bearer("https://api.anthropic.com/v1/messages/", body, "llmtrim-sub");
+            let result = handler.handle_request_inner(req).await;
+            let RequestOrResponse::Response(res) = result else {
+                panic!("trailing-slash messages must still be classified as messages");
+            };
+            assert_eq!(res.status().as_u16(), 400);
+            assert!(response_body_string(res).await.contains("dummy Anthropic auth"));
+        }
+
+        #[tokio::test]
+        async fn handle_request_inner_dummy_messages_with_sub_enters_reroute_not_stub() {
+            // With sub set, messages take the reroute path (auth may fail without credentials,
+            // but must NOT return the non-messages stub `{}` or the "not routing" 400).
+            let (mut handler, _rx) = make_interceptor();
+            handler.sub = Some(crate::reroute::SubProvider::Grok);
+            handler.sub_fallback = false;
+            let body = r#"{"model":"claude-opus-4","messages":[{"role":"user","content":"hi"}],"max_tokens":16}"#;
+            let req =
+                post_request_bearer("https://api.anthropic.com/v1/messages", body, "llmtrim-sub");
+            let result = handler.handle_request_inner(req).await;
+            let RequestOrResponse::Response(res) = result else {
+                // A rewritten Request to Grok is also fine (would mean auth succeeded in test env).
+                return;
+            };
+            let status = res.status().as_u16();
+            let text = response_body_string(res).await;
+            assert_ne!(status, 200, "must not be the soft non-messages stub");
+            assert!(
+                !text.contains("not routing to a subscription"),
+                "must enter reroute, not the window-off error: {text}"
+            );
+            // Without stored Grok creds, get_token fails with 401 + not authenticated.
+            assert!(
+                status == 401 || text.contains("not authenticated") || text.contains("llmtrim"),
+                "expected reroute preflight error, got status={status} body={text}"
+            );
+        }
+
+        #[tokio::test]
+        async fn handle_request_inner_real_auth_does_not_stub_models() {
+            let (mut handler, _rx) = make_interceptor();
+            let req = get_request_bearer("https://api.anthropic.com/v1/models", "sk-ant-real-key");
+            let result = handler.handle_request_inner(req).await;
+            // Real credential: forward (Request), do not short-circuit with our stub list.
+            let RequestOrResponse::Request(_) = result else {
+                panic!("real API key on /v1/models must forward, not stub");
+            };
         }
 
         // Test 3: replay on 400 ───────────────────────────────────────────────

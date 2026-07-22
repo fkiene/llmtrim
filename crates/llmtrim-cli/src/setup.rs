@@ -774,6 +774,21 @@ pub fn uninstall(purge: bool, keep_binary: bool) -> Result<()> {
         Err(e) => rows.push((ui::WARN, "Window /sub".into(), format!("not removed: {e}"))),
     }
 
+    // 2c2. Drop the dummy Anthropic auth env we inject while always-sub is on.
+    match crate::statusline::clear_sub_auth_env() {
+        Ok(crate::statusline::SubAuthEnvChange::Removed) => rows.push((
+            ui::OK,
+            "Claude auth".into(),
+            "removed dummy ANTHROPIC_AUTH_TOKEN from settings".into(),
+        )),
+        Ok(_) => {}
+        Err(e) => rows.push((
+            ui::WARN,
+            "Claude auth".into(),
+            format!("not cleaned: {e}"),
+        )),
+    }
+
     // 2d. Unwire the Claude Code guard hook, leaving the user's other hooks in place.
     match crate::guard::unwire() {
         Ok(true) => rows.push((

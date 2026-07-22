@@ -1151,6 +1151,69 @@ fn resolve_sub_fallback(env: &impl Fn(&str) -> Option<String>, file: Option<&tom
         .unwrap_or(false)
 }
 
+/// Whether global sub is active in `always` mode (provider set, mode not `fallback`).
+///
+/// Reads the config file **fresh from disk** so a CLI that just ran `write_sub_*` in this process
+/// sees the new state. Prefer this over [`RuntimeConfig::get`] for post-write decisions —
+/// `RuntimeConfig` is process-cached and stays on the pre-write snapshot.
+pub fn sub_always_on() -> bool {
+    let file = load_config_file();
+    let env = |k: &str| std::env::var(k).ok();
+    resolve_sub_provider(&env, file.as_ref()).is_some() && !resolve_sub_fallback(&env, file.as_ref())
+}
+
+/// Whether always-sub should inject a dummy `ANTHROPIC_AUTH_TOKEN` so Claude Code skips Anthropic
+/// OAuth / `/login`.
+///
+/// Default **true** when [`sub_always_on`] (skip login). Set `sub.anthropic_login = "keep"` or
+/// `LLMTRIM_SUB_ANTHROPIC_LOGIN=keep` to leave Claude on its claude.ai OAuth session — required for
+/// claude.ai connectors, but then a live Anthropic login is mandatory again.
+///
+/// Fresh-from-disk like [`sub_always_on`]. False when sub is off or in fallback mode.
+pub fn sub_skip_anthropic_login() -> bool {
+    if !sub_always_on() {
+        return false;
+    }
+    let file = load_config_file();
+    let env = |k: &str| std::env::var(k).ok();
+    resolve_sub_skip_anthropic_login(&env, file.as_ref())
+}
+
+fn resolve_sub_skip_anthropic_login(
+    env: &impl Fn(&str) -> Option<String>,
+    file: Option<&toml::Value>,
+) -> bool {
+    // `skip` = inject dummy (default). `keep` = leave Anthropic OAuth alone (connectors work).
+    let parse = |raw: &str| match raw.trim().to_ascii_lowercase().as_str() {
+        "keep" | "oauth" | "claude" | "connectors" => false,
+        "skip" | "dummy" | "none" => true,
+        other => {
+            eprintln!(
+                "llmtrim: unknown sub.anthropic_login '{other}' — using 'skip' (expected skip|keep)"
+            );
+            true
+        }
+    };
+    if let Some(v) = env("LLMTRIM_SUB_ANTHROPIC_LOGIN").filter(|s| !s.is_empty()) {
+        return parse(&v);
+    }
+    file.and_then(|v| v.get("sub"))
+        .and_then(|v| v.get("anthropic_login"))
+        .and_then(toml::Value::as_str)
+        .map(parse)
+        .unwrap_or(true) // default: skip Anthropic login while always-sub
+}
+
+/// Persist `sub.anthropic_login`: `skip` (dummy token, no Anthropic /login) or `keep` (claude.ai
+/// OAuth for connectors; Anthropic login still required).
+pub fn write_sub_anthropic_login(skip: bool) -> Result<()> {
+    let path = config_path().ok_or_else(|| anyhow::anyhow!("no config path (HOME/XDG unset)"))?;
+    let value = if skip { "skip" } else { "keep" };
+    edit_sub_table_at(&path, |t| {
+        t["anthropic_login"] = toml_edit::value(value);
+    })
+}
+
 /// Ordered fallback providers from env or `[sub] chain`. Unknown entries are retained so the
 /// serve layer can report them clearly; an empty/missing chain falls back to the active provider.
 fn resolve_sub_chain(
@@ -1756,6 +1819,40 @@ mod tests {
         }
         let env = |k: &str| (k == "LLMTRIM_SUB_MODE").then(|| "on-error".to_string());
         assert!(resolve_sub_fallback(&env, None));
+    }
+
+    #[test]
+    fn sub_skip_anthropic_login_defaults_skip_and_honors_keep() {
+        let no_env = |_: &str| None;
+        // Default while always-sub: skip (inject dummy).
+        let always: toml::Value =
+            toml::from_str("[sub]\nactive = \"grok\"\nmode = \"always\"\n").unwrap();
+        assert!(resolve_sub_skip_anthropic_login(&no_env, Some(&always)));
+        // Explicit keep.
+        let keep: toml::Value = toml::from_str(
+            "[sub]\nactive = \"grok\"\nmode = \"always\"\nanthropic_login = \"keep\"\n",
+        )
+        .unwrap();
+        assert!(!resolve_sub_skip_anthropic_login(&no_env, Some(&keep)));
+        // Explicit skip.
+        let skip: toml::Value = toml::from_str(
+            "[sub]\nactive = \"grok\"\nmode = \"always\"\nanthropic_login = \"skip\"\n",
+        )
+        .unwrap();
+        assert!(resolve_sub_skip_anthropic_login(&no_env, Some(&skip)));
+        // Env wins over file keep.
+        let env_skip =
+            |k: &str| (k == "LLMTRIM_SUB_ANTHROPIC_LOGIN").then(|| "skip".to_string());
+        assert!(resolve_sub_skip_anthropic_login(&env_skip, Some(&keep)));
+        let env_keep =
+            |k: &str| (k == "LLMTRIM_SUB_ANTHROPIC_LOGIN").then(|| "keep".to_string());
+        assert!(!resolve_sub_skip_anthropic_login(&env_keep, Some(&always)));
+        // Connectors alias for keep.
+        let connectors: toml::Value = toml::from_str(
+            "[sub]\nactive = \"grok\"\nmode = \"always\"\nanthropic_login = \"connectors\"\n",
+        )
+        .unwrap();
+        assert!(!resolve_sub_skip_anthropic_login(&no_env, Some(&connectors)));
     }
 
     #[test]

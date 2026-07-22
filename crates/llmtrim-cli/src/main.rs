@@ -540,6 +540,15 @@ enum SubCmd {
         #[command(subcommand)]
         action: AuthAction,
     },
+    /// Whether always-sub injects a dummy Anthropic token so Claude Code skips `/login`.
+    ///
+    /// `skip` (default): no Anthropic OAuth required; claude.ai connectors are disabled.
+    /// `keep`: leave Claude on its claude.ai login (connectors work; Anthropic /login still required).
+    #[command(name = "anthropic-login")]
+    AnthropicLogin {
+        /// `skip` or `keep`.
+        mode: String,
+    },
 }
 
 #[derive(Subcommand)]
@@ -974,12 +983,48 @@ fn print_reroute_enabled(p: llmtrim::reroute::SubProvider) -> bool {
     logged_in
 }
 
+/// Reconcile Claude Code's dummy Anthropic auth with `sub_skip_anthropic_login()`.
+/// When always-sub and anthropic-login=skip, inject `ANTHROPIC_AUTH_TOKEN=llmtrim-sub` into
+/// `~/.claude/settings.json` so Claude Code skips Anthropic OAuth (same trick as
+/// claude-code-proxy). Off / fallback / keep removes only our sentinel.
+///
+/// Note: a dummy token disables claude.ai connectors (Claude Code prefers any API-key source
+/// over claude.ai login). Use `llmtrim sub anthropic-login keep` to restore connectors.
+#[cfg(feature = "intercept")]
+fn sync_claude_sub_auth() {
+    let want = llmtrim_core::config::sub_skip_anthropic_login();
+    match llmtrim::statusline::sync_sub_auth_env(want) {
+        Ok(llmtrim::statusline::SubAuthEnvChange::Injected) => {
+            println!(
+                "Claude Code: set env.ANTHROPIC_AUTH_TOKEN so Anthropic /login is not required \
+                 while sub is always-on.\n\
+                 Note: claude.ai connectors are disabled while this is set (Claude Code treats \
+                 any API-key auth as overriding claude.ai login).\n\
+                 Keep connectors: `llmtrim sub anthropic-login keep` (Anthropic /login required).\n\
+                 Restart Claude Code to pick this up."
+            );
+        }
+        Ok(llmtrim::statusline::SubAuthEnvChange::Removed) => {
+            println!(
+                "Claude Code: removed dummy ANTHROPIC_AUTH_TOKEN (Anthropic OAuth / API key \
+                 required again; claude.ai connectors can work again).\n\
+                 Restart Claude Code to pick this up."
+            );
+        }
+        Ok(llmtrim::statusline::SubAuthEnvChange::Unchanged) => {}
+        Err(e) => eprintln!("llmtrim: could not update Claude Code auth env: {e:#}"),
+    }
+}
+
 /// Apply a `sub` config change to the interceptor. The daemon reads its config once at boot
 /// (`RuntimeConfig` is a `OnceLock`), so a running one keeps the old routing until restarted.
 /// Restarts it in place unless `no_restart` is set or nothing is running (the next `start` picks
-/// up the new config on its own).
+/// up the new config on its own). Also reconciles the Claude Code dummy-auth env for always-on sub.
 #[cfg(feature = "intercept")]
 fn apply_sub_change(no_restart: bool) {
+    // Always reconcile Claude settings, even when the daemon isn't running / no_restart —
+    // the auth env is independent of the interceptor process.
+    sync_claude_sub_auth();
     let Some(state) = llmtrim::daemon::running() else {
         return;
     };
@@ -1157,15 +1202,19 @@ fn run_sub(action: SubCmd) -> Result<()> {
                     print_reroute_enabled(p)
                 }
             };
-            // Skip the restart when signed out: routing can't work until sign-in anyway.
+            // Claude auth-env sync always runs (independent of provider login). Daemon restart
+            // is still skipped when signed out — routing can't work until sign-in anyway.
             if logged_in {
                 apply_sub_change(no_restart);
+            } else {
+                sync_claude_sub_auth();
             }
             Ok(())
         }
         SubCmd::Off { no_restart } => {
             llmtrim_core::config::disable_sub()?;
             println!("Reroute disabled — traffic goes to Anthropic (compression only).");
+            // Always sync Claude auth env even if not logged in earlier paths skipped restart.
             apply_sub_change(no_restart);
             Ok(())
         }
@@ -1303,11 +1352,20 @@ fn run_sub(action: SubCmd) -> Result<()> {
                 for (k, v) in &cfg.sub_tiers {
                     mapping.insert(k.clone(), v.clone());
                 }
+                let skip_login = llmtrim_core::config::sub_skip_anthropic_login();
+                let claude_auth = match llmtrim::statusline::sub_auth_env_presence() {
+                    llmtrim::statusline::SubAuthEnvPresence::Ours => "dummy",
+                    llmtrim::statusline::SubAuthEnvPresence::Foreign => "foreign",
+                    llmtrim::statusline::SubAuthEnvPresence::Absent => "absent",
+                    llmtrim::statusline::SubAuthEnvPresence::Unknown => "unknown",
+                };
                 let out = serde_json::json!({
                     "provider": active.map(|p| p.as_str()),
                     "mode": if cfg.sub_fallback { "fallback" } else { "always" },
                     "chain": cfg.sub_chain,
                     "effort": cfg.sub_effort,
+                    "anthropic_login": if skip_login { "skip" } else { "keep" },
+                    "claude_auth_token": claude_auth,
                     "mapping": mapping,
                     "auth": {
                         "codex": llmtrim::reroute::auth::auth_status_json(SubProvider::Codex),
@@ -1392,11 +1450,66 @@ fn run_sub(action: SubCmd) -> Result<()> {
                             p.as_str()
                         );
                     }
+                    // Report what is actually in Claude settings, not just the intended mode.
+                    use llmtrim::statusline::SubAuthEnvPresence;
+                    let skip = llmtrim_core::config::sub_skip_anthropic_login();
+                    match (
+                        cfg.sub_fallback,
+                        skip,
+                        llmtrim::statusline::sub_auth_env_presence(),
+                    ) {
+                        (true, _, _) => println!(
+                            "  claude: fallback mode needs a live Anthropic login \
+                             (primary path is Anthropic; connectors OK)"
+                        ),
+                        (false, true, SubAuthEnvPresence::Ours) => println!(
+                            "  claude: Anthropic /login not required (dummy token set); \
+                             claude.ai connectors disabled — `llmtrim sub anthropic-login keep` \
+                             to restore connectors"
+                        ),
+                        (false, true, SubAuthEnvPresence::Foreign) => println!(
+                            "  claude: skip-login wanted, but a foreign ANTHROPIC_AUTH_TOKEN is \
+                             already in settings — left alone (connectors may still be disabled)"
+                        ),
+                        (false, true, SubAuthEnvPresence::Absent | SubAuthEnvPresence::Unknown) => {
+                            println!(
+                                "  claude: skip-login wanted, but dummy token is not in settings \
+                                 yet — run `llmtrim sub mode always` or `llmtrim ensure`, then \
+                                 restart Claude Code"
+                            );
+                        }
+                        (false, false, _) => println!(
+                            "  claude: anthropic-login=keep — stay logged in to Anthropic \
+                             (claude.ai connectors OK)"
+                        ),
+                    }
                 }
             }
             Ok(())
         }
         SubCmd::Auth { provider, action } => run_auth(&provider, action),
+        SubCmd::AnthropicLogin { mode } => {
+            let skip = match mode.trim().to_ascii_lowercase().as_str() {
+                "skip" | "dummy" | "none" => true,
+                "keep" | "oauth" | "claude" | "connectors" => false,
+                other => anyhow::bail!("unknown anthropic-login mode '{other}' (skip|keep)"),
+            };
+            llmtrim_core::config::write_sub_anthropic_login(skip)?;
+            if skip {
+                println!(
+                    "anthropic-login: skip — always-sub injects a dummy token (no Anthropic \
+                     /login; claude.ai connectors disabled)."
+                );
+            } else {
+                println!(
+                    "anthropic-login: keep — Claude stays on claude.ai OAuth (connectors work; \
+                     Anthropic /login still required when the session expires)."
+                );
+            }
+            // Reconcile settings immediately (no daemon restart needed for settings env).
+            sync_claude_sub_auth();
+            Ok(())
+        }
     }
 }
 

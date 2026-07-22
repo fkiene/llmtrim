@@ -329,6 +329,26 @@ This window only (installed with ensure; includes subagents; survives `/clear`):
 
 Tokens: `~/.llmtrim/<provider>/auth.json` (mode 0600). Env: `LLMTRIM_SUB`, `LLMTRIM_SUB_MODE`, `LLMTRIM_SUB_CHAIN`.
 
+**Anthropic `/login` vs claude.ai connectors:** with global `sub` in `always` mode, by
+default llmtrim writes a dummy `ANTHROPIC_AUTH_TOKEN` into `~/.claude/settings.json` (same
+idea as [claude-code-proxy](https://github.com/raine/claude-code-proxy)'s
+`ANTHROPIC_AUTH_TOKEN=unused`) so Claude Code does not need a live Anthropic OAuth session.
+The MITM strips that dummy token and injects the real Grok/Codex/Kimi credential; non-messages
+Anthropic probes are answered locally so they never return `401 Invalid bearer token`.
+
+Claude Code treats any API-key auth as overriding claude.ai login, so **claude.ai connectors
+are disabled** while the dummy token is set. That is expected. To keep connectors (and accept
+Anthropic `/login` when the session expires):
+
+```bash
+llmtrim sub anthropic-login keep   # connectors OK; Anthropic login required
+llmtrim sub anthropic-login skip   # default: no Anthropic /login; connectors off
+```
+
+Restart Claude Code after `sub on` / `sub off` / `sub mode` / `sub anthropic-login` for the
+settings change to take effect. `sub mode fallback` always needs a real Anthropic login (the
+primary path is Anthropic).
+
 </details>
 
 ---
