@@ -1592,7 +1592,7 @@ fn env_block(proxy: &str, ca: &str, bundle: Option<&str>, syntax: Syntax) -> Str
                  \x20   export NO_PROXY={no_proxy}\n\
                  \x20   export no_proxy={no_proxy}\n\
                  \x20   export NODE_EXTRA_CA_CERTS={ca}\n\
-                 \x20   export NODE_USE_ENV_PROXY=1\n\
+                 \x20   export NODE_USE_ENV_PROXY='1'\n\
                  {native}fi\n\
                  {END}\n"
             )
@@ -1651,7 +1651,7 @@ fn manual_env_lines(proxy: &str, ca: &str, bundle: Option<&str>) -> Vec<String> 
             format!("export NO_PROXY={}", q(NO_PROXY)),
             format!("export no_proxy={}", q(NO_PROXY)),
             format!("export NODE_EXTRA_CA_CERTS={}", q(ca)),
-            "export NODE_USE_ENV_PROXY=1".to_string(),
+            "export NODE_USE_ENV_PROXY='1'".to_string(),
         ];
         if let Some(b) = bundle {
             lines.push(format!("export SSL_CERT_FILE={}", q(b)));
@@ -2123,7 +2123,7 @@ mod tests {
         assert!(b.contains("export HTTPS_PROXY='http://127.0.0.1:8787'"));
         assert!(b.contains("export NODE_EXTRA_CA_CERTS='/home/u/ca.pem'"));
         // Node undici needs this to honor HTTPS_PROXY (Claude Code).
-        assert!(b.contains("export NODE_USE_ENV_PROXY=1"));
+        assert!(b.contains("export NODE_USE_ENV_PROXY='1'"));
         // LAN/local bypass travels with the proxy, in both casings tools read.
         assert!(b.contains(&format!("export NO_PROXY='{NO_PROXY}'")));
         assert!(b.contains(&format!("export no_proxy='{NO_PROXY}'")));
@@ -2157,7 +2157,7 @@ mod tests {
         assert!(lines.contains(&format!("export NO_PROXY='{NO_PROXY}'")));
         assert!(lines.contains(&format!("export no_proxy='{NO_PROXY}'")));
         assert!(lines.contains(&"export NODE_EXTRA_CA_CERTS='/home/u/ca.pem'".to_string()));
-        assert!(lines.contains(&"export NODE_USE_ENV_PROXY=1".to_string()));
+        assert!(lines.contains(&"export NODE_USE_ENV_PROXY='1'".to_string()));
         assert!(!lines.iter().any(|l| l.contains("SSL_CERT_FILE")));
         assert!(!lines.iter().any(|l| l.contains("CURL_CA_BUNDLE")));
         // Unlike env_block, this is a standalone eval-able snippet: no BEGIN/END markers,
