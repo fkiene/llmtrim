@@ -1255,7 +1255,7 @@ fn set_env_in(env: &winreg::RegKey, proxy: &str, ca: &str) -> Result<()> {
         .context("failed to set NO_PROXY")?;
     env.set_value("NODE_EXTRA_CA_CERTS", &ca)
         .context("failed to set NODE_EXTRA_CA_CERTS")?;
-    env.set_value("NODE_USE_ENV_PROXY", "1")
+    env.set_value("NODE_USE_ENV_PROXY", &"1".to_string())
         .context("failed to set NODE_USE_ENV_PROXY")?;
     Ok(())
 }
