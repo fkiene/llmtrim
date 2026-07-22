@@ -6488,12 +6488,7 @@ mod imp {
         }
 
         async fn response_body_string(res: Response<Body>) -> String {
-            let bytes = res
-                .into_body()
-                .collect()
-                .await
-                .expect("body")
-                .to_bytes();
+            let bytes = res.into_body().collect().await.expect("body").to_bytes();
             String::from_utf8_lossy(&bytes).into_owned()
         }
 
@@ -6848,10 +6843,7 @@ mod imp {
             };
             assert_eq!(res.status().as_u16(), 200);
             let body = response_body_string(res).await;
-            assert!(
-                body.contains("claude-opus-4"),
-                "stub model list: {body}"
-            );
+            assert!(body.contains("claude-opus-4"), "stub model list: {body}");
         }
 
         #[tokio::test]
@@ -6894,14 +6886,21 @@ mod imp {
             let (mut handler, _rx) = make_interceptor();
             handler.sub = None;
             let body = r#"{"model":"claude-opus-4","messages":[{"role":"user","content":"hi"}],"max_tokens":16}"#;
-            let req =
-                post_request_bearer("https://api.anthropic.com/v1/messages/", body, "llmtrim-sub");
+            let req = post_request_bearer(
+                "https://api.anthropic.com/v1/messages/",
+                body,
+                "llmtrim-sub",
+            );
             let result = handler.handle_request_inner(req).await;
             let RequestOrResponse::Response(res) = result else {
                 panic!("trailing-slash messages must still be classified as messages");
             };
             assert_eq!(res.status().as_u16(), 400);
-            assert!(response_body_string(res).await.contains("dummy Anthropic auth"));
+            assert!(
+                response_body_string(res)
+                    .await
+                    .contains("dummy Anthropic auth")
+            );
         }
 
         #[tokio::test]

@@ -782,11 +782,7 @@ pub fn uninstall(purge: bool, keep_binary: bool) -> Result<()> {
             "removed dummy ANTHROPIC_AUTH_TOKEN from settings".into(),
         )),
         Ok(_) => {}
-        Err(e) => rows.push((
-            ui::WARN,
-            "Claude auth".into(),
-            format!("not cleaned: {e}"),
-        )),
+        Err(e) => rows.push((ui::WARN, "Claude auth".into(), format!("not cleaned: {e}"))),
     }
 
     // 2d. Unwire the Claude Code guard hook, leaving the user's other hooks in place.

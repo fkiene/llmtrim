@@ -446,9 +446,7 @@ pub fn apply(opts: Options) -> Result<Report> {
                         "skip-login wanted, dummy token not in settings yet".to_string()
                     }
                 };
-                report
-                    .rows
-                    .push((ui::OK, "Claude auth".into(), detail));
+                report.rows.push((ui::OK, "Claude auth".into(), detail));
             }
             Ok(_) => {}
             Err(e) => report.rows.push((

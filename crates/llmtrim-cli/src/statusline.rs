@@ -2173,8 +2173,7 @@ mod tests {
             SubAuthEnvChange::Unchanged
         );
         assert_eq!(
-            settings["env"]["CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC"],
-            "1",
+            settings["env"]["CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC"], "1",
             "user-only flag left alone when our token is absent"
         );
     }

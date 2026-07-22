@@ -158,13 +158,14 @@ fn exec_agent(inv: &WrapInvocation) -> Result<()> {
     // Always-sub skip-login: Claude Code must not require a live Anthropic OAuth session.
     // Only inject for Claude-ish binaries — never pollute codex/gemini/etc.
     // Prefer an already-set user value; only inject when missing so a real key still wins.
-    if llmtrim_core::config::sub_skip_anthropic_login() && agent_is_claude(&inv.agent) {
-        if std::env::var_os("ANTHROPIC_AUTH_TOKEN").is_none() {
-            cmd.env(
-                "ANTHROPIC_AUTH_TOKEN",
-                crate::statusline::SUB_AUTH_TOKEN_VALUE,
-            );
-        }
+    if llmtrim_core::config::sub_skip_anthropic_login()
+        && agent_is_claude(&inv.agent)
+        && std::env::var_os("ANTHROPIC_AUTH_TOKEN").is_none()
+    {
+        cmd.env(
+            "ANTHROPIC_AUTH_TOKEN",
+            crate::statusline::SUB_AUTH_TOKEN_VALUE,
+        );
     }
     let status = cmd.status().with_context(|| {
         if KNOWN_AGENTS.contains(&inv.agent.as_str()) {

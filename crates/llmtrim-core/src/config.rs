@@ -1159,7 +1159,8 @@ fn resolve_sub_fallback(env: &impl Fn(&str) -> Option<String>, file: Option<&tom
 pub fn sub_always_on() -> bool {
     let file = load_config_file();
     let env = |k: &str| std::env::var(k).ok();
-    resolve_sub_provider(&env, file.as_ref()).is_some() && !resolve_sub_fallback(&env, file.as_ref())
+    resolve_sub_provider(&env, file.as_ref()).is_some()
+        && !resolve_sub_fallback(&env, file.as_ref())
 }
 
 /// Whether always-sub should inject a dummy `ANTHROPIC_AUTH_TOKEN` so Claude Code skips Anthropic
@@ -1841,18 +1842,19 @@ mod tests {
         .unwrap();
         assert!(resolve_sub_skip_anthropic_login(&no_env, Some(&skip)));
         // Env wins over file keep.
-        let env_skip =
-            |k: &str| (k == "LLMTRIM_SUB_ANTHROPIC_LOGIN").then(|| "skip".to_string());
+        let env_skip = |k: &str| (k == "LLMTRIM_SUB_ANTHROPIC_LOGIN").then(|| "skip".to_string());
         assert!(resolve_sub_skip_anthropic_login(&env_skip, Some(&keep)));
-        let env_keep =
-            |k: &str| (k == "LLMTRIM_SUB_ANTHROPIC_LOGIN").then(|| "keep".to_string());
+        let env_keep = |k: &str| (k == "LLMTRIM_SUB_ANTHROPIC_LOGIN").then(|| "keep".to_string());
         assert!(!resolve_sub_skip_anthropic_login(&env_keep, Some(&always)));
         // Connectors alias for keep.
         let connectors: toml::Value = toml::from_str(
             "[sub]\nactive = \"grok\"\nmode = \"always\"\nanthropic_login = \"connectors\"\n",
         )
         .unwrap();
-        assert!(!resolve_sub_skip_anthropic_login(&no_env, Some(&connectors)));
+        assert!(!resolve_sub_skip_anthropic_login(
+            &no_env,
+            Some(&connectors)
+        ));
     }
 
     #[test]
