@@ -6,6 +6,8 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.11.7] - 2026-07-22
+
 ### Fixed
 
 - **Grok full-body ghost turns are classified and greppable.** After the 0.11.6 transport-reset
@@ -1305,7 +1307,8 @@ bill, never a broken call.
   (6 targets with SLSA build provenance), CI on Linux/macOS/Windows with secret
   scanning, license compliance, and MSRV gates.
 
-[Unreleased]: https://github.com/fkiene/llmtrim/compare/v0.11.6...HEAD
+[Unreleased]: https://github.com/fkiene/llmtrim/compare/v0.11.7...HEAD
+[0.11.7]: https://github.com/fkiene/llmtrim/compare/v0.11.6...v0.11.7
 [0.11.6]: https://github.com/fkiene/llmtrim/compare/v0.11.5...v0.11.6
 [0.11.5]: https://github.com/fkiene/llmtrim/compare/v0.11.4...v0.11.5
 [0.11.4]: https://github.com/fkiene/llmtrim/compare/v0.11.3...v0.11.4
