@@ -4,8 +4,14 @@
 //! Past the prompt-cache TTL (the same 1h Claude Code asks for and the status line uses)
 //! a resumed session re-writes its whole context on the next request, billed at the cache-write
 //! rate. Nothing at the prompt says so. So on the first submit after a long idle gap on a big
-//! context, print the figure to stderr and exit 2 — Claude Code blocks the prompt with no API
+//! context, emit a JSON block decision and exit 2 — Claude Code blocks the prompt with no API
 //! call, and a resend goes straight through.
+//!
+//! The block response sets `suppressOriginalPrompt` so Claude Code does not append the blocked
+//! text as `Original prompt:` (that echo nested the warning inside itself on every resend). The
+//! blocked text is saved to disk instead; on the *next* submit that is allowed through, if the
+//! user typed something different, the saved text is reinjected via `additionalContext` so it
+//! is not lost when Claude Code cleared the input box.
 //!
 //! Data comes from Claude Code's own transcript, not llmtrim's ledger: the ledger's `session_id`
 //! is a hash of the system prompt, so a *subagent* turn (different system prompt, same Claude Code
@@ -160,16 +166,35 @@ fn already_acked(path: &Path, gap_id: &str) -> bool {
     std::fs::read_to_string(path).is_ok_and(|s| s.trim() == gap_id)
 }
 
+/// Path of the stashed blocked prompt for one session.
+fn prompt_path(dir: &Path, session_id: &str) -> PathBuf {
+    marker_path(dir, session_id).with_extension("prompt")
+}
+
 /// Stash the blocked prompt beside its marker. Claude Code does not restore it to the input box,
 /// so this is the only copy; failing to write it must not stop the warning.
 fn save_prompt(dir: &Path, session_id: &str, prompt: &str) -> Option<PathBuf> {
     if prompt.is_empty() {
         return None;
     }
-    let path = marker_path(dir, session_id).with_extension("prompt");
+    let path = prompt_path(dir, session_id);
     std::fs::create_dir_all(dir).ok()?;
     std::fs::write(&path, prompt).ok()?;
     Some(path)
+}
+
+/// Take the previously blocked prompt, if any. Returns `None` when there is nothing to reinject
+/// (no file, empty file, or the user retyped the same text). Always removes the file so a later
+/// gap cannot re-surface a stale draft.
+fn take_saved_prompt(dir: &Path, session_id: &str, current: &str) -> Option<String> {
+    let path = prompt_path(dir, session_id);
+    let saved = std::fs::read_to_string(&path).ok();
+    let _ = std::fs::remove_file(&path);
+    let saved = saved?.trim_end().to_string();
+    if saved.is_empty() || saved == current.trim_end() {
+        return None;
+    }
+    Some(saved)
 }
 
 fn ack(path: &Path, gap_id: &str) -> Result<()> {
@@ -212,17 +237,15 @@ fn human_idle(secs: i64) -> String {
 /// to summarise it (paying the charge), then the next turn writes a fresh cache for the summary
 /// (paying again) — measured on real captures at 128,758 then 45,131 tokens. Resending pays once.
 ///
-/// The user's prompt is not echoed: Claude Code appends it itself as `Original prompt:`, so
-/// echoing nests the warning inside itself on every resend. It is *saved* instead — a blocked
-/// prompt is not restored to the input box (observed: the resend came back as `promptSource:
-/// typed`), so without this the text would be lost.
-fn message(idle_secs: i64, tokens: i64, cost: Option<f64>, saved: Option<&Path>) -> String {
+/// The user's prompt is not echoed here. Claude Code used to append it as `Original prompt:`,
+/// which nested the warning inside itself on every resend; the block response now sets
+/// `suppressOriginalPrompt` to stop that. The text is *saved* instead — a blocked prompt is not
+/// restored to the input box (observed: the resend came back as `promptSource: typed`), so without
+/// this the text would be lost. On the next allowed submit it is reinjected if the user typed
+/// something else.
+fn message(idle_secs: i64, tokens: i64, cost: Option<f64>) -> String {
     let cost = match cost {
         Some(c) => format!(" — about ${c:.2}"),
-        None => String::new(),
-    };
-    let saved = match saved {
-        Some(p) => format!(" Your message is saved at {}.", p.display()),
         None => String::new(),
     };
     format!(
@@ -233,70 +256,122 @@ fn message(idle_secs: i64, tokens: i64, cost: Option<f64>, saved: Option<&Path>)
          summarise it), and only comes out ahead if you are staying for several more turns. To \
          avoid the charge entirely, ask in a fresh session.\n\
          \n\
-         Not sent.{} Resend to continue as-is.",
+         Not sent. Your message is saved and will be reinjected on the next turn if you type \
+         something else. Resend to continue as-is.",
         human_idle(idle_secs),
         tokens as f64 / 1000.0,
         cost,
-        saved,
     )
+}
+
+/// JSON body Claude Code reads on stdout for a block decision. `suppressOriginalPrompt` keeps
+/// the blocked text out of the warning so a resend cannot nest the previous block message.
+fn block_stdout(reason: &str) -> String {
+    serde_json::json!({
+        "decision": "block",
+        "reason": reason,
+        "hookSpecificOutput": {
+            "hookEventName": "UserPromptSubmit",
+            "suppressOriginalPrompt": true,
+        },
+    })
+    .to_string()
+}
+
+/// JSON body that reinjects a previously blocked prompt as model context. Used on the pass that
+/// follows a block, when the user typed something different from what was saved.
+fn reinject_stdout(saved: &str) -> String {
+    serde_json::json!({
+        "hookSpecificOutput": {
+            "hookEventName": "UserPromptSubmit",
+            "additionalContext": format!(
+                "Previous prompt that was blocked by the cold-cache guard (not restored to the \
+                 input box by Claude Code):\n\n{saved}"
+            ),
+        },
+    })
+    .to_string()
 }
 
 // ── the hook entrypoint ──────────────────────────────────────────────────────────
 
-/// Exit code for "block this prompt". Claude Code shows stderr to the user and makes no API call.
+/// Exit code for "block this prompt". Claude Code reads the JSON reason from stdout and makes no
+/// API call. Exit 2 with plain stderr still works, but JSON is what unlocks `suppressOriginalPrompt`.
 const BLOCK: i32 = 2;
 const PASS: i32 = 0;
 
-/// Decide and (if warning) print. Returns the exit code. Any error inside maps to `PASS` at the
-/// boundary in [`run`].
-fn decide(input: &str, now: DateTime<Utc>) -> Result<i32> {
-    decide_in(input, now, &guard_dir()?)
+/// What the hook should emit. Separated from the exit code so tests can assert the JSON body
+/// without capturing process stdout.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Verdict {
+    Pass,
+    /// Allow the prompt, but attach previously blocked text as model context.
+    PassWith(String),
+    Block(String),
 }
 
-/// [`decide`] against an explicit marker directory, so tests drive the real path.
-fn decide_in(input: &str, now: DateTime<Utc>, dir: &Path) -> Result<i32> {
+impl Verdict {
+    fn code(&self) -> i32 {
+        match self {
+            Verdict::Pass | Verdict::PassWith(_) => PASS,
+            Verdict::Block(_) => BLOCK,
+        }
+    }
+
+    fn emit(self) {
+        match self {
+            Verdict::Pass => {}
+            Verdict::PassWith(body) | Verdict::Block(body) => println!("{body}"),
+        }
+    }
+}
+
+/// Decide against an explicit marker directory, so tests drive the real path without the
+/// process-global state dir. [`run`] maps any panic to `PASS`.
+fn decide_in(input: &str, now: DateTime<Utc>, dir: &Path) -> Verdict {
     let Some(hook) = parse_hook(input) else {
-        return Ok(PASS);
+        return Verdict::Pass;
     };
     let Ok(file) = std::fs::File::open(&hook.transcript_path) else {
-        return Ok(PASS);
+        return Verdict::Pass;
     };
     let Some(s) = scan(std::io::BufReader::new(file)) else {
-        return Ok(PASS);
+        return Verdict::Pass;
     };
 
     let idle = now.signed_duration_since(s.last_ts).num_seconds();
     if !should_warn(idle, s.tokens) {
-        return Ok(PASS);
+        // Not a cold-cache block, but a previous block in this session may have stashed a draft.
+        return match take_saved_prompt(dir, &hook.session_id, &hook.prompt) {
+            Some(saved) => Verdict::PassWith(reinject_stdout(&saved)),
+            None => Verdict::Pass,
+        };
     }
 
-    // Warn once per idle gap; a resend then goes straight through.
+    // Warn once per idle gap; a resend then goes straight through (and may reinject).
     let gap_id = s.last_ts.to_rfc3339();
     let marker = marker_path(dir, &hook.session_id);
     if already_acked(&marker, &gap_id) {
-        return Ok(PASS);
+        return match take_saved_prompt(dir, &hook.session_id, &hook.prompt) {
+            Some(saved) => Verdict::PassWith(reinject_stdout(&saved)),
+            None => Verdict::Pass,
+        };
     }
     // Ack before printing: if the marker cannot be written we fail open rather than block
     // without recording that we did.
-    ack(&marker, &gap_id)?;
+    if ack(&marker, &gap_id).is_err() {
+        return Verdict::Pass;
+    }
 
     // Best effort: losing the saved copy is not a reason to let the expensive turn through.
-    let saved = save_prompt(dir, &hook.session_id, &hook.prompt);
+    let _ = save_prompt(dir, &hook.session_id, &hook.prompt);
 
     let model = pricing_model(&hook.session_id, &s.model);
-    eprintln!(
-        "{}",
-        message(
-            idle,
-            s.tokens,
-            cold_turn_cost(s.tokens, &model),
-            saved.as_deref()
-        )
-    );
-    Ok(BLOCK)
+    let reason = message(idle, s.tokens, cold_turn_cost(s.tokens, &model));
+    Verdict::Block(block_stdout(&reason))
 }
 
-/// Run the hook: read stdin, print to stderr, return the exit code for `main` to exit with.
+/// Run the hook: read stdin, print JSON to stdout, return the exit code for `main` to exit with.
 ///
 /// Fail open, unconditionally: an error, a panic, a missing transcript — anything but a genuine
 /// stale-and-large session — returns 0 and the prompt goes through.
@@ -307,7 +382,13 @@ pub fn run() -> i32 {
         if std::io::stdin().read_to_string(&mut input).is_err() {
             return PASS;
         }
-        decide(&input, Utc::now()).unwrap_or(PASS)
+        let verdict = match guard_dir() {
+            Ok(dir) => decide_in(&input, Utc::now(), &dir),
+            Err(_) => Verdict::Pass,
+        };
+        let code = verdict.code();
+        verdict.emit();
+        code
     })
 }
 
@@ -591,7 +672,11 @@ mod tests {
     /// The real [`decide_in`], with markers kept inside the test's own dir. Drives the whole
     /// path — scan, trigger, marker, message — not a re-implementation of it.
     fn verdict(payload: &str, dir: &Path) -> i32 {
-        decide_in(payload, Utc::now(), dir).unwrap_or(PASS)
+        decide_in(payload, Utc::now(), dir).code()
+    }
+
+    fn decide_verdict(payload: &str, dir: &Path) -> Verdict {
+        decide_in(payload, Utc::now(), dir)
     }
 
     #[test]
@@ -657,13 +742,19 @@ mod tests {
         let dir = std::env::temp_dir();
         assert_eq!(verdict("not json", &dir), PASS);
         assert_eq!(verdict("{}", &dir), PASS);
+        // Missing transcript / malformed stdin: decide_in returns Pass without a marker dir.
         assert_eq!(
-            decide(r#"{"transcript_path":"/nonexistent/x.jsonl"}"#, Utc::now()).unwrap(),
+            decide_in(
+                r#"{"transcript_path":"/nonexistent/x.jsonl"}"#,
+                Utc::now(),
+                &dir
+            )
+            .code(),
             PASS,
             "missing transcript fails open"
         );
         assert_eq!(
-            decide("garbage", Utc::now()).unwrap(),
+            decide_in("garbage", Utc::now(), &dir).code(),
             PASS,
             "malformed stdin fails open"
         );
@@ -707,7 +798,7 @@ mod tests {
 
     #[test]
     fn message_does_not_sell_compact_as_a_saving() {
-        let m = message(7200, 150_000, Some(1.5), None);
+        let m = message(7200, 150_000, Some(1.5));
         assert!(m.contains("2h 0m") && m.contains("150k"), "{m}");
         assert!(m.contains("$1.50"), "cost at the cache-write rate: {m}");
         assert!(
@@ -720,7 +811,79 @@ mod tests {
         );
         assert!(!m.contains("carry on"), "never echo the prompt: {m}");
         // No price for an unknown model ⇒ no figure, but still a warning.
-        assert!(!message(7200, 150_000, None, None).contains('$'));
+        assert!(!message(7200, 150_000, None).contains('$'));
+    }
+
+    #[test]
+    fn block_stdout_suppresses_the_original_prompt_echo() {
+        let body = block_stdout("idle warning");
+        let v: Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(v["decision"], "block");
+        assert_eq!(v["reason"], "idle warning");
+        assert_eq!(v["hookSpecificOutput"]["hookEventName"], "UserPromptSubmit");
+        assert_eq!(
+            v["hookSpecificOutput"]["suppressOriginalPrompt"], true,
+            "Claude Code must not append 'Original prompt:' — that nests the warning"
+        );
+        // The reason itself never carries the user's text either.
+        assert!(!body.contains("carry on"));
+    }
+
+    #[test]
+    fn a_block_emits_suppress_json_not_plain_stderr() {
+        let (payload, dir) = fixture(&[entry(&ago(7200), 150_000, false)]);
+        match decide_verdict(&payload, &dir) {
+            Verdict::Block(body) => {
+                let v: Value = serde_json::from_str(&body).unwrap();
+                assert_eq!(v["decision"], "block");
+                assert_eq!(v["hookSpecificOutput"]["suppressOriginalPrompt"], true);
+                assert!(
+                    v["reason"].as_str().unwrap().contains("prompt cache"),
+                    "reason carries the warning: {v}"
+                );
+            }
+            other => panic!("expected Block, got {other:?}"),
+        }
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn next_submit_reinjects_a_different_blocked_prompt() {
+        let (payload, dir) = fixture(&[entry(&ago(7200), 150_000, false)]);
+        assert_eq!(verdict(&payload, &dir), BLOCK, "first submit is stopped");
+
+        // User types something new after the block cleared the input box.
+        let mut v: Value = serde_json::from_str(&payload).unwrap();
+        v["prompt"] = Value::String("something else".into());
+        // Still cold, but the gap is already acked → pass, with reinjection.
+        match decide_verdict(&v.to_string(), &dir) {
+            Verdict::PassWith(body) => {
+                let out: Value = serde_json::from_str(&body).unwrap();
+                let ctx = out["hookSpecificOutput"]["additionalContext"]
+                    .as_str()
+                    .unwrap();
+                assert!(ctx.contains("carry on"), "saved prompt reinjected: {ctx}");
+                assert!(
+                    !prompt_path(&dir, v["session_id"].as_str().unwrap()).exists(),
+                    "stash is consumed so it cannot reappear later"
+                );
+            }
+            other => panic!("expected PassWith reinjection, got {other:?}"),
+        }
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn resending_the_same_text_does_not_reinject() {
+        let (payload, dir) = fixture(&[entry(&ago(7200), 150_000, false)]);
+        assert_eq!(verdict(&payload, &dir), BLOCK);
+        // Exact resend: Claude Code may still hold the text, or the user retyped it.
+        assert_eq!(
+            decide_verdict(&payload, &dir),
+            Verdict::Pass,
+            "identical text is not double-injected"
+        );
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]
