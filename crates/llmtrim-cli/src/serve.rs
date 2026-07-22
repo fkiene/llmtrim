@@ -1045,14 +1045,11 @@ mod imp {
         let model = pending.and_then(|p| p.model.as_deref()).unwrap_or("?");
         let sub = pending
             .and_then(|p| {
-                p.reroute
-                    .as_ref()
-                    .map(|r| r.provider.as_str())
-                    .or_else(|| {
-                        p.fallback
-                            .as_ref()
-                            .and_then(|f| f.providers.first().map(|p| p.as_str()))
-                    })
+                p.reroute.as_ref().map(|r| r.provider.as_str()).or_else(|| {
+                    p.fallback
+                        .as_ref()
+                        .and_then(|f| f.providers.first().map(|p| p.as_str()))
+                })
             })
             .unwrap_or("-");
         let session = pending
@@ -1060,11 +1057,7 @@ mod imp {
                 p.reroute
                     .as_ref()
                     .and_then(|r| r.session_id.as_deref())
-                    .or_else(|| {
-                        p.fallback
-                            .as_ref()
-                            .and_then(|f| f.session_id.as_deref())
-                    })
+                    .or_else(|| p.fallback.as_ref().and_then(|f| f.session_id.as_deref()))
                     .or_else(|| {
                         p.breakdown
                             .as_ref()
@@ -1472,8 +1465,7 @@ mod imp {
                         // Non-2xx after a successful transport: surface as a typed Anthropic
                         // error (same shape as the live reroute failure path), not another
                         // transport error — we got a real response this time.
-                        let message =
-                            reroute_upstream_error_message(info.provider, status, &raw);
+                        let message = reroute_upstream_error_message(info.provider, status, &raw);
                         let acc = Arc::new(Mutex::new(message.clone().into_bytes()));
                         let _finalize = Finalize {
                             acc,
@@ -1488,11 +1480,7 @@ mod imp {
                             None,
                         );
                     }
-                    log_upstream_transport_failure(
-                        self.pending.as_ref(),
-                        &cause,
-                        "retry-failed",
-                    );
+                    log_upstream_transport_failure(self.pending.as_ref(), &cause, "retry-failed");
                 } else if let Some(original) = pending.original.clone() {
                     log_upstream_transport_failure(self.pending.as_ref(), &cause, "retry");
                     let proxy = self.upstream_proxy.clone();
@@ -1521,11 +1509,7 @@ mod imp {
                         };
                         return buffered_response(status, content_type, body);
                     }
-                    log_upstream_transport_failure(
-                        self.pending.as_ref(),
-                        &cause,
-                        "retry-failed",
-                    );
+                    log_upstream_transport_failure(self.pending.as_ref(), &cause, "retry-failed");
                 }
             }
 
@@ -4935,9 +4919,7 @@ mod imp {
             assert!(is_transient_transport_error("broken pipe"));
             assert!(is_transient_transport_error("operation timed out"));
             // Validation / auth failures must never re-fire a body.
-            assert!(!is_transient_transport_error(
-                "invalid_request: bad schema"
-            ));
+            assert!(!is_transient_transport_error("invalid_request: bad schema"));
             assert!(!is_transient_transport_error(
                 "authentication_error: invalid x-api-key"
             ));
