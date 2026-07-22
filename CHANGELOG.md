@@ -6,6 +6,8 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.11.6] - 2026-07-22
+
 ### Added
 
 - **Grok reroute pins `prompt_cache_key` to the Claude Code session id.** Codex and Kimi already
@@ -1279,7 +1281,8 @@ bill, never a broken call.
   (6 targets with SLSA build provenance), CI on Linux/macOS/Windows with secret
   scanning, license compliance, and MSRV gates.
 
-[Unreleased]: https://github.com/fkiene/llmtrim/compare/v0.11.5...HEAD
+[Unreleased]: https://github.com/fkiene/llmtrim/compare/v0.11.6...HEAD
+[0.11.6]: https://github.com/fkiene/llmtrim/compare/v0.11.5...v0.11.6
 [0.11.5]: https://github.com/fkiene/llmtrim/compare/v0.11.4...v0.11.5
 [0.11.4]: https://github.com/fkiene/llmtrim/compare/v0.11.3...v0.11.4
 [0.11.3]: https://github.com/fkiene/llmtrim/compare/v0.11.2...v0.11.3

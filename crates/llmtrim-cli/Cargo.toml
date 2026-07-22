@@ -37,10 +37,10 @@ path = "src/main.rs"
 [dependencies]
 # `version` is required for `cargo publish` (path alone isn't publishable) and is kept in
 # lockstep with llmtrim-core by cargo-release's shared-version on every bump.
-llmtrim-core = { path = "../llmtrim-core", version = "0.11.6-dev" }
+llmtrim-core = { path = "../llmtrim-core", version = "0.11.6" }
 # Published alongside core (see release.yml publish order). `version` is required
 # for `cargo publish` and is kept in lockstep by cargo-release's shared-version.
-llmtrim-ledger = { path = "../llmtrim-ledger", version = "0.11.6-dev" }
+llmtrim-ledger = { path = "../llmtrim-ledger", version = "0.11.6" }
 anyhow.workspace = true
 chrono = "0.4.45"
 clap = { version = "4.6.1", features = ["derive"] }
