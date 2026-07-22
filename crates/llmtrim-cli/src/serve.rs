@@ -1024,6 +1024,88 @@ mod imp {
         r
     }
 
+    /// True when any usage field carries a *positive* provider count. Synthetic Anthropic
+    /// `message_start` / `finish_if_open` frames emit zeros for every field; those must not
+    /// count as a real completion (they are how Grok full-body ghosts used to look healthy).
+    fn usage_has_positive_counts(usage: &ResponseUsage) -> bool {
+        usage.output_after.is_some_and(|n| n > 0)
+            || usage.cache_read.is_some_and(|n| n > 0)
+            || usage.fresh_input.is_some_and(|n| n > 0)
+            || usage.cache_write.is_some_and(|n| n > 0)
+    }
+
+    /// Accumulator contains a client-visible content delta (text / thinking / tool JSON).
+    /// Used to distinguish a pure empty stream from a mid-turn abort.
+    fn sse_has_content_delta(buf: &[u8]) -> bool {
+        let Ok(text) = std::str::from_utf8(buf) else {
+            return false;
+        };
+        // Anthropic SSE delta types the encoder emits; also tolerate raw Anthropic text_delta.
+        text.contains("\"type\":\"text_delta\"")
+            || text.contains("\"type\": \"text_delta\"")
+            || text.contains("\"type\":\"thinking_delta\"")
+            || text.contains("\"type\": \"thinking_delta\"")
+            || text.contains("\"type\":\"input_json_delta\"")
+            || text.contains("\"type\": \"input_json_delta\"")
+            || text.contains("\"type\":\"signature_delta\"")
+            || text.contains("\"type\": \"signature_delta\"")
+    }
+
+    /// Classify a turn whose harvested usage is all-zero / missing. Returns `None` for a real
+    /// completion (positive provider usage). Otherwise:
+    /// - `empty_stream` — no client-visible content (empty body, or only synthetic
+    ///   `message_start` zeros before the client/upstream dropped)
+    /// - `incomplete_stream` — content was emitted but the stream never delivered real usage
+    ///   (client abort mid-turn, quiet EOF, truncated upstream)
+    ///
+    /// Distinct from `transport_reset`, which is reserved for `handle_error` (request never
+    /// got a response at all).
+    fn classify_empty_usage_outcome(buf: &[u8], usage: &ResponseUsage) -> Option<&'static str> {
+        if usage_has_positive_counts(usage) {
+            return None;
+        }
+        if sse_has_content_delta(buf) {
+            Some("incomplete_stream")
+        } else {
+            Some("empty_stream")
+        }
+    }
+
+    /// Greppable stderr line for a stream that finalized without measurable usage.
+    fn log_stream_ghost(pending: &Pending, outcome: &str, detail: &str) {
+        let model = pending.model.as_deref().unwrap_or("?");
+        let sub = pending
+            .reroute
+            .as_ref()
+            .map(|r| r.provider.as_str())
+            .or_else(|| {
+                pending
+                    .fallback
+                    .as_ref()
+                    .and_then(|f| f.providers.first().map(|p| p.as_str()))
+            })
+            .unwrap_or("-");
+        let session = pending
+            .reroute
+            .as_ref()
+            .and_then(|r| r.session_id.as_deref())
+            .or_else(|| {
+                pending
+                    .fallback
+                    .as_ref()
+                    .and_then(|f| f.session_id.as_deref())
+            })
+            .or_else(|| {
+                pending
+                    .breakdown
+                    .as_ref()
+                    .and_then(|b| b.cc_session_id.as_deref())
+            })
+            .unwrap_or("-");
+        eprintln!("llmtrim: stream {outcome} model={model} sub={sub} session={session}: {detail}");
+        let _ = std::io::Write::flush(&mut std::io::stderr());
+    }
+
     /// True for the hyper/hudsucker failures that a one-shot re-issue usually fixes: a pooled
     /// keep-alive the server already closed, a brief connect blip, a SendRequest reset. Leave
     /// validation/auth strings alone so we never re-fire a bad body.
@@ -1389,13 +1471,21 @@ mod imp {
 
     impl Drop for Interceptor {
         fn drop(&mut self) {
-            // A compressed request whose response we never saw (connection dropped): still
-            // record the input savings, with output unknown.
+            // A compressed request whose response we never saw (connection dropped before
+            // handle_response / handle_error took ownership): still record the input savings,
+            // tagged empty_stream so it is greppable and not confused with a real out=0 turn.
             if let Some(p) = self.pending.take() {
+                log_stream_ghost(
+                    &p,
+                    "empty_stream",
+                    "pending dropped without response (interceptor teardown)",
+                );
                 if let Some(x) = build_breakdown(&p, &ResponseUsage::default()) {
                     let _ = self.breakdown_ledger.send(x);
                 }
-                let _ = self.ledger.send(record_from(p, ResponseUsage::default()));
+                let mut r = record_from(p, ResponseUsage::default());
+                r.outcome = Some("empty_stream".into());
+                let _ = self.ledger.send(r);
             }
         }
     }
@@ -2427,6 +2517,50 @@ mod imp {
                     breakdown_ledger: self.breakdown_ledger.clone(),
                 };
                 return anthropic_error_typed(status, reroute_error_kind(status), &message, None);
+            }
+
+            // Quiet EOF before any client-visible content: the upstream accepted the request
+            // (HTTP 2xx) then closed without a single content/finish event. That is the
+            // measured Grok full-body ghost pattern — no handle_error, no transport_reset.
+            // One buffered re-issue when we still hold the replay body; if it lands 2xx we
+            // stream the retry. Past this point the client already owns nothing, so a retry
+            // cannot double-bill a delivered answer. Do not retry once content was committed
+            // (client may have seen bytes).
+            if !committed
+                && prelude.is_empty()
+                && let Some(replay) = info.replay.as_ref()
+            {
+                log_stream_ghost(
+                    &pending,
+                    "empty_stream",
+                    "upstream closed 2xx stream before content; retrying once",
+                );
+                if let Some((s, raw, _ra)) = self
+                    .reissue_reroute(&replay.url, replay.headers.clone(), replay.body.clone())
+                    .await
+                {
+                    if (200..300).contains(&s) {
+                        return self.finish_buffered_reroute(pending, &info, raw);
+                    }
+                    // Retry got a real non-2xx: fall through to typed error surface below via
+                    // the buffered path's own classification.
+                    let message = reroute_upstream_error_message(info.provider, s, &raw);
+                    let acc = Arc::new(Mutex::new(message.clone().into_bytes()));
+                    let _finalize = Finalize {
+                        acc,
+                        pending: Some(pending),
+                        ledger: self.ledger.clone(),
+                        breakdown_ledger: self.breakdown_ledger.clone(),
+                    };
+                    return anthropic_error_typed(s, reroute_error_kind(s), &message, None);
+                }
+                // Retry transport failed: keep going and record empty_stream on Finalize drop
+                // so the ghost is greppable even without a successful re-issue.
+                log_stream_ghost(
+                    &pending,
+                    "empty_stream",
+                    "empty-stream retry failed; recording ghost row",
+                );
             }
 
             // Backend accepted this turn (content committed, no pre-output fatal): refresh the
@@ -3720,31 +3854,72 @@ mod imp {
                 .map(|mut b| std::mem::take(&mut *b))
                 .unwrap_or_default();
             // Prefer the provider's own output-token count (exact; includes tool-use and
-            // thinking output). Fall back to tokenizing the answer text only when no usage is
-            // present in the response.
-            let output_after = extract_output_usage(p.provider, &buf).or_else(|| {
-                extract_output_text(p.provider, &buf).and_then(|text| {
-                    llmtrim_core::tokenizer::counter_for(p.provider, p.model.as_deref())
-                        .ok()
-                        .map(|c| c.count(&text) as i64)
-                })
-            });
+            // thinking output). Classify ghosts against *provider* usage only — the text
+            // tokenization fallback can invent a positive `output_after` from a partial
+            // answer and would otherwise hide incomplete_stream / empty_stream tags.
+            let provider_output = extract_output_usage(p.provider, &buf);
             // Cached-prefix tokens the provider served from its prompt cache (the discounted
             // resent context); `None` when the provider reports none.
             let cache_read = extract_cache_read(p.provider, &buf);
             // Full-rate + cache-write input tokens — with `cache_read` these reconstruct the
             // request's real input bill, which the dashboard's net-$ figures are priced from.
             let (fresh_input, cache_write) = extract_input_usage(p.provider, &buf);
-            let usage = ResponseUsage {
-                output_after,
+            let provider_usage = ResponseUsage {
+                output_after: provider_output,
                 cache_read,
                 fresh_input,
                 cache_write,
             };
+            // Synthetic Anthropic `message_start` / `finish_if_open` frames write zeros into
+            // every usage field. Treating those zeros as "provider said out=0" produced the
+            // Grok full-body ghost rows (compressed body recorded, no real usage, next turn
+            // healthy). When nothing positive landed from the provider, tag the outcome.
+            let ghost_outcome = classify_empty_usage_outcome(&buf, &provider_usage);
+            let mut usage = provider_usage;
+            if ghost_outcome.is_some() {
+                // Blank synthetic zeros so the ledger doesn't store out=0 / fresh=0 as if the
+                // provider reported a real empty completion.
+                if usage.output_after == Some(0) {
+                    usage.output_after = None;
+                }
+                if usage.cache_read == Some(0) {
+                    usage.cache_read = None;
+                }
+                if usage.fresh_input == Some(0) {
+                    usage.fresh_input = None;
+                }
+                if usage.cache_write == Some(0) {
+                    usage.cache_write = None;
+                }
+            }
+            // Tokenize answer text only when the provider omitted output usage entirely.
+            // Skip on pure empty_stream (no content to count); allow on incomplete_stream so
+            // a mid-turn abort still leaves a rough output estimate when useful.
+            if usage.output_after.is_none() && ghost_outcome != Some("empty_stream") {
+                usage.output_after = extract_output_text(p.provider, &buf).and_then(|text| {
+                    llmtrim_core::tokenizer::counter_for(p.provider, p.model.as_deref())
+                        .ok()
+                        .map(|c| c.count(&text) as i64)
+                });
+            }
+            if let Some(outcome) = ghost_outcome {
+                let detail = if buf.is_empty() {
+                    "no response bytes accumulated"
+                } else if outcome == "incomplete_stream" {
+                    "content emitted but no positive usage (client abort or truncated stream)"
+                } else {
+                    "synthetic zero usage only (message_start / finish_if_open, no real content)"
+                };
+                log_stream_ghost(&p, outcome, detail);
+            }
             if let Some(x) = build_breakdown(&p, &usage) {
                 let _ = self.breakdown_ledger.send(x);
             }
-            let _ = self.ledger.send(record_from(p, usage));
+            let mut rec = record_from(p, usage);
+            if let Some(outcome) = ghost_outcome {
+                rec.outcome = Some(outcome.into());
+            }
+            let _ = self.ledger.send(rec);
         }
     }
 
@@ -5243,6 +5418,70 @@ mod imp {
                     .and_then(serde_json::Value::as_str),
                 Some("new")
             );
+        }
+
+        #[test]
+        fn empty_usage_classifier_tags_ghosts() {
+            // Real completion: any positive field keeps outcome unset.
+            let healthy = ResponseUsage {
+                output_after: Some(12),
+                cache_read: Some(100),
+                fresh_input: Some(5),
+                cache_write: None,
+            };
+            assert_eq!(classify_empty_usage_outcome(b"", &healthy), None);
+            assert!(usage_has_positive_counts(&healthy));
+
+            // All zeros / missing — no content → empty_stream (the Grok full-body ghost).
+            let zeros = ResponseUsage {
+                output_after: Some(0),
+                cache_read: Some(0),
+                fresh_input: Some(0),
+                cache_write: Some(0),
+            };
+            assert_eq!(
+                classify_empty_usage_outcome(b"", &zeros),
+                Some("empty_stream")
+            );
+            // Synthetic message_start zeros only (no content delta).
+            let msg_start = concat!(
+                "event: message_start\n",
+                "data: {\"type\":\"message_start\",\"message\":{\"usage\":{\"input_tokens\":0,\"output_tokens\":0}}}\n\n",
+                "event: message_delta\n",
+                "data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"input_tokens\":0,\"output_tokens\":0,\"cache_read_input_tokens\":0}}\n\n",
+            );
+            let extracted = ResponseUsage {
+                output_after: extract_output_usage(ProviderKind::Anthropic, msg_start.as_bytes()),
+                cache_read: extract_cache_read(ProviderKind::Anthropic, msg_start.as_bytes()),
+                fresh_input: extract_input_usage(ProviderKind::Anthropic, msg_start.as_bytes()).0,
+                cache_write: extract_input_usage(ProviderKind::Anthropic, msg_start.as_bytes()).1,
+            };
+            assert_eq!(extracted.output_after, Some(0));
+            assert_eq!(
+                classify_empty_usage_outcome(msg_start.as_bytes(), &extracted),
+                Some("empty_stream"),
+                "message_start zeros alone must not look like a real completion"
+            );
+
+            // Content deltas without positive usage → incomplete_stream (client abort / truncate).
+            let partial = concat!(
+                "event: message_start\n",
+                "data: {\"type\":\"message_start\",\"message\":{\"usage\":{\"input_tokens\":0,\"output_tokens\":0}}}\n\n",
+                "event: content_block_delta\n",
+                "data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"hel\"}}\n\n",
+            );
+            let partial_usage = ResponseUsage {
+                output_after: extract_output_usage(ProviderKind::Anthropic, partial.as_bytes()),
+                cache_read: extract_cache_read(ProviderKind::Anthropic, partial.as_bytes()),
+                fresh_input: extract_input_usage(ProviderKind::Anthropic, partial.as_bytes()).0,
+                cache_write: None,
+            };
+            assert_eq!(
+                classify_empty_usage_outcome(partial.as_bytes(), &partial_usage),
+                Some("incomplete_stream")
+            );
+            assert!(sse_has_content_delta(partial.as_bytes()));
+            assert!(!sse_has_content_delta(msg_start.as_bytes()));
         }
 
         #[test]
@@ -6818,13 +7057,15 @@ mod imp {
                 compact: None,
             });
 
-            // Three chunks; the client will consume only the first then drop the body.
+            // Three Anthropic-shaped chunks; the client will consume only the first then drop.
+            // The first frame carries a real text_delta so Finalize classifies the abort as
+            // incomplete_stream (content seen, usage never arrived) rather than empty_stream.
             let chunks: Vec<Result<bytes::Bytes, std::io::Error>> = vec![
                 Ok(bytes::Bytes::from_static(
-                    b"data: {\"delta\":{\"text\":\"hel\"}}\n\n",
+                    b"data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"hel\"}}\n\n",
                 )),
                 Ok(bytes::Bytes::from_static(
-                    b"data: {\"delta\":{\"text\":\"lo\"}}\n\n",
+                    b"data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"lo\"}}\n\n",
                 )),
                 Ok(bytes::Bytes::from_static(
                     b"data: {\"type\":\"message_delta\",\"usage\":{\"output_tokens\":5}}\n\n",
@@ -6861,6 +7102,20 @@ mod imp {
             );
             assert_eq!(rec.input_before, 150, "input_before from pending");
             assert_eq!(rec.input_after, 90, "input_after from pending");
+            // Client saw a text delta but never the final usage frame → incomplete_stream,
+            // not a silent out=0 success.
+            assert_eq!(
+                rec.outcome.as_deref(),
+                Some("incomplete_stream"),
+                "mid-stream client abort must tag incomplete_stream"
+            );
+            // Provider never delivered usage frames; cache/fresh stay blank. output_after may
+            // still be a tokenized estimate of the partial text — that is fine and still
+            // incomplete (not a silent success).
+            assert!(
+                rec.cache_read_tokens.is_none() && rec.fresh_input_tokens.is_none(),
+                "abort without provider usage must not invent cache/fresh counts"
+            );
 
             // No second record.
             assert!(
@@ -6924,10 +7179,16 @@ mod imp {
                 .recv_timeout(std::time::Duration::from_secs(2))
                 .expect("Finalize must emit one record even for an empty body");
 
-            // Empty accumulator → no usage and no answer text → output_after is None.
+            // Empty accumulator → no usage and no answer text → output_after is None,
+            // and the row is tagged empty_stream so it is not confused with a real out=0 turn.
             assert_eq!(
                 rec.output_after, None,
                 "empty body: output_after must be None (nothing to extract)"
+            );
+            assert_eq!(
+                rec.outcome.as_deref(),
+                Some("empty_stream"),
+                "empty body must tag empty_stream"
             );
             assert_eq!(rec.input_before, 80);
             assert_eq!(rec.input_after, 50);

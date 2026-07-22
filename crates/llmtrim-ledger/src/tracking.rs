@@ -45,8 +45,11 @@ pub struct Record {
     /// denominator for the "saved on new content" figure. `None` on pre-meter rows.
     pub frozen_input_tokens: Option<i64>,
     /// Explicit non-success outcome for a turn that never produced measurable output, e.g.
-    /// `transport_reset` when the upstream keep-alive died before any response. `None` on
-    /// ordinary rows (including pre-column ledgers) so old readers stay valid.
+    /// `transport_reset` when the upstream keep-alive died before any response,
+    /// `empty_stream` when a 2xx body closed with only synthetic zero usage / no content,
+    /// `incomplete_stream` when content was emitted but positive usage never arrived
+    /// (client abort or truncated stream). `None` on ordinary rows (including pre-column
+    /// ledgers) so old readers stay valid.
     pub outcome: Option<String>,
 }
 

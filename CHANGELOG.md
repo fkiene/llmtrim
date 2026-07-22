@@ -8,6 +8,17 @@ All notable changes to this project are documented here. The format follows
 
 ### Fixed
 
+- **Grok full-body ghost turns are classified and greppable.** After the 0.11.6 transport-reset
+  hardening, some Grok sub turns still landed in the ledger as anonymous `out=0` / zero usage rows
+  with no `outcome` and no `serve.log` transport line: the stream had accepted (HTTP 2xx) then died
+  with only synthetic Anthropic `message_start` zeros (or nothing at all), and `Finalize` treated
+  those zeros as a real completion. `Finalize` now blanks all-zero / missing usage, tags
+  `outcome=empty_stream` (no client-visible content) or `outcome=incomplete_stream` (content
+  without positive usage — client abort / truncate), and logs
+  `llmtrim: stream <outcome> model=… sub=… session=…` on stderr. On the reroute path, a quiet EOF
+  before any content also triggers one buffered replay when the body is still available — same
+  safety rule as the `handle_error` retry (never after the client has seen bytes).
+
 - **Grok reasoning history is replayed for prompt-cache continuity.** cli-chat-proxy returns
   Responses `reasoning` items (summary always; `encrypted_content` when
   `include: ["reasoning.encrypted_content"]` is set). llmtrim previously dropped Anthropic
