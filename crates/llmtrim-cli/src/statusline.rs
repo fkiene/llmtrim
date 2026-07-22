@@ -1373,8 +1373,7 @@ pub fn apply_sub_auth_env(settings: &mut Value, want: bool) -> Result<SubAuthEnv
         return Ok(SubAuthEnvChange::Unchanged);
     };
     env_obj.remove(SUB_AUTH_TOKEN_KEY);
-    if env_obj.get(NODE_USE_ENV_PROXY_KEY).and_then(Value::as_str)
-        == Some(NODE_USE_ENV_PROXY_VALUE)
+    if env_obj.get(NODE_USE_ENV_PROXY_KEY).and_then(Value::as_str) == Some(NODE_USE_ENV_PROXY_VALUE)
     {
         env_obj.remove(NODE_USE_ENV_PROXY_KEY);
     }
