@@ -1296,11 +1296,17 @@ pub enum SubAuthEnvPresence {
     Unknown,
 }
 
+/// Node 20.18+/22+ undici `fetch` ignores `HTTPS_PROXY` unless this is set. Claude Code uses
+/// that stack, so without it skip-login's dummy token hits real Anthropic → `401 Invalid bearer
+/// token` even when the shell has `HTTPS_PROXY` and the MITM is healthy.
+const NODE_USE_ENV_PROXY_KEY: &str = "NODE_USE_ENV_PROXY";
+const NODE_USE_ENV_PROXY_VALUE: &str = "1";
+
 /// Pure mutation of a parsed Claude settings object.
 ///
-/// - `want = true`: set `env.ANTHROPIC_AUTH_TOKEN` to [`SUB_AUTH_TOKEN_VALUE`] unless a foreign
-///   (non-sentinel) value is already there.
-/// - `want = false`: remove the key only when it holds our sentinel.
+/// - `want = true`: set `env.ANTHROPIC_AUTH_TOKEN` to [`SUB_AUTH_TOKEN_VALUE`] (and
+///   `NODE_USE_ENV_PROXY=1`) unless a foreign (non-sentinel) token is already there.
+/// - `want = false`: remove those keys only when the token holds our sentinel.
 pub fn apply_sub_auth_env(settings: &mut Value, want: bool) -> Result<SubAuthEnvChange> {
     let root = settings
         .as_object_mut()
@@ -1315,7 +1321,26 @@ pub fn apply_sub_auth_env(settings: &mut Value, want: bool) -> Result<SubAuthEnv
 
     if want {
         match current.as_deref() {
-            Some(SUB_AUTH_TOKEN_VALUE) => return Ok(SubAuthEnvChange::Unchanged),
+            Some(SUB_AUTH_TOKEN_VALUE) => {
+                // Ours already — still ensure Node honors HTTPS_PROXY (upgrade path for
+                // installs that got the dummy token before NODE_USE_ENV_PROXY was added).
+                let env = root
+                    .entry("env")
+                    .or_insert_with(|| Value::Object(Default::default()));
+                let env_obj = env
+                    .as_object_mut()
+                    .context("Claude settings env must be an object")?;
+                let proxy_ok = env_obj.get(NODE_USE_ENV_PROXY_KEY).and_then(Value::as_str)
+                    == Some(NODE_USE_ENV_PROXY_VALUE);
+                if proxy_ok {
+                    return Ok(SubAuthEnvChange::Unchanged);
+                }
+                env_obj.insert(
+                    NODE_USE_ENV_PROXY_KEY.to_string(),
+                    Value::String(NODE_USE_ENV_PROXY_VALUE.to_string()),
+                );
+                return Ok(SubAuthEnvChange::Injected);
+            }
             Some(_) => return Ok(SubAuthEnvChange::Unchanged), // foreign — leave alone
             None => {
                 let env = root
@@ -1328,12 +1353,16 @@ pub fn apply_sub_auth_env(settings: &mut Value, want: bool) -> Result<SubAuthEnv
                     SUB_AUTH_TOKEN_KEY.to_string(),
                     Value::String(SUB_AUTH_TOKEN_VALUE.to_string()),
                 );
+                env_obj.insert(
+                    NODE_USE_ENV_PROXY_KEY.to_string(),
+                    Value::String(NODE_USE_ENV_PROXY_VALUE.to_string()),
+                );
                 return Ok(SubAuthEnvChange::Injected);
             }
         }
     }
 
-    // want = false: remove only our sentinel.
+    // want = false: remove only our package.
     if current.as_deref() != Some(SUB_AUTH_TOKEN_VALUE) {
         return Ok(SubAuthEnvChange::Unchanged);
     }
@@ -1344,10 +1373,13 @@ pub fn apply_sub_auth_env(settings: &mut Value, want: bool) -> Result<SubAuthEnv
         return Ok(SubAuthEnvChange::Unchanged);
     };
     env_obj.remove(SUB_AUTH_TOKEN_KEY);
+    if env_obj.get(NODE_USE_ENV_PROXY_KEY).and_then(Value::as_str)
+        == Some(NODE_USE_ENV_PROXY_VALUE)
+    {
+        env_obj.remove(NODE_USE_ENV_PROXY_KEY);
+    }
     // Legacy cleanup: early 0.11.8-dev also wrote CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1
-    // alongside our sentinel. We no longer set that flag (cannot own a bare "1"), but drop it
-    // when tearing down our package so an orphan key does not linger after anthropic-login keep
-    // / sub off. Only remove the exact value we used to write.
+    // alongside our sentinel. Drop it when tearing down our package.
     const LEGACY_NONESSENTIAL_KEY: &str = "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC";
     if env_obj.get(LEGACY_NONESSENTIAL_KEY).and_then(Value::as_str) == Some("1") {
         env_obj.remove(LEGACY_NONESSENTIAL_KEY);
@@ -2090,7 +2122,8 @@ mod tests {
             settings["env"]["ANTHROPIC_AUTH_TOKEN"],
             SUB_AUTH_TOKEN_VALUE
         );
-        // Idempotent when already ours.
+        assert_eq!(settings["env"]["NODE_USE_ENV_PROXY"], "1");
+        // Idempotent when already ours (token + proxy flag).
         assert_eq!(
             apply_sub_auth_env(&mut settings, true).unwrap(),
             SubAuthEnvChange::Unchanged
@@ -2143,6 +2176,7 @@ mod tests {
         let mut settings = serde_json::json!({
             "env": {
                 "ANTHROPIC_AUTH_TOKEN": SUB_AUTH_TOKEN_VALUE,
+                "NODE_USE_ENV_PROXY": "1",
                 "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1",
                 "CLAUDE_CODE_EFFORT_LEVEL": "low"
             }
@@ -2152,6 +2186,7 @@ mod tests {
             SubAuthEnvChange::Removed
         );
         assert!(settings["env"].get("ANTHROPIC_AUTH_TOKEN").is_none());
+        assert!(settings["env"].get("NODE_USE_ENV_PROXY").is_none());
         assert!(
             settings["env"]
                 .get("CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC")
@@ -2159,6 +2194,18 @@ mod tests {
             "legacy package flag cleaned with our token"
         );
         assert_eq!(settings["env"]["CLAUDE_CODE_EFFORT_LEVEL"], "low");
+    }
+
+    #[test]
+    fn sub_auth_env_upgrades_existing_token_with_node_proxy_flag() {
+        let mut settings = serde_json::json!({
+            "env": { "ANTHROPIC_AUTH_TOKEN": SUB_AUTH_TOKEN_VALUE }
+        });
+        assert_eq!(
+            apply_sub_auth_env(&mut settings, true).unwrap(),
+            SubAuthEnvChange::Injected
+        );
+        assert_eq!(settings["env"]["NODE_USE_ENV_PROXY"], "1");
     }
 
     #[test]

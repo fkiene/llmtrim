@@ -23,7 +23,7 @@ const END: &str = "# <<< llmtrim <<<";
 /// process can't rewrite its parent shell's environment, so `stop`/`uninstall` print this for
 /// the user to run (or they open a new shell, which self-heals via the daemon-gated block).
 /// Single source of truth for the five managed vars, in both `NO_PROXY` casings.
-pub const UNSET_HINT: &str = "unset HTTPS_PROXY HTTP_PROXY NO_PROXY no_proxy NODE_EXTRA_CA_CERTS SSL_CERT_FILE CURL_CA_BUNDLE";
+pub const UNSET_HINT: &str = "unset HTTPS_PROXY HTTP_PROXY NO_PROXY no_proxy NODE_EXTRA_CA_CERTS SSL_CERT_FILE CURL_CA_BUNDLE NODE_USE_ENV_PROXY";
 
 /// Hosts/ranges that must bypass the interceptor: loopback, link-local, and the private LAN
 /// ranges (RFC-1918 + IPv6 ULA). llmtrim only MITMs a fixed set of public LLM API hosts (the
@@ -259,17 +259,21 @@ pub fn heal_managed_env() -> Result<Vec<PathBuf>> {
 /// hermetic. Rewrites the managed block only in profiles that already contain a healable one (see
 /// [`managed_block_needs_heal`]); returns the paths actually rewritten.
 /// Does `s` contain a *well-formed* managed block (`BEGIN`…`END`) that predates the current block
-/// shape and should be rewritten? A block is healable when it lacks either the `NO_PROXY` bypass
-/// or the daemon-liveness gate (`llmtrim _alive`) — both are silent rewrites into the current
-/// form, and the second is what migrates every pre-gate install so `stop` unwires new shells
-/// without the user re-running `setup`. Only a well-formed block qualifies: a malformed
-/// BEGIN-without-END is skipped (rewriting it would stack a duplicate), an already-current block
-/// (both markers present inside it) is skipped, and a `NO_PROXY`/guard the user placed *outside*
-/// the markers does not count — it must be inside the block we manage. Pure/testable.
+/// shape and should be rewritten? A block is healable when it lacks the `NO_PROXY` bypass, the
+/// daemon-liveness gate (`llmtrim _alive`), or `NODE_USE_ENV_PROXY` (Node undici proxy for Claude
+/// Code). Only a well-formed block qualifies: a malformed BEGIN-without-END is skipped (rewriting
+/// it would stack a duplicate), an already-current block is skipped, and a marker the user placed
+/// *outside* the block we manage does not count. Pure/testable.
 #[cfg(not(windows))]
 fn managed_block_needs_heal(s: &str) -> bool {
-    let (mut in_block, mut saw_begin, mut saw_end, mut bypass_in_block, mut gate_in_block) =
-        (false, false, false, false, false);
+    let (
+        mut in_block,
+        mut saw_begin,
+        mut saw_end,
+        mut bypass_in_block,
+        mut gate_in_block,
+        mut node_proxy_in_block,
+    ) = (false, false, false, false, false, false);
     for line in s.lines() {
         match line.trim() {
             BEGIN => {
@@ -284,10 +288,11 @@ fn managed_block_needs_heal(s: &str) -> bool {
             }
             l if in_block && l.contains("llmtrim _alive") => gate_in_block = true,
             l if in_block && l.contains("NO_PROXY") => bypass_in_block = true,
+            l if in_block && l.contains("NODE_USE_ENV_PROXY") => node_proxy_in_block = true,
             _ => {}
         }
     }
-    saw_begin && saw_end && (!bypass_in_block || !gate_in_block)
+    saw_begin && saw_end && (!bypass_in_block || !gate_in_block || !node_proxy_in_block)
 }
 
 #[cfg(not(windows))]
@@ -1145,11 +1150,12 @@ fn profile_has_block_in(base: &std::path::Path) -> bool {
 
 /// The values llmtrim manages in the user environment.
 #[cfg(windows)]
-const ENV_KEYS: [&str; 4] = [
+const ENV_KEYS: [&str; 5] = [
     "HTTPS_PROXY",
     "HTTP_PROXY",
     "NO_PROXY",
     "NODE_EXTRA_CA_CERTS",
+    "NODE_USE_ENV_PROXY",
 ];
 
 /// Open `HKCU\Environment` for read+write (created if somehow absent).
@@ -1249,6 +1255,8 @@ fn set_env_in(env: &winreg::RegKey, proxy: &str, ca: &str) -> Result<()> {
         .context("failed to set NO_PROXY")?;
     env.set_value("NODE_EXTRA_CA_CERTS", &ca)
         .context("failed to set NODE_EXTRA_CA_CERTS")?;
+    env.set_value("NODE_USE_ENV_PROXY", "1")
+        .context("failed to set NODE_USE_ENV_PROXY")?;
     Ok(())
 }
 
@@ -1573,6 +1581,9 @@ fn env_block(proxy: &str, ca: &str, bundle: Option<&str>, syntax: Syntax) -> Str
                 .unwrap_or_default();
             let (proxy, ca, no_proxy) =
                 (posix_quote(proxy), posix_quote(ca), posix_quote(NO_PROXY));
+            // NODE_USE_ENV_PROXY: Node 20.18+/22+ undici fetch ignores HTTPS_PROXY unless set
+            // (Claude Code's Anthropic client). Without it, skip-login's dummy token hits
+            // real Anthropic → 401 Invalid bearer token despite a healthy MITM.
             format!(
                 "{BEGIN}\n\
                  if command -v llmtrim >/dev/null 2>&1 && llmtrim _alive 2>/dev/null; then\n\
@@ -1581,6 +1592,7 @@ fn env_block(proxy: &str, ca: &str, bundle: Option<&str>, syntax: Syntax) -> Str
                  \x20   export NO_PROXY={no_proxy}\n\
                  \x20   export no_proxy={no_proxy}\n\
                  \x20   export NODE_EXTRA_CA_CERTS={ca}\n\
+                 \x20   export NODE_USE_ENV_PROXY=1\n\
                  {native}fi\n\
                  {END}\n"
             )
@@ -1597,6 +1609,7 @@ fn env_block(proxy: &str, ca: &str, bundle: Option<&str>, syntax: Syntax) -> Str
                  $env:HTTP_PROXY = {proxy}\n\
                  $env:NO_PROXY = {no_proxy}\n\
                  $env:NODE_EXTRA_CA_CERTS = {ca}\n\
+                 $env:NODE_USE_ENV_PROXY = '1'\n\
                  {END}\n"
             )
         }
@@ -1638,6 +1651,7 @@ fn manual_env_lines(proxy: &str, ca: &str, bundle: Option<&str>) -> Vec<String> 
             format!("export NO_PROXY={}", q(NO_PROXY)),
             format!("export no_proxy={}", q(NO_PROXY)),
             format!("export NODE_EXTRA_CA_CERTS={}", q(ca)),
+            "export NODE_USE_ENV_PROXY=1".to_string(),
         ];
         if let Some(b) = bundle {
             lines.push(format!("export SSL_CERT_FILE={}", q(b)));
@@ -1653,6 +1667,7 @@ fn manual_env_lines(proxy: &str, ca: &str, bundle: Option<&str>) -> Vec<String> 
             format!("$env:HTTP_PROXY = {}", powershell_quote(proxy)),
             format!("$env:NO_PROXY = {}", powershell_quote(NO_PROXY)),
             format!("$env:NODE_EXTRA_CA_CERTS = {}", powershell_quote(ca)),
+            "$env:NODE_USE_ENV_PROXY = '1'".to_string(),
         ]
     }
 }
@@ -2107,6 +2122,8 @@ mod tests {
         );
         assert!(b.contains("export HTTPS_PROXY='http://127.0.0.1:8787'"));
         assert!(b.contains("export NODE_EXTRA_CA_CERTS='/home/u/ca.pem'"));
+        // Node undici needs this to honor HTTPS_PROXY (Claude Code).
+        assert!(b.contains("export NODE_USE_ENV_PROXY=1"));
         // LAN/local bypass travels with the proxy, in both casings tools read.
         assert!(b.contains(&format!("export NO_PROXY='{NO_PROXY}'")));
         assert!(b.contains(&format!("export no_proxy='{NO_PROXY}'")));
@@ -2140,6 +2157,7 @@ mod tests {
         assert!(lines.contains(&format!("export NO_PROXY='{NO_PROXY}'")));
         assert!(lines.contains(&format!("export no_proxy='{NO_PROXY}'")));
         assert!(lines.contains(&"export NODE_EXTRA_CA_CERTS='/home/u/ca.pem'".to_string()));
+        assert!(lines.contains(&"export NODE_USE_ENV_PROXY=1".to_string()));
         assert!(!lines.iter().any(|l| l.contains("SSL_CERT_FILE")));
         assert!(!lines.iter().any(|l| l.contains("CURL_CA_BUNDLE")));
         // Unlike env_block, this is a standalone eval-able snippet: no BEGIN/END markers,
