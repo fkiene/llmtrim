@@ -1738,6 +1738,7 @@ mod tests {
                     cache_write_tokens: None,
                     output_shaped: Some(false),
                     frozen_input_tokens: Some(0),
+                    outcome: None,
                 })
                 .unwrap();
         }
@@ -1827,6 +1828,7 @@ mod tests {
             cache_write_tokens: None,
             output_shaped: Some(false),
             frozen_input_tokens: Some(0),
+            outcome: None,
         })
         .unwrap();
         let v2: serde_json::Value = serde_json::from_str(&stats_json(&t2, None).unwrap()).unwrap();
@@ -1860,6 +1862,7 @@ mod tests {
                 cache_write_tokens: None,
                 output_shaped: Some(false),
                 frozen_input_tokens: Some(600),
+                outcome: None,
             })
             .unwrap();
         let ov = overview_data(&tracker, |_, _| {
@@ -1903,6 +1906,7 @@ mod tests {
             cache_write_tokens: None,
             output_shaped: Some(false),
             frozen_input_tokens: frozen,
+            outcome: None,
         };
         let tracker = Tracker::open_in_memory().unwrap();
         // Metered row: 100 frozen, no saving on its 300-token surface.

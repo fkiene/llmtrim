@@ -1434,6 +1434,7 @@ fn run() -> Result<()> {
                     cache_write_tokens: None,
                     output_shaped: Some(result.output_shaped),
                     frozen_input_tokens: Some(result.frozen_input_tokens.0 as i64),
+                    outcome: None,
                 });
             }
 
@@ -1478,6 +1479,7 @@ fn run() -> Result<()> {
                         cache_write_tokens: None,
                         output_shaped: Some(result.output_shaped),
                         frozen_input_tokens: Some(result.frozen_input_tokens.0 as i64),
+                        outcome: None,
                     });
                 }
             }

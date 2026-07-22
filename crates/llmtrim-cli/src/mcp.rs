@@ -239,6 +239,7 @@ mod imp {
             cache_write_tokens: None,
             output_shaped: Some(false),
             frozen_input_tokens: Some(0),
+            outcome: None,
         }
     }
 
@@ -327,6 +328,7 @@ mod imp {
             cache_write_tokens: None,
             output_shaped: Some(result.output_shaped),
             frozen_input_tokens: Some(result.frozen_input_tokens.0 as i64),
+            outcome: None,
         }
     }
 

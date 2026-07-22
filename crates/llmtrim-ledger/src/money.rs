@@ -827,6 +827,7 @@ mod tests {
             cache_write_tokens: None,
             output_shaped: Some(false),
             frozen_input_tokens: Some(0),
+            outcome: None,
         })
         .unwrap();
         let cov = money_coverage(t.connection()).unwrap();

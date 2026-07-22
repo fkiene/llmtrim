@@ -1011,7 +1011,89 @@ mod imp {
             cache_write_tokens: usage.cache_write,
             output_shaped: Some(p.output_shaped),
             frozen_input_tokens: p.frozen_input_tokens,
+            outcome: None,
         }
+    }
+
+    /// Ledger row for a transport failure that never produced a response: input savings still
+    /// count, but `outcome=transport_reset` marks it so status doesn't treat the zero output as
+    /// a real completion.
+    fn record_transport_reset(p: Pending) -> Record {
+        let mut r = record_from(p, ResponseUsage::default());
+        r.outcome = Some("transport_reset".into());
+        r
+    }
+
+    /// True for the hyper/hudsucker failures that a one-shot re-issue usually fixes: a pooled
+    /// keep-alive the server already closed, a brief connect blip, a SendRequest reset. Leave
+    /// validation/auth strings alone so we never re-fire a bad body.
+    fn is_transient_transport_error(cause: &str) -> bool {
+        let c = cause.to_ascii_lowercase();
+        c.contains("connection reset")
+            || c.contains("connection closed")
+            || c.contains("broken pipe")
+            || c.contains("connection refused")
+            || c.contains("sendrequest")
+            || c.contains("timed out")
+            || c.contains("timeout")
+            || c.contains("connection error")
+    }
+
+    /// Stderr line for a transport failure: always names session + model so a Grok/sub reset is
+    /// greppable without reconstructing the turn from the ledger.
+    fn log_upstream_transport_failure(pending: Option<&Pending>, cause: &str, attempt: &str) {
+        let model = pending.and_then(|p| p.model.as_deref()).unwrap_or("?");
+        let sub = pending
+            .and_then(|p| {
+                p.reroute
+                    .as_ref()
+                    .map(|r| r.provider.as_str())
+                    .or_else(|| {
+                        p.fallback
+                            .as_ref()
+                            .and_then(|f| f.providers.first().map(|p| p.as_str()))
+                    })
+            })
+            .unwrap_or("-");
+        let session = pending
+            .and_then(|p| {
+                p.reroute
+                    .as_ref()
+                    .and_then(|r| r.session_id.as_deref())
+                    .or_else(|| {
+                        p.fallback
+                            .as_ref()
+                            .and_then(|f| f.session_id.as_deref())
+                    })
+                    .or_else(|| {
+                        p.breakdown
+                            .as_ref()
+                            .and_then(|b| b.cc_session_id.as_deref())
+                    })
+            })
+            .unwrap_or("-");
+        eprintln!(
+            "llmtrim: upstream transport {attempt} model={model} sub={sub} session={session}: {cause}"
+        );
+        let _ = std::io::Write::flush(&mut std::io::stderr());
+    }
+
+    /// Short-idle hyper client for the MITM outbound pool. Stale keep-alives to subscription
+    /// backends (esp. Grok) surface as `SendRequest: connection reset` after idle; expire them
+    /// quickly so we almost never re-use a half-closed socket. Title/preserve flags match
+    /// hudsucker's default client so header casing stays wire-compatible.
+    fn outbound_client_builder() -> hyper_util::client::legacy::Builder {
+        let mut client =
+            hyper_util::client::legacy::Client::builder(hyper_util::rt::TokioExecutor::new());
+        client
+            .http1_title_case_headers(true)
+            .http1_preserve_header_case(true)
+            // Stale keep-alives to subscription backends (esp. Grok) show up as
+            // `SendRequest: connection reset` after idle. Keep the pool for burst reuse
+            // but expire idle sockets quickly so we almost never re-use a half-closed one.
+            .pool_idle_timeout(std::time::Duration::from_secs(5))
+            .pool_max_idle_per_host(2);
+        client
     }
 
     /// Per-source attribution attached to a `Pending` for the breakdown view: the parsed
@@ -1346,9 +1428,9 @@ mod imp {
         /// through `tracing`, which llmtrim does not subscribe to: the user sees a dropped
         /// connection with no cause, and the SDK sees an error it cannot parse (issue #157).
         ///
-        /// Report it instead: name the cause on stderr (where the rest of llmtrim's proxy
-        /// diagnostics go, so `llmtrim serve` in the foreground shows it) and answer in the
-        /// client's own error shape so it can back off and retry rather than fail the turn.
+        /// Report it instead: name the cause (with session/model) on stderr, try one replay when
+        /// the body is still available, and answer in the client's own error shape so it can
+        /// back off and retry rather than fail the turn.
         async fn handle_error(
             &mut self,
             _ctx: &HttpContext,
@@ -1364,9 +1446,97 @@ mod imp {
                 cause.push_str(&e.to_string());
                 src = std::error::Error::source(e);
             }
+
+            log_upstream_transport_failure(self.pending.as_ref(), &cause, "failed");
+
+            // One re-issue on a transient reset when we still hold a replayable body. Prefer the
+            // rewritten subscription body (Grok/sub path); otherwise the original Anthropic body.
+            if is_transient_transport_error(&cause)
+                && let Some(pending) = self.pending.as_ref()
+            {
+                if let Some(info) = pending.reroute.clone()
+                    && let Some(replay) = info.replay.clone()
+                {
+                    log_upstream_transport_failure(self.pending.as_ref(), &cause, "retry");
+                    if let Some((status, raw, _ra)) = self
+                        .reissue_reroute(&replay.url, replay.headers.clone(), replay.body)
+                        .await
+                    {
+                        let pending = self.pending.take().expect("pending present above");
+                        if (200..300).contains(&status) {
+                            return self.finish_buffered_reroute(pending, &info, raw);
+                        }
+                        // Non-2xx after a successful transport: surface as a typed Anthropic
+                        // error (same shape as the live reroute failure path), not another
+                        // transport error — we got a real response this time.
+                        let message =
+                            reroute_upstream_error_message(info.provider, status, &raw);
+                        let acc = Arc::new(Mutex::new(message.clone().into_bytes()));
+                        let _finalize = Finalize {
+                            acc,
+                            pending: Some(pending),
+                            ledger: self.ledger.clone(),
+                            breakdown_ledger: self.breakdown_ledger.clone(),
+                        };
+                        return anthropic_error_typed(
+                            status,
+                            reroute_error_kind(status),
+                            &message,
+                            None,
+                        );
+                    }
+                    log_upstream_transport_failure(
+                        self.pending.as_ref(),
+                        &cause,
+                        "retry-failed",
+                    );
+                } else if let Some(original) = pending.original.clone() {
+                    log_upstream_transport_failure(self.pending.as_ref(), &cause, "retry");
+                    let proxy = self.upstream_proxy.clone();
+                    let fetched = tokio::task::spawn_blocking(move || {
+                        fetch_original(&original, proxy.as_deref())
+                    })
+                    .await;
+                    if let Ok(Some((status, content_type, body))) = fetched {
+                        let pending = self.pending.take().expect("pending present above");
+                        if (200..300).contains(&status) {
+                            note_session_accepted(&pending);
+                            let _finalize = Finalize {
+                                acc: Arc::new(Mutex::new(body.clone())),
+                                pending: Some(pending),
+                                ledger: self.ledger.clone(),
+                                breakdown_ledger: self.breakdown_ledger.clone(),
+                            };
+                            return buffered_response(status, content_type, body);
+                        }
+                        // Got a real non-2xx: record via Finalize (output unknown) and relay.
+                        let _finalize = Finalize {
+                            acc: Arc::new(Mutex::new(body.clone())),
+                            pending: Some(pending),
+                            ledger: self.ledger.clone(),
+                            breakdown_ledger: self.breakdown_ledger.clone(),
+                        };
+                        return buffered_response(status, content_type, body);
+                    }
+                    log_upstream_transport_failure(
+                        self.pending.as_ref(),
+                        &cause,
+                        "retry-failed",
+                    );
+                }
+            }
+
+            // Final surface: take pending so Drop does not double-record, mark transport_reset.
+            if let Some(p) = self.pending.take() {
+                if let Some(x) = build_breakdown(&p, &ResponseUsage::default()) {
+                    let _ = self.breakdown_ledger.send(x);
+                }
+                let _ = self.ledger.send(record_transport_reset(p));
+            }
             eprintln!(
                 "llmtrim: upstream request failed ({cause}) — reported to the client as a retryable error"
             );
+            let _ = std::io::Write::flush(&mut std::io::stderr());
             upstream_transport_error(self.streaming, &format!("upstream request failed: {cause}"))
         }
 
@@ -4180,6 +4350,7 @@ mod imp {
                 .with_addr(addr)
                 .with_ca(ca)
                 .with_http_connector(proxy_connector)
+                .with_client(outbound_client_builder())
                 .with_http_handler(handler)
                 .with_graceful_shutdown(async {
                     let _ = tokio::signal::ctrl_c().await;
@@ -4194,6 +4365,7 @@ mod imp {
                 .with_addr(addr)
                 .with_ca(ca)
                 .with_rustls_connector(aws_lc_rs::default_provider())
+                .with_client(outbound_client_builder())
                 .with_http_handler(handler)
                 .with_graceful_shutdown(async {
                     let _ = tokio::signal::ctrl_c().await;
@@ -4746,6 +4918,26 @@ mod imp {
                     .unwrap()
                     .contains("tls handshake eof")
             );
+        }
+
+        #[test]
+        fn is_transient_transport_error_matches_real_hyper_reset() {
+            // The exact cause string hyper/hudsucker surfaces for a stale keep-alive to Grok.
+            assert!(is_transient_transport_error(
+                "client error (SendRequest): connection error: connection reset"
+            ));
+            assert!(is_transient_transport_error(
+                "connection closed before message completed"
+            ));
+            assert!(is_transient_transport_error("broken pipe"));
+            assert!(is_transient_transport_error("operation timed out"));
+            // Validation / auth failures must never re-fire a body.
+            assert!(!is_transient_transport_error(
+                "invalid_request: bad schema"
+            ));
+            assert!(!is_transient_transport_error(
+                "authentication_error: invalid x-api-key"
+            ));
         }
 
         #[test]

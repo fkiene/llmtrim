@@ -44,6 +44,10 @@ pub struct Record {
     /// discipline. `input_before − frozen` is the compressible surface — the honest
     /// denominator for the "saved on new content" figure. `None` on pre-meter rows.
     pub frozen_input_tokens: Option<i64>,
+    /// Explicit non-success outcome for a turn that never produced measurable output, e.g.
+    /// `transport_reset` when the upstream keep-alive died before any response. `None` on
+    /// ordinary rows (including pre-column ledgers) so old readers stay valid.
+    pub outcome: Option<String>,
 }
 
 /// One attributed proxy turn for the breakdown view: identity + provider-reported usage +
@@ -371,7 +375,8 @@ impl Tracker {
                     fresh_input_tokens INTEGER,
                     cache_write_tokens INTEGER,
                     output_shaped INTEGER,
-                    frozen_input_tokens INTEGER
+                    frozen_input_tokens INTEGER,
+                    outcome TEXT
                 );
                 CREATE TABLE IF NOT EXISTS breakdown_turns (
                     id            INTEGER PRIMARY KEY,
@@ -466,6 +471,15 @@ impl Tracker {
                 return Err(e).with_context(|| format!("failed to add breakdown column {col}"));
             }
         }
+        for col in ["outcome"] {
+            if let Err(e) = self.conn.execute(
+                &format!("ALTER TABLE compressions ADD COLUMN {col} TEXT"),
+                [],
+            ) && !is_duplicate_column(&e)
+            {
+                return Err(e).with_context(|| format!("failed to add ledger column {col}"));
+            }
+        }
         Ok(())
     }
 
@@ -526,8 +540,9 @@ impl Tracker {
                 "INSERT INTO compressions
                     (ts, provider, model, tokenizer, exact, input_before, input_after,
                      output_before, output_after, compress_micros, cache_read_tokens,
-                     fresh_input_tokens, cache_write_tokens, output_shaped, frozen_input_tokens)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
+                     fresh_input_tokens, cache_write_tokens, output_shaped, frozen_input_tokens,
+                     outcome)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)",
                 params![
                     ts,
                     r.provider,
@@ -544,6 +559,7 @@ impl Tracker {
                     r.cache_write_tokens,
                     r.output_shaped.map(i64::from),
                     r.frozen_input_tokens,
+                    r.outcome,
                 ],
             )
             .context("failed to record compression")?;
@@ -717,8 +733,9 @@ impl Tracker {
                 "INSERT INTO compressions
                     (ts, provider, model, tokenizer, exact, input_before, input_after,
                      output_before, output_after, compress_micros, cache_read_tokens,
-                     fresh_input_tokens, cache_write_tokens, output_shaped, frozen_input_tokens)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
+                     fresh_input_tokens, cache_write_tokens, output_shaped, frozen_input_tokens,
+                     outcome)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)",
                 params![
                     ts,
                     r.provider,
@@ -735,6 +752,7 @@ impl Tracker {
                     r.cache_write_tokens,
                     r.output_shaped.map(i64::from),
                     r.frozen_input_tokens,
+                    r.outcome,
                 ],
             )
             .context("failed to record compression (test)")?;
@@ -994,6 +1012,7 @@ mod tests {
             cache_write_tokens: None,
             output_shaped: None,
             frozen_input_tokens: None,
+            outcome: None,
         }
     }
 
@@ -1184,6 +1203,7 @@ mod tests {
             cache_write_tokens: Some(12),
             output_shaped: Some(true),
             frozen_input_tokens: None,
+            outcome: None,
         })
         .unwrap();
 
@@ -1203,6 +1223,7 @@ mod tests {
             cache_write_tokens: None,
             output_shaped: Some(false),
             frozen_input_tokens: None,
+            outcome: None,
         })
         .unwrap();
 
@@ -1334,6 +1355,29 @@ mod tests {
             .expect("second migrate swallows duplicate-column ALTERs");
         t.record(&rec("openai", true, 10, 5)).unwrap();
         assert_eq!(t.summary().unwrap().events, 1);
+    }
+
+    #[test]
+    fn transport_reset_outcome_round_trips() {
+        // Transport failures used to look like anonymous out=0 rows. The outcome column
+        // lets status/monitor distinguish a reset from a real zero-output completion.
+        let t = Tracker::open_in_memory().unwrap();
+        let mut r = rec("anthropic", true, 100, 80);
+        r.outcome = Some("transport_reset".into());
+        t.record(&r).unwrap();
+        let outcome: Option<String> = t
+            .conn
+            .query_row(
+                "SELECT outcome FROM compressions WHERE provider = 'anthropic'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(outcome.as_deref(), Some("transport_reset"));
+        // Re-migrate must keep the column and not reject a second insert.
+        t.migrate().expect("outcome ALTER is idempotent");
+        t.record(&rec("openai", true, 10, 5)).unwrap();
+        assert_eq!(t.summary().unwrap().events, 2);
     }
 
     #[test]
