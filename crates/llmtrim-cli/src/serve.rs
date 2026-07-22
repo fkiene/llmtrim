@@ -1088,6 +1088,9 @@ mod imp {
         client
             .http1_title_case_headers(true)
             .http1_preserve_header_case(true)
+            // Required for `pool_idle_timeout` to actually fire (hyper-util no-ops the
+            // timeout when no timer is installed).
+            .pool_timer(hyper_util::rt::TokioTimer::new())
             // Stale keep-alives to subscription backends (esp. Grok) show up as
             // `SendRequest: connection reset` after idle. Keep the pool for burst reuse
             // but expire idle sockets quickly so we almost never re-use a half-closed one.
