@@ -55,12 +55,15 @@ pub fn request_headers(
 
 /// Build the Grok Responses request body from an intercepted Anthropic `/v1/messages` body.
 ///
-/// `model` is already resolved to an upstream id. `session_id` is unused today (Grok does not
-/// require a prompt-cache key the way Codex does).
+/// `model` is already resolved to an upstream id. `session_id` is the
+/// `x-claude-code-session-id` header value if present; it becomes the Responses
+/// `prompt_cache_key` so cli-chat-proxy can pin automatic prefix caching to the Claude Code
+/// session (same field Codex/Kimi already set). Live probe: the field is accepted (HTTP 200)
+/// and subsequent turns report `input_tokens_details.cached_tokens`.
 pub fn build_request_body(
     anthropic: &Value,
     model: &str,
-    _session_id: Option<&str>,
+    session_id: Option<&str>,
 ) -> Result<Value> {
     let mut body = Map::new();
     body.insert("model".into(), json!(model));
@@ -105,6 +108,13 @@ pub fn build_request_body(
 
     if let Some(max) = anthropic.get("max_tokens").and_then(Value::as_u64) {
         body.insert("max_output_tokens".into(), json!(max));
+    }
+
+    // Pin the automatic prefix cache to the Claude Code session. Without this, Grok's
+    // cache affinity is account/content-hash only and multi-session concurrency (or any
+    // server-side routing change) shows up as a sudden `cached_tokens` collapse.
+    if let Some(sid) = session_id {
+        body.insert("prompt_cache_key".into(), json!(sid));
     }
 
     Ok(Value::Object(body))
@@ -352,6 +362,8 @@ struct ToolCall {
 /// blocks, so each tool is emitted as ToolStart/Delta/Stop only when that call completes or
 /// when a different block (text/thinking) must open.
 pub struct Reducer {
+    /// Resolved upstream model id (for upstream-usage capture metadata only).
+    model: String,
     parser: SseLineParser,
     open: Open,
     /// call_id of the Anthropic tool block currently open (if `open == Tool`).
@@ -365,8 +377,9 @@ pub struct Reducer {
 }
 
 impl Reducer {
-    pub fn new(_model: &str) -> Self {
+    pub fn new(model: &str) -> Self {
         Self {
+            model: model.to_string(),
             parser: SseLineParser::new(),
             open: Open::None,
             open_tool: None,
@@ -715,12 +728,18 @@ impl Reducer {
         } else {
             StopReason::EndTurn
         };
-        let usage = v
+        let raw_usage = v
             .get("response")
             .and_then(|r| r.get("usage"))
-            .or_else(|| v.get("usage"))
-            .map(map_usage)
-            .unwrap_or_default();
+            .or_else(|| v.get("usage"));
+        // Opt-in: when `LLMTRIM_CAPTURE_DIR` is set, keep the *raw* upstream usage object
+        // (pre-mapping) so a cache-collapse investigation can compare Grok's
+        // `input_tokens_details.cached_tokens` against the ledger without guessing the
+        // schema. Best-effort; capture must never break streaming.
+        if let Some(raw) = raw_usage {
+            capture_upstream_usage(raw, &self.model);
+        }
+        let usage = raw_usage.map(map_usage).unwrap_or_default();
         self.terminal_seen = true;
         out.push(ReduceEvent::Finish {
             stop_reason,
@@ -733,6 +752,56 @@ impl Reducer {
                 .or_else(|| v.get("id").and_then(|i| i.as_str()).map(|s| s.to_string())),
             continuation_eligible: false,
         });
+    }
+}
+
+/// Write one `*-upstream-usage.json` record under the capture corpus, if configured.
+/// Public for tests; production call sites go through the reducer terminal path.
+pub fn capture_upstream_usage(raw_usage: &Value, model: &str) {
+    let Some(dir) = llmtrim_core::config::RuntimeConfig::get()
+        .capture_dir
+        .clone()
+    else {
+        return;
+    };
+    write_upstream_usage_capture(&dir, raw_usage, model, "grok");
+}
+
+/// Env-independent body of [`capture_upstream_usage`] (testable without RuntimeConfig).
+fn write_upstream_usage_capture(
+    dir: &std::path::Path,
+    raw_usage: &Value,
+    model: &str,
+    provider: &str,
+) {
+    let mapped = map_usage(raw_usage);
+    let record = json!({
+        "ts": chrono::Utc::now().to_rfc3339(),
+        "kind": "upstream_usage",
+        "provider": provider,
+        "model": model,
+        "usage": raw_usage,
+        // Pre-computed mapping so a cold-turn audit can compare without re-running map_usage.
+        "mapped": {
+            "input": mapped.input,
+            "output": mapped.output,
+            "cache_read": mapped.cache_read,
+            "cache_write": mapped.cache_write,
+        },
+    });
+    let name = format!(
+        "{}-{:x}-upstream-usage.json",
+        chrono::Utc::now().timestamp_micros(),
+        std::process::id()
+    );
+    let path = dir.join(name);
+    if let Err(e) =
+        std::fs::create_dir_all(dir).and_then(|_| std::fs::write(&path, record.to_string()))
+    {
+        eprintln!(
+            "llmtrim: upstream usage capture failed ({}): {e}",
+            path.display()
+        );
     }
 }
 
@@ -868,6 +937,129 @@ mod tests {
         assert!(
             h.iter()
                 .any(|(k, v)| k == "x-grok-client-identifier" && v == "grok-shell")
+        );
+    }
+
+    #[test]
+    fn prompt_cache_key_from_session_id() {
+        let body = build_request_body(
+            &json!({ "messages": [{"role": "user", "content": "hi"}] }),
+            "grok-4.5",
+            Some("sess-1"),
+        )
+        .expect("build");
+        assert_eq!(body["prompt_cache_key"], "sess-1");
+    }
+
+    #[test]
+    fn prompt_cache_key_omitted_without_session() {
+        let body = build_request_body(
+            &json!({ "messages": [{"role": "user", "content": "hi"}] }),
+            "grok-4.5",
+            None,
+        )
+        .expect("build");
+        assert!(body.get("prompt_cache_key").is_none());
+    }
+
+    #[test]
+    fn map_usage_reads_input_tokens_details_cached_tokens() {
+        let u = map_usage(&json!({
+            "input_tokens": 100,
+            "input_tokens_details": {"cached_tokens": 40},
+            "output_tokens": 7,
+        }));
+        assert_eq!(
+            u,
+            Usage {
+                input: 60,
+                output: 7,
+                cache_read: 40,
+                cache_write: 0,
+            }
+        );
+    }
+
+    #[test]
+    fn map_usage_zero_cache_on_miss() {
+        let u = map_usage(&json!({
+            "input_tokens": 50,
+            "input_tokens_details": {"cached_tokens": 0},
+            "output_tokens": 3,
+            "output_tokens_details": {"reasoning_tokens": 2},
+            "context_details": {"input_tokens": 50, "output_tokens": 3},
+        }));
+        assert_eq!(u.cache_read, 0);
+        assert_eq!(u.input, 50);
+        assert_eq!(u.output, 3);
+    }
+
+    #[test]
+    fn write_upstream_usage_capture_records_raw_and_mapped() {
+        let dir = std::env::temp_dir().join(format!(
+            "llmtrim-grok-usage-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("mkdir");
+        let raw = json!({
+            "input_tokens": 218,
+            "input_tokens_details": {"cached_tokens": 128},
+            "output_tokens": 41,
+            "output_tokens_details": {"reasoning_tokens": 40},
+        });
+        write_upstream_usage_capture(&dir, &raw, "grok-4.5", "grok");
+        let files: Vec<_> = std::fs::read_dir(&dir)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .map(|e| e.path())
+            .filter(|p| {
+                p.file_name()
+                    .and_then(|n| n.to_str())
+                    .is_some_and(|n| n.ends_with("-upstream-usage.json"))
+            })
+            .collect();
+        assert_eq!(files.len(), 1, "one capture file");
+        let rec: Value =
+            serde_json::from_str(&std::fs::read_to_string(&files[0]).unwrap()).unwrap();
+        assert_eq!(rec["kind"], "upstream_usage");
+        assert_eq!(rec["provider"], "grok");
+        assert_eq!(rec["model"], "grok-4.5");
+        assert_eq!(rec["usage"]["input_tokens_details"]["cached_tokens"], 128);
+        assert_eq!(rec["mapped"]["cache_read"], 128);
+        assert_eq!(rec["mapped"]["input"], 90); // 218 - 128
+        assert_eq!(rec["mapped"]["output"], 41);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn reducer_finish_maps_cached_tokens_into_usage() {
+        let mut r = Reducer::new("grok-4.5");
+        let chunk = concat!(
+            "data: {\"type\":\"response.output_text.delta\",\"delta\":\"hi\"}\n\n",
+            "data: {\"type\":\"response.completed\",\"response\":{\"usage\":{\"input_tokens\":100,\"input_tokens_details\":{\"cached_tokens\":40},\"output_tokens\":5}}}\n\n",
+        );
+        let events: Vec<_> = r
+            .push(chunk.as_bytes())
+            .into_iter()
+            .chain(r.finish())
+            .collect();
+        let finish = events.iter().find_map(|e| match e {
+            ReduceEvent::Finish { usage, .. } => Some(*usage),
+            _ => None,
+        });
+        assert_eq!(
+            finish,
+            Some(Usage {
+                input: 60,
+                output: 5,
+                cache_read: 40,
+                cache_write: 0,
+            })
         );
     }
 

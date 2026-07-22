@@ -6,6 +6,19 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- **Grok reroute pins `prompt_cache_key` to the Claude Code session id.** Codex and Kimi already
+  set Responses `prompt_cache_key` from `x-claude-code-session-id`; Grok did not, so multi-session
+  concurrency (and any server-side routing change) could drop `cached_tokens` to 0/128 on an
+  otherwise append-only conversation. cli-chat-proxy accepts the field (HTTP 200) and reports
+  `input_tokens_details.cached_tokens` on hits.
+
+- **Grok upstream usage capture under `LLMTRIM_CAPTURE_DIR`.** When the capture corpus is on, each
+  completed Grok turn also writes `*-upstream-usage.json` with the raw `response.completed.usage`
+  object and the mapped ledger fields, so a cache-collapse audit can compare Grok's wire usage
+  against the Anthropic-shaped ledger without re-running the turn.
+
 ### Fixed
 
 - **Upstream transport resets are retried and recorded instead of becoming silent zero-output rows.**
