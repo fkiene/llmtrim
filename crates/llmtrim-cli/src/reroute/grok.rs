@@ -25,12 +25,17 @@ const WEB_SEARCH_TOOL: &str = "web_search_20250305";
 // ---------------------------------------------------------------------------------------------
 
 /// Headers for the rewritten upstream request.
+///
+/// When `session_id` is present it is also sent as `x-grok-conv-id` (Chat Completions cache
+/// affinity header from xAI docs). Responses caching itself is driven by `prompt_cache_key` in
+/// the body; dual-sending is harmless (live probe: HTTP 200) and covers any proxy path that still
+/// keys on the header.
 pub fn request_headers(
     access_token: &str,
     _account_id: Option<&str>,
-    _session_id: Option<&str>,
+    session_id: Option<&str>,
 ) -> Vec<(String, String)> {
-    vec![
+    let mut headers = vec![
         ("content-type".to_string(), "application/json".to_string()),
         ("accept".to_string(), "text/event-stream".to_string()),
         (
@@ -50,7 +55,11 @@ pub fn request_headers(
             "user-agent".to_string(),
             format!("llmtrim/{}", env!("CARGO_PKG_VERSION")),
         ),
-    ]
+    ];
+    if let Some(sid) = session_id {
+        headers.push(("x-grok-conv-id".to_string(), sid.to_string()));
+    }
+    headers
 }
 
 /// Build the Grok Responses request body from an intercepted Anthropic `/v1/messages` body.
@@ -105,6 +114,11 @@ pub fn build_request_body(
 
     body.insert("store".into(), json!(false));
     body.insert("stream".into(), json!(true));
+    // Ask cli-chat-proxy for `encrypted_content` on reasoning items so the next turn can
+    // replay it. Live probe: without `include`, items only carry `summary`; with it, done
+    // items gain `encrypted_content`. xAI docs list omitted prior reasoning as a top cause
+    // of cache misses on reasoning models (grok-4.5 bills large `reasoning_tokens`).
+    body.insert("include".into(), json!(["reasoning.encrypted_content"]));
 
     if let Some(max) = anthropic.get("max_tokens").and_then(Value::as_u64) {
         body.insert("max_output_tokens".into(), json!(max));
@@ -171,8 +185,12 @@ fn tool_result_output(block: &Value) -> String {
     }
 }
 
-/// Build Responses `input[]` from Anthropic `messages`. Thinking / hosted-search history is
-/// dropped (Grok does not need encrypted reasoning replay the way Codex does).
+/// Build Responses `input[]` from Anthropic `messages`.
+///
+/// Assistant `thinking` / `redacted_thinking` blocks are replayed as Responses `reasoning`
+/// items (encrypted when we tunnelled Grok's blob out as the thinking signature; otherwise
+/// best-effort `summary` from plaintext thinking). Hosted-search history is still dropped —
+/// we never re-emit server tool blocks Claude Code cannot round-trip.
 fn build_input(anthropic: &Value) -> Vec<Value> {
     let mut input = Vec::new();
     let Some(messages) = anthropic.get("messages").and_then(Value::as_array) else {
@@ -190,7 +208,10 @@ fn build_input(anthropic: &Value) -> Vec<Value> {
                 for b in &blocks {
                     match b.get("type").and_then(Value::as_str) {
                         Some("thinking") | Some("redacted_thinking") => {
-                            // Drop — no encrypted_content to replay.
+                            flush_message(&mut input, "assistant", &mut parts);
+                            if let Some(item) = thinking_input_item(b) {
+                                input.push(item);
+                            }
                         }
                         Some("text") => {
                             if let Some(t) = b.get("text").and_then(Value::as_str) {
@@ -271,6 +292,64 @@ fn flush_message(input: &mut Vec<Value>, role: &str, parts: &mut Vec<Value>) {
         "role": role,
         "content": Value::Array(std::mem::take(parts)),
     }));
+}
+
+/// Sentinel prefixing a thinking-block signature that carries llmtrim's own Grok
+/// `encrypted_content`. Same role as Codex's marker: Claude Code stores the blob as the thinking
+/// `signature`, and the marker lets the next turn tell our blobs apart from foreign Anthropic
+/// signatures left in history when `/sub grok` is switched on mid-conversation. Replaying a
+/// foreign blob as `encrypted_content` makes cli-chat-proxy 400 ("Could not decrypt…").
+const GROK_SIG_MARK: &str = "llmtrim-grok-v1:";
+
+fn mark_grok_signature(encrypted: &str) -> String {
+    format!("{GROK_SIG_MARK}{encrypted}")
+}
+
+fn unmark_grok_signature(signature: &str) -> Option<&str> {
+    signature.strip_prefix(GROK_SIG_MARK)
+}
+
+/// Build a Grok Responses `reasoning` input item.
+///
+/// Prefer `encrypted_content` when present (live probe: replaying it keeps subsequent-turn
+/// `reasoning_tokens` lower; foreign blobs 400). Plaintext `summary` alone is accepted but is
+/// only a best-effort stand-in for history that never received a Grok-issued signature
+/// (e.g. Anthropic thinking carried over when `/sub` is enabled mid-session).
+fn reasoning_item(encrypted: Option<&str>, summary_text: &str) -> Option<Value> {
+    let summary = if summary_text.is_empty() {
+        json!([])
+    } else {
+        json!([{"type": "summary_text", "text": summary_text}])
+    };
+    match encrypted {
+        Some(enc) if !enc.is_empty() => Some(json!({
+            "type": "reasoning",
+            "encrypted_content": enc,
+            "summary": summary,
+        })),
+        _ if !summary_text.is_empty() => Some(json!({
+            "type": "reasoning",
+            "summary": summary,
+        })),
+        _ => None,
+    }
+}
+
+/// Map an Anthropic thinking / redacted_thinking block into a Grok `reasoning` input item.
+fn thinking_input_item(block: &Value) -> Option<Value> {
+    let thinking = block
+        .get("thinking")
+        .and_then(Value::as_str)
+        .or_else(|| block.get("data").and_then(Value::as_str))
+        .unwrap_or_default();
+    let signature = block
+        .get("signature")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    // Only treat marked signatures as Grok encrypted_content. An empty/foreign signature falls
+    // through to summary-only replay from plaintext thinking when available.
+    let encrypted = unmark_grok_signature(signature);
+    reasoning_item(encrypted, thinking)
 }
 
 fn build_tools(anthropic: &Value) -> Vec<Value> {
@@ -361,6 +440,10 @@ struct ToolCall {
 /// argument deltas on the wire buffer correctly. Anthropic SSE still requires non-interleaved
 /// blocks, so each tool is emitted as ToolStart/Delta/Stop only when that call completes or
 /// when a different block (text/thinking) must open.
+///
+/// Reasoning items with `encrypted_content` (when requested via `include`) are tunnelled out as
+/// Anthropic thinking `signature_delta` so the next turn can rebuild a Grok `reasoning` input
+/// item. Summary/text deltas still stream as thinking text.
 pub struct Reducer {
     /// Resolved upstream model id (for upstream-usage capture metadata only).
     model: String,
@@ -374,6 +457,12 @@ pub struct Reducer {
     /// Stable emission order for tools registered this turn.
     tool_order: Vec<String>,
     terminal_seen: bool,
+    /// Grok `encrypted_content` for the open (or most recent) reasoning item, mapped to Anthropic
+    /// `signature_delta` before the thinking block closes.
+    thinking_encrypted: Option<String>,
+    /// Last encrypted blob emitted as a signature, so the repeated `added`/`done` copies of one
+    /// reasoning item dedupe while a later item still gets its own signature.
+    last_signature: Option<String>,
 }
 
 impl Reducer {
@@ -388,6 +477,8 @@ impl Reducer {
             item_to_call: std::collections::HashMap::new(),
             tool_order: Vec::new(),
             terminal_seen: false,
+            thinking_encrypted: None,
+            last_signature: None,
         }
     }
 
@@ -418,8 +509,7 @@ impl Reducer {
     fn close_open(&mut self, out: &mut Vec<ReduceEvent>) {
         match self.open {
             Open::Thinking => {
-                out.push(ReduceEvent::ThinkingStop);
-                self.open = Open::None;
+                self.close_thinking(out);
             }
             Open::Text => {
                 out.push(ReduceEvent::TextStop);
@@ -434,6 +524,56 @@ impl Reducer {
             }
             Open::None => {}
         }
+    }
+
+    /// Emit `ThinkingSignatureDelta` when encrypted reasoning content is known, then close the
+    /// thinking block. Signature must precede `content_block_stop` or Claude Code rejects the turn.
+    fn close_thinking(&mut self, out: &mut Vec<ReduceEvent>) {
+        if self.open != Open::Thinking {
+            return;
+        }
+        if let Some(sig) = self.thinking_encrypted.take()
+            && self.last_signature.as_deref() != Some(sig.as_str())
+        {
+            out.push(ReduceEvent::ThinkingSignatureDelta(mark_grok_signature(
+                &sig,
+            )));
+            self.last_signature = Some(sig);
+        }
+        out.push(ReduceEvent::ThinkingStop);
+        self.open = Open::None;
+    }
+
+    /// Record encrypted reasoning content from a Responses `reasoning` item. Opens a thinking
+    /// block when the upstream omitted summary text (signature-only shape).
+    ///
+    /// Grok (like Codex) can repeat the same `encrypted_content` on an item's `added` and `done`
+    /// events; a turn with tool calls may emit several distinct reasoning items.
+    fn note_reasoning_encrypted(
+        &mut self,
+        out: &mut Vec<ReduceEvent>,
+        encrypted: String,
+        done: bool,
+    ) {
+        if self.last_signature.as_deref() == Some(encrypted.as_str()) {
+            return;
+        }
+        self.thinking_encrypted = Some(encrypted);
+        // On `added` the summary deltas are still to come: stash the signature and let the
+        // summary open the block.
+        if !done {
+            return;
+        }
+        if self.open != Open::Thinking {
+            // Don't interrupt an open tool for a late reasoning signature-only item.
+            if self.open == Open::Tool {
+                return;
+            }
+            self.close_open(out);
+            out.push(ReduceEvent::ThinkingStart);
+            self.open = Open::Thinking;
+        }
+        self.close_thinking(out);
     }
 
     fn emit_tool_complete(&mut self, call_id: &str, out: &mut Vec<ReduceEvent>) {
@@ -604,9 +744,18 @@ impl Reducer {
                             self.open_tool_stream(&call_id, out);
                         }
                     }
+                    Some("reasoning") => {
+                        if let Some(enc) = item
+                            .get("encrypted_content")
+                            .and_then(Value::as_str)
+                            .filter(|s| !s.is_empty())
+                        {
+                            self.note_reasoning_encrypted(out, enc.to_string(), false);
+                        }
+                    }
                     // Hosted search / custom tools — no Claude function block (Grok runs them).
                     // Must not close an open client function tool when these complete later.
-                    Some("custom_tool_call") | Some("web_search_call") | Some("reasoning") => {}
+                    Some("custom_tool_call") | Some("web_search_call") => {}
                     _ => {}
                 }
             }
@@ -691,11 +840,22 @@ impl Reducer {
                             self.close_open(out);
                         }
                     }
-                    // Hosted / reasoning done must not close an open function tool.
-                    Some("custom_tool_call")
-                    | Some("web_search_call")
-                    | Some("reasoning")
-                    | None => {}
+                    Some("reasoning") => {
+                        // Prefer closing an open thinking block with the encrypted signature
+                        // when available. Do not close an open function tool for hosted/reasoning
+                        // completion (same rule as custom_tool_call / web_search_call).
+                        if let Some(enc) = item
+                            .get("encrypted_content")
+                            .and_then(Value::as_str)
+                            .filter(|s| !s.is_empty())
+                        {
+                            self.note_reasoning_encrypted(out, enc.to_string(), true);
+                        } else if self.open == Open::Thinking {
+                            self.close_thinking(out);
+                        }
+                    }
+                    // Hosted done must not close an open function tool.
+                    Some("custom_tool_call") | Some("web_search_call") | None => {}
                     _ => {}
                 }
             }
@@ -861,6 +1021,160 @@ mod tests {
         assert_eq!(body["model"], "grok-4.5");
         assert_eq!(body["stream"], true);
         assert_eq!(body["store"], false);
+        assert_eq!(
+            body["include"],
+            json!(["reasoning.encrypted_content"]),
+            "always request encrypted reasoning for multi-turn replay"
+        );
+    }
+
+    #[test]
+    fn thinking_history_replays_as_reasoning_with_encrypted_signature() {
+        let body = build_request_body(
+            &json!({
+                "messages": [
+                    {"role":"user","content":"hi"},
+                    {"role":"assistant","content":[
+                        {
+                            "type":"thinking",
+                            "thinking":"consider options",
+                            "signature": mark_grok_signature("enc-blob-1")
+                        },
+                        {"type":"text","text":"hello"}
+                    ]},
+                    {"role":"user","content":"again"}
+                ]
+            }),
+            "grok-4.5",
+            Some("sess-think"),
+        )
+        .expect("build");
+        let input = body["input"].as_array().unwrap();
+        let reasoning = input
+            .iter()
+            .find(|i| i["type"] == "reasoning")
+            .expect("reasoning item from thinking history");
+        assert_eq!(reasoning["encrypted_content"], "enc-blob-1");
+        assert_eq!(
+            reasoning["summary"],
+            json!([{"type":"summary_text","text":"consider options"}])
+        );
+        // Order: user msg, reasoning, assistant text, next user.
+        assert_eq!(input[0]["type"], "message");
+        assert_eq!(input[0]["role"], "user");
+        assert_eq!(input[1]["type"], "reasoning");
+        assert_eq!(input[2]["type"], "message");
+        assert_eq!(input[2]["role"], "assistant");
+        assert_eq!(input[3]["type"], "message");
+        assert_eq!(input[3]["role"], "user");
+        assert_eq!(body["prompt_cache_key"], "sess-think");
+    }
+
+    #[test]
+    fn plaintext_thinking_without_grok_signature_replays_as_summary_only() {
+        let body = build_request_body(
+            &json!({
+                "messages": [
+                    {"role":"user","content":"hi"},
+                    {"role":"assistant","content":[
+                        {"type":"thinking","thinking":"anthropic leftover","signature":""},
+                        {"type":"text","text":"ok"}
+                    ]}
+                ]
+            }),
+            "grok-4.5",
+            None,
+        )
+        .expect("build");
+        let input = body["input"].as_array().unwrap();
+        let reasoning = input
+            .iter()
+            .find(|i| i["type"] == "reasoning")
+            .expect("summary-only reasoning");
+        assert!(reasoning.get("encrypted_content").is_none());
+        assert_eq!(
+            reasoning["summary"],
+            json!([{"type":"summary_text","text":"anthropic leftover"}])
+        );
+    }
+
+    #[test]
+    fn foreign_thinking_signature_is_not_replayed_as_encrypted() {
+        // Unmarked signature would 400 cli-chat-proxy; drop it and fall back to summary.
+        let body = build_request_body(
+            &json!({
+                "messages": [
+                    {"role":"user","content":"hi"},
+                    {"role":"assistant","content":[
+                        {
+                            "type":"thinking",
+                            "thinking":"foreign",
+                            "signature":"not-a-grok-blob"
+                        },
+                        {"type":"text","text":"ok"}
+                    ]}
+                ]
+            }),
+            "grok-4.5",
+            None,
+        )
+        .expect("build");
+        let reasoning = body["input"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|i| i["type"] == "reasoning")
+            .expect("summary fallback");
+        assert!(reasoning.get("encrypted_content").is_none());
+        assert_eq!(
+            reasoning["summary"],
+            json!([{"type":"summary_text","text":"foreign"}])
+        );
+    }
+
+    #[test]
+    fn empty_thinking_without_signature_is_dropped() {
+        let body = build_request_body(
+            &json!({
+                "messages": [
+                    {"role":"assistant","content":[
+                        {"type":"thinking","thinking":"","signature":""},
+                        {"type":"text","text":"ok"}
+                    ]}
+                ]
+            }),
+            "grok-4.5",
+            None,
+        )
+        .expect("build");
+        let input = body["input"].as_array().unwrap();
+        assert!(
+            input.iter().all(|i| i["type"] != "reasoning"),
+            "empty thinking must not inject an empty reasoning item"
+        );
+        assert!(
+            input
+                .iter()
+                .any(|i| i["type"] == "message" && i["role"] == "assistant")
+        );
+    }
+
+    #[test]
+    fn non_thinking_assistant_unchanged() {
+        let body = build_request_body(
+            &json!({
+                "messages": [
+                    {"role":"user","content":"hi"},
+                    {"role":"assistant","content":"plain reply"}
+                ]
+            }),
+            "grok-4.5",
+            None,
+        )
+        .expect("build");
+        let input = body["input"].as_array().unwrap();
+        assert!(input.iter().all(|i| i["type"] != "reasoning"));
+        assert_eq!(input.len(), 2);
     }
 
     #[test]
@@ -937,6 +1251,16 @@ mod tests {
         assert!(
             h.iter()
                 .any(|(k, v)| k == "x-grok-client-identifier" && v == "grok-shell")
+        );
+        assert!(h.iter().all(|(k, _)| k != "x-grok-conv-id"));
+    }
+
+    #[test]
+    fn headers_set_conv_id_from_session() {
+        let h = request_headers("tok", None, Some("sess-42"));
+        assert!(
+            h.iter()
+                .any(|(k, v)| k == "x-grok-conv-id" && v == "sess-42")
         );
     }
 
@@ -1110,6 +1434,48 @@ mod tests {
                 .iter()
                 .any(|e| matches!(e, ReduceEvent::TextDelta(s) if s == "ok"))
         );
+    }
+
+    #[test]
+    fn reducer_tunnels_encrypted_reasoning_as_thinking_signature() {
+        let mut r = Reducer::new("grok-4.5");
+        let chunk = concat!(
+            "data: {\"type\":\"response.output_item.added\",\"item\":{\"type\":\"reasoning\",\"id\":\"rs_1\",\"summary\":[],\"status\":\"in_progress\"}}\n\n",
+            "data: {\"type\":\"response.reasoning_summary_text.delta\",\"delta\":\"ponder\"}\n\n",
+            "data: {\"type\":\"response.output_item.done\",\"item\":{\"type\":\"reasoning\",\"id\":\"rs_1\",\"status\":\"completed\",\"summary\":[{\"type\":\"summary_text\",\"text\":\"ponder\"}],\"encrypted_content\":\"encXYZ\"}}\n\n",
+            "data: {\"type\":\"response.output_text.delta\",\"delta\":\"answer\"}\n\n",
+            "data: {\"type\":\"response.completed\",\"response\":{\"usage\":{}}}\n\n",
+        );
+        let events: Vec<_> = r
+            .push(chunk.as_bytes())
+            .into_iter()
+            .chain(r.finish())
+            .collect();
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, ReduceEvent::ThinkingStart))
+        );
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, ReduceEvent::ThinkingDelta(s) if s == "ponder"))
+        );
+        let sig = events.iter().find_map(|e| match e {
+            ReduceEvent::ThinkingSignatureDelta(s) => Some(s.as_str()),
+            _ => None,
+        });
+        assert_eq!(sig, Some(mark_grok_signature("encXYZ").as_str()));
+        // signature before stop
+        let sig_pos = events
+            .iter()
+            .position(|e| matches!(e, ReduceEvent::ThinkingSignatureDelta(_)))
+            .unwrap();
+        let stop_pos = events
+            .iter()
+            .position(|e| matches!(e, ReduceEvent::ThinkingStop))
+            .unwrap();
+        assert!(sig_pos < stop_pos);
     }
 
     #[test]

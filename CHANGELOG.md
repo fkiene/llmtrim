@@ -6,6 +6,19 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Fixed
+
+- **Grok reasoning history is replayed for prompt-cache continuity.** cli-chat-proxy returns
+  Responses `reasoning` items (summary always; `encrypted_content` when
+  `include: ["reasoning.encrypted_content"]` is set). llmtrim previously dropped Anthropic
+  `thinking` / `redacted_thinking` blocks when building Grok `input[]`, which is the top
+  documented cause of cache misses on reasoning models. The reducer now tunnels Grok
+  `encrypted_content` out as a marked thinking signature (same pattern as Codex), requests the
+  encrypted include on every turn, and rebuilds `reasoning` items on the next request — encrypted
+  when the signature is ours, summary-only plaintext as a best-effort fallback for history that
+  never received a Grok blob. Also dual-sends `x-grok-conv-id` from the Claude Code session id
+  alongside `prompt_cache_key`. Still uses `store: false` (no `previous_response_id` continuation).
+
 ## [0.11.6] - 2026-07-22
 
 ### Added
