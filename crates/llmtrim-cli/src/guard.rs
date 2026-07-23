@@ -826,7 +826,10 @@ mod tests {
         );
         // Draft is printed under our own label so the cold TTY still shows it after the
         // input box is cleared — but never as Claude Code's "Original prompt:" (that nests).
-        assert!(m.contains("carry on"), "draft stays visible in the reason: {m}");
+        assert!(
+            m.contains("carry on"),
+            "draft stays visible in the reason: {m}"
+        );
         assert!(
             m.contains("Not sent — draft"),
             "draft uses our label, not Claude Code's: {m}"
