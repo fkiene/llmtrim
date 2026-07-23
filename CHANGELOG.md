@@ -8,6 +8,12 @@ All notable changes to this project are documented here. The format follows
 
 ### Fixed
 
+- **Claude Code under always-sub skip-login actually hits the MITM.** Node 20.18+/22 undici
+  ignores `HTTPS_PROXY` unless `NODE_USE_ENV_PROXY=1`, so the dummy `ANTHROPIC_AUTH_TOKEN`
+  was reaching real Anthropic and returning `401 Invalid bearer token`. Setup now exports
+  the flag in the managed env block, Windows registry, and `settings.json` next to the dummy
+  token, and heals older profile blocks that lack it.
+
 - **`llmtrim ensure` no longer re-asks about cheaper `/compact` models after they are configured.**
   `compact_models_configured()` used `str::parse::<toml::Value>()`, which in toml 1.x only accepts
   a single value — a real multi-key `config.toml` failed the parse, the error was swallowed, and
