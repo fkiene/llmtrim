@@ -1333,7 +1333,18 @@ pub fn compact_models_configured() -> bool {
     };
     std::fs::read_to_string(path)
         .ok()
-        .and_then(|text| text.parse::<toml::Value>().ok())
+        .is_some_and(|text| compact_models_present_in(&text))
+}
+
+/// True when `text` is a TOML document that defines `[compact].models` (any value, including `[]`).
+///
+/// Uses `toml::from_str` (document deserialize), not `str::parse` / `Value::from_str`. In toml 1.x,
+/// `Value: FromStr` is a single-value parser — a multi-key document like `capture_dir = "…"` fails
+/// with "unexpected content, expected nothing". Swallowing that error made ensure re-prompt forever
+/// even when `[compact].models` was already set.
+fn compact_models_present_in(text: &str) -> bool {
+    toml::from_str::<toml::Value>(text)
+        .ok()
         .and_then(|doc| doc.get("compact").cloned())
         .and_then(|compact| compact.get("models").cloned())
         .is_some()
@@ -2226,6 +2237,22 @@ mod tests {
     fn compact_models_preserve_order_and_deduplicate() {
         let c = resolve_file("[compact]\nmodels = [\"haiku\", \"sonnet\", \"haiku\", \"\"]\n");
         assert_eq!(c.compact_models, vec!["haiku", "sonnet"]);
+    }
+
+    /// Regression: a real config always has other top-level keys (`capture_dir`, `theme`, …).
+    /// `str::parse::<toml::Value>` rejects that shape in toml 1.x, so ensure kept re-prompting.
+    #[test]
+    fn compact_models_present_in_multi_key_document() {
+        let text = "capture_dir = \"/tmp/cap\"\ntheme = \"macchiato\"\n\n[compact]\nmodels = [\"haiku\", \"sonnet\"]\n\n[sub]\nactive = \"off\"\n";
+        assert!(compact_models_present_in(text));
+        assert!(compact_models_present_in("[compact]\nmodels = []\n"));
+        assert!(!compact_models_present_in("[compact]\n# models omitted\n"));
+        assert!(!compact_models_present_in("capture_dir = \"/tmp/cap\"\n"));
+        // The wrong API: documents are not single values.
+        assert!(
+            text.parse::<toml::Value>().is_err(),
+            "toml 1.x Value::from_str must not silently accept multi-key documents (that was the bug)"
+        );
     }
 
     #[test]

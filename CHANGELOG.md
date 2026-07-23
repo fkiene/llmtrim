@@ -8,6 +8,12 @@ All notable changes to this project are documented here. The format follows
 
 ### Fixed
 
+- **`llmtrim ensure` no longer re-asks about cheaper `/compact` models after they are configured.**
+  `compact_models_configured()` used `str::parse::<toml::Value>()`, which in toml 1.x only accepts
+  a single value — a real multi-key `config.toml` failed the parse, the error was swallowed, and
+  ensure/doctor always reported compact as missing. It now uses `toml::from_str` like every other
+  config reader.
+
 - **Cold-cache guard shows the blocked draft on the TTY again.** `suppressOriginalPrompt` stopped
   Claude Code nesting `Original prompt:` into the warning, but also hid the draft entirely once
   the input box was cleared — next-turn `additionalContext` only helped if you typed something
