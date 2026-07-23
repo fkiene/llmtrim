@@ -9,9 +9,9 @@
 //!
 //! The block response sets `suppressOriginalPrompt` so Claude Code does not append the blocked
 //! text as `Original prompt:` (that echo nested the warning inside itself on every resend). The
-//! blocked text is saved to disk instead; on the *next* submit that is allowed through, if the
-//! user typed something different, the saved text is reinjected via `additionalContext` so it
-//! is not lost when Claude Code cleared the input box.
+//! draft is instead printed *inside* our reason (so it is still visible after Claude Code clears
+//! the input box) and saved to disk; on the *next* submit that is allowed through, if the user
+//! typed something different, the saved text is reinjected via `additionalContext`.
 //!
 //! Data comes from Claude Code's own transcript, not llmtrim's ledger: the ledger's `session_id`
 //! is a hash of the system prompt, so a *subagent* turn (different system prompt, same Claude Code
@@ -237,16 +237,23 @@ fn human_idle(secs: i64) -> String {
 /// to summarise it (paying the charge), then the next turn writes a fresh cache for the summary
 /// (paying again) — measured on real captures at 128,758 then 45,131 tokens. Resending pays once.
 ///
-/// The user's prompt is not echoed here. Claude Code used to append it as `Original prompt:`,
-/// which nested the warning inside itself on every resend; the block response now sets
-/// `suppressOriginalPrompt` to stop that. The text is *saved* instead — a blocked prompt is not
-/// restored to the input box (observed: the resend came back as `promptSource: typed`), so without
-/// this the text would be lost. On the next allowed submit it is reinjected if the user typed
-/// something else.
-fn message(idle_secs: i64, tokens: i64, cost: Option<f64>) -> String {
+/// Claude Code used to append the blocked text as `Original prompt:`, which nested the warning
+/// inside itself on every resend; the block response sets `suppressOriginalPrompt` to stop that.
+/// But Claude Code also clears the input box and does not restore the draft (observed:
+/// `promptSource: typed` on the resend), so with suppress alone the text would vanish from the
+/// TTY. We print it inside our own reason instead — one copy, under our control — and still
+/// save it to disk so a *different* next submit can reinject it via `additionalContext`.
+fn message(idle_secs: i64, tokens: i64, cost: Option<f64>, prompt: &str) -> String {
     let cost = match cost {
         Some(c) => format!(" — about ${c:.2}"),
         None => String::new(),
+    };
+    let draft = if prompt.is_empty() {
+        String::new()
+    } else {
+        // Leading newline keeps the draft off the cost paragraph; no "Original prompt:" label
+        // (that is what nested under Claude Code's own append).
+        format!("\n\nNot sent — draft (input was cleared):\n{prompt}")
     };
     format!(
         "Idle {}, {:.0}k tokens of context. The prompt cache has expired, so the next turn \
@@ -254,18 +261,20 @@ fn message(idle_secs: i64, tokens: i64, cost: Option<f64>) -> String {
          \n\
          You pay that whichever way you go: /compact pays it too (it reads the full context to \
          summarise it), and only comes out ahead if you are staying for several more turns. To \
-         avoid the charge entirely, ask in a fresh session.\n\
+         avoid the charge entirely, ask in a fresh session.{}\n\
          \n\
-         Not sent. Your message is saved and will be reinjected on the next turn if you type \
-         something else. Resend to continue as-is.",
+         Resend the same text to continue as-is. If you type something else next, the draft is \
+         reinjected as context.",
         human_idle(idle_secs),
         tokens as f64 / 1000.0,
         cost,
+        draft,
     )
 }
 
-/// JSON body Claude Code reads on stdout for a block decision. `suppressOriginalPrompt` keeps
-/// the blocked text out of the warning so a resend cannot nest the previous block message.
+/// JSON body Claude Code reads on stdout for a block decision. `suppressOriginalPrompt` stops
+/// Claude Code from appending its own `Original prompt:` line (which nested the warning); the
+/// draft itself is carried in `reason` so it still shows on a cold TTY after the input is cleared.
 fn block_stdout(reason: &str) -> String {
     serde_json::json!({
         "decision": "block",
@@ -364,10 +373,16 @@ fn decide_in(input: &str, now: DateTime<Utc>, dir: &Path) -> Verdict {
     }
 
     // Best effort: losing the saved copy is not a reason to let the expensive turn through.
+    // The draft is also embedded in the reason so it stays visible after the input is cleared.
     let _ = save_prompt(dir, &hook.session_id, &hook.prompt);
 
     let model = pricing_model(&hook.session_id, &s.model);
-    let reason = message(idle, s.tokens, cold_turn_cost(s.tokens, &model));
+    let reason = message(
+        idle,
+        s.tokens,
+        cold_turn_cost(s.tokens, &model),
+        &hook.prompt,
+    );
     Verdict::Block(block_stdout(&reason))
 }
 
@@ -798,7 +813,7 @@ mod tests {
 
     #[test]
     fn message_does_not_sell_compact_as_a_saving() {
-        let m = message(7200, 150_000, Some(1.5));
+        let m = message(7200, 150_000, Some(1.5), "carry on");
         assert!(m.contains("2h 0m") && m.contains("150k"), "{m}");
         assert!(m.contains("$1.50"), "cost at the cache-write rate: {m}");
         assert!(
@@ -809,9 +824,27 @@ mod tests {
             !m.contains("Run /compact"),
             "no compact recommendation: {m}"
         );
-        assert!(!m.contains("carry on"), "never echo the prompt: {m}");
+        // Draft is printed under our own label so the cold TTY still shows it after the
+        // input box is cleared — but never as Claude Code's "Original prompt:" (that nests).
+        assert!(
+            m.contains("carry on"),
+            "draft stays visible in the reason: {m}"
+        );
+        assert!(
+            m.contains("Not sent — draft"),
+            "draft uses our label, not Claude Code's: {m}"
+        );
+        assert!(
+            !m.contains("Original prompt:"),
+            "must not use Claude Code's nesting label: {m}"
+        );
         // No price for an unknown model ⇒ no figure, but still a warning.
-        assert!(!message(7200, 150_000, None).contains('$'));
+        assert!(!message(7200, 150_000, None, "").contains('$'));
+        // Empty prompt ⇒ no draft section.
+        assert!(
+            !message(7200, 150_000, Some(1.0), "").contains("Not sent — draft"),
+            "no empty draft block"
+        );
     }
 
     #[test]
@@ -825,21 +858,28 @@ mod tests {
             v["hookSpecificOutput"]["suppressOriginalPrompt"], true,
             "Claude Code must not append 'Original prompt:' — that nests the warning"
         );
-        // The reason itself never carries the user's text either.
-        assert!(!body.contains("carry on"));
     }
 
     #[test]
-    fn a_block_emits_suppress_json_not_plain_stderr() {
+    fn a_block_emits_suppress_json_and_shows_the_draft_in_the_reason() {
         let (payload, dir) = fixture(&[entry(&ago(7200), 150_000, false)]);
         match decide_verdict(&payload, &dir) {
             Verdict::Block(body) => {
                 let v: Value = serde_json::from_str(&body).unwrap();
                 assert_eq!(v["decision"], "block");
                 assert_eq!(v["hookSpecificOutput"]["suppressOriginalPrompt"], true);
+                let reason = v["reason"].as_str().unwrap();
                 assert!(
-                    v["reason"].as_str().unwrap().contains("prompt cache"),
+                    reason.contains("prompt cache"),
                     "reason carries the warning: {v}"
+                );
+                assert!(
+                    reason.contains("carry on"),
+                    "draft is reinjected into the reason so a cold TTY still shows it: {reason}"
+                );
+                assert!(
+                    !reason.contains("Original prompt:"),
+                    "uses our draft label, not Claude Code's nesting append: {reason}"
                 );
             }
             other => panic!("expected Block, got {other:?}"),
