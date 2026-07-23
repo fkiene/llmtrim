@@ -6,6 +6,8 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.11.9] - 2026-07-23
+
 ### Fixed
 
 - **Claude Code under always-sub skip-login actually hits the MITM.** Node 20.18+/22 undici
@@ -1347,7 +1349,8 @@ bill, never a broken call.
   (6 targets with SLSA build provenance), CI on Linux/macOS/Windows with secret
   scanning, license compliance, and MSRV gates.
 
-[Unreleased]: https://github.com/fkiene/llmtrim/compare/v0.11.8...HEAD
+[Unreleased]: https://github.com/fkiene/llmtrim/compare/v0.11.9...HEAD
+[0.11.9]: https://github.com/fkiene/llmtrim/compare/v0.11.8...v0.11.9
 [0.11.8]: https://github.com/fkiene/llmtrim/compare/v0.11.7...v0.11.8
 [0.11.7]: https://github.com/fkiene/llmtrim/compare/v0.11.6...v0.11.7
 [0.11.6]: https://github.com/fkiene/llmtrim/compare/v0.11.5...v0.11.6
