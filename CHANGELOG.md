@@ -6,6 +6,14 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Fixed
+
+- **Cold-cache guard shows the blocked draft on the TTY again.** `suppressOriginalPrompt` stopped
+  Claude Code nesting `Original prompt:` into the warning, but also hid the draft entirely once
+  the input box was cleared — next-turn `additionalContext` only helped if you typed something
+  else. The block reason now carries the draft under our own label, so a cold session still shows
+  what was not sent; the disk stash + next-turn reinject path is unchanged.
+
 ## [0.11.8] - 2026-07-22
 
 ### Added
