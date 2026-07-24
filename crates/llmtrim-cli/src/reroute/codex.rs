@@ -11,7 +11,9 @@
 use anyhow::Result;
 use serde_json::{Map, Value, json};
 
-use crate::reroute::sse::{ReduceEvent, SseLineParser, StopReason, Usage};
+use crate::reroute::sse::{
+    ReduceEvent, SERVER_TOOL_ID_PREFIX, SseLineParser, StopReason, Usage, WEB_SEARCH_RESULT_TOOL,
+};
 
 pub const HOST: &str = "chatgpt.com";
 pub const PATH: &str = "/backend-api/codex/responses";
@@ -202,6 +204,9 @@ fn build_input(anthropic: &Value) -> Vec<Value> {
                                 "arguments": args_str,
                             }));
                         }
+                        // Hosted search blocks are server-side history Claude Code may echo
+                        // back; Codex has no equivalent input item, so drop them.
+                        Some("server_tool_use") | Some("web_search_tool_result") => {}
                         _ => {}
                     }
                 }
@@ -255,6 +260,7 @@ fn build_input(anthropic: &Value) -> Vec<Value> {
                                 "output": output,
                             }));
                         }
+                        Some("web_search_tool_result") => {}
                         _ => {}
                     }
                 }
@@ -601,6 +607,19 @@ enum Open {
     Tool,
 }
 
+/// Hosted web search recorded from a Codex `web_search_call`, emitted as Anthropic
+/// `server_tool_use` + `web_search_tool_result` once citations/text are known.
+struct PendingWebSearch {
+    id: String,
+    query: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct WebSearchResultItem {
+    title: String,
+    url: String,
+}
+
 /// Stateful reducer: Codex Responses SSE -> shared [`ReduceEvent`] stream.
 pub struct Reducer {
     parser: SseLineParser,
@@ -630,6 +649,12 @@ pub struct Reducer {
     last_signature: Option<String>,
     /// Text deltas that arrived while thinking was still awaiting its signature.
     deferred_text_deltas: Vec<String>,
+    /// Hosted web searches not yet emitted as Anthropic server-tool blocks. Text after a search
+    /// is deferred until these flush so the result block can include citations scraped from the
+    /// answer (and any `url_citation` annotations).
+    pending_web_searches: Vec<PendingWebSearch>,
+    /// Citations from `response.output_text.annotation.added` (`url_citation`).
+    web_search_citations: Vec<WebSearchResultItem>,
     // Accumulation for continuation transcript (assistant outputs in codex input item shape)
     current_assistant_text: String,
     /// Thinking text emitted downstream this block; replayed as the reasoning item's `summary` so
@@ -654,6 +679,8 @@ impl Reducer {
             defer_text_open: false,
             last_signature: None,
             deferred_text_deltas: Vec::new(),
+            pending_web_searches: Vec::new(),
+            web_search_citations: Vec::new(),
             current_assistant_text: String::new(),
             current_thinking: String::new(),
             output_items: Vec::new(),
@@ -693,9 +720,13 @@ impl Reducer {
         if !self.defer_text_open && self.deferred_text_deltas.is_empty() {
             return;
         }
+        // Hosted search blocks must precede the answer that cites them.
+        self.flush_web_searches(out);
         self.defer_text_open = false;
-        out.push(ReduceEvent::TextStart);
-        self.open = Open::Text;
+        if self.open != Open::Text {
+            out.push(ReduceEvent::TextStart);
+            self.open = Open::Text;
+        }
         for delta in std::mem::take(&mut self.deferred_text_deltas) {
             self.current_assistant_text.push_str(&delta);
             out.push(ReduceEvent::TextDelta(delta));
@@ -768,6 +799,60 @@ impl Reducer {
         }
     }
 
+    fn has_unflushed_web_search(&self) -> bool {
+        !self.pending_web_searches.is_empty()
+    }
+
+    /// Emit buffered hosted web searches as Anthropic server-tool blocks, using collected
+    /// citations and any markdown/bare URLs from the (possibly deferred) answer text.
+    fn flush_web_searches(&mut self, out: &mut Vec<ReduceEvent>) {
+        if self.pending_web_searches.is_empty() {
+            return;
+        }
+        let mut text = self.current_assistant_text.clone();
+        for delta in &self.deferred_text_deltas {
+            text.push_str(delta);
+        }
+        let mut results = self.web_search_citations.clone();
+        for scraped in scrape_web_search_results_from_text(&text) {
+            if results.iter().any(|r| r.url == scraped.url) {
+                continue;
+            }
+            results.push(scraped);
+        }
+        let searches = std::mem::take(&mut self.pending_web_searches);
+        let result_content: Vec<Value> = results
+            .iter()
+            .map(|r| {
+                json!({
+                    "type": "web_search_result",
+                    "title": r.title,
+                    "url": r.url,
+                })
+            })
+            .collect();
+        let result_json =
+            serde_json::to_string(&result_content).unwrap_or_else(|_| "[]".to_string());
+        for search in searches {
+            let input = json!({ "query": search.query });
+            let partial = serde_json::to_string(&input).unwrap_or_else(|_| "{}".into());
+            // Encoder special-cases srvtoolu_* + name web_search → server_tool_use.
+            out.push(ReduceEvent::ToolStart {
+                id: search.id.clone(),
+                name: "web_search".into(),
+            });
+            out.push(ReduceEvent::ToolDelta(partial));
+            out.push(ReduceEvent::ToolStop);
+            // Encoder special-cases WEB_SEARCH_RESULT_TOOL → web_search_tool_result.
+            out.push(ReduceEvent::ToolStart {
+                id: search.id,
+                name: WEB_SEARCH_RESULT_TOOL.into(),
+            });
+            out.push(ReduceEvent::ToolDelta(result_json.clone()));
+            out.push(ReduceEvent::ToolStop);
+        }
+    }
+
     pub fn push(&mut self, chunk: &[u8]) -> Vec<ReduceEvent> {
         let mut out = Vec::new();
         for v in self.parser.push(chunk) {
@@ -781,6 +866,8 @@ impl Reducer {
     /// so it never triggers continuation recording (matches proxy expectations).
     pub fn finish(&mut self) -> Vec<ReduceEvent> {
         let mut out = Vec::new();
+        self.flush_web_searches(&mut out);
+        self.flush_deferred_text(&mut out);
         self.close_open(&mut out);
         if !self.terminal_seen {
             self.terminal_seen = true;
@@ -847,7 +934,11 @@ impl Reducer {
                         }
                     }
                     Some("message") => {
-                        if !self.close_thinking_when_ready(out) {
+                        if self.has_unflushed_web_search() {
+                            // Answer text is held until hosted search blocks flush (see
+                            // output_text.delta + finish_terminal).
+                            self.defer_text_open = true;
+                        } else if !self.close_thinking_when_ready(out) {
                             self.defer_text_open = true;
                         } else {
                             self.close_open(out);
@@ -856,6 +947,7 @@ impl Reducer {
                         }
                     }
                     Some("function_call") => {
+                        self.flush_web_searches(out);
                         self.close_open(out);
                         self.saw_tool_use = true;
                         self.tool_id = item
@@ -877,8 +969,21 @@ impl Reducer {
                         });
                         self.open = Open::Tool;
                     }
+                    Some("web_search_call") => {
+                        // Query usually arrives on `done`; record a placeholder if `added` carries
+                        // the action already so a truncated stream still has something to emit.
+                        if let Some(query) = web_search_query(&item) {
+                            self.note_web_search(
+                                item.get("id").and_then(Value::as_str).unwrap_or(""),
+                                query,
+                            );
+                        }
+                    }
                     _ => {}
                 }
+            }
+            "response.output_text.annotation.added" => {
+                self.note_url_citation(v);
             }
             "response.reasoning_summary_part.added" => {
                 if self.open == Open::Thinking {
@@ -902,6 +1007,12 @@ impl Reducer {
             }
             "response.output_text.delta" => {
                 let delta = v.get("delta").and_then(Value::as_str).unwrap_or("");
+                // Hold answer text until hosted web searches flush so result blocks can include
+                // citations scraped from the answer (and any url_citation annotations).
+                if self.has_unflushed_web_search() {
+                    self.deferred_text_deltas.push(delta.to_string());
+                    return;
+                }
                 if self.open != Open::Text {
                     if self.open == Open::Thinking && self.thinking_encrypted.is_none() {
                         self.defer_text_open = true;
@@ -944,11 +1055,17 @@ impl Reducer {
                 {
                     return;
                 }
-                if let Some(item) = v.get("item")
-                    && let Some(enc) = reasoning_encrypted_content(item)
-                {
-                    self.note_reasoning_encrypted(out, enc, true);
-                    return;
+                if let Some(item) = v.get("item") {
+                    if item.get("type").and_then(Value::as_str) == Some("web_search_call") {
+                        let id = item.get("id").and_then(Value::as_str).unwrap_or("");
+                        let query = web_search_query(item).unwrap_or_default();
+                        self.note_web_search(id, query);
+                        return;
+                    }
+                    if let Some(enc) = reasoning_encrypted_content(item) {
+                        self.note_reasoning_encrypted(out, enc, true);
+                        return;
+                    }
                 }
                 self.close_open(out);
             }
@@ -980,6 +1097,11 @@ impl Reducer {
         if self.terminal_seen {
             return;
         }
+        // Emit hosted search blocks before any deferred answer text so Claude Code sees the
+        // server_tool_use / web_search_tool_result pair ahead of the prose.
+        self.flush_web_searches(out);
+        // Text deferred while search was pending (or while waiting on a thinking signature).
+        self.flush_deferred_text(out);
         self.close_open(out);
         let stop_reason = if incomplete {
             StopReason::MaxTokens
@@ -1008,6 +1130,160 @@ impl Reducer {
             continuation_eligible,
         });
     }
+
+    fn note_web_search(&mut self, raw_id: &str, query: String) {
+        let id = server_tool_use_id_from_codex_web_search_id(raw_id);
+        if let Some(existing) = self.pending_web_searches.iter_mut().find(|s| s.id == id) {
+            if existing.query.is_empty() && !query.is_empty() {
+                existing.query = query;
+            }
+            return;
+        }
+        self.pending_web_searches
+            .push(PendingWebSearch { id, query });
+    }
+
+    fn note_url_citation(&mut self, v: &Value) {
+        let Some(annotation) = v.get("annotation") else {
+            return;
+        };
+        if annotation.get("type").and_then(Value::as_str) != Some("url_citation") {
+            return;
+        }
+        let Some(url) = annotation.get("url").and_then(Value::as_str) else {
+            return;
+        };
+        if url.is_empty() || self.web_search_citations.iter().any(|r| r.url == url) {
+            return;
+        }
+        let title = annotation
+            .get("title")
+            .and_then(Value::as_str)
+            .filter(|t| !t.is_empty())
+            .unwrap_or(url)
+            .to_string();
+        self.web_search_citations.push(WebSearchResultItem {
+            title,
+            url: url.to_string(),
+        });
+    }
+}
+
+/// Anthropic server-tool ids must look like `srvtoolu_*`.
+fn server_tool_use_id_from_codex_web_search_id(id: &str) -> String {
+    let suffix: String = id
+        .chars()
+        .map(|c| {
+            if c.is_alphanumeric() || c == '_' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    format!("{SERVER_TOOL_ID_PREFIX}{suffix}")
+}
+
+fn web_search_query(item: &Value) -> Option<String> {
+    let action = item.get("action")?;
+    if let Some(q) = action.get("query").and_then(Value::as_str) {
+        return Some(q.to_string());
+    }
+    if let Some(queries) = action.get("queries").and_then(Value::as_array) {
+        for q in queries {
+            if let Some(s) = q.as_str() {
+                return Some(s.to_string());
+            }
+        }
+    }
+    None
+}
+
+/// Pull markdown links and bare URLs out of the answer text as a best-effort result list when
+/// Codex does not stream structured search hits.
+fn scrape_web_search_results_from_text(text: &str) -> Vec<WebSearchResultItem> {
+    let mut results = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+
+    // [title](https://...)
+    let mut rest = text;
+    while let Some(open) = rest.find('[') {
+        let after_open = &rest[open + 1..];
+        let Some(close) = after_open.find(']') else {
+            break;
+        };
+        let title = after_open[..close].trim();
+        let after_close = &after_open[close + 1..];
+        if !after_close.starts_with('(') {
+            rest = &after_open[close + 1..];
+            continue;
+        }
+        let after_paren = &after_close[1..];
+        let Some(end) = after_paren.find(')') else {
+            break;
+        };
+        let mut url = after_paren[..end].trim().to_string();
+        trim_trailing_url_punct(&mut url);
+        if (url.starts_with("http://") || url.starts_with("https://")) && seen.insert(url.clone()) {
+            let display = if title.is_empty() {
+                fallback_title_from_url(&url)
+            } else {
+                title.to_string()
+            };
+            results.push(WebSearchResultItem {
+                title: display,
+                url,
+            });
+        }
+        rest = &after_paren[end + 1..];
+    }
+
+    // Bare URLs not already captured via markdown.
+    let mut rest = text;
+    while let Some(start) = {
+        let http = rest.find("http://");
+        let https = rest.find("https://");
+        match (http, https) {
+            (Some(a), Some(b)) => Some(a.min(b)),
+            (Some(a), None) | (None, Some(a)) => Some(a),
+            (None, None) => None,
+        }
+    } {
+        let candidate = &rest[start..];
+        let end = candidate
+            .find(|c: char| c.is_whitespace() || matches!(c, '<' | '>' | ')' | '|' | '"' | '\''))
+            .unwrap_or(candidate.len());
+        let mut url = candidate[..end].to_string();
+        trim_trailing_url_punct(&mut url);
+        if !url.is_empty() && seen.insert(url.clone()) {
+            results.push(WebSearchResultItem {
+                title: fallback_title_from_url(&url),
+                url,
+            });
+        }
+        rest = &candidate[end.max(1)..];
+    }
+
+    results
+}
+
+fn trim_trailing_url_punct(url: &mut String) {
+    while url
+        .chars()
+        .last()
+        .is_some_and(|c| matches!(c, '.' | ',' | ';' | ':' | '!' | '?' | ')'))
+    {
+        url.pop();
+    }
+}
+
+fn fallback_title_from_url(url: &str) -> String {
+    url.trim_start_matches("https://")
+        .trim_start_matches("http://")
+        .split('/')
+        .next()
+        .unwrap_or(url)
+        .to_string()
 }
 
 fn rate_limited(v: &Value) -> bool {
@@ -1566,7 +1842,7 @@ mod tests {
                         input: 7,
                         output: 5,
                         cache_read: 3,
-                        cache_write: 0
+                        cache_write: 0,
                     },
                     response_id: None,
                     continuation_eligible: true,
@@ -1604,13 +1880,85 @@ mod tests {
                         input: 4,
                         output: 2,
                         cache_read: 0,
-                        cache_write: 0
+                        cache_write: 0,
                     },
                     response_id: None,
                     continuation_eligible: true,
                 },
             ]
         );
+    }
+
+    #[test]
+    fn web_search_call_emits_server_tool_blocks_before_text() {
+        let sse = concat!(
+            "data: {\"type\":\"response.output_item.added\",\"output_index\":0,\"item\":{\"type\":\"web_search_call\",\"id\":\"ws_1\"}}\n\n",
+            "data: {\"type\":\"response.output_item.done\",\"output_index\":0,\"item\":{\"type\":\"web_search_call\",\"id\":\"ws_1\",\"action\":{\"query\":\"rust async\"}}}\n\n",
+            "data: {\"type\":\"response.output_item.added\",\"output_index\":1,\"item\":{\"type\":\"message\",\"id\":\"msg_1\"}}\n\n",
+            "data: {\"type\":\"response.output_text.delta\",\"output_index\":1,\"delta\":\"See [Async book](https://rust-lang.github.io/async-book/).\"}\n\n",
+            "data: {\"type\":\"response.output_text.annotation.added\",\"annotation\":{\"type\":\"url_citation\",\"url\":\"https://docs.rs/tokio\",\"title\":\"Tokio\"}}\n\n",
+            "data: {\"type\":\"response.output_item.done\",\"output_index\":1,\"item\":{\"type\":\"message\"}}\n\n",
+            "data: {\"type\":\"response.completed\",\"response\":{\"usage\":{\"input_tokens\":10,\"output_tokens\":5}}}\n\n",
+        );
+        let (events, _) = reduce(sse);
+        let result_json = json!([
+            {
+                "type": "web_search_result",
+                "title": "Tokio",
+                "url": "https://docs.rs/tokio"
+            },
+            {
+                "type": "web_search_result",
+                "title": "Async book",
+                "url": "https://rust-lang.github.io/async-book/"
+            }
+        ])
+        .to_string();
+        assert_eq!(
+            events,
+            vec![
+                ReduceEvent::ToolStart {
+                    id: "srvtoolu_ws_1".into(),
+                    name: "web_search".into(),
+                },
+                ReduceEvent::ToolDelta(r#"{"query":"rust async"}"#.into()),
+                ReduceEvent::ToolStop,
+                ReduceEvent::ToolStart {
+                    id: "srvtoolu_ws_1".into(),
+                    name: WEB_SEARCH_RESULT_TOOL.into(),
+                },
+                ReduceEvent::ToolDelta(result_json),
+                ReduceEvent::ToolStop,
+                ReduceEvent::TextStart,
+                ReduceEvent::TextDelta(
+                    "See [Async book](https://rust-lang.github.io/async-book/).".into()
+                ),
+                ReduceEvent::TextStop,
+                ReduceEvent::Finish {
+                    stop_reason: StopReason::EndTurn,
+                    usage: Usage {
+                        input: 10,
+                        output: 5,
+                        cache_read: 0,
+                        cache_write: 0,
+                    },
+                    response_id: None,
+                    continuation_eligible: true,
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn scrape_web_search_results_prefers_markdown_titles() {
+        let got = scrape_web_search_results_from_text(
+            "Check [Example](https://example.com/path) and https://other.com/page.",
+        );
+        assert_eq!(got.len(), 2);
+        assert_eq!(got[0].title, "Example");
+        assert_eq!(got[0].url, "https://example.com/path");
+        assert_eq!(got[1].url, "https://other.com/page");
+        assert_eq!(got[1].title, "other.com");
     }
 
     #[test]

@@ -8,6 +8,12 @@ All notable changes to this project are documented here. The format follows
 
 ### Fixed
 
+- **Codex hosted web search results reach Claude Code.** After the request-side `allowed_tools`
+  fix, Codex `web_search_call` items were still dropped on the way back, so the client never saw
+  `server_tool_use` / `web_search_tool_result` blocks or `usage.server_tool_use`. The reducer now
+  maps those calls (with query + url citations / scraped answer links) into Anthropic server-tool
+  SSE ahead of the answer text, and counts them in usage.
+
 - **Forced Codex web search no longer 400s.** Claude Code forces the hosted search tool as
   `tool_choice: {type:"tool", name:"web_search"}` while registering
   `web_search_20250305`. llmtrim used to rewrite that force as

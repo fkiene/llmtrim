@@ -909,7 +909,7 @@ mod tests {
                     input: 70,
                     output: 10,
                     cache_read: 30,
-                    cache_write: 0
+                    cache_write: 0,
                 },
                 response_id: None,
                 continuation_eligible: false,

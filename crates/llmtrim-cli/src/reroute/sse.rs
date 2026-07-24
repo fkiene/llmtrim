@@ -51,10 +51,25 @@ impl Usage {
     }
 }
 
+/// Sentinel tool name used by provider reducers for a hosted web-search *result* block.
+/// The encoder turns `ToolStart{name: WEB_SEARCH_RESULT_TOOL, id}` + `ToolDelta` (JSON results
+/// array) + `ToolStop` into Anthropic `web_search_tool_result`. Not a real client tool.
+pub const WEB_SEARCH_RESULT_TOOL: &str = "web_search_tool_result";
+
+/// Hosted web_search server-tool ids always use this Anthropic-style prefix.
+pub const SERVER_TOOL_ID_PREFIX: &str = "srvtoolu_";
+
 /// A single normalized event from a provider reducer, in emission order. The encoder relies on
 /// well-formed nesting: every `*Start` is eventually followed by its `*Stop`, and blocks do not
 /// interleave (thinking closes before text opens, etc.). Reducers are responsible for closing an
 /// open block before opening another — the encoder only assigns indices.
+///
+/// Hosted web search is encoded with the existing tool events (keeps the public API patch-stable):
+/// - `ToolStart { id: "srvtoolu_…", name: "web_search" }` → Anthropic `server_tool_use`
+/// - `ToolDelta` → `input_json_delta` for the query
+/// - `ToolStop` closes that block
+/// - `ToolStart { id: tool_use_id, name: WEB_SEARCH_RESULT_TOOL }` + `ToolDelta` (JSON array of
+///   `{title,url}`) + `ToolStop` → `web_search_tool_result`
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ReduceEvent {
     ThinkingStart,
@@ -102,6 +117,24 @@ pub struct AnthropicSseEncoder {
     /// The index of the currently open block (set on any `*Start`), used for its deltas + stop.
     current_index: i64,
     stopped: bool,
+    /// Open tool kind so ToolDelta/ToolStop know how to render.
+    open_tool: OpenTool,
+    /// Buffered JSON for a pending `web_search_tool_result` (results land in content_block_start).
+    pending_result_id: Option<String>,
+    pending_result_json: String,
+    /// Hosted web_search server tools opened this turn (for `usage.server_tool_use`).
+    web_search_requests: i64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum OpenTool {
+    None,
+    /// Client function tool → Anthropic `tool_use`.
+    Function,
+    /// Hosted web_search → Anthropic `server_tool_use`.
+    ServerWebSearch,
+    /// Buffered result block (emitted on ToolStop).
+    WebSearchResult,
 }
 
 impl AnthropicSseEncoder {
@@ -113,6 +146,10 @@ impl AnthropicSseEncoder {
             next_index: 0,
             current_index: 0,
             stopped: false,
+            open_tool: OpenTool::None,
+            pending_result_id: None,
+            pending_result_json: String::new(),
+            web_search_requests: 0,
         }
     }
 
@@ -147,17 +184,59 @@ impl AnthropicSseEncoder {
             }
             ReduceEvent::TextStop => self.close_block(out),
             ReduceEvent::ToolStart { id, name } => {
-                let idx = self.open_block(
-                    out,
-                    json!({"type": "tool_use", "id": id, "name": name, "input": {}}),
-                );
-                self.current_index = idx;
+                if name == WEB_SEARCH_RESULT_TOOL {
+                    self.open_tool = OpenTool::WebSearchResult;
+                    self.pending_result_id = Some(id.clone());
+                    self.pending_result_json.clear();
+                } else if name == "web_search" && id.starts_with(SERVER_TOOL_ID_PREFIX) {
+                    self.web_search_requests += 1;
+                    self.open_tool = OpenTool::ServerWebSearch;
+                    let idx = self.open_block(
+                        out,
+                        json!({"type": "server_tool_use", "id": id, "name": name, "input": {}}),
+                    );
+                    self.current_index = idx;
+                } else {
+                    self.open_tool = OpenTool::Function;
+                    let idx = self.open_block(
+                        out,
+                        json!({"type": "tool_use", "id": id, "name": name, "input": {}}),
+                    );
+                    self.current_index = idx;
+                }
             }
-            ReduceEvent::ToolDelta(partial) => self.block_delta(
-                out,
-                json!({"type": "input_json_delta", "partial_json": partial}),
-            ),
-            ReduceEvent::ToolStop => self.close_block(out),
+            ReduceEvent::ToolDelta(partial) => match self.open_tool {
+                OpenTool::WebSearchResult => self.pending_result_json.push_str(partial),
+                OpenTool::Function | OpenTool::ServerWebSearch => self.block_delta(
+                    out,
+                    json!({"type": "input_json_delta", "partial_json": partial}),
+                ),
+                OpenTool::None => {}
+            },
+            ReduceEvent::ToolStop => match self.open_tool {
+                OpenTool::WebSearchResult => {
+                    let tool_use_id = self.pending_result_id.take().unwrap_or_default();
+                    let content: Value = serde_json::from_str(&self.pending_result_json)
+                        .unwrap_or_else(|_| json!([]));
+                    self.pending_result_json.clear();
+                    self.open_tool = OpenTool::None;
+                    let idx = self.open_block(
+                        out,
+                        json!({
+                            "type": "web_search_tool_result",
+                            "tool_use_id": tool_use_id,
+                            "content": content,
+                        }),
+                    );
+                    self.current_index = idx;
+                    self.close_block(out);
+                }
+                OpenTool::Function | OpenTool::ServerWebSearch => {
+                    self.open_tool = OpenTool::None;
+                    self.close_block(out);
+                }
+                OpenTool::None => self.close_block(out),
+            },
             ReduceEvent::Finish {
                 stop_reason, usage, ..
             } => self.emit_finish(out, *stop_reason, *usage),
@@ -222,10 +301,17 @@ impl AnthropicSseEncoder {
             return;
         }
         self.stopped = true;
+        let mut usage_json = usage.to_json();
+        if self.web_search_requests > 0 {
+            usage_json.as_object_mut().expect("object").insert(
+                "server_tool_use".into(),
+                json!({ "web_search_requests": self.web_search_requests }),
+            );
+        }
         let delta = json!({
             "type": "message_delta",
             "delta": {"stop_reason": stop_reason.as_str(), "stop_sequence": Value::Null},
-            "usage": usage.to_json(),
+            "usage": usage_json,
         });
         frame(out, "message_delta", &delta);
         frame(out, "message_stop", &json!({"type": "message_stop"}));
@@ -360,6 +446,55 @@ mod tests {
         assert!(out.contains("\"stop_reason\":\"end_turn\""));
         assert!(out.contains("\"cache_read_input_tokens\":3"));
         assert!(out.contains("event: message_stop"));
+    }
+
+    #[test]
+    fn web_search_blocks_and_usage_encode() {
+        let results = json!([
+            {
+                "type": "web_search_result",
+                "title": "Async book",
+                "url": "https://rust-lang.github.io/async-book/"
+            }
+        ]);
+        let out = encode_all(
+            "m",
+            &[
+                ReduceEvent::ToolStart {
+                    id: "srvtoolu_ws_1".into(),
+                    name: "web_search".into(),
+                },
+                ReduceEvent::ToolDelta(r#"{"query":"rust async"}"#.into()),
+                ReduceEvent::ToolStop,
+                ReduceEvent::ToolStart {
+                    id: "srvtoolu_ws_1".into(),
+                    name: WEB_SEARCH_RESULT_TOOL.into(),
+                },
+                ReduceEvent::ToolDelta(results.to_string()),
+                ReduceEvent::ToolStop,
+                ReduceEvent::TextStart,
+                ReduceEvent::TextDelta("see link".into()),
+                ReduceEvent::TextStop,
+                ReduceEvent::Finish {
+                    stop_reason: StopReason::EndTurn,
+                    usage: Usage {
+                        input: 1,
+                        output: 2,
+                        cache_read: 0,
+                        cache_write: 0,
+                    },
+                    response_id: None,
+                    continuation_eligible: true,
+                },
+            ],
+        );
+        assert!(out.contains("\"type\":\"server_tool_use\""));
+        assert!(out.contains("\"name\":\"web_search\""));
+        assert!(out.contains("\"type\":\"web_search_tool_result\""));
+        assert!(out.contains("\"type\":\"web_search_result\""));
+        assert!(out.contains("\"url\":\"https://rust-lang.github.io/async-book/\""));
+        assert!(out.contains("\"web_search_requests\":1"));
+        assert!(out.contains("\"server_tool_use\""));
     }
 
     #[test]
