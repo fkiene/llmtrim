@@ -71,7 +71,12 @@ pub(crate) fn build_upstream_for_model(
             .and_then(|v| v.as_str())
             .unwrap_or_default()
     });
-    let model = resolve_model(provider, incoming, overrides);
+    let mut model = resolve_model(provider, incoming, overrides);
+    // Hosted web_search needs the full Responses API; luna only exists on the lite lane and
+    // 404s there as a `-free` id, so upgrade to the nearest full-lane sibling.
+    if provider == SubProvider::Codex && codex::has_hosted_web_search(anthropic_body) {
+        model = codex::full_lane_web_search_model(&model).to_string();
+    }
     let (host, path, body, headers) = match provider {
         SubProvider::Codex => {
             let b = codex::build_request_body(anthropic_body, &model, session_id)?;
@@ -604,6 +609,30 @@ mod tests {
         assert_eq!(
             resolve_model(SubProvider::Codex, "mystery-model", &ov),
             "gpt-5.6-luna"
+        );
+    }
+
+    #[test]
+    fn codex_web_search_upgrades_luna_to_sol() {
+        let token = auth::TokenSet {
+            access: "tok".into(),
+            account_id: None,
+        };
+        let body = serde_json::json!({
+            "model": "claude-sonnet-5",
+            "messages": [],
+            "tools": [{ "type": "web_search_20250305", "name": "web_search" }],
+            "tool_choice": { "type": "tool", "name": "web_search" }
+        });
+        let up = build_upstream(SubProvider::Codex, &body, &BTreeMap::new(), &token, None)
+            .expect("build");
+        assert_eq!(up.model, "gpt-5.6-sol");
+        let parsed: serde_json::Value = serde_json::from_slice(&up.body).expect("json");
+        assert_eq!(parsed["model"], "gpt-5.6-sol");
+        assert_eq!(parsed["tool_choice"]["type"], "allowed_tools");
+        assert_eq!(
+            parsed["tool_choice"]["tools"],
+            serde_json::json!([{ "type": "web_search" }])
         );
     }
 }

@@ -6,6 +6,17 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Fixed
+
+- **Forced Codex web search no longer 400s.** Claude Code forces the hosted search tool as
+  `tool_choice: {type:"tool", name:"web_search"}` while registering
+  `web_search_20250305`. llmtrim used to rewrite that force as
+  `{type:"function", name:"web_search"}`, which the Codex backend rejects with
+  `Tool choice 'function' not found in 'tools' parameter` because the tool is hosted, not a
+  function. Forced web search now maps to Responses `allowed_tools` with `{type:"web_search"}`,
+  hosted search enables `external_web_access`, and `gpt-5.6-luna` (lite-only) upgrades to
+  `gpt-5.6-sol` for those turns so the full Responses API accepts the hosted tool.
+
 ## [0.11.9] - 2026-07-23
 
 ### Fixed

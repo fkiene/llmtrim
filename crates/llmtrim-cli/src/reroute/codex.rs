@@ -55,7 +55,7 @@ pub fn build_request_body(
         body.insert("tools".into(), Value::Array(tools));
     }
 
-    if let Some(tc) = build_tool_choice(anthropic.get("tool_choice")) {
+    if let Some(tc) = build_tool_choice(anthropic.get("tool_choice"), anthropic.get("tools")) {
         body.insert("tool_choice".into(), tc);
     }
 
@@ -329,7 +329,9 @@ fn web_search_tool(tool: &Value) -> Value {
     }
     let mut obj = Map::new();
     obj.insert("type".into(), json!("web_search"));
-    obj.insert("external_web_access".into(), json!(false));
+    // Hosted search must be allowed to leave the provider's crawl set; `false` keeps the tool
+    // registered but returns empty / sandbox results.
+    obj.insert("external_web_access".into(), json!(true));
     obj.insert("search_content_types".into(), json!(["text", "image"]));
     if !filters.is_empty() {
         obj.insert("filters".into(), Value::Object(filters));
@@ -342,12 +344,60 @@ fn is_web_search(tool: &Value) -> bool {
         || tool.get("type").and_then(Value::as_str) == Some(WEB_SEARCH_TOOL)
 }
 
+/// True when the Anthropic body registers the hosted web-search tool.
+pub fn has_hosted_web_search(anthropic: &Value) -> bool {
+    anthropic
+        .get("tools")
+        .and_then(Value::as_array)
+        .is_some_and(|tools| tools.iter().any(is_web_search))
+}
+
+/// `gpt-5.6-luna` is a lite-lane-only id; hosted tools need the full Responses API, where luna
+/// 404s as a `-free` variant. Upgrade to the nearest full-lane sibling.
+pub fn full_lane_web_search_model(model: &str) -> &str {
+    if model == "gpt-5.6-luna" {
+        "gpt-5.6-sol"
+    } else {
+        model
+    }
+}
+
+/// Whether a forced Anthropic `tool_choice` names the hosted web-search tool that is actually
+/// registered in `tools[]`. Claude Code forces `{type:"tool", name:"web_search"}` while the tool
+/// entry is `{type:"web_search_20250305", name:"web_search"}`. Match by the tool's own name (or the
+/// type id); do not treat a client-side `WebSearch` function tool as hosted.
+fn is_hosted_web_search_choice(name: &str, tools: Option<&Value>) -> bool {
+    tools.and_then(Value::as_array).is_some_and(|arr| {
+        arr.iter().any(|tool| {
+            if !is_web_search(tool) {
+                return false;
+            }
+            // Type-id force (`web_search_20250305`) always counts once a hosted tool is present.
+            if name == WEB_SEARCH_TOOL {
+                return true;
+            }
+            // Prefer the tool's declared name; fall back to the type id when `name` is absent.
+            let tool_name = tool
+                .get("name")
+                .and_then(Value::as_str)
+                .unwrap_or(WEB_SEARCH_TOOL);
+            tool_name == name
+        })
+    })
+}
+
 /// Translate Anthropic `tool_choice` into the Responses form.
 ///
-/// Returns a STRING `"none"`/`"required"` or a `{type:"function", name}` object. `auto` (and an
-/// absent choice) return `None` so the key is omitted. A choice targeting the hosted web-search
-/// tool is dropped.
-fn build_tool_choice(tc: Option<&Value>) -> Option<Value> {
+/// Returns a STRING `"none"`/`"required"`, a `{type:"function", name}` object, or an
+/// `allowed_tools` object that forces the hosted Codex `web_search` tool. `auto` (and an absent
+/// choice) return `None` so the key is omitted.
+///
+/// Claude Code forces hosted search with `{type:"tool", name:"web_search"}`. Mapping that to
+/// `{type:"function", name:"web_search"}` makes the backend 400 (`Tool choice 'function' not found
+/// in 'tools' parameter`) because the tool is registered as hosted `web_search`, not a function.
+/// Force it via `allowed_tools` instead. An unregistered web-search force is dropped rather than
+/// rewritten as a function choice.
+fn build_tool_choice(tc: Option<&Value>, tools: Option<&Value>) -> Option<Value> {
     let tc = tc?;
     match tc.get("type").and_then(Value::as_str) {
         Some("auto") | None => None,
@@ -355,7 +405,17 @@ fn build_tool_choice(tc: Option<&Value>) -> Option<Value> {
         Some("any") | Some("required") => Some(json!("required")),
         Some("tool") => {
             let name = tc.get("name").and_then(Value::as_str)?;
-            if name == WEB_SEARCH_TOOL {
+            if is_hosted_web_search_choice(name, tools) {
+                return Some(json!({
+                    "type": "allowed_tools",
+                    "mode": "required",
+                    "tools": [{ "type": "web_search" }],
+                }));
+            }
+            // Bare hosted names with no matching tools[] entry: drop rather than emit a function
+            // choice the tools list lacks. Keep case-sensitive so a client `WebSearch` function
+            // tool is still forced as `{type:"function", name:"WebSearch"}`.
+            if name == WEB_SEARCH_TOOL || name == "web_search" {
                 return None;
             }
             Some(json!({ "type": "function", "name": name }))
@@ -1219,7 +1279,7 @@ mod tests {
         assert_eq!(tools[0]["name"], "Read");
         // web_search is now a real Codex tool, not stripped, with its domain filter carried over.
         assert_eq!(tools[1]["type"], "web_search");
-        assert_eq!(tools[1]["external_web_access"], false);
+        assert_eq!(tools[1]["external_web_access"], true);
         assert_eq!(tools[1]["search_content_types"][0], "text");
         assert_eq!(tools[1]["filters"]["allowed_domains"][0], "docs.rs");
     }
@@ -1258,15 +1318,15 @@ mod tests {
     #[test]
     fn tool_choice_required_and_specific() {
         assert_eq!(
-            build_tool_choice(Some(&json!({ "type": "any" }))),
+            build_tool_choice(Some(&json!({ "type": "any" })), None),
             Some(json!("required"))
         );
         assert_eq!(
-            build_tool_choice(Some(&json!({ "type": "required" }))),
+            build_tool_choice(Some(&json!({ "type": "required" })), None),
             Some(json!("required"))
         );
         assert_eq!(
-            build_tool_choice(Some(&json!({ "type": "tool", "name": "Read" }))),
+            build_tool_choice(Some(&json!({ "type": "tool", "name": "Read" })), None),
             Some(json!({ "type": "function", "name": "Read" }))
         );
     }
@@ -1283,13 +1343,112 @@ mod tests {
     }
 
     #[test]
-    fn tool_choice_web_search_is_dropped() {
+    fn tool_choice_forced_web_search_uses_allowed_tools() {
+        // Claude Code forces hosted search as {type:"tool", name:"web_search"} while the tool
+        // entry is {type:"web_search_20250305", name:"web_search"}. That must become
+        // allowed_tools, not {type:"function", name:"web_search"} (backend 400).
+        let tools = json!([{
+            "type": "web_search_20250305",
+            "name": "web_search",
+            "allowed_domains": ["example.com"]
+        }]);
+        let body = build_request_body(
+            &json!({
+                "messages": [],
+                "tools": tools,
+                "tool_choice": { "type": "tool", "name": "web_search" }
+            }),
+            "gpt-5.5",
+            None,
+        )
+        .expect("build");
+        assert_eq!(body["tool_choice"]["type"], "allowed_tools");
+        assert_eq!(body["tool_choice"]["mode"], "required");
         assert_eq!(
-            build_tool_choice(Some(
-                &json!({ "type": "tool", "name": "web_search_20250305" })
-            )),
+            body["tool_choice"]["tools"],
+            json!([{ "type": "web_search" }])
+        );
+        assert_eq!(body["tools"][0]["type"], "web_search");
+        assert_eq!(body["tools"][0]["external_web_access"], true);
+        assert_eq!(
+            body["tools"][0]["filters"]["allowed_domains"][0],
+            "example.com"
+        );
+
+        // Type-id force also maps when the hosted tool is registered.
+        assert_eq!(
+            build_tool_choice(
+                Some(&json!({ "type": "tool", "name": "web_search_20250305" })),
+                Some(&tools)
+            ),
+            Some(json!({
+                "type": "allowed_tools",
+                "mode": "required",
+                "tools": [{ "type": "web_search" }],
+            }))
+        );
+    }
+
+    #[test]
+    fn tool_choice_unregistered_web_search_is_dropped() {
+        // Without a registered hosted tool, do not invent a function choice that tools[] lacks.
+        assert_eq!(
+            build_tool_choice(
+                Some(&json!({ "type": "tool", "name": "web_search" })),
+                Some(&json!([{ "name": "Read", "input_schema": { "type": "object" } }]))
+            ),
             None
         );
+        assert_eq!(
+            build_tool_choice(
+                Some(&json!({ "type": "tool", "name": "web_search_20250305" })),
+                None
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn tool_choice_client_websearch_function_stays_function() {
+        // A client-side WebSearch function tool must not be rewritten as hosted allowed_tools
+        // just because a hosted web_search tool is also registered.
+        let tools = json!([
+            { "type": "web_search_20250305", "name": "web_search" },
+            {
+                "name": "WebSearch",
+                "description": "client search",
+                "input_schema": { "type": "object" }
+            }
+        ]);
+        assert_eq!(
+            build_tool_choice(
+                Some(&json!({ "type": "tool", "name": "WebSearch" })),
+                Some(&tools)
+            ),
+            Some(json!({ "type": "function", "name": "WebSearch" }))
+        );
+    }
+
+    #[test]
+    fn full_lane_web_search_model_upgrades_luna() {
+        assert_eq!(full_lane_web_search_model("gpt-5.6-luna"), "gpt-5.6-sol");
+        assert_eq!(full_lane_web_search_model("gpt-5.6-sol"), "gpt-5.6-sol");
+        assert_eq!(full_lane_web_search_model("gpt-5.6-terra"), "gpt-5.6-terra");
+        assert_eq!(full_lane_web_search_model("gpt-5.5"), "gpt-5.5");
+    }
+
+    #[test]
+    fn has_hosted_web_search_detects_tool() {
+        assert!(has_hosted_web_search(&json!({
+            "tools": [{ "type": "web_search_20250305", "name": "web_search" }]
+        })));
+        assert!(has_hosted_web_search(&json!({
+            "tools": [{ "name": "web_search_20250305" }]
+        })));
+        assert!(!has_hosted_web_search(&json!({
+            "tools": [{ "name": "Read", "input_schema": { "type": "object" } }]
+        })));
+        assert!(!has_hosted_web_search(&json!({ "messages": [] })));
     }
 
     #[test]
