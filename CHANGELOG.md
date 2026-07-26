@@ -6,6 +6,16 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Fixed
+
+- **Sub streams no longer die to Claude Code's ~180s stall watchdog.** Quiet Codex/Grok/Kimi
+  turns (long reasoning, buffered tool-arg generation) used to go silent on the Anthropic SSE
+  side, so Claude Code aborted with `Response stalled mid-stream` after exactly three minutes
+  (`incomplete_stream` / `no terminal frame` in `serve.log`). The live reroute stream now emits
+  Anthropic `event: ping` keepalives every 15s once `message_start` has been sent — both on total
+  upstream silence and when upstream is still sending chunks that produce no client-visible
+  events. Same shape as claude-code-proxy's historical tool-buffer keepalive.
+
 ## [0.11.10] - 2026-07-26
 
 ### Fixed

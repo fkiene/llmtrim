@@ -6,10 +6,24 @@
 //! content-block index bookkeeping in one place — the reducers never compute Anthropic indices,
 //! they just say "a text block started / a delta arrived / it stopped" and the encoder assigns and
 //! tracks the index. This is deliberately the *only* place that emits `message_start`,
-//! `content_block_*`, `message_delta`, and `message_stop`, so the wire contract can't drift between
-//! providers.
+//! `content_block_*`, `message_delta`, `message_stop`, and mid-stream `ping` keepalives, so the
+//! wire contract can't drift between providers.
+//!
+//! Claude Code aborts a live stream after ~180s with no downstream events ("Response stalled
+//! mid-stream"). Sub backends often go quiet while reasoning or while we buffer tool-call
+//! arguments, so the serve path emits Anthropic `ping` frames on
+//! [`KEEPALIVE_INTERVAL`] once `message_start` has been sent.
+
+use std::time::Duration;
 
 use serde_json::{Value, json};
+
+/// How often a quiet sub stream should emit an Anthropic SSE `ping` to Claude Code.
+///
+/// Matches claude-code-proxy's historical 15s keepalive (well under Claude Code's ~180s idle
+/// watchdog). Used by the live reroute stream in `serve` for both total upstream silence and
+/// upstream noise that produces no client-visible ReduceEvents (buffered tool args).
+pub const KEEPALIVE_INTERVAL: Duration = Duration::from_secs(15);
 
 /// Why the model stopped, mapped onto Anthropic `stop_reason`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -277,6 +291,25 @@ impl AnthropicSseEncoder {
     pub fn finish_if_open(&mut self, out: &mut String) {
         if self.started && !self.stopped {
             self.emit_finish(out, StopReason::EndTurn, Usage::default());
+        }
+    }
+
+    /// True once `message_start` has been sent and neither `message_stop` nor an `error` frame has
+    /// closed the stream. The serve path uses this to decide whether a quiet period should emit a
+    /// keepalive [`emit_ping`] — pings before `message_start` or after close are not useful and can
+    /// confuse Claude Code's stream parser.
+    pub fn is_open(&self) -> bool {
+        self.started && !self.stopped
+    }
+
+    /// Append an Anthropic SSE `ping` frame if the message is open. No-op before `message_start` or
+    /// after the stream has been closed by `Finish`/`Error`/`finish_if_open`.
+    ///
+    /// Claude Code's idle-stream watchdog treats any SSE event (including `ping`) as activity, so
+    /// this keeps a long-thinking or tool-arg-buffering sub turn from being killed at ~180s.
+    pub fn emit_ping(&mut self, out: &mut String) {
+        if self.is_open() {
+            frame(out, "ping", &json!({"type": "ping"}));
         }
     }
 
@@ -679,5 +712,52 @@ mod tests {
         let got = p.push(b": keepalive\ndata: \ndata: not json\ndata: {\"ok\":true}\n");
         assert_eq!(got.len(), 1);
         assert_eq!(got[0]["ok"], true);
+    }
+
+    #[test]
+    fn emit_ping_only_while_message_is_open() {
+        let mut enc = AnthropicSseEncoder::new("m");
+        let mut out = String::new();
+
+        // Before message_start: no-op.
+        enc.emit_ping(&mut out);
+        assert!(out.is_empty(), "ping before message_start must be a no-op");
+        assert!(!enc.is_open());
+
+        enc.encode(&ReduceEvent::TextStart, &mut out);
+        assert!(enc.is_open());
+        let len_after_start = out.len();
+        enc.emit_ping(&mut out);
+        let ping = &out[len_after_start..];
+        assert!(
+            ping.contains("event: ping") && ping.contains(r#""type":"ping""#),
+            "open stream must emit Anthropic ping frames: {ping:?}"
+        );
+
+        enc.encode(
+            &ReduceEvent::Finish {
+                stop_reason: StopReason::EndTurn,
+                usage: Usage::default(),
+                response_id: None,
+                continuation_eligible: false,
+            },
+            &mut out,
+        );
+        assert!(!enc.is_open());
+        let len_after_finish = out.len();
+        enc.emit_ping(&mut out);
+        assert_eq!(
+            out.len(),
+            len_after_finish,
+            "ping after message_stop must be a no-op"
+        );
+    }
+
+    #[test]
+    fn keepalive_interval_is_under_claude_code_stall_watchdog() {
+        // Document the invariant the serve path relies on: pings must land well before the
+        // ~180s client abort. 15s matches claude-code-proxy's historical keepalive.
+        assert_eq!(KEEPALIVE_INTERVAL.as_secs(), 15);
+        assert!(KEEPALIVE_INTERVAL.as_secs() * 4 < 180);
     }
 }

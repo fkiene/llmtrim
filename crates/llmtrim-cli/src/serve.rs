@@ -2740,6 +2740,10 @@ mod imp {
                 finalize: Finalize,
                 phase: Phase,
                 prelude: String,
+                /// Wall clock of the last client-visible SSE emission (content *or* keepalive
+                /// ping). Drives the 15s Anthropic `ping` so Claude Code's ~180s idle-stream
+                /// watchdog does not kill a quiet reasoning / buffered-tool-arg turn.
+                last_emit: std::time::Instant,
                 // For continuation recording on terminal Finish during live stream
                 provider: crate::reroute::SubProvider,
                 logical_body: Option<Value>,
@@ -2753,6 +2757,7 @@ mod imp {
                 finalize,
                 phase: Phase::Prelude,
                 prelude,
+                last_emit: std::time::Instant::now(),
                 provider: info.provider,
                 logical_body: info.logical_body.clone(),
                 session_id: info.session_id.clone(),
@@ -2772,6 +2777,7 @@ mod imp {
                             if let Ok(mut buf) = st.acc.lock() {
                                 buf.extend_from_slice(out.as_bytes());
                             }
+                            st.last_emit = std::time::Instant::now();
                             return Some((
                                 Ok::<Bytes, std::io::Error>(Bytes::from(out.into_bytes())),
                                 st,
@@ -2802,56 +2808,101 @@ mod imp {
                             let bytes = Bytes::from(out.into_bytes());
                             return Some((Ok::<Bytes, std::io::Error>(bytes), st));
                         }
-                        Phase::Body => match st.inner.next().await {
-                            Some(Ok(frame)) => {
-                                let Ok(chunk) = frame.into_data() else {
+                        Phase::Body => {
+                            // Two quiet cases Claude Code's ~180s stall watchdog kills without help:
+                            // 1) upstream totally silent (long reasoning, hung provider)
+                            // 2) upstream still sending chunks that produce no client-visible
+                            //    ReduceEvents (buffered tool-arg deltas, provider keepalives)
+                            // `select!` covers (1); the empty-`out` branch covers (2). Both emit
+                            // Anthropic `event: ping` on KEEPALIVE_INTERVAL once message_start has
+                            // been sent (encoder.is_open).
+                            let sleep_for = crate::reroute::sse::KEEPALIVE_INTERVAL
+                                .saturating_sub(st.last_emit.elapsed());
+                            tokio::select! {
+                                frame = st.inner.next() => match frame {
+                                    Some(Ok(frame)) => {
+                                        let Ok(chunk) = frame.into_data() else {
+                                            continue;
+                                        };
+                                        let mut out = String::new();
+                                        for ev in st.reducer.push(&chunk) {
+                                            record_codex_continuation(
+                                                &ev,
+                                                &mut st.reducer,
+                                                st.provider,
+                                                st.logical_body.as_ref(),
+                                                st.session_id.as_deref(),
+                                            );
+                                            st.encoder.encode(&ev, &mut out);
+                                        }
+                                        // Upstream noise with no client-visible events: still ping
+                                        // if the idle budget has elapsed (buffered tool args).
+                                        if out.is_empty()
+                                            && st.encoder.is_open()
+                                            && st.last_emit.elapsed()
+                                                >= crate::reroute::sse::KEEPALIVE_INTERVAL
+                                        {
+                                            st.encoder.emit_ping(&mut out);
+                                        }
+                                        if out.is_empty() {
+                                            continue;
+                                        }
+                                        if let Ok(mut buf) = st.acc.lock() {
+                                            buf.extend_from_slice(out.as_bytes());
+                                        }
+                                        st.last_emit = std::time::Instant::now();
+                                        let bytes = Bytes::from(out.into_bytes());
+                                        return Some((Ok(bytes), st));
+                                    }
+                                    Some(Err(_)) => {
+                                        // Transport error mid-stream: surface it as an Anthropic
+                                        // `error` frame so the client can tell a dropped provider
+                                        // connection from a clean end-of-turn, instead of a
+                                        // silently truncated answer.
+                                        let mut out = String::new();
+                                        st.encoder.encode(
+                                            &ReduceEvent::Error {
+                                                message: "llmtrim: upstream stream error"
+                                                    .to_string(),
+                                            },
+                                            &mut out,
+                                        );
+                                        st.phase = Phase::Flush;
+                                        if out.is_empty() {
+                                            continue;
+                                        }
+                                        if let Ok(mut buf) = st.acc.lock() {
+                                            buf.extend_from_slice(out.as_bytes());
+                                        }
+                                        return Some((Ok(Bytes::from(out.into_bytes())), st));
+                                    }
+                                    None => {
+                                        st.phase = Phase::Flush;
+                                        continue;
+                                    }
+                                },
+                                _ = tokio::time::sleep(sleep_for) => {
+                                    if st.encoder.is_open()
+                                        && st.last_emit.elapsed()
+                                            >= crate::reroute::sse::KEEPALIVE_INTERVAL
+                                    {
+                                        let mut out = String::new();
+                                        st.encoder.emit_ping(&mut out);
+                                        if !out.is_empty() {
+                                            if let Ok(mut buf) = st.acc.lock() {
+                                                buf.extend_from_slice(out.as_bytes());
+                                            }
+                                            st.last_emit = std::time::Instant::now();
+                                            return Some((
+                                                Ok(Bytes::from(out.into_bytes())),
+                                                st,
+                                            ));
+                                        }
+                                    }
                                     continue;
-                                };
-                                let mut out = String::new();
-                                for ev in st.reducer.push(&chunk) {
-                                    record_codex_continuation(
-                                        &ev,
-                                        &mut st.reducer,
-                                        st.provider,
-                                        st.logical_body.as_ref(),
-                                        st.session_id.as_deref(),
-                                    );
-                                    st.encoder.encode(&ev, &mut out);
                                 }
-                                if out.is_empty() {
-                                    continue;
-                                }
-                                if let Ok(mut buf) = st.acc.lock() {
-                                    buf.extend_from_slice(out.as_bytes());
-                                }
-                                let bytes = Bytes::from(out.into_bytes());
-                                return Some((Ok(bytes), st));
                             }
-                            Some(Err(_)) => {
-                                // Transport error mid-stream: surface it as an Anthropic `error`
-                                // frame so the client can tell a dropped provider connection from a
-                                // clean end-of-turn, instead of a silently truncated answer.
-                                let mut out = String::new();
-                                st.encoder.encode(
-                                    &ReduceEvent::Error {
-                                        message: "llmtrim: upstream stream error".to_string(),
-                                    },
-                                    &mut out,
-                                );
-                                st.phase = Phase::Flush;
-                                if out.is_empty() {
-                                    continue;
-                                }
-                                if let Ok(mut buf) = st.acc.lock() {
-                                    buf.extend_from_slice(out.as_bytes());
-                                }
-                                return Some((Ok(Bytes::from(out.into_bytes())), st));
-                            }
-                            None => {
-                                st.phase = Phase::Flush;
-                                continue;
-                            }
-                        },
+                        }
                     }
                 }
             });
