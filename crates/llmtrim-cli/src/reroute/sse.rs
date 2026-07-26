@@ -296,8 +296,8 @@ impl AnthropicSseEncoder {
 
     /// True once `message_start` has been sent and neither `message_stop` nor an `error` frame has
     /// closed the stream. The serve path uses this to decide whether a quiet period should emit a
-    /// keepalive [`emit_ping`] — pings before `message_start` or after close are not useful and can
-    /// confuse Claude Code's stream parser.
+    /// keepalive [`Self::emit_ping`] — pings before `message_start` or after close are not useful
+    /// and can confuse Claude Code's stream parser.
     pub fn is_open(&self) -> bool {
         self.started && !self.stopped
     }
