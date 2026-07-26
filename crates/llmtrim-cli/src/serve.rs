@@ -861,12 +861,7 @@ mod imp {
         let message = crate::reroute::context_limit::GUARD_MESSAGE;
         if let Some(pending) = pending {
             let acc = Arc::new(Mutex::new(message.as_bytes().to_vec()));
-            let _finalize = Finalize {
-                acc,
-                pending: Some(pending),
-                ledger: ledger.clone(),
-                breakdown_ledger: breakdown.clone(),
-            };
+            let _finalize = Finalize::new(acc, Some(pending), ledger.clone(), breakdown.clone());
         }
         anthropic_error_typed(400, "invalid_request_error", message, None)
     }
@@ -1148,6 +1143,22 @@ mod imp {
             || text.contains("\"type\": \"signature_delta\"")
     }
 
+    /// Accumulator contains a terminal Anthropic frame (`message_stop`, or a `message_delta`
+    /// with a string `stop_reason`). Synthetic `message_start` carries `"stop_reason":null`
+    /// and must **not** match — only a real close (including `finish_if_open` zeros) does.
+    /// Used to split client abort mid-stream (no terminal) from upstream quiet-close after
+    /// content (terminal with zero usage).
+    fn sse_has_terminal_frame(buf: &[u8]) -> bool {
+        let Ok(text) = std::str::from_utf8(buf) else {
+            return false;
+        };
+        text.contains("\"type\":\"message_stop\"")
+            || text.contains("\"type\": \"message_stop\"")
+            // String stop_reason only — null on message_start must not count.
+            || text.contains("\"stop_reason\":\"")
+            || text.contains("\"stop_reason\": \"")
+    }
+
     /// Classify a turn whose harvested usage is all-zero / missing. Returns `None` for a real
     /// completion (positive provider usage). Otherwise:
     /// - `empty_stream` — no client-visible content (empty body, or only synthetic
@@ -1169,7 +1180,11 @@ mod imp {
     }
 
     /// Greppable stderr line for a stream that finalized without measurable usage.
-    fn log_stream_ghost(pending: &Pending, outcome: &str, detail: &str) {
+    ///
+    /// Always includes wall-clock `ts=` so operators don't need `stat` mtime of serve.log.
+    /// When `duration_ms` is present (Finalize path), also emits `duration_ms=` so a 6 s
+    /// re-prompt abort is visible without correlating capture mtimes.
+    fn log_stream_ghost(pending: &Pending, outcome: &str, detail: &str, duration_ms: Option<u64>) {
         let model = pending.model.as_deref().unwrap_or("?");
         let sub = pending
             .reroute
@@ -1199,7 +1214,13 @@ mod imp {
                     .and_then(|b| b.cc_session_id.as_deref())
             })
             .unwrap_or("-");
-        eprintln!("llmtrim: stream {outcome} model={model} sub={sub} session={session}: {detail}");
+        let ts = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+        let dur = duration_ms
+            .map(|ms| format!(" duration_ms={ms}"))
+            .unwrap_or_default();
+        eprintln!(
+            "llmtrim: stream {outcome} model={model} sub={sub} session={session} ts={ts}{dur}: {detail}"
+        );
         let _ = std::io::Write::flush(&mut std::io::stderr());
     }
 
@@ -1576,6 +1597,7 @@ mod imp {
                     &p,
                     "empty_stream",
                     "pending dropped without response (interceptor teardown)",
+                    None,
                 );
                 if let Some(x) = build_breakdown(&p, &ResponseUsage::default()) {
                     let _ = self.breakdown_ledger.send(x);
@@ -1654,12 +1676,12 @@ mod imp {
                         // transport error — we got a real response this time.
                         let message = reroute_upstream_error_message(info.provider, status, &raw);
                         let acc = Arc::new(Mutex::new(message.clone().into_bytes()));
-                        let _finalize = Finalize {
+                        let _finalize = Finalize::new(
                             acc,
-                            pending: Some(pending),
-                            ledger: self.ledger.clone(),
-                            breakdown_ledger: self.breakdown_ledger.clone(),
-                        };
+                            Some(pending),
+                            self.ledger.clone(),
+                            self.breakdown_ledger.clone(),
+                        );
                         return anthropic_error_typed(
                             status,
                             reroute_error_kind(status),
@@ -1679,21 +1701,21 @@ mod imp {
                         let pending = self.pending.take().expect("pending present above");
                         if (200..300).contains(&status) {
                             note_session_accepted(&pending);
-                            let _finalize = Finalize {
-                                acc: Arc::new(Mutex::new(body.clone())),
-                                pending: Some(pending),
-                                ledger: self.ledger.clone(),
-                                breakdown_ledger: self.breakdown_ledger.clone(),
-                            };
+                            let _finalize = Finalize::new(
+                                Arc::new(Mutex::new(body.clone())),
+                                Some(pending),
+                                self.ledger.clone(),
+                                self.breakdown_ledger.clone(),
+                            );
                             return buffered_response(status, content_type, body);
                         }
                         // Got a real non-2xx: record via Finalize (output unknown) and relay.
-                        let _finalize = Finalize {
-                            acc: Arc::new(Mutex::new(body.clone())),
-                            pending: Some(pending),
-                            ledger: self.ledger.clone(),
-                            breakdown_ledger: self.breakdown_ledger.clone(),
-                        };
+                        let _finalize = Finalize::new(
+                            Arc::new(Mutex::new(body.clone())),
+                            Some(pending),
+                            self.ledger.clone(),
+                            self.breakdown_ledger.clone(),
+                        );
                         return buffered_response(status, content_type, body);
                     }
                     log_upstream_transport_failure(self.pending.as_ref(), &cause, "retry-failed");
@@ -2548,12 +2570,12 @@ mod imp {
                 let message = reroute_upstream_error_message(info.provider, cur_status, &cur_body);
                 let acc = Arc::new(Mutex::new(message.clone().into_bytes()));
                 // Record the row (output 0) as this Finalize drops.
-                let _finalize = Finalize {
+                let _finalize = Finalize::new(
                     acc,
-                    pending: Some(pending),
-                    ledger: self.ledger.clone(),
-                    breakdown_ledger: self.breakdown_ledger.clone(),
-                };
+                    Some(pending),
+                    self.ledger.clone(),
+                    self.breakdown_ledger.clone(),
+                );
                 // Emit `Retry-After` for a rate limit, capped so the client backs off without
                 // stalling for the full (possibly multi-hour) reset — the true reset is in the
                 // message. Type the error by status so it renders as a rate limit / auth failure.
@@ -2635,12 +2657,12 @@ mod imp {
                     info.provider.as_str()
                 );
                 let acc = Arc::new(Mutex::new(message.clone().into_bytes()));
-                let _finalize = Finalize {
+                let _finalize = Finalize::new(
                     acc,
-                    pending: Some(pending),
-                    ledger: self.ledger.clone(),
-                    breakdown_ledger: self.breakdown_ledger.clone(),
-                };
+                    Some(pending),
+                    self.ledger.clone(),
+                    self.breakdown_ledger.clone(),
+                );
                 return anthropic_error_typed(status, reroute_error_kind(status), &message, None);
             }
 
@@ -2659,6 +2681,7 @@ mod imp {
                     &pending,
                     "empty_stream",
                     "upstream closed 2xx stream before content; retrying once",
+                    None,
                 );
                 if let Some((s, raw, _ra)) = self
                     .reissue_reroute(&replay.url, replay.headers.clone(), replay.body.clone())
@@ -2671,12 +2694,12 @@ mod imp {
                     // the buffered path's own classification.
                     let message = reroute_upstream_error_message(info.provider, s, &raw);
                     let acc = Arc::new(Mutex::new(message.clone().into_bytes()));
-                    let _finalize = Finalize {
+                    let _finalize = Finalize::new(
                         acc,
-                        pending: Some(pending),
-                        ledger: self.ledger.clone(),
-                        breakdown_ledger: self.breakdown_ledger.clone(),
-                    };
+                        Some(pending),
+                        self.ledger.clone(),
+                        self.breakdown_ledger.clone(),
+                    );
                     return anthropic_error_typed(s, reroute_error_kind(s), &message, None);
                 }
                 // Retry transport failed: keep going and record empty_stream on Finalize drop
@@ -2685,6 +2708,7 @@ mod imp {
                     &pending,
                     "empty_stream",
                     "empty-stream retry failed; recording ghost row",
+                    None,
                 );
             }
 
@@ -2695,12 +2719,12 @@ mod imp {
             }
 
             let acc = Arc::new(Mutex::new(Vec::<u8>::new()));
-            let finalize = Finalize {
-                acc: acc.clone(),
-                pending: Some(pending),
-                ledger: self.ledger.clone(),
-                breakdown_ledger: self.breakdown_ledger.clone(),
-            };
+            let finalize = Finalize::new(
+                acc.clone(),
+                Some(pending),
+                self.ledger.clone(),
+                self.breakdown_ledger.clone(),
+            );
 
             enum Phase {
                 Prelude,
@@ -2929,12 +2953,12 @@ mod imp {
             }
 
             let acc = Arc::new(Mutex::new(out.clone().into_bytes()));
-            let _finalize = Finalize {
+            let _finalize = Finalize::new(
                 acc,
-                pending: Some(pending),
-                ledger: self.ledger.clone(),
-                breakdown_ledger: self.breakdown_ledger.clone(),
-            };
+                Some(pending),
+                self.ledger.clone(),
+                self.breakdown_ledger.clone(),
+            );
             sse_response(out)
         }
 
@@ -3071,12 +3095,12 @@ mod imp {
                     );
                 }
                 let acc = Arc::new(Mutex::new(output.clone().into_bytes()));
-                let _finalize = Finalize {
+                let _finalize = Finalize::new(
                     acc,
-                    pending: Some(pending),
-                    ledger: self.ledger.clone(),
-                    breakdown_ledger: self.breakdown_ledger.clone(),
-                };
+                    Some(pending),
+                    self.ledger.clone(),
+                    self.breakdown_ledger.clone(),
+                );
                 return sse_response(output);
             }
             self.fallback_error(
@@ -3233,12 +3257,12 @@ mod imp {
             pending.input_after = pending.input_before;
             pending.output_shaped = false;
             note_session_accepted(&pending);
-            let _finalize = Finalize {
-                acc: Arc::new(Mutex::new(body.clone())),
-                pending: Some(pending),
-                ledger: self.ledger.clone(),
-                breakdown_ledger: self.breakdown_ledger.clone(),
-            };
+            let _finalize = Finalize::new(
+                Arc::new(Mutex::new(body.clone())),
+                Some(pending),
+                self.ledger.clone(),
+                self.breakdown_ledger.clone(),
+            );
             Ok(buffered_response(status, content_type, body))
         }
 
@@ -3427,12 +3451,12 @@ mod imp {
                     if (200..300).contains(&fetched.0) {
                         note_session_accepted(&pending);
                     }
-                    let _finalize = Finalize {
-                        acc: Arc::new(Mutex::new(body.clone())),
-                        pending: Some(pending),
-                        ledger: self.ledger.clone(),
-                        breakdown_ledger: self.breakdown_ledger.clone(),
-                    };
+                    let _finalize = Finalize::new(
+                        Arc::new(Mutex::new(body.clone())),
+                        Some(pending),
+                        self.ledger.clone(),
+                        self.breakdown_ledger.clone(),
+                    );
                     return Some(buffered_response(fetched.0, fetched.1, body));
                 }
             }
@@ -3452,12 +3476,12 @@ mod imp {
                 &mut out,
             );
             let acc = Arc::new(Mutex::new(out.clone().into_bytes()));
-            let _finalize = Finalize {
+            let _finalize = Finalize::new(
                 acc,
-                pending: Some(pending),
-                ledger: self.ledger.clone(),
-                breakdown_ledger: self.breakdown_ledger.clone(),
-            };
+                Some(pending),
+                self.ledger.clone(),
+                self.breakdown_ledger.clone(),
+            );
             sse_response(out)
         }
 
@@ -3491,12 +3515,12 @@ mod imp {
                     return retried;
                 }
                 let body = client_model_json(&body, &state.client_model);
-                let _finalize = Finalize {
-                    acc: Arc::new(Mutex::new(body.clone())),
-                    pending: Some(pending),
-                    ledger: self.ledger.clone(),
-                    breakdown_ledger: self.breakdown_ledger.clone(),
-                };
+                let _finalize = Finalize::new(
+                    Arc::new(Mutex::new(body.clone())),
+                    Some(pending),
+                    self.ledger.clone(),
+                    self.breakdown_ledger.clone(),
+                );
                 return buffered_response(status, content_type, body);
             }
             // Subscription reroute: the upstream reply is the provider's SSE — translate it back to
@@ -3620,12 +3644,12 @@ mod imp {
             let acc = Arc::new(Mutex::new(Vec::<u8>::new()));
             // `Finalize` records the full row (input + measured output) when the streamed
             // body is fully sent (or aborted) — i.e. when this closure is dropped.
-            let finalize = Finalize {
-                acc: acc.clone(),
-                pending: Some(pending),
-                ledger: self.ledger.clone(),
-                breakdown_ledger: self.breakdown_ledger.clone(),
-            };
+            let finalize = Finalize::new(
+                acc.clone(),
+                Some(pending),
+                self.ledger.clone(),
+                self.breakdown_ledger.clone(),
+            );
             use hudsucker::futures::StreamExt;
             let stream = BodyStream::new(body).filter_map(move |frame| {
                 let out = match frame {
@@ -3966,6 +3990,26 @@ mod imp {
         pending: Option<Pending>,
         ledger: Sender<Record>,
         breakdown_ledger: Sender<BreakdownPayload>,
+        /// When this Finalize was built (≈ response-stream start). Used only for ghost
+        /// `duration_ms=` on stderr.
+        started_at: std::time::Instant,
+    }
+
+    impl Finalize {
+        fn new(
+            acc: Arc<Mutex<Vec<u8>>>,
+            pending: Option<Pending>,
+            ledger: Sender<Record>,
+            breakdown_ledger: Sender<BreakdownPayload>,
+        ) -> Self {
+            Self {
+                acc,
+                pending,
+                ledger,
+                breakdown_ledger,
+                started_at: std::time::Instant::now(),
+            }
+        }
     }
 
     impl Drop for Finalize {
@@ -4028,14 +4072,19 @@ mod imp {
                 });
             }
             if let Some(outcome) = ghost_outcome {
+                let duration_ms = self.started_at.elapsed().as_millis() as u64;
+                // Prefer a specific detail when the buffer can already separate abort from
+                // truncate — the old fixed string forced a Claude-jsonl dig every time.
                 let detail = if buf.is_empty() {
                     "no response bytes accumulated"
+                } else if outcome == "incomplete_stream" && !sse_has_terminal_frame(&buf) {
+                    "content emitted, no terminal frame (client abort mid-stream)"
                 } else if outcome == "incomplete_stream" {
-                    "content emitted but no positive usage (client abort or truncated stream)"
+                    "content emitted, terminal with zero usage (upstream truncate or finish_if_open)"
                 } else {
                     "synthetic zero usage only (message_start / finish_if_open, no real content)"
                 };
-                log_stream_ghost(&p, outcome, detail);
+                log_stream_ghost(&p, outcome, detail, Some(duration_ms));
             }
             if let Some(x) = build_breakdown(&p, &usage) {
                 let _ = self.breakdown_ledger.send(x);
@@ -5607,6 +5656,45 @@ mod imp {
             );
             assert!(sse_has_content_delta(partial.as_bytes()));
             assert!(!sse_has_content_delta(msg_start.as_bytes()));
+            // No terminal frame → client abort mid-stream (the detail-split signal).
+            assert!(!sse_has_terminal_frame(partial.as_bytes()));
+
+            // Content + terminal with zero usage → still incomplete_stream, but the other
+            // detail branch (upstream truncate / finish_if_open).
+            let truncated = concat!(
+                "event: message_start\n",
+                "data: {\"type\":\"message_start\",\"message\":{\"usage\":{\"input_tokens\":0,\"output_tokens\":0}}}\n\n",
+                "event: content_block_delta\n",
+                "data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"hel\"}}\n\n",
+                "event: message_delta\n",
+                "data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"input_tokens\":0,\"output_tokens\":0}}\n\n",
+                "event: message_stop\n",
+                "data: {\"type\":\"message_stop\"}\n\n",
+            );
+            let trunc_usage = ResponseUsage {
+                output_after: extract_output_usage(ProviderKind::Anthropic, truncated.as_bytes()),
+                cache_read: extract_cache_read(ProviderKind::Anthropic, truncated.as_bytes()),
+                fresh_input: extract_input_usage(ProviderKind::Anthropic, truncated.as_bytes()).0,
+                cache_write: None,
+            };
+            assert_eq!(
+                classify_empty_usage_outcome(truncated.as_bytes(), &trunc_usage),
+                Some("incomplete_stream"),
+                "content + zero-usage terminal is still incomplete_stream"
+            );
+            assert!(
+                sse_has_terminal_frame(truncated.as_bytes()),
+                "stop_reason/message_stop marks terminal"
+            );
+            // message_start alone carries `"stop_reason":null` — must not look like a terminal.
+            let start_only = concat!(
+                "event: message_start\n",
+                "data: {\"type\":\"message_start\",\"message\":{\"id\":\"m\",\"type\":\"message\",\"role\":\"assistant\",\"model\":\"x\",\"content\":[],\"stop_reason\":null,\"stop_sequence\":null,\"usage\":{\"input_tokens\":0,\"output_tokens\":0}}}\n\n",
+            );
+            assert!(
+                !sse_has_terminal_frame(start_only.as_bytes()),
+                "stop_reason:null on message_start must not count as a terminal frame"
+            );
         }
 
         #[test]

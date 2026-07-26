@@ -23,6 +23,13 @@ All notable changes to this project are documented here. The format follows
   hosted search enables `external_web_access`, and `gpt-5.6-luna` (lite-only) upgrades to
   `gpt-5.6-sol` for those turns so the full Responses API accepts the hosted tool.
 
+- **Ghost stream log lines separate client abort from upstream truncate.** `incomplete_stream`
+  lines in `serve.log` used to say *client abort or truncated stream* with no wall-clock time,
+  so diagnosing a re-prompt ESC vs a quiet upstream close meant correlating capture mtimes and
+  Claude session jsonl by hand. The greppable line now carries `ts=` and `duration_ms=`, and
+  the detail splits on whether a terminal frame was present: *no terminal frame (client abort
+  mid-stream)* vs *terminal with zero usage (upstream truncate or finish_if_open)*.
+
 ## [0.11.9] - 2026-07-23
 
 ### Fixed
