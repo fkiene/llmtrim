@@ -561,9 +561,10 @@ mod tests {
             .collect::<Vec<_>>()
             .join("\n");
         let arriving_log = (0..80)
-            .map(|i| format!("DEBUG new worker {i} idle waiting for work"))
+            .map(|i| format!("\x1b[90mDEBUG new worker {i} idle waiting for work\x1b[0m"))
             .collect::<Vec<_>>()
             .join("\n")
+            + "\nordinary future-critical detail sentinel_delta_47"
             + "\nERROR failure in the arriving result";
         let input = serde_json::json!({
             "model": "claude-3-5-sonnet-20241022",
@@ -604,6 +605,15 @@ mod tests {
             "the arriving result was shaped before its cache write ({} -> {})",
             arriving_log.len(),
             shaped.len()
+        );
+        assert!(
+            shaped.contains("sentinel_delta_47")
+                && shaped.contains("DEBUG new worker 47 idle waiting for work"),
+            "ordinary details and literal template values must survive boundary shaping: {shaped}"
+        );
+        assert!(
+            !shaped.contains("omitted"),
+            "cache-boundary shaping must never emit a lossy omission marker: {shaped}"
         );
     }
 

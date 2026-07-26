@@ -34,8 +34,10 @@
 //! 3. **Never inflate** (`elide_into`): an elision marker is emitted only when it is
 //!    shorter than the lines it hides; a lone `--` separator survives as itself.
 //!
-//! Lossy, `InputTokens`-gated (reverts if it doesn't cut tokens), `Content`-scoped.
-//! Zero model calls.
+//! Live-zone windowing is lossy. First-arrival cache-boundary results receive only terminal-
+//! equivalent normalization; even template folding stays live-zone-only because it rewrites
+//! literal values into compact notation. The combined stage is `InputTokens`-gated (reverts if it
+//! doesn't cut tokens), `Content`-scoped, and uses zero model calls.
 //!
 //! Note on universality: the level/failure keywords scored below are tokens
 //! *machine-emitted* by runtimes and build tools (`ERROR`, `FATAL`, `Traceback`,
@@ -169,7 +171,19 @@ impl Transform for ToolOutputStage {
         provider: &dyn Provider,
         _plan: &mut Vec<PlanEntry>,
     ) -> Result<()> {
-        let pointers = crate::cache_zone::tool_result_write_pointers(req, provider);
+        let first_arrival = crate::cache_zone::first_arrival_tool_result_pointers(req, provider);
+        for pointer in first_arrival {
+            let Some(raw) = req.get_str(&pointer) else {
+                continue;
+            };
+            let (shaped, changed) = normalize::normalize(raw);
+            if changed {
+                req.set(&pointer, Value::String(shaped));
+            }
+        }
+
+        // Lossy classification and windowing remain restricted to the ordinary live zone.
+        let pointers = crate::cache_zone::compressible_pointers(req, provider);
 
         // Pre-pass (feature #6): strip ANSI escapes and collapse carriage-return progress
         // on each candidate *before* detection. This is lossless for the model and lets

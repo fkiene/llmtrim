@@ -6,8 +6,9 @@
 //! cache, which usually costs *more* than the tokens saved (the "input compression is a
 //! false economy" trap). So content-mutating stages ordinarily compress only the **live zone**:
 //! the segments after the last `cache_control` marker. Tool output has one narrow exception: a
-//! tool result in the final marked message is shaped as that cache entry is first written, then
-//! the turn memo replays the emitted bytes verbatim.
+//! tool result in the final marked message receives terminal-equivalent normalization as that
+//! cache entry is first written, then the turn memo replays the emitted bytes verbatim. Template
+//! folding and lossy windowing remain confined to the live zone.
 //!
 //! No markers ⇒ no known cache ⇒ everything is compressible (behavior unchanged):
 //! determinism keeps an identical prefix cache-stable across calls, and Stage A's OpenAI
@@ -33,12 +34,11 @@ pub fn compressible_pointers(req: &Request, provider: &dyn Provider) -> Vec<Stri
         .collect()
 }
 
-/// Content pointers available to the tool-output write path. In addition to the ordinary live
-/// zone, this includes tool results in the newest cache-marked message: the breakpoint writes the
-/// whole message prefix, including sibling tool results before the marked block, so shaping them
-/// now makes every later cache read cheaper. Earlier messages stay frozen and are replayed
-/// byte-for-byte by the turn memo.
-pub fn tool_result_write_pointers(req: &Request, provider: &dyn Provider) -> Vec<String> {
+/// Tool-result pointers in the final cache-marked message. The breakpoint writes the whole
+/// message prefix, including sibling tool results before the marked block, so terminal-noise
+/// normalization at this boundary makes every later cache read cheaper. These pointers are separate
+/// from [`compressible_pointers`]: lossy live-zone transforms must never run on them.
+pub fn first_arrival_tool_result_pointers(req: &Request, provider: &dyn Provider) -> Vec<String> {
     let raw = req.raw();
     let newest_marked = raw
         .get("messages")
@@ -47,15 +47,10 @@ pub fn tool_result_write_pointers(req: &Request, provider: &dyn Provider) -> Vec
             let i = messages.len().checked_sub(1)?;
             has_cache_control(&messages[i]).then_some(i)
         });
-    let frozen = frozen_pointers(req, provider);
-
     provider
         .content_text_pointers(req)
         .into_iter()
         .filter(|pointer| {
-            if !frozen.contains(pointer) {
-                return !is_instruction(req, provider, pointer);
-            }
             newest_marked.is_some_and(|i| {
                 pointer.starts_with(&format!("/messages/{i}/"))
                     && crate::provider::is_tool_result_ptr(req, pointer)
@@ -251,7 +246,7 @@ mod tests {
 
         assert!(compressible_pointers(&r, p.as_ref()).is_empty());
         assert_eq!(
-            tool_result_write_pointers(&r, p.as_ref()),
+            first_arrival_tool_result_pointers(&r, p.as_ref()),
             vec![
                 "/messages/2/content/0/content".to_string(),
                 "/messages/2/content/1/content".to_string(),
@@ -269,7 +264,7 @@ mod tests {
         }));
         let p = for_kind(ProviderKind::Anthropic);
 
-        assert!(tool_result_write_pointers(&r, p.as_ref()).is_empty());
+        assert!(first_arrival_tool_result_pointers(&r, p.as_ref()).is_empty());
     }
 
     #[test]
