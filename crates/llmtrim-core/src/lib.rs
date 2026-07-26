@@ -555,6 +555,59 @@ mod tests {
     }
 
     #[test]
+    fn agent_preset_shapes_tool_result_at_cache_write_boundary() {
+        let cached_log = (0..80)
+            .map(|i| format!("INFO old step {i} routine nominal pass"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let arriving_log = (0..80)
+            .map(|i| format!("DEBUG new worker {i} idle waiting for work"))
+            .collect::<Vec<_>>()
+            .join("\n")
+            + "\nERROR failure in the arriving result";
+        let input = serde_json::json!({
+            "model": "claude-3-5-sonnet-20241022",
+            "messages": [
+                {"role": "user", "content": [
+                    {"type": "tool_result", "tool_use_id": "old", "content": cached_log,
+                     "cache_control": {"type": "ephemeral"}}
+                ]},
+                {"role": "assistant", "content": [
+                    {"type": "tool_use", "id": "new", "name": "shell", "input": {}}
+                ]},
+                {"role": "user", "content": [
+                    {"type": "tool_result", "tool_use_id": "new", "content": arriving_log,
+                     "cache_control": {"type": "ephemeral"}}
+                ]},
+            ],
+            "max_tokens": 1024,
+        })
+        .to_string();
+
+        let cfg = config::DenseConfig::preset("agent").expect("agent preset");
+        let result =
+            compress_with_config(&input, Some(ProviderKind::Anthropic), &cfg).expect("compress");
+        let body: Value = serde_json::from_str(&result.request_json).unwrap();
+
+        assert_eq!(
+            body.pointer("/messages/0/content/0/content")
+                .and_then(Value::as_str),
+            Some(cached_log.as_str()),
+            "an older cache entry stays byte-identical"
+        );
+        let shaped = body
+            .pointer("/messages/2/content/0/content")
+            .and_then(Value::as_str)
+            .unwrap();
+        assert!(
+            shaped.len() < arriving_log.len(),
+            "the arriving result was shaped before its cache write ({} -> {})",
+            arriving_log.len(),
+            shaped.len()
+        );
+    }
+
+    #[test]
     fn frozen_prefix_untouched_while_live_zone_compresses() {
         // message 0 is the cached prefix (`cache_control`) holding a big log; message 1 is
         // the live user turn with another big log. The agent preset must compress the live

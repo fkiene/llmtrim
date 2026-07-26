@@ -169,7 +169,7 @@ impl Transform for ToolOutputStage {
         provider: &dyn Provider,
         _plan: &mut Vec<PlanEntry>,
     ) -> Result<()> {
-        let pointers = crate::cache_zone::compressible_pointers(req, provider);
+        let pointers = crate::cache_zone::tool_result_write_pointers(req, provider);
 
         // Pre-pass (feature #6): strip ANSI escapes and collapse carriage-return progress
         // on each candidate *before* detection. This is lossless for the model and lets

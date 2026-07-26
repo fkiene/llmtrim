@@ -4,9 +4,10 @@
 //! prefix), the provider caches everything up to the last marker and bills it at ~0.1×.
 //! Rewriting that content — even to save tokens — changes the cached bytes and busts the
 //! cache, which usually costs *more* than the tokens saved (the "input compression is a
-//! false economy" trap). So the content-mutating stages compress only the **live zone**:
-//! the segments after the last `cache_control` marker. Each new tool result is therefore
-//! compressed exactly once — when it first arrives in the live zone — then frozen.
+//! false economy" trap). So content-mutating stages ordinarily compress only the **live zone**:
+//! the segments after the last `cache_control` marker. Tool output has one narrow exception: a
+//! tool result in the final marked message is shaped as that cache entry is first written, then
+//! the turn memo replays the emitted bytes verbatim.
 //!
 //! No markers ⇒ no known cache ⇒ everything is compressible (behavior unchanged):
 //! determinism keeps an identical prefix cache-stable across calls, and Stage A's OpenAI
@@ -29,6 +30,37 @@ pub fn compressible_pointers(req: &Request, provider: &dyn Provider) -> Vec<Stri
         .content_text_pointers(req)
         .into_iter()
         .filter(|p| !frozen.contains(p) && !is_instruction(req, provider, p))
+        .collect()
+}
+
+/// Content pointers available to the tool-output write path. In addition to the ordinary live
+/// zone, this includes tool results in the newest cache-marked message: the breakpoint writes the
+/// whole message prefix, including sibling tool results before the marked block, so shaping them
+/// now makes every later cache read cheaper. Earlier messages stay frozen and are replayed
+/// byte-for-byte by the turn memo.
+pub fn tool_result_write_pointers(req: &Request, provider: &dyn Provider) -> Vec<String> {
+    let raw = req.raw();
+    let newest_marked = raw
+        .get("messages")
+        .and_then(Value::as_array)
+        .and_then(|messages| {
+            let i = messages.len().checked_sub(1)?;
+            has_cache_control(&messages[i]).then_some(i)
+        });
+    let frozen = frozen_pointers(req, provider);
+
+    provider
+        .content_text_pointers(req)
+        .into_iter()
+        .filter(|pointer| {
+            if !frozen.contains(pointer) {
+                return !is_instruction(req, provider, pointer);
+            }
+            newest_marked.is_some_and(|i| {
+                pointer.starts_with(&format!("/messages/{i}/"))
+                    && crate::provider::is_tool_result_ptr(req, pointer)
+            })
+        })
         .collect()
 }
 
@@ -195,6 +227,49 @@ mod tests {
         let frozen = frozen_pointers(&r, p.as_ref());
         assert!(frozen.contains("/messages/0/content/0/text"));
         assert!(frozen.contains("/messages/1/content/0/text"));
+    }
+
+    #[test]
+    fn newest_marked_tool_result_is_available_only_to_write_path() {
+        let r = req(json!({
+            "messages": [
+                {"role": "user", "content": [
+                    {"type": "tool_result", "tool_use_id": "old", "content": "old cached output",
+                     "cache_control": {"type": "ephemeral"}}
+                ]},
+                {"role": "assistant", "content": [
+                    {"type": "tool_use", "id": "new", "name": "shell", "input": {}}
+                ]},
+                {"role": "user", "content": [
+                    {"type": "tool_result", "tool_use_id": "new-a", "content": "new output A"},
+                    {"type": "tool_result", "tool_use_id": "new-b", "content": "new output B",
+                     "cache_control": {"type": "ephemeral"}}
+                ]},
+            ]
+        }));
+        let p = for_kind(ProviderKind::Anthropic);
+
+        assert!(compressible_pointers(&r, p.as_ref()).is_empty());
+        assert_eq!(
+            tool_result_write_pointers(&r, p.as_ref()),
+            vec![
+                "/messages/2/content/0/content".to_string(),
+                "/messages/2/content/1/content".to_string(),
+            ],
+            "the breakpoint writes the whole final message, including sibling results"
+        );
+    }
+
+    #[test]
+    fn marked_non_tool_content_stays_frozen_on_write_path() {
+        let r = req(json!({
+            "messages": [{"role": "user", "content": [
+                {"type": "text", "text": "do not reshape", "cache_control": {"type": "ephemeral"}}
+            ]}]
+        }));
+        let p = for_kind(ProviderKind::Anthropic);
+
+        assert!(tool_result_write_pointers(&r, p.as_ref()).is_empty());
     }
 
     #[test]
