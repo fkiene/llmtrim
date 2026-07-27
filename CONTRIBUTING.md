@@ -21,16 +21,19 @@ The standard check loop (run all three before pushing):
 
 ```bash
 cargo fmt
-cargo clippy --features intercept
-cargo nextest run --features intercept
+cargo clippy --all-targets
+cargo nextest run --profile ci
 ```
 
 Notes:
 
 - Use `cargo nextest run`, not `cargo test`: it runs in parallel and prints compact output.
-- Do not pass `-- -D warnings` to clippy. `warnings = "deny"` is already set in the
+  `--profile ci` matches the GitHub Actions job (see `.config/nextest.toml`).
+- Do not pass `-- -D warnings` to clippy locally. `warnings = "deny"` is already set in the
   workspace `[lints.rust]`, and adding the flag forks the build cache between clippy and test.
-- Keep `--features intercept` consistent across commands so the incremental cache is reused.
+  CI still runs clippy with `-D warnings`.
+- Default features already include `intercept` and `mcp`. Pass feature flags only when you
+  intentionally change that set (e.g. `--features live` for the bench network path).
 
 The suite is deterministic and hits no network. `cargo build --features live` builds the
 optional bench network path (async-openai + tokio); async is confined to that path and is
@@ -39,7 +42,7 @@ not allowed in the core compression stages.
 Before the first push that opens a PR, also check coverage of the files you changed:
 
 ```bash
-cargo llvm-cov --features intercept,mcp --summary-only
+cargo llvm-cov nextest --features intercept,mcp --summary-only
 ```
 
 CI runs fmt, clippy, and the test suite on Linux, macOS, and Windows. Keep all three green.
@@ -52,17 +55,18 @@ git config core.hooksPath .githooks
 
 ## Adding a compression stage
 
-Stages implement the `Transform` trait (`src/gate.rs`) and are assembled in
-`stages_for` (`src/lib.rs`). A stage:
+Stages implement the `Transform` trait (`crates/llmtrim-core/src/gate.rs`) and are assembled in
+`stages_for` (`crates/llmtrim-core/src/lib.rs`). A stage:
 
 1. Declares a `GateKind`: `InputTokens` (reverted if it doesn't reduce tokens),
    `OutputShaping`, or `Structural`.
 2. Mutates the JSON-backed `Request` at JSON-pointer addresses (lossless by construction
    for any field it doesn't touch).
-3. Adds a config flag in `DenseConfig` (`src/config.rs`) and is wired into a preset.
+3. Adds a config flag in `DenseConfig` (`crates/llmtrim-core/src/config.rs`) and is wired into a preset.
 4. Ships with unit tests proving the token win and quality behavior.
 
-Lossy stages stay **off by default** and are quality-checked offline (see README §6).
+Lossy stages stay **off by default** and are quality-checked offline (see README → Configuration
+and The numbers).
 
 ## Editing the user's config file
 

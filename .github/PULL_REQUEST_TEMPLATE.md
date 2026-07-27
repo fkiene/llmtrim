@@ -1,4 +1,4 @@
-<!-- Thanks for contributing to llmtrim! -->
+<!-- Thanks for contributing to llmtrim. -->
 
 ## What & why
 
@@ -12,15 +12,15 @@ Closes #
 
 ## How it was verified
 
-<!-- Tests added/updated? Did the check loop pass? -->
+<!-- Tests added or updated? Did the check loop pass? -->
 
 - [ ] `cargo fmt` is clean
-- [ ] `cargo clippy --features intercept` is clean
-- [ ] `cargo nextest run --features intercept` passes
+- [ ] `cargo clippy --all-targets` is clean
+- [ ] `cargo nextest run --profile ci` passes
 - [ ] New behavior is covered by a test
 - [ ] `CHANGELOG.md` has an entry under `## [Unreleased]` (or the change is invisible to users)
 - [ ] Commits are signed off (`git commit -s`, DCO, see CONTRIBUTING.md)
 
 ## Notes
 
-<!-- Anything reviewers should know: tradeoffs, follow-ups, breaking changes. -->
+<!-- Tradeoffs, follow-ups, or breaking changes reviewers should know about. -->

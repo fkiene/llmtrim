@@ -17,12 +17,12 @@ assignees: ""
 ## Token / quality impact
 
 <!-- If it's a compression stage: roughly what does it save, and what's the quality risk?
-     llmtrim stages are token-gated and quality-checked offline (see README §6). -->
+     Lossy stages stay off by default and are quality-checked offline
+     (see README → Configuration and The numbers). -->
 
 ## Are you willing to contribute this?
 
-<!-- No obligation either way. This just tells us whether to leave it for you
-     or pick it up ourselves. -->
+<!-- No obligation. Say whether you plan to open a PR or only want the idea on record. -->
 
 - [ ] I'd like to implement this myself and open a PR
 - [ ] I'm reporting the idea; happy for a maintainer or someone else to build it

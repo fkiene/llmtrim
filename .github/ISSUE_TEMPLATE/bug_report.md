@@ -8,39 +8,43 @@ assignees: ""
 
 ## What happened
 
-<!-- A clear description of the bug. -->
+<!-- What went wrong, in plain terms. -->
 
 ## How are you running llmtrim?
 
-- [ ] Proxy (`llmtrim setup` / `serve`) — intercepting a tool's traffic
-- [ ] CLI (`llmtrim compress` / `send` / `batch`)
+- [ ] Proxy / daemon (`llmtrim setup` / `start` / `serve` / `wrap`): intercepting a tool's traffic
+- [ ] CLI (`llmtrim compress` / `send`)
+- [ ] Subscription reroute (`llmtrim sub` → codex | kimi | grok)
+- [ ] MCP (`llmtrim mcp`)
 
 - Tool / client (proxy path): <!-- e.g. Claude Code, Cursor, Codex, a Node app -->
-- Provider: <!-- openai | anthropic | gemini | … -->
-- Preset / config: <!-- auto (default), rag, code, … — paste your config.toml if custom -->
+- Provider: <!-- openai | anthropic | google (`gemini` is an alias for google) -->
+- Preset / config: <!-- auto (default), safe, agent, code, rag, aggressive, cache, reasoning, frugal; or paste ~/.config/llmtrim/config.toml if custom -->
 
 ## Reproduce
 
 ```bash
 # Proxy: the steps + the tool action that triggers it.
-# CLI:  the command + a MINIMAL request body, e.g.
+# For mangled requests, set LLMTRIM_CAPTURE_DIR=~/llmtrim-capture and re-run, then attach the before/after pair.
+# CLI: the command + a MINIMAL request body, e.g.
 echo '<request json>' | llmtrim compress --provider openai
 ```
 
-> ⚠️ **Redact secrets first** — strip API keys, `authorization` headers, and private prompt
-> content. llmtrim never needs them to reproduce a compression bug. (Security *vulnerabilities*
-> go through the private advisory link, not a public issue — see SECURITY.md.)
+> ⚠️ **Redact secrets first.** Strip API keys, `authorization` headers, and private prompt
+> content. llmtrim never needs them to reproduce a compression bug. Security *vulnerabilities*
+> go through the private advisory link, not a public issue (see SECURITY.md).
 
 ## Expected vs actual
 
 - Expected:
 - Actual:
 
-<!-- Paste any error output / proxy log (run `llmtrim serve` in the foreground) here. -->
+<!-- Paste error output or proxy log here. Daemon log is usually ~/.llmtrim/serve.log; or run `llmtrim serve` in the foreground. -->
 
 ## Environment
 
 - `llmtrim --version`:
-- `llmtrim status` (daemon + CA + savings state):
-- Install method: <!-- prebuilt binary | cargo install | homebrew | source -->
+- `llmtrim status` (daemon + CA + savings):
+- `llmtrim doctor` (paste failing checks only):
+- Install method: <!-- npm | curl installer | homebrew | scoop | cargo install | docker | source -->
 - OS / arch:
