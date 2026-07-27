@@ -22,8 +22,28 @@ const END: &str = "# <<< llmtrim <<<";
 /// The shell command that clears the interceptor env vars from the *current* shell. A running
 /// process can't rewrite its parent shell's environment, so `stop`/`uninstall` print this for
 /// the user to run (or they open a new shell, which self-heals via the daemon-gated block).
-/// Single source of truth for the five managed vars, in both `NO_PROXY` casings.
+/// Single source of truth for the managed vars, in both `NO_PROXY` casings. POSIX form — see
+/// [`unset_hint`] for the `$SHELL`-aware variant (fish uses `set -e`).
 pub const UNSET_HINT: &str = "unset HTTPS_PROXY HTTP_PROXY NO_PROXY no_proxy NODE_EXTRA_CA_CERTS SSL_CERT_FILE CURL_CA_BUNDLE NODE_USE_ENV_PROXY";
+
+/// Fish equivalent of [`UNSET_HINT`] (`set -e` unsets one or more variables).
+/// Unix-only: Windows `unset_hint` always returns the POSIX constant (registry env path).
+#[cfg(not(windows))]
+const UNSET_HINT_FISH: &str = "set -e HTTPS_PROXY HTTP_PROXY NO_PROXY no_proxy NODE_EXTRA_CA_CERTS SSL_CERT_FILE CURL_CA_BUNDLE NODE_USE_ENV_PROXY";
+
+/// Shell-aware unset snippet for the *current* session. Fish gets `set -e …`; everything else
+/// gets the POSIX [`UNSET_HINT`]. Prefers the live-session signal (`FISH_VERSION`, which fish
+/// always exports) over `$SHELL`, so an interactive fish started from a bash login shell still
+/// gets a pasteable fish command.
+pub fn unset_hint() -> &'static str {
+    #[cfg(not(windows))]
+    {
+        if session_is_fish() {
+            return UNSET_HINT_FISH;
+        }
+    }
+    UNSET_HINT
+}
 
 /// Hosts/ranges that must bypass the interceptor: loopback, link-local, and the private LAN
 /// ranges (RFC-1918 + IPv6 ULA). llmtrim only MITMs a fixed set of public LLM API hosts (the
@@ -189,8 +209,10 @@ pub(crate) fn parse_proxy_port(text: &str) -> Option<u16> {
 }
 
 /// The interceptor port currently wired into the environment, if any — read from the live env
-/// source for this platform (POSIX: the shell-profile block; Windows: `HKCU\Environment`).
-/// Public so `status`/`doctor` can compare the wired port against the daemon's.
+/// source for this platform (POSIX: any candidate shell-profile block; Windows:
+/// `HKCU\Environment`). Public so `status`/`doctor` can compare the wired port against the
+/// daemon's. On POSIX we scan **all** candidate profiles (not only `$SHELL`'s default) so a
+/// fish-only install still reports the port when the login shell is bash, and vice versa.
 pub fn configured_port() -> Option<u16> {
     #[cfg(windows)]
     {
@@ -201,10 +223,25 @@ pub fn configured_port() -> Option<u16> {
     }
     #[cfg(not(windows))]
     {
-        profile_target()
-            .and_then(|(p, _)| std::fs::read_to_string(p).ok())
-            .and_then(|t| parse_proxy_port(&t))
+        let Ok(home) = std::env::var("HOME") else {
+            return None;
+        };
+        configured_port_in(std::path::Path::new(&home))
     }
+}
+
+/// Inner seam for [`configured_port`]: first `127.0.0.1:<port>` found in any candidate
+/// profile under `base`. Tests pass a temp dir so real `$HOME` is never read.
+#[cfg(not(windows))]
+fn configured_port_in(base: &std::path::Path) -> Option<u16> {
+    for path in candidate_profiles(base) {
+        if let Ok(text) = std::fs::read_to_string(path)
+            && let Some(port) = parse_proxy_port(&text)
+        {
+            return Some(port);
+        }
+    }
+    None
 }
 
 /// Self-heal an existing managed env block that predates the `NO_PROXY` bypass, *in place* and
@@ -302,7 +339,6 @@ fn heal_profiles_in(
     ca: &str,
     bundle: Option<&str>,
 ) -> Result<Vec<PathBuf>> {
-    let block = env_block(proxy, ca, bundle, Syntax::Posix);
     let mut healed = Vec::new();
     for path in candidate_profiles(base) {
         let existing = match std::fs::read_to_string(&path) {
@@ -316,6 +352,8 @@ fn heal_profiles_in(
         if !managed_block_needs_heal(&existing) {
             continue;
         }
+        // Per-path dialect: a stale block in config.fish must be rewritten as fish, not POSIX.
+        let block = env_block(proxy, ca, bundle, syntax_for_profile(&path));
         let mut base_content = strip_block(&existing);
         if !base_content.is_empty() && !base_content.ends_with('\n') {
             base_content.push('\n');
@@ -482,7 +520,7 @@ pub fn run(requested: Option<u16>, force: bool) -> Result<()> {
         } else {
             let names = paths
                 .iter()
-                .filter_map(|p| p.file_name().map(|n| n.to_string_lossy().into_owned()))
+                .map(|p| profile_label(p))
                 .collect::<Vec<_>>()
                 .join(", ");
             rows.push((
@@ -1001,7 +1039,8 @@ pub fn uninstall(purge: bool, keep_binary: bool) -> Result<()> {
             Tone::Bold,
             &format!(
                 "Done. Your current shell still has HTTPS_PROXY, HTTP_PROXY, NO_PROXY, and \
-                 NODE_EXTRA_CA_CERTS exported. Open a new shell to clear them, or run: {UNSET_HINT}"
+                 NODE_EXTRA_CA_CERTS exported. Open a new shell to clear them, or run: {}",
+                unset_hint()
             )
         )
     );
@@ -1030,31 +1069,76 @@ pub fn uninstall(purge: bool, keep_binary: bool) -> Result<()> {
     Ok(())
 }
 
-/// Every POSIX shell rc file llmtrim may write its managed block into. Setup writes the
-/// block to all of these that exist (so whichever shell the terminal launches picks up the
-/// env, independent of `$SHELL`); uninstall sweeps the block from all of them. Covers the
-/// interactive AND login rc of the two common shells, plus the universal `.profile`:
+/// Every shell rc file llmtrim may write its managed block into. Setup writes the block to
+/// all of these that exist (so whichever shell the terminal launches picks up the env,
+/// independent of `$SHELL`); uninstall sweeps the block from all of them. Covers the
+/// interactive AND login rc of the two common POSIX shells, the universal `.profile`, and
+/// fish's config:
 /// zsh interactive `.zshrc` / login `.zprofile`; bash interactive `.bashrc` / login
-/// `.bash_profile`; and `.profile` (sh, and bash-login when no `.bash_profile`). `base` is
-/// the home directory; tests pass a temp dir so no real `$HOME` is ever mutated.
+/// `.bash_profile`; `.profile` (sh, and bash-login when no `.bash_profile`); and
+/// `.config/fish/config.fish` (fish's only user config — there is no separate login file).
+/// Paths are relative to `base` (the home directory); tests pass a temp dir so no real
+/// `$HOME` is ever mutated.
+///
+/// When `base` is the real `$HOME` and `XDG_CONFIG_HOME` points somewhere other than
+/// `base/.config`, the fish config under that tree is also a candidate (fish reads
+/// `$XDG_CONFIG_HOME/fish/config.fish`). Tests pass a temp `base`, so ambient XDG is never
+/// consulted — hermetic suites must not touch the developer's real fish config.
 #[cfg(not(windows))]
 fn candidate_profiles(base: &std::path::Path) -> Vec<PathBuf> {
-    [
+    let mut paths: Vec<PathBuf> = [
         ".zshrc",
         ".zprofile",
         ".bashrc",
         ".bash_profile",
         ".profile",
+        // Multi-component: Path::join keeps the separators, yielding base/.config/fish/config.fish.
+        ".config/fish/config.fish",
     ]
     .iter()
     .map(|f| base.join(f))
-    .collect()
+    .collect();
+
+    // Custom XDG only when operating on the real home. Comparing against `$HOME` keeps temp-dir
+    // tests from ever writing into the ambient XDG tree.
+    if let (Ok(home), Ok(xdg)) = (std::env::var("HOME"), std::env::var("XDG_CONFIG_HOME"))
+        && std::path::Path::new(&home) == base
+    {
+        let xdg_fish = PathBuf::from(xdg).join("fish/config.fish");
+        if !paths.contains(&xdg_fish) {
+            paths.push(xdg_fish);
+        }
+    }
+    paths
 }
 
-/// Strip the llmtrim managed block from **every** POSIX shell profile that contains it,
-/// using `base` as the home directory. Returns the paths that were actually cleaned.
-/// A file that does not exist or cannot be read is silently skipped; a write failure is
-/// returned as an error so the caller can report it. Windows: always returns `Ok(vec![])`.
+/// Home-relative path to the default fish config (`~/.config/fish/config.fish`).
+#[cfg(not(windows))]
+fn fish_config_rel() -> &'static str {
+    ".config/fish/config.fish"
+}
+
+/// Absolute path to the fish config fish will actually read for this `base` home.
+/// When `base` is the real `$HOME` and `XDG_CONFIG_HOME` is set, that is
+/// `$XDG_CONFIG_HOME/fish/config.fish` (fish ignores `~/.config` in that case).
+/// Otherwise `base/.config/fish/config.fish`. Hermetic tests pass a temp `base` ≠ `$HOME`,
+/// so ambient XDG never redirects them.
+#[cfg(not(windows))]
+fn fish_config_path(base: &std::path::Path) -> PathBuf {
+    if let (Ok(home), Ok(xdg)) = (std::env::var("HOME"), std::env::var("XDG_CONFIG_HOME"))
+        && std::path::Path::new(&home) == base
+        && !xdg.is_empty()
+    {
+        return PathBuf::from(xdg).join("fish/config.fish");
+    }
+    base.join(fish_config_rel())
+}
+
+/// Strip the llmtrim managed block from **every** candidate shell profile that contains it
+/// (bash/zsh/profile **and** fish), using `base` as the home directory. Returns the paths
+/// that were actually cleaned. A file that does not exist or cannot be read is silently
+/// skipped; a write failure is returned as an error so the caller can report it. Windows:
+/// always returns `Ok(vec![])`.
 #[cfg_attr(windows, allow(dead_code))]
 fn remove_profile_block_in(base: &std::path::Path) -> Result<Vec<PathBuf>> {
     #[cfg(windows)]
@@ -1438,22 +1522,57 @@ fn strip_path_entry(path: &str, dir: &str) -> String {
 }
 
 /// Which shell dialect the profile uses, so the managed block is written in its native syntax.
-/// Each variant is constructed on only one platform (`Posix` off-Windows, `PowerShell` on
-/// Windows), yet both arms of `env_block` are compiled and unit-tested everywhere so the
-/// formatting is verifiable on either OS — hence the unconditional `allow(dead_code)`.
+/// `Posix` and `Fish` are written on Unix (picked per target file — a multi-shell home can
+/// hold both); `PowerShell` on Windows. Every arm of `env_block` is compiled and unit-tested
+/// everywhere so the formatting is verifiable on either OS — hence the unconditional
+/// `allow(dead_code)`.
 #[allow(dead_code)]
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Syntax {
     Posix,
+    Fish,
     PowerShell,
+}
+
+/// True when a `$SHELL` (or any path) names fish — basename equality, so `/usr/bin/fish`
+/// and `fish` match but `/usr/bin/notfish` does not.
+#[cfg_attr(windows, allow(dead_code))]
+fn shell_is_fish(shell: &str) -> bool {
+    let name = shell.rsplit(['/', '\\']).next().unwrap_or(shell);
+    name == "fish"
+}
+
+/// True when the *current process* is running under fish: either fish exported
+/// `FISH_VERSION` into this environment (interactive fish, or anything launched from one),
+/// or `$SHELL` itself is fish. `FISH_VERSION` wins so `stop`/`setup --env` print fish syntax
+/// even when the login shell is still bash.
+#[cfg_attr(windows, allow(dead_code))]
+fn session_is_fish() -> bool {
+    session_is_fish_from(
+        std::env::var_os("FISH_VERSION").is_some(),
+        std::env::var("SHELL").ok().as_deref(),
+    )
+}
+
+/// Pure core of [`session_is_fish`] — `has_fish_version` mirrors `FISH_VERSION` being set;
+/// `shell` is the `$SHELL` value. Split out so unit tests don't mutate process env.
+#[cfg_attr(windows, allow(dead_code))]
+fn session_is_fish_from(has_fish_version: bool, shell: Option<&str>) -> bool {
+    if has_fish_version {
+        return true;
+    }
+    shell.map(shell_is_fish).unwrap_or(false)
 }
 
 /// The rc file for a `$SHELL` value (its basename decides; unknown shells get `.profile`).
 /// Single source for the shell→file mapping — used by both [`profile_target`] and
-/// [`write_profile_block_in`].
+/// [`write_profile_block_in`]. Fish returns a multi-component relative path
+/// (`.config/fish/config.fish`); `Path::join` handles that.
 #[cfg(not(windows))]
 fn shell_profile_file(shell: &str) -> &'static str {
-    if shell.ends_with("zsh") {
+    if shell_is_fish(shell) {
+        fish_config_rel()
+    } else if shell.ends_with("zsh") {
         ".zshrc"
     } else if shell.ends_with("bash") {
         ".bashrc"
@@ -1462,15 +1581,57 @@ fn shell_profile_file(shell: &str) -> &'static str {
     }
 }
 
-/// The profile file to write the managed env block into, and the syntax it uses. Unix: the
-/// `$SHELL` rc file (`export`). Windows: the current-user PowerShell profile (`$env:`).
+/// Dialect for a profile path: fish's `config.fish` gets [`Syntax::Fish`]; everything else
+/// under the POSIX candidate list gets [`Syntax::Posix`]. Used so a multi-shell home gets the
+/// right block shape in each file (never `export` inside fish, never `set -gx` inside bash).
+#[cfg(not(windows))]
+fn syntax_for_profile(path: &std::path::Path) -> Syntax {
+    // Match on the filename so a custom XDG layout ending in `config.fish` still counts,
+    // and so tests that seed `base/config.fish` directly also resolve correctly.
+    match path.file_name().and_then(|n| n.to_str()) {
+        Some("config.fish") => Syntax::Fish,
+        _ => Syntax::Posix,
+    }
+}
+
+/// Short label for setup/uninstall output: basenames for flat rc files, the home-relative
+/// `.config/fish/config.fish` for fish (plain `config.fish` would be ambiguous).
+#[cfg_attr(windows, allow(dead_code))]
+fn profile_label(path: &std::path::Path) -> String {
+    let s = path.to_string_lossy();
+    if s.ends_with(".config/fish/config.fish") {
+        ".config/fish/config.fish".into()
+    } else if path.file_name().and_then(|n| n.to_str()) == Some("config.fish") {
+        // Non-default layout (e.g. $XDG_CONFIG_HOME/fish/config.fish) — show parent/name.
+        match path
+            .parent()
+            .and_then(|p| p.file_name())
+            .and_then(|n| n.to_str())
+        {
+            Some(parent) => format!("{parent}/config.fish"),
+            None => "config.fish".into(),
+        }
+    } else {
+        path.file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_else(|| path.display().to_string())
+    }
+}
+
+/// The profile file for the current `$SHELL` (Unix) or PowerShell profile (Windows), and the
+/// syntax it uses. On Unix the live write/heal/port paths scan **all** [`candidate_profiles`]
+/// instead; this helper remains for the Windows profile arm and as the `$SHELL`-default
+/// mapping used by tests of [`shell_profile_file`].
+#[cfg_attr(not(windows), allow(dead_code))]
 fn profile_target() -> Option<(PathBuf, Syntax)> {
     #[cfg(not(windows))]
     {
         let home = std::env::var("HOME").ok()?;
         let shell = std::env::var("SHELL").unwrap_or_default();
         let file = shell_profile_file(&shell);
-        Some((PathBuf::from(home).join(file), Syntax::Posix))
+        let path = PathBuf::from(home).join(file);
+        let syntax = syntax_for_profile(&path);
+        Some((path, syntax))
     }
     #[cfg(windows)]
     {
@@ -1558,7 +1719,7 @@ fn ensure_ca_bundle(ca_path: &std::path::Path) -> Result<Option<PathBuf>> {
 #[allow(dead_code)]
 fn env_block(proxy: &str, ca: &str, bundle: Option<&str>, syntax: Syntax) -> String {
     match syntax {
-        // NO_PROXY is set in both cases (lowercase too on POSIX: curl/libcurl, Go, and others
+        // NO_PROXY is set in both POSIX and fish (lowercase too: curl/libcurl, Go, and others
         // only honor `no_proxy`). Windows env vars are case-insensitive, so one suffices there.
         // Wire the env only while the daemon is actually up. A new shell opened after
         // `llmtrim stop` must not route at a now-dead proxy — so the block gates every export
@@ -1594,6 +1755,34 @@ fn env_block(proxy: &str, ca: &str, bundle: Option<&str>, syntax: Syntax) -> Str
                  \x20   export NODE_EXTRA_CA_CERTS={ca}\n\
                  \x20   export NODE_USE_ENV_PROXY='1'\n\
                  {native}fi\n\
+                 {END}\n"
+            )
+        }
+        // fish: `set -gx` for exported globals; `command -q` is the quiet existence check;
+        // `and` chains the liveness probe; the block closes with `end` (no `then`/`fi`).
+        // Same daemon-gated contract as the POSIX arm — a new fish shell after `stop` must
+        // not inherit a dead proxy.
+        Syntax::Fish => {
+            let native = bundle
+                .map(|b| {
+                    let b = fish_quote(b);
+                    format!(
+                        "\x20   set -gx SSL_CERT_FILE {b}\n\
+                         \x20   set -gx CURL_CA_BUNDLE {b}\n"
+                    )
+                })
+                .unwrap_or_default();
+            let (proxy, ca, no_proxy) = (fish_quote(proxy), fish_quote(ca), fish_quote(NO_PROXY));
+            format!(
+                "{BEGIN}\n\
+                 if command -q llmtrim; and llmtrim _alive 2>/dev/null\n\
+                 \x20   set -gx HTTPS_PROXY {proxy}\n\
+                 \x20   set -gx HTTP_PROXY {proxy}\n\
+                 \x20   set -gx NO_PROXY {no_proxy}\n\
+                 \x20   set -gx no_proxy {no_proxy}\n\
+                 \x20   set -gx NODE_EXTRA_CA_CERTS {ca}\n\
+                 \x20   set -gx NODE_USE_ENV_PROXY '1'\n\
+                 {native}end\n\
                  {END}\n"
             )
         }
@@ -1634,17 +1823,61 @@ fn posix_quote(s: &str) -> String {
     format!("'{}'", s.replace('\'', "'\"'\"'"))
 }
 
-/// The interceptor env as standalone, ungated shell lines — one `export`/`$env:` assignment
-/// per variable, no `BEGIN`/`END` markers and no `llmtrim _alive` liveness gate (unlike
-/// [`env_block`], this isn't a persisted block that must self-disable when the daemon later
-/// stops; it's a one-shot snippet the caller evals or copies immediately). Shared by `run`'s
-/// "no profile found" fallback and `print_env`, so both always report the same variables.
-/// Values are single-quoted (as in `env_block`) since this snippet exists specifically to be
-/// `eval`'d.
+/// Escape `s` for a single-quoted fish literal: `'…'`. Inside fish single quotes the only
+/// special sequences are `\'` and `\\`, so backslashes are doubled first, then each `'` is
+/// turned into `\'`. Same safety contract as [`posix_quote`] — hostile paths stay inert.
+fn fish_quote(s: &str) -> String {
+    format!("'{}'", s.replace('\\', "\\\\").replace('\'', "\\'"))
+}
+
+/// The interceptor env as standalone, ungated shell lines — one assignment per variable, no
+/// `BEGIN`/`END` markers and no `llmtrim _alive` liveness gate (unlike [`env_block`], this
+/// isn't a persisted block that must self-disable when the daemon later stops; it's a
+/// one-shot snippet the caller evals or copies immediately). Shared by `run`'s "no profile
+/// found" fallback and `print_env`, so both always report the same variables. Values are
+/// single-quoted (as in `env_block`) since this snippet exists specifically to be `eval`'d /
+/// `source`'d. Dialect follows the platform (and, on Unix, [`session_is_fish`] —
+/// `FISH_VERSION` first, then `$SHELL`): fish sessions get `set -gx`, everyone else on
+/// Unix gets `export`, Windows gets `$env:`.
 fn manual_env_lines(proxy: &str, ca: &str, bundle: Option<&str>) -> Vec<String> {
     #[cfg(not(windows))]
     {
-        use self::posix_quote as q;
+        manual_env_lines_for(proxy, ca, bundle, session_is_fish())
+    }
+    #[cfg(windows)]
+    {
+        let _ = bundle; // no combined bundle on Windows — see env_block's PowerShell arm
+        vec![
+            format!("$env:HTTPS_PROXY = {}", powershell_quote(proxy)),
+            format!("$env:HTTP_PROXY = {}", powershell_quote(proxy)),
+            format!("$env:NO_PROXY = {}", powershell_quote(NO_PROXY)),
+            format!("$env:NODE_EXTRA_CA_CERTS = {}", powershell_quote(ca)),
+            "$env:NODE_USE_ENV_PROXY = '1'".to_string(),
+        ]
+    }
+}
+
+/// Testable core of [`manual_env_lines`] for Unix: `fish = true` emits `set -gx`, otherwise
+/// POSIX `export`. Kept separate so unit tests don't depend on the ambient `$SHELL`.
+#[cfg(not(windows))]
+fn manual_env_lines_for(proxy: &str, ca: &str, bundle: Option<&str>, fish: bool) -> Vec<String> {
+    if fish {
+        let q = fish_quote;
+        let mut lines = vec![
+            format!("set -gx HTTPS_PROXY {}", q(proxy)),
+            format!("set -gx HTTP_PROXY {}", q(proxy)),
+            format!("set -gx NO_PROXY {}", q(NO_PROXY)),
+            format!("set -gx no_proxy {}", q(NO_PROXY)),
+            format!("set -gx NODE_EXTRA_CA_CERTS {}", q(ca)),
+            "set -gx NODE_USE_ENV_PROXY '1'".to_string(),
+        ];
+        if let Some(b) = bundle {
+            lines.push(format!("set -gx SSL_CERT_FILE {}", q(b)));
+            lines.push(format!("set -gx CURL_CA_BUNDLE {}", q(b)));
+        }
+        lines
+    } else {
+        let q = posix_quote;
         let mut lines = vec![
             format!("export HTTPS_PROXY={}", q(proxy)),
             format!("export HTTP_PROXY={}", q(proxy)),
@@ -1658,17 +1891,6 @@ fn manual_env_lines(proxy: &str, ca: &str, bundle: Option<&str>) -> Vec<String> 
             lines.push(format!("export CURL_CA_BUNDLE={}", q(b)));
         }
         lines
-    }
-    #[cfg(windows)]
-    {
-        let _ = bundle; // no combined bundle on Windows — see env_block's PowerShell arm
-        vec![
-            format!("$env:HTTPS_PROXY = {}", powershell_quote(proxy)),
-            format!("$env:HTTP_PROXY = {}", powershell_quote(proxy)),
-            format!("$env:NO_PROXY = {}", powershell_quote(NO_PROXY)),
-            format!("$env:NODE_EXTRA_CA_CERTS = {}", powershell_quote(ca)),
-            "$env:NODE_USE_ENV_PROXY = '1'".to_string(),
-        ]
     }
 }
 
@@ -1718,11 +1940,9 @@ pub fn print_env(requested: Option<u16>) -> Result<()> {
     Ok(())
 }
 
-/// Inner seam for [`write_profile_block`]: write into a profile file named by `shell` (the
-/// basename of `$SHELL`, e.g. `"bash"` → `.bashrc`, `"zsh"` → `.zshrc`) under `base` as the
-/// home directory. Sweeps stale blocks from all other candidates under `base` first, then
-/// writes the new block. Returns the path written. `base` is never `$HOME` itself; it is
-/// always a caller-supplied directory, which tests supply as a temp dir.
+/// Inner seam for [`write_profile_block`]: write into profile files under `base` as the home
+/// directory (`$HOME` in production; a temp dir in tests). Sweeps stale blocks from all
+/// candidates under `base` first, then writes the new block. Returns the paths written.
 #[cfg(not(windows))]
 fn write_profile_block_in(
     base: &std::path::Path,
@@ -1741,20 +1961,44 @@ fn write_profile_block_in(
     // fixes the macOS trap: setup keyed the target off `$SHELL`, but `$SHELL` is the login
     // shell and can disagree with the shell the terminal actually launches (iTerm running
     // zsh while `$SHELL=/bin/bash`), so the block landed in a file the running shell never
-    // sourced. Now whichever shell starts, its rc already carries the env. The managed
-    // BEGIN/END markers make a block in several files idempotent and cleanly removable.
+    // sourced. Now whichever shell starts, its rc already carries the env — including fish
+    // (via [`fish_config_path`], which honors `$XDG_CONFIG_HOME` when `base` is real `$HOME`).
+    // The managed BEGIN/END markers make a block in several files idempotent and cleanly
+    // removable. Each file gets its own dialect (POSIX vs fish) via [`syntax_for_profile`].
+    //
+    // Fish special case: if the fish config's parent dir already exists but `config.fish`
+    // does not, still create the config. Users who run fish interactively with a bash/zsh
+    // login shell often have the directory (conf.d, functions) without ever creating
+    // config.fish — without this, setup would only wire bash and leave fish unwired.
     let mut targets: Vec<PathBuf> = candidate_profiles(base)
         .into_iter()
         .filter(|p| p.exists())
         .collect();
-    let shell_default = base.join(shell_profile_file(shell));
+    // Fish shell-default uses [`fish_config_path`] so custom XDG is the create-if-missing
+    // target (not a dead `~/.config/fish` fish will never source).
+    let shell_default = if shell_is_fish(shell) {
+        fish_config_path(base)
+    } else {
+        base.join(shell_profile_file(shell))
+    };
     if !targets.contains(&shell_default) {
         targets.push(shell_default); // guarantee the running shell's rc gets it, even if absent
     }
+    // Interactive-fish-with-bash-login: fish config dir often exists without config.fish.
+    // Use the same path fish will read (XDG-aware) so we don't invent a dead ~/.config copy
+    // when XDG_CONFIG_HOME redirects away from base/.config.
+    let fish_cfg = fish_config_path(base);
+    if !targets.contains(&fish_cfg) && fish_cfg.parent().is_some_and(|p| p.is_dir()) {
+        targets.push(fish_cfg);
+    }
 
-    let block = env_block(proxy, ca, bundle, Syntax::Posix);
     let mut written = Vec::with_capacity(targets.len());
     for path in targets {
+        // Fish lives under `.config/fish/` or `$XDG_CONFIG_HOME/fish/`; create parents when new.
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)
+                .with_context(|| format!("failed to create {}", parent.display()))?;
+        }
         // strip_block is a safety net in case remove_profile_block_in skipped a file with a
         // broken BEGIN-without-END that it left intact.
         let existing = std::fs::read_to_string(&path).unwrap_or_default();
@@ -1762,6 +2006,7 @@ fn write_profile_block_in(
         if !base_content.is_empty() && !base_content.ends_with('\n') {
             base_content.push('\n');
         }
+        let block = env_block(proxy, ca, bundle, syntax_for_profile(&path));
         std::fs::write(&path, format!("{base_content}{block}"))
             .with_context(|| format!("failed to write {}", path.display()))?;
         written.push(path);
@@ -2151,7 +2396,9 @@ mod tests {
     #[cfg(not(windows))]
     #[test]
     fn manual_env_lines_posix_omits_bundle_vars_when_none() {
-        let lines = manual_env_lines("http://127.0.0.1:8787", "/home/u/ca.pem", None);
+        // Use the pure helper — `manual_env_lines` follows the ambient session (FISH_VERSION /
+        // $SHELL) and would flip to fish syntax under a fish developer shell.
+        let lines = manual_env_lines_for("http://127.0.0.1:8787", "/home/u/ca.pem", None, false);
         assert!(lines.contains(&"export HTTPS_PROXY='http://127.0.0.1:8787'".to_string()));
         assert!(lines.contains(&"export HTTP_PROXY='http://127.0.0.1:8787'".to_string()));
         assert!(lines.contains(&format!("export NO_PROXY='{NO_PROXY}'")));
@@ -2172,10 +2419,11 @@ mod tests {
     #[cfg(not(windows))]
     #[test]
     fn manual_env_lines_posix_includes_bundle_vars_when_present() {
-        let lines = manual_env_lines(
+        let lines = manual_env_lines_for(
             "http://127.0.0.1:8787",
             "/home/u/.llmtrim/ca.pem",
             Some("/home/u/.llmtrim/ca-bundle.pem"),
+            false,
         );
         assert!(
             lines.contains(&"export SSL_CERT_FILE='/home/u/.llmtrim/ca-bundle.pem'".to_string())
@@ -2262,6 +2510,45 @@ mod tests {
             let status = child.wait().unwrap();
             assert!(status.success(), "{shell} -n rejected the block:\n{block}");
         }
+    }
+
+    // Same contract for fish: a syntax error in config.fish breaks every new fish session.
+    // `fish -n <file>` parses without running (more portable than stdin across fish builds);
+    // skip when fish isn't installed.
+    #[cfg(unix)]
+    #[test]
+    fn env_block_fish_is_syntactically_valid_shell() {
+        use std::process::Command;
+        let block = env_block(
+            "http://127.0.0.1:8787",
+            "/home/u/ca.pem",
+            Some("/home/u/.llmtrim/ca-bundle.pem"),
+            Syntax::Fish,
+        );
+        // Probe first so we don't leave a temp file when fish is absent.
+        if Command::new("fish").arg("--version").output().is_err() {
+            return;
+        }
+        let path = std::env::temp_dir().join(format!(
+            "llmtrim-fish-syntax-{}-{}.fish",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        std::fs::write(&path, &block).expect("write temp fish block");
+        let out = Command::new("fish")
+            .arg("-n")
+            .arg(&path)
+            .output()
+            .expect("spawn fish -n");
+        let _ = std::fs::remove_file(&path);
+        assert!(
+            out.status.success(),
+            "fish -n rejected the block:\n{block}\nstderr: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
     }
 
     #[test]
@@ -2365,7 +2652,7 @@ mod tests {
     /// keys off `127.0.0.1:`, which quoting doesn't touch.
     #[test]
     fn parse_proxy_port_reads_single_quoted_block() {
-        for syntax in [Syntax::Posix, Syntax::PowerShell] {
+        for syntax in [Syntax::Posix, Syntax::Fish, Syntax::PowerShell] {
             let b = env_block("http://127.0.0.1:8787", "/home/u/ca.pem", None, syntax);
             assert_eq!(parse_proxy_port(&b), Some(8787));
         }
@@ -2383,6 +2670,174 @@ mod tests {
         assert!(b.contains("$env:NODE_EXTRA_CA_CERTS = 'C:\\Users\\u\\ca.pem'"));
         assert!(b.contains(&format!("$env:NO_PROXY = '{NO_PROXY}'")));
         assert!(!b.contains("export ")); // no posix syntax leaked in
+    }
+
+    #[test]
+    fn env_block_fish_uses_set_gx_and_gates_on_alive() {
+        let b = env_block(
+            "http://127.0.0.1:8787",
+            "/home/u/ca.pem",
+            None,
+            Syntax::Fish,
+        );
+        assert!(
+            b.contains("set -gx HTTPS_PROXY 'http://127.0.0.1:8787'"),
+            "fish set -gx missing: {b}"
+        );
+        assert!(b.contains("set -gx NODE_EXTRA_CA_CERTS '/home/u/ca.pem'"));
+        assert!(b.contains(&format!("set -gx NO_PROXY '{NO_PROXY}'")));
+        assert!(
+            b.contains("llmtrim _alive"),
+            "fish block must probe daemon liveness"
+        );
+        // Guard shape: `if …; and …` … `end` — no POSIX `then`/`fi`, no `export`.
+        assert!(b.contains("if command -q llmtrim; and llmtrim _alive"));
+        assert!(b.contains("\nend\n"), "fish block must close with end");
+        assert!(
+            !b.contains("export "),
+            "POSIX export leaked into fish block"
+        );
+        assert!(!b.contains("\nfi\n"), "POSIX fi leaked into fish block");
+        assert!(!b.contains("$env:"), "PowerShell leaked into fish block");
+
+        // Exports sit inside the guard.
+        let if_at = b.find("if command -q llmtrim").expect("guard present");
+        let end_at = b.find("\nend\n").expect("guard closed with end");
+        let set_at = b.find("set -gx HTTPS_PROXY").expect("set present");
+        assert!(
+            if_at < set_at && set_at < end_at,
+            "set -gx must live inside the liveness guard"
+        );
+
+        // Bundle exports gated too.
+        let with_bundle = env_block(
+            "http://127.0.0.1:8787",
+            "/home/u/ca.pem",
+            Some("/home/u/.llmtrim/ca-bundle.pem"),
+            Syntax::Fish,
+        );
+        let end_at = with_bundle.find("\nend\n").expect("end");
+        let ssl_at = with_bundle
+            .find("set -gx SSL_CERT_FILE")
+            .expect("bundle set present");
+        assert!(ssl_at < end_at, "native-TLS sets must sit inside the guard");
+    }
+
+    /// Hostile path through the fish arm: single-quoted with `\'` / `\\` escapes so
+    /// `$(…)`, backticks and `;` stay inert.
+    #[test]
+    fn env_block_fish_quotes_hostile_values() {
+        let hostile = "/home/$(whoami)/`id`/a;b/it's/\"q\"/back\\slash/ca.pem";
+        let b = env_block(
+            "http://127.0.0.1:8787",
+            hostile,
+            Some(hostile),
+            Syntax::Fish,
+        );
+        // fish_quote: `\` → `\\`, `'` → `\'`.
+        let quoted = "'/home/$(whoami)/`id`/a;b/it\\'s/\"q\"/back\\\\slash/ca.pem'";
+        assert!(
+            b.contains(&format!("set -gx NODE_EXTRA_CA_CERTS {quoted}")),
+            "hostile CA path not safely quoted: {b}"
+        );
+        assert!(b.contains(&format!("set -gx SSL_CERT_FILE {quoted}")));
+        assert!(
+            !b.contains("set -gx NODE_EXTRA_CA_CERTS \"/home/"),
+            "value emitted in double quotes: {b}"
+        );
+    }
+
+    #[test]
+    fn shell_is_fish_matches_path_and_basename() {
+        assert!(shell_is_fish("/usr/bin/fish"));
+        assert!(shell_is_fish("fish"));
+        assert!(shell_is_fish("/usr/local/bin/fish"));
+        assert!(!shell_is_fish("/bin/bash"));
+        assert!(!shell_is_fish("/bin/zsh"));
+        assert!(!shell_is_fish("/usr/bin/notfish"));
+        assert!(!shell_is_fish(""));
+    }
+
+    #[test]
+    fn session_is_fish_from_prefers_fish_version_over_shell() {
+        // Interactive fish always exports FISH_VERSION, even when login $SHELL is bash.
+        assert!(session_is_fish_from(true, Some("/bin/bash")));
+        assert!(session_is_fish_from(true, None));
+        assert!(session_is_fish_from(false, Some("/usr/bin/fish")));
+        assert!(!session_is_fish_from(false, Some("/bin/bash")));
+        assert!(!session_is_fish_from(false, None));
+        assert!(!session_is_fish_from(false, Some("/usr/bin/notfish")));
+    }
+
+    #[test]
+    fn shell_profile_file_maps_fish_to_config_fish() {
+        #[cfg(not(windows))]
+        {
+            assert_eq!(
+                shell_profile_file("/usr/bin/fish"),
+                ".config/fish/config.fish"
+            );
+            assert_eq!(shell_profile_file("fish"), ".config/fish/config.fish");
+            assert_eq!(shell_profile_file("/bin/zsh"), ".zshrc");
+            assert_eq!(shell_profile_file("/bin/bash"), ".bashrc");
+            assert_eq!(shell_profile_file("/bin/sh"), ".profile");
+        }
+    }
+
+    /// Temp-dir `base` must never follow ambient XDG — only real `$HOME` does.
+    #[cfg(not(windows))]
+    #[test]
+    fn fish_config_path_ignores_xdg_when_base_is_not_home() {
+        let dir = TempDir::new("fish-xdg-hermetic");
+        let base = dir.path();
+        let path = fish_config_path(base);
+        assert_eq!(path, base.join(".config/fish/config.fish"));
+    }
+
+    #[test]
+    fn syntax_for_profile_distinguishes_fish() {
+        #[cfg(not(windows))]
+        {
+            assert_eq!(
+                syntax_for_profile(std::path::Path::new("/home/u/.config/fish/config.fish")),
+                Syntax::Fish
+            );
+            assert_eq!(
+                syntax_for_profile(std::path::Path::new("/home/u/.bashrc")),
+                Syntax::Posix
+            );
+            assert_eq!(
+                syntax_for_profile(std::path::Path::new("/home/u/.zshrc")),
+                Syntax::Posix
+            );
+        }
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn managed_block_needs_heal_recognises_current_fish_block() {
+        let current = env_block(
+            "http://127.0.0.1:8787",
+            "/home/u/ca.pem",
+            None,
+            Syntax::Fish,
+        );
+        assert!(
+            !managed_block_needs_heal(&current),
+            "current fish block must not need heal"
+        );
+        // Old fish-shaped block missing the gate still heals (markers + no _alive).
+        let old = format!("{BEGIN}\nset -gx HTTPS_PROXY 'x'\nset -gx NO_PROXY 'y'\n{END}\n");
+        assert!(
+            managed_block_needs_heal(&old),
+            "fish block missing _alive gate needs heal"
+        );
+    }
+
+    #[test]
+    fn strip_block_reverses_fish_block() {
+        let withblock = format!("keep\n{}", env_block("p", "c", None, Syntax::Fish));
+        assert_eq!(strip_block(&withblock), "keep\n");
     }
 
     #[test]
@@ -2728,9 +3183,239 @@ mod tests {
             "only the zsh default is created"
         );
         assert!(base.join(".zshrc").exists());
-        for other in [".zprofile", ".bashrc", ".bash_profile", ".profile"] {
+        for other in [
+            ".zprofile",
+            ".bashrc",
+            ".bash_profile",
+            ".profile",
+            ".config/fish/config.fish",
+        ] {
             assert!(!base.join(other).exists(), "{other} must not be created");
         }
+    }
+
+    /// Fish `$SHELL`: create `~/.config/fish/config.fish` (and its parents) with fish syntax,
+    /// and do not litter bash/zsh rc files on a fish-only home.
+    #[cfg(not(windows))]
+    #[test]
+    fn write_profile_block_in_creates_fish_config_with_fish_syntax() {
+        let dir = TempDir::new("wpb-fish");
+        let base = dir.path();
+        let proxy = "http://127.0.0.1:8788";
+        let ca = "/tmp/ca.crt";
+        let paths = write_profile_block_in(base, "/usr/bin/fish", proxy, ca, None).expect("write");
+        let fish_cfg = base.join(".config/fish/config.fish");
+        assert_eq!(
+            paths,
+            vec![fish_cfg.clone()],
+            "only fish config created: {paths:?}"
+        );
+        assert!(fish_cfg.exists(), "fish config file must exist");
+        let body = std::fs::read_to_string(&fish_cfg).expect("read fish config");
+        assert!(body.contains(BEGIN) && body.contains(END));
+        assert!(
+            body.contains(&format!("set -gx HTTPS_PROXY '{proxy}'")),
+            "fish syntax missing: {body}"
+        );
+        assert!(
+            body.contains("if command -q llmtrim; and llmtrim _alive"),
+            "fish liveness guard missing: {body}"
+        );
+        assert!(
+            !body.contains("export "),
+            "POSIX must not land in fish config"
+        );
+        for other in [
+            ".zshrc",
+            ".bashrc",
+            ".profile",
+            ".bash_profile",
+            ".zprofile",
+        ] {
+            assert!(
+                !base.join(other).exists(),
+                "{other} must not be created for fish"
+            );
+        }
+    }
+
+    /// `$SHELL=bash` but `~/.config/fish/` already exists (interactive fish user who never
+    /// made config.fish): still create config.fish with fish syntax so fish sessions get the env.
+    #[cfg(not(windows))]
+    #[test]
+    fn write_profile_block_in_creates_fish_config_when_fish_dir_exists_under_bash_shell() {
+        let dir = TempDir::new("wpb-fish-dir");
+        let base = dir.path();
+        let fish_dir = base.join(".config/fish");
+        std::fs::create_dir_all(&fish_dir).expect("mkdir fish dir");
+        // conf.d-only install — no config.fish yet.
+        std::fs::create_dir_all(fish_dir.join("conf.d")).expect("mkdir conf.d");
+        std::fs::write(base.join(".bashrc"), "# bash\n").expect("seed bashrc");
+
+        let paths =
+            write_profile_block_in(base, "/bin/bash", "http://127.0.0.1:8788", "/tmp/ca", None)
+                .expect("write");
+        let fish_cfg = base.join(".config/fish/config.fish");
+        assert!(
+            paths.contains(&fish_cfg),
+            "fish config created because fish dir exists: {paths:?}"
+        );
+        assert!(paths.contains(&base.join(".bashrc")));
+        let fish = std::fs::read_to_string(&fish_cfg).expect("read fish");
+        assert!(
+            fish.contains("set -gx HTTPS_PROXY 'http://127.0.0.1:8788'"),
+            "fish dialect required: {fish}"
+        );
+        assert!(
+            !fish.contains("export "),
+            "must not write POSIX into fish config"
+        );
+        let bash = std::fs::read_to_string(base.join(".bashrc")).expect("read bash");
+        assert!(bash.contains("export HTTPS_PROXY="));
+        assert!(!bash.contains("set -gx"));
+    }
+
+    /// Bare home with no fish dir and `$SHELL=bash` must NOT invent a fish config.
+    #[cfg(not(windows))]
+    #[test]
+    fn write_profile_block_in_does_not_invent_fish_config_without_fish_dir() {
+        let dir = TempDir::new("wpb-no-fish-dir");
+        let base = dir.path();
+        let paths =
+            write_profile_block_in(base, "/bin/bash", "http://127.0.0.1:8788", "/tmp/ca", None)
+                .expect("write");
+        assert_eq!(paths, vec![base.join(".bashrc")]);
+        assert!(!base.join(".config/fish/config.fish").exists());
+        // And we must not have created the fish directory tree either.
+        assert!(!base.join(".config/fish").exists());
+    }
+
+    /// `configured_port` must find a port wired only into fish config even when `$SHELL` is bash
+    /// (profile_target alone would miss it).
+    #[cfg(not(windows))]
+    #[test]
+    fn configured_port_in_finds_port_in_any_candidate_including_fish() {
+        let dir = TempDir::new("cfg-port-fish");
+        let base = dir.path();
+        let fish_cfg = base.join(".config/fish/config.fish");
+        std::fs::create_dir_all(fish_cfg.parent().unwrap()).expect("mkdir");
+        let block = env_block("http://127.0.0.1:43117", "/tmp/ca", None, Syntax::Fish);
+        std::fs::write(&fish_cfg, block).expect("write fish");
+        // No bashrc — only fish carries the port.
+        assert_eq!(configured_port_in(base), Some(43117));
+
+        // Empty home → none.
+        let empty = TempDir::new("cfg-port-empty");
+        assert_eq!(configured_port_in(empty.path()), None);
+    }
+
+    /// Multi-shell home that already has both `.bashrc` and fish config: each gets its own
+    /// dialect (POSIX vs fish), and re-setup under fish still refreshes the bashrc block.
+    #[cfg(not(windows))]
+    #[test]
+    fn write_profile_block_in_writes_fish_and_posix_dialects_side_by_side() {
+        let dir = TempDir::new("wpb-multi-fish");
+        let base = dir.path();
+        let fish_cfg = base.join(".config/fish/config.fish");
+        std::fs::create_dir_all(fish_cfg.parent().unwrap()).expect("mkdir fish");
+        std::fs::write(base.join(".bashrc"), "# bash pre\n").expect("seed bashrc");
+        std::fs::write(&fish_cfg, "# fish pre\n").expect("seed fish");
+
+        let paths = write_profile_block_in(
+            base,
+            "/usr/bin/fish",
+            "http://127.0.0.1:9999",
+            "/tmp/ca",
+            None,
+        )
+        .expect("write");
+        assert!(
+            paths.contains(&base.join(".bashrc")),
+            "bashrc written: {paths:?}"
+        );
+        assert!(paths.contains(&fish_cfg), "fish config written: {paths:?}");
+
+        let bash = std::fs::read_to_string(base.join(".bashrc")).expect("read bash");
+        assert!(bash.contains("# bash pre"));
+        assert!(bash.contains("export HTTPS_PROXY='http://127.0.0.1:9999'"));
+        assert!(
+            !bash.contains("set -gx"),
+            "fish syntax must not land in bashrc"
+        );
+
+        let fish = std::fs::read_to_string(&fish_cfg).expect("read fish");
+        assert!(fish.contains("# fish pre"));
+        assert!(fish.contains("set -gx HTTPS_PROXY 'http://127.0.0.1:9999'"));
+        assert!(
+            !fish.contains("export "),
+            "POSIX must not land in fish config"
+        );
+    }
+
+    /// Uninstall sweeps a fish config block just like the POSIX ones.
+    #[cfg(not(windows))]
+    #[test]
+    fn remove_profile_block_in_cleans_fish_config() {
+        let dir = TempDir::new("sweep-fish");
+        let base = dir.path();
+        let fish_cfg = base.join(".config/fish/config.fish");
+        std::fs::create_dir_all(fish_cfg.parent().unwrap()).expect("mkdir");
+        let block = env_block("http://127.0.0.1:8787", "/tmp/ca", None, Syntax::Fish);
+        std::fs::write(&fish_cfg, format!("# keep\n{block}")).expect("write fish");
+
+        let cleaned = remove_profile_block_in(base).expect("remove");
+        assert_eq!(cleaned, vec![fish_cfg.clone()]);
+        let after = std::fs::read_to_string(&fish_cfg).expect("read");
+        assert_eq!(after, "# keep\n");
+        assert!(!after.contains(BEGIN));
+    }
+
+    /// Heal rewrites a stale fish block into the current fish dialect (not POSIX).
+    #[cfg(not(windows))]
+    #[test]
+    fn heal_rewrites_stale_fish_block_as_fish() {
+        let dir = TempDir::new("heal-fish");
+        let base = dir.path();
+        let fish_cfg = base.join(".config/fish/config.fish");
+        std::fs::create_dir_all(fish_cfg.parent().unwrap()).expect("mkdir");
+        // Old block: markers + proxy, no NO_PROXY / no _alive gate.
+        let old = format!("{BEGIN}\nset -gx HTTPS_PROXY 'http://127.0.0.1:43117'\n{END}\n");
+        std::fs::write(&fish_cfg, &old).expect("write");
+
+        let healed =
+            heal_profiles_in(base, "http://127.0.0.1:43117", "/home/u/ca.pem", None).expect("heal");
+        assert_eq!(healed, vec![fish_cfg.clone()]);
+        let after = std::fs::read_to_string(&fish_cfg).expect("read");
+        assert!(after.contains("set -gx NO_PROXY"), "bypass added in fish");
+        assert!(after.contains("llmtrim _alive"), "gate added in fish");
+        assert!(after.contains("set -gx HTTPS_PROXY"), "still fish syntax");
+        assert!(
+            !after.contains("export "),
+            "heal must not rewrite fish as POSIX"
+        );
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn manual_env_lines_for_fish_uses_set_gx() {
+        let lines = manual_env_lines_for("http://127.0.0.1:8787", "/home/u/ca.pem", None, true);
+        assert!(lines.iter().any(|l| l.starts_with("set -gx HTTPS_PROXY ")));
+        assert!(lines.iter().all(|l| !l.starts_with("export ")));
+        let posix = manual_env_lines_for("http://127.0.0.1:8787", "/home/u/ca.pem", None, false);
+        assert!(posix.iter().any(|l| l.starts_with("export HTTPS_PROXY=")));
+        assert!(posix.iter().all(|l| !l.starts_with("set -gx ")));
+    }
+
+    #[test]
+    fn profile_label_shows_fish_path() {
+        assert_eq!(
+            profile_label(std::path::Path::new("/home/u/.config/fish/config.fish")),
+            ".config/fish/config.fish"
+        );
+        assert_eq!(
+            profile_label(std::path::Path::new("/home/u/.bashrc")),
+            ".bashrc"
+        );
     }
 
     /// Multiple shells installed (several rc files present): the block lands in every one,
@@ -2850,6 +3535,30 @@ mod tests {
             assert!(
                 !line.starts_with("export "),
                 "POSIX `export` leaked into PowerShell block: {line:?}"
+            );
+        }
+    }
+
+    /// Fish block: every non-marker line is the liveness guard, `end`, or a `set -gx` assignment.
+    #[test]
+    fn env_block_fish_all_lines_are_valid_sets() {
+        let proxy = "http://127.0.0.1:8787";
+        let ca = "/home/user/.llmtrim/ca.crt";
+        let block = env_block(proxy, ca, None, Syntax::Fish);
+
+        let inner: Vec<&str> = block.lines().filter(|l| *l != BEGIN && *l != END).collect();
+        assert!(!inner.is_empty(), "no inner lines in fish block");
+        for line in &inner {
+            let trimmed = line.trim_start();
+            let is_guard = trimmed.starts_with("if ") || trimmed == "end";
+            let is_set = trimmed.starts_with("set -gx ") && trimmed.contains(" '");
+            assert!(
+                is_guard || is_set,
+                "line is neither the liveness guard nor a valid set -gx: {line:?}"
+            );
+            assert!(
+                !trimmed.starts_with("export "),
+                "POSIX export leaked into fish block: {line:?}"
             );
         }
     }

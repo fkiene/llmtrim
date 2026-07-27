@@ -1743,7 +1743,7 @@ fn run() -> Result<()> {
                             &format!(
                                 "This shell still points at the stopped interceptor. New \
                                  terminals are already clear; to fix this one, run:\n    {}",
-                                llmtrim::setup::UNSET_HINT
+                                llmtrim::setup::unset_hint()
                             )
                         )
                     );

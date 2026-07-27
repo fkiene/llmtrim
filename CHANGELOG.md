@@ -6,6 +6,18 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Fixed
+
+- **`llmtrim setup` supports the fish shell.** Setup only knew bash/zsh/`.profile` and always
+  wrote POSIX `export` lines, so fish users got a dead block in `.bashrc` (or `.profile`) that
+  fish never sources. The managed block now also targets the config fish actually reads —
+  `~/.config/fish/config.fish`, or `$XDG_CONFIG_HOME/fish/config.fish` when that env is set —
+  with native `set -gx` syntax and a fish liveness guard (`command -q` / `and` / `end`).
+  Multi-shell homes get the right dialect per file; an existing fish config directory is enough
+  to create `config.fish` even when `$SHELL` is still bash; and `stop`/`uninstall`/`setup --env`
+  prefer the live `FISH_VERSION` session signal over `$SHELL` so interactive fish gets
+  `set -e` / `set -gx`. Re-run `llmtrim setup` to wire an existing fish install. (#223)
+
 ## [0.11.11] - 2026-07-26
 
 ### Fixed
