@@ -1292,7 +1292,7 @@ const SUB_AUTH_TOKEN_KEY: &str = "ANTHROPIC_AUTH_TOKEN";
 /// optional so a missing `ca.pem` still pins the proxy URL rather than leaving a dummy-only
 /// package that 401s at Anthropic.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct SubAuthProxyEnv {
+pub(crate) struct SubAuthProxyEnv {
     /// e.g. `http://127.0.0.1:43117`
     pub proxy_url: String,
     /// Path to the llmtrim MITM CA (`ca.pem`) for `NODE_EXTRA_CA_CERTS`, when the file exists.
@@ -1511,13 +1511,21 @@ fn remove_sub_auth_package(
     }
 }
 
-/// Pure mutation of a parsed Claude settings object.
+/// Pure mutation of a parsed Claude settings object (token + `NODE_USE_ENV_PROXY` only).
+///
+/// Prefer [`sync_sub_auth_env`], which also pins the MITM proxy URL + CA trust. This thin
+/// wrapper keeps the published 2-arg signature stable for cargo-semver-checks.
+pub fn apply_sub_auth_env(settings: &mut Value, want: bool) -> Result<SubAuthEnvChange> {
+    apply_sub_auth_env_with_proxy(settings, want, None)
+}
+
+/// Pure mutation with an optional MITM proxy package.
 ///
 /// - `want = true`: set `env.ANTHROPIC_AUTH_TOKEN` to [`SUB_AUTH_TOKEN_VALUE`],
 ///   `NODE_USE_ENV_PROXY=1`, and (when `proxy` is provided) the MITM `HTTPS_PROXY` + CA trust
 ///   keys — unless a foreign (non-sentinel) token is already there.
 /// - `want = false`: remove those keys only when the token holds our sentinel.
-pub fn apply_sub_auth_env(
+pub(crate) fn apply_sub_auth_env_with_proxy(
     settings: &mut Value,
     want: bool,
     proxy: Option<&SubAuthProxyEnv>,
@@ -1628,7 +1636,7 @@ pub fn sync_sub_auth_env(want: bool) -> Result<SubAuthEnvChange> {
             .with_context(|| format!("{} is not valid JSON", path.display()))?
     };
     let proxy = resolve_sub_auth_proxy_env();
-    let change = apply_sub_auth_env(&mut settings, want, Some(&proxy))?;
+    let change = apply_sub_auth_env_with_proxy(&mut settings, want, Some(&proxy))?;
     if matches!(
         change,
         SubAuthEnvChange::Injected | SubAuthEnvChange::Removed
@@ -2347,7 +2355,7 @@ mod tests {
         let mut settings = serde_json::json!({ "theme": "dark" });
         let proxy = sample_proxy();
         assert_eq!(
-            apply_sub_auth_env(&mut settings, true, Some(&proxy)).unwrap(),
+            apply_sub_auth_env_with_proxy(&mut settings, true, Some(&proxy)).unwrap(),
             SubAuthEnvChange::Injected
         );
         assert_eq!(
@@ -2369,12 +2377,12 @@ mod tests {
         );
         // Idempotent when already ours (full package).
         assert_eq!(
-            apply_sub_auth_env(&mut settings, true, Some(&proxy)).unwrap(),
+            apply_sub_auth_env_with_proxy(&mut settings, true, Some(&proxy)).unwrap(),
             SubAuthEnvChange::Unchanged
         );
         // Remove on want=false.
         assert_eq!(
-            apply_sub_auth_env(&mut settings, false, Some(&proxy)).unwrap(),
+            apply_sub_auth_env_with_proxy(&mut settings, false, Some(&proxy)).unwrap(),
             SubAuthEnvChange::Removed
         );
         assert!(settings.get("env").is_none(), "empty env object dropped");
@@ -2388,7 +2396,7 @@ mod tests {
         });
         let proxy = sample_proxy();
         assert_eq!(
-            apply_sub_auth_env(&mut settings, true, Some(&proxy)).unwrap(),
+            apply_sub_auth_env_with_proxy(&mut settings, true, Some(&proxy)).unwrap(),
             SubAuthEnvChange::Unchanged
         );
         assert_eq!(settings["env"]["ANTHROPIC_AUTH_TOKEN"], "sk-ant-real");
@@ -2397,7 +2405,7 @@ mod tests {
             "foreign token blocks the whole package"
         );
         assert_eq!(
-            apply_sub_auth_env(&mut settings, false, Some(&proxy)).unwrap(),
+            apply_sub_auth_env_with_proxy(&mut settings, false, Some(&proxy)).unwrap(),
             SubAuthEnvChange::Unchanged
         );
         assert_eq!(settings["env"]["ANTHROPIC_AUTH_TOKEN"], "sk-ant-real");
@@ -2413,7 +2421,7 @@ mod tests {
             }
         });
         assert_eq!(
-            apply_sub_auth_env(&mut settings, false, None).unwrap(),
+            apply_sub_auth_env_with_proxy(&mut settings, false, None).unwrap(),
             SubAuthEnvChange::Removed
         );
         assert!(settings["env"].get("ANTHROPIC_AUTH_TOKEN").is_none());
@@ -2432,7 +2440,7 @@ mod tests {
             }
         });
         assert_eq!(
-            apply_sub_auth_env(&mut settings, false, None).unwrap(),
+            apply_sub_auth_env_with_proxy(&mut settings, false, None).unwrap(),
             SubAuthEnvChange::Removed
         );
         assert!(settings["env"].get("ANTHROPIC_AUTH_TOKEN").is_none());
@@ -2459,7 +2467,7 @@ mod tests {
         });
         let proxy = sample_proxy();
         assert_eq!(
-            apply_sub_auth_env(&mut settings, true, Some(&proxy)).unwrap(),
+            apply_sub_auth_env_with_proxy(&mut settings, true, Some(&proxy)).unwrap(),
             SubAuthEnvChange::Injected
         );
         assert_eq!(settings["env"]["NODE_USE_ENV_PROXY"], "1");
@@ -2483,7 +2491,7 @@ mod tests {
         });
         let proxy = sample_proxy();
         assert_eq!(
-            apply_sub_auth_env(&mut settings, true, Some(&proxy)).unwrap(),
+            apply_sub_auth_env_with_proxy(&mut settings, true, Some(&proxy)).unwrap(),
             SubAuthEnvChange::Injected
         );
         assert_eq!(settings["env"]["HTTPS_PROXY"], "http://127.0.0.1:43117");
@@ -2510,7 +2518,7 @@ mod tests {
             ca_bundle: None,
         };
         assert_eq!(
-            apply_sub_auth_env(&mut settings, false, Some(&current)).unwrap(),
+            apply_sub_auth_env_with_proxy(&mut settings, false, Some(&current)).unwrap(),
             SubAuthEnvChange::Removed
         );
         assert!(settings["env"].get("HTTPS_PROXY").is_none());
@@ -2529,7 +2537,7 @@ mod tests {
         });
         let proxy = sample_proxy();
         assert_eq!(
-            apply_sub_auth_env(&mut settings, true, Some(&proxy)).unwrap(),
+            apply_sub_auth_env_with_proxy(&mut settings, true, Some(&proxy)).unwrap(),
             SubAuthEnvChange::Injected
         );
         assert_eq!(settings["env"]["NODE_USE_ENV_PROXY"], "1");
@@ -2544,7 +2552,7 @@ mod tests {
             ca_bundle: None,
         };
         assert_eq!(
-            apply_sub_auth_env(&mut settings, true, Some(&proxy)).unwrap(),
+            apply_sub_auth_env_with_proxy(&mut settings, true, Some(&proxy)).unwrap(),
             SubAuthEnvChange::Injected
         );
         assert_eq!(settings["env"]["HTTPS_PROXY"], "http://127.0.0.1:43117");
@@ -2561,7 +2569,7 @@ mod tests {
         });
         let proxy = sample_proxy();
         assert_eq!(
-            apply_sub_auth_env(&mut settings, true, Some(&proxy)).unwrap(),
+            apply_sub_auth_env_with_proxy(&mut settings, true, Some(&proxy)).unwrap(),
             SubAuthEnvChange::Injected
         );
         assert_eq!(
@@ -2584,7 +2592,7 @@ mod tests {
             }
         });
         assert_eq!(
-            apply_sub_auth_env(&mut settings, false, None).unwrap(),
+            apply_sub_auth_env_with_proxy(&mut settings, false, None).unwrap(),
             SubAuthEnvChange::Unchanged
         );
         assert_eq!(
