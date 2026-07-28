@@ -1352,8 +1352,7 @@ fn is_llmtrim_proxy_url(value: &str) -> bool {
 /// True when `value` looks like an llmtrim CA path under `~/.llmtrim/` (any home).
 fn is_llmtrim_ca_path(value: &str) -> bool {
     let norm = value.replace('\\', "/");
-    norm.contains("/.llmtrim/")
-        && (norm.ends_with("/ca.pem") || norm.ends_with("/ca-bundle.pem"))
+    norm.contains("/.llmtrim/") && (norm.ends_with("/ca.pem") || norm.ends_with("/ca-bundle.pem"))
 }
 
 /// Insert/update one env key. Overwrites when absent or `can_overwrite(current)`; never
@@ -1432,26 +1431,20 @@ fn ensure_sub_auth_package(
         changed = true;
     }
     // Same bypass list as the shell profile — Claude (and children) must not MITM loopback.
-    if set_env_if(
-        env_obj,
-        NO_PROXY_KEY,
-        crate::setup::NO_PROXY,
-        |cur| cur == crate::setup::NO_PROXY,
-    ) {
+    if set_env_if(env_obj, NO_PROXY_KEY, crate::setup::NO_PROXY, |cur| {
+        cur == crate::setup::NO_PROXY
+    }) {
         changed = true;
     }
-    if set_env_if(
-        env_obj,
-        NO_PROXY_LOWER_KEY,
-        crate::setup::NO_PROXY,
-        |cur| cur == crate::setup::NO_PROXY,
-    ) {
+    if set_env_if(env_obj, NO_PROXY_LOWER_KEY, crate::setup::NO_PROXY, |cur| {
+        cur == crate::setup::NO_PROXY
+    }) {
         changed = true;
     }
-    if let Some(ca) = proxy.ca_certs.as_deref() {
-        if set_env_if(env_obj, NODE_EXTRA_CA_KEY, ca, is_llmtrim_ca_path) {
-            changed = true;
-        }
+    if let Some(ca) = proxy.ca_certs.as_deref()
+        && set_env_if(env_obj, NODE_EXTRA_CA_KEY, ca, is_llmtrim_ca_path)
+    {
+        changed = true;
     }
     if let Some(bundle) = proxy.ca_bundle.as_deref() {
         if set_env_if(env_obj, SSL_CERT_FILE_KEY, bundle, is_llmtrim_ca_path) {
@@ -1487,7 +1480,9 @@ fn remove_sub_auth_package(
         proxy.is_some_and(|p| cur == p.proxy_url) || is_llmtrim_proxy_url(cur)
     });
     drop_env_if(env_obj, NO_PROXY_KEY, |cur| cur == crate::setup::NO_PROXY);
-    drop_env_if(env_obj, NO_PROXY_LOWER_KEY, |cur| cur == crate::setup::NO_PROXY);
+    drop_env_if(env_obj, NO_PROXY_LOWER_KEY, |cur| {
+        cur == crate::setup::NO_PROXY
+    });
 
     drop_env_if(env_obj, NODE_EXTRA_CA_KEY, |cur| {
         proxy
@@ -2570,8 +2565,7 @@ mod tests {
             SubAuthEnvChange::Injected
         );
         assert_eq!(
-            settings["env"]["HTTPS_PROXY"],
-            "http://corp-proxy.example:8080",
+            settings["env"]["HTTPS_PROXY"], "http://corp-proxy.example:8080",
             "user corporate proxy left alone"
         );
         // Still adds the CA + NODE_USE_ENV_PROXY bits.
