@@ -1,3 +1,5 @@
+[![MCP Toplist](https://mcptoplist.com/badge/io.github.fkiene%2Fllmtrim.svg)](https://mcptoplist.com/server/io.github.fkiene%2Fllmtrim)
+
 <p align="center">
   <img src="assets/logo.png" alt="llmtrim" width="450">
 </p>
