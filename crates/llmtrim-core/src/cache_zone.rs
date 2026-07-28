@@ -34,27 +34,28 @@ pub fn compressible_pointers(req: &Request, provider: &dyn Provider) -> Vec<Stri
         .collect()
 }
 
-/// Tool-result pointers in the final cache-marked message. The breakpoint writes the whole
-/// message prefix, including sibling tool results before the marked block, so terminal-noise
-/// normalization at this boundary makes every later cache read cheaper. These pointers are separate
-/// from [`compressible_pointers`]: lossy live-zone transforms must never run on them.
+/// Tool-result pointers entering the cache at the final breakpoint. Claude Code may append a
+/// system reminder carrying the marker after the result, so skip those trailing system messages
+/// and select the adjacent tool-result message. Lossy transforms remain confined to the live zone.
 pub fn first_arrival_tool_result_pointers(req: &Request, provider: &dyn Provider) -> Vec<String> {
-    let raw = req.raw();
-    let newest_marked = raw
-        .get("messages")
-        .and_then(Value::as_array)
-        .and_then(|messages| {
-            let i = messages.len().checked_sub(1)?;
-            has_cache_control(&messages[i]).then_some(i)
-        });
+    let Some(messages) = req.raw().get("messages").and_then(Value::as_array) else {
+        return Vec::new();
+    };
+    let Some(mut boundary) = messages.len().checked_sub(1) else {
+        return Vec::new();
+    };
+    if !has_cache_control(&messages[boundary]) {
+        return Vec::new();
+    }
+    while boundary > 0 && messages[boundary].get("role").and_then(Value::as_str) == Some("system") {
+        boundary -= 1;
+    }
+    let prefix = format!("/messages/{boundary}/");
     provider
         .content_text_pointers(req)
         .into_iter()
         .filter(|pointer| {
-            newest_marked.is_some_and(|i| {
-                pointer.starts_with(&format!("/messages/{i}/"))
-                    && crate::provider::is_tool_result_ptr(req, pointer)
-            })
+            pointer.starts_with(&prefix) && crate::provider::is_tool_result_ptr(req, pointer)
         })
         .collect()
 }
@@ -252,6 +253,30 @@ mod tests {
                 "/messages/2/content/1/content".to_string(),
             ],
             "the breakpoint writes the whole final message, including sibling results"
+        );
+    }
+
+    #[test]
+    fn trailing_marked_system_reminder_caches_preceding_tool_result() {
+        let r = req(json!({
+            "messages": [
+                {"role": "assistant", "content": [
+                    {"type": "tool_use", "id": "new", "name": "shell", "input": {}}
+                ]},
+                {"role": "user", "content": [
+                    {"type": "tool_result", "tool_use_id": "new", "content": "new output"}
+                ]},
+                {"role": "system", "content": [
+                    {"type": "text", "text": "budget reminder",
+                     "cache_control": {"type": "ephemeral"}}
+                ]},
+            ]
+        }));
+        let p = for_kind(ProviderKind::Anthropic);
+
+        assert_eq!(
+            first_arrival_tool_result_pointers(&r, p.as_ref()),
+            vec!["/messages/1/content/0/content".to_string()]
         );
     }
 

@@ -154,20 +154,6 @@ pub fn run_gated(
     let mut content = count_content_cached(req, provider, counter, &mut seg_cache);
     let mut tools = count_tools(req, counter);
     let input_tokens_before = content + tools;
-    // Frozen-zone meter: size of the cache-controlled prefix the stages will skip. Counted
-    // once up front (the zone is immutable by discipline); `seg_cache` is already warm from
-    // the full content count, so this is hash lookups, not a second BPE pass.
-    let frozen_input_tokens: usize = crate::cache_zone::frozen_pointers(req, provider)
-        .iter()
-        .filter_map(|p| req.get_str(p))
-        .map(|s| {
-            seg_cache
-                .get(s)
-                .copied()
-                .unwrap_or_else(|| counter.count(s))
-        })
-        .sum();
-
     for stage in stages {
         let scope = stage.scope();
         let before = content + tools;
@@ -275,6 +261,19 @@ pub fn run_gated(
     }
 
     let input_tokens_after = content + tools;
+    // Measure the prefix bytes that will actually be cached. Toolout may apply lossless
+    // terminal normalization to a newly marked boundary, so the frozen zone is immutable only
+    // after the pipeline has finished. The segment cache keeps unchanged entries cheap.
+    let frozen_input_tokens: usize = crate::cache_zone::frozen_pointers(req, provider)
+        .iter()
+        .filter_map(|p| req.get_str(p))
+        .map(|s| {
+            seg_cache
+                .get(s)
+                .copied()
+                .unwrap_or_else(|| counter.count(s))
+        })
+        .sum();
     PipelineOutcome {
         stages: reports,
         plan,

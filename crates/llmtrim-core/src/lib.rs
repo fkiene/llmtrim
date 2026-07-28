@@ -577,7 +577,10 @@ mod tests {
                     {"type": "tool_use", "id": "new", "name": "shell", "input": {}}
                 ]},
                 {"role": "user", "content": [
-                    {"type": "tool_result", "tool_use_id": "new", "content": arriving_log,
+                    {"type": "tool_result", "tool_use_id": "new", "content": arriving_log}
+                ]},
+                {"role": "system", "content": [
+                    {"type": "text", "text": "budget reminder",
                      "cache_control": {"type": "ephemeral"}}
                 ]},
             ],
@@ -614,6 +617,14 @@ mod tests {
         assert!(
             !shaped.contains("omitted"),
             "cache-boundary shaping must never emit a lossy omission marker: {shaped}"
+        );
+        let counter =
+            tokenizer::counter_for(ProviderKind::Anthropic, result.model.as_deref()).unwrap();
+        let expected_frozen =
+            counter.count(&cached_log) + counter.count(shaped) + counter.count("budget reminder");
+        assert_eq!(
+            result.frozen_input_tokens.0, expected_frozen,
+            "the frozen-zone meter must describe the normalized bytes actually forwarded"
         );
     }
 
