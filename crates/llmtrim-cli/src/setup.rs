@@ -60,7 +60,9 @@ pub fn unset_hint() -> &'static str {
 /// CIDR). There is no portable way to express "all of 192.168.0.0/16" in `NO_PROXY`, so LAN
 /// bypass *by raw IP* is best-effort on non-CIDR clients; loopback/`localhost`/`*.local` is the
 /// portable, high-value core. The CIDR entries are harmless where ignored.
-const NO_PROXY: &str = "localhost,127.0.0.1,::1,10.0.0.0/8,172.16.0.0/12,192.168.0.0/16,169.254.0.0/16,fd00::/8,*.local";
+/// Shared with skip-login's Claude `settings.json` env package so shell profile and settings
+/// agree on the bypass list (see `statusline::SubAuthProxyEnv`).
+pub(crate) const NO_PROXY: &str = "localhost,127.0.0.1,::1,10.0.0.0/8,172.16.0.0/12,192.168.0.0/16,169.254.0.0/16,fd00::/8,*.local";
 
 /// Default interceptor port; the scan for a free port starts here. Chosen to be unassigned
 /// by IANA and below the OS ephemeral range (so it isn't grabbed as a transient client port),

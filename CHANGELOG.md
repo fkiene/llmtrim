@@ -6,6 +6,21 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Fixed
+
+- **Always-sub skip-login no longer 401s when the shell has no `HTTPS_PROXY`.** Skip-login
+  wrote `ANTHROPIC_AUTH_TOKEN=llmtrim-sub` into Claude Code's `settings.json` but still relied
+  on the shell profile for `HTTPS_PROXY` + CA trust. Shells that never sourced the managed
+  block (non-interactive launch, IDE/remote, shell opened while the daemon was down) sent the
+  dummy bearer straight to api.anthropic.com → `Please run /login · API Error: 401 Invalid
+  bearer token` despite a healthy MITM and a logged-in Grok/Codex/Kimi sub. The skip-login
+  package now also pins `HTTPS_PROXY` / `HTTP_PROXY` / `NO_PROXY` / `NODE_EXTRA_CA_CERTS`
+  (and the CA bundle vars when present) into `settings.json` `env`, so Claude routes through
+  the MITM regardless of how it was launched — the settings analogue of claude-code-proxy
+  pinning `ANTHROPIC_BASE_URL` next to its dummy token. Settings deliberately do not gate on
+  daemon liveness (unlike the shell block): a temporarily down proxy is a connection error,
+  not a fake `/login` prompt. `llmtrim ensure` upgrades existing installs.
+
 ## [0.11.12] - 2026-07-27
 
 ### Fixed

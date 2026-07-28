@@ -1261,6 +1261,18 @@ pub fn uninstall() -> Result<()> {
 // claude.ai login, so **claude.ai connectors are disabled** while our dummy is set. Users who
 // need connectors run `llmtrim sub anthropic-login keep` (and stay logged in to Anthropic).
 //
+// The dummy token alone is not enough. Shell profiles only export `HTTPS_PROXY` when the
+// daemon is alive *at shell start*, and non-interactive / IDE / remote launches often never
+// source those profiles. Claude then sends `Authorization: Bearer llmtrim-sub` straight to
+// api.anthropic.com → `401 Invalid bearer token` / "Please run /login". So the skip-login
+// package also writes the MITM proxy URL + CA trust into `settings.json` `env`, which Claude
+// loads regardless of how it was launched.
+//
+// Unlike the shell block, settings deliberately do **not** gate on daemon liveness: Claude
+// cannot re-read the profile mid-session, and a dummy token without a proxy is always worse
+// than a proxy that is temporarily down (connection error vs. "Please run /login"). When
+// skip-login turns off, the whole package is removed.
+//
 // Ownership: only touch the key when missing or already set to our sentinel value. Never
 // overwrite a real API key the user put there, and never remove a foreign value on `sub off`.
 // We deliberately do *not* manage CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC — that flag is a
@@ -1271,6 +1283,23 @@ pub fn uninstall() -> Result<()> {
 pub const SUB_AUTH_TOKEN_VALUE: &str = "llmtrim-sub";
 
 const SUB_AUTH_TOKEN_KEY: &str = "ANTHROPIC_AUTH_TOKEN";
+
+/// MITM proxy + CA paths written into Claude `settings.json` env alongside the dummy token.
+/// Without these, skip-login depends on the shell having exported `HTTPS_PROXY` — and that
+/// fails for any launch that did not source the managed profile while the daemon was up.
+///
+/// `proxy_url` is always set (port falls back to [`crate::setup::DEFAULT_PORT`]). CA paths are
+/// optional so a missing `ca.pem` still pins the proxy URL rather than leaving a dummy-only
+/// package that 401s at Anthropic.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SubAuthProxyEnv {
+    /// e.g. `http://127.0.0.1:43117`
+    pub proxy_url: String,
+    /// Path to the llmtrim MITM CA (`ca.pem`) for `NODE_EXTRA_CA_CERTS`, when the file exists.
+    pub ca_certs: Option<String>,
+    /// Combined OS-roots + MITM CA bundle, when available (`ca-bundle.pem`).
+    pub ca_bundle: Option<String>,
+}
 
 /// Result of reconciling the Claude Code dummy-auth env with the current sub mode.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1302,12 +1331,202 @@ pub enum SubAuthEnvPresence {
 const NODE_USE_ENV_PROXY_KEY: &str = "NODE_USE_ENV_PROXY";
 const NODE_USE_ENV_PROXY_VALUE: &str = "1";
 
+const HTTPS_PROXY_KEY: &str = "HTTPS_PROXY";
+const HTTP_PROXY_KEY: &str = "HTTP_PROXY";
+const NO_PROXY_KEY: &str = "NO_PROXY";
+const NO_PROXY_LOWER_KEY: &str = "no_proxy";
+const NODE_EXTRA_CA_KEY: &str = "NODE_EXTRA_CA_CERTS";
+const SSL_CERT_FILE_KEY: &str = "SSL_CERT_FILE";
+const CURL_CA_BUNDLE_KEY: &str = "CURL_CA_BUNDLE";
+
+/// True when `value` is something we previously wrote for the MITM proxy URL
+/// (`http://127.0.0.1:<digits>`), so an upgrade can rewrite the port without clobbering a
+/// user's unrelated proxy.
+fn is_llmtrim_proxy_url(value: &str) -> bool {
+    let rest = value
+        .strip_prefix("http://127.0.0.1:")
+        .or_else(|| value.strip_prefix("http://localhost:"));
+    rest.is_some_and(|r| !r.is_empty() && r.chars().all(|c| c.is_ascii_digit()))
+}
+
+/// True when `value` looks like an llmtrim CA path under `~/.llmtrim/` (any home).
+fn is_llmtrim_ca_path(value: &str) -> bool {
+    let norm = value.replace('\\', "/");
+    norm.contains("/.llmtrim/")
+        && (norm.ends_with("/ca.pem") || norm.ends_with("/ca-bundle.pem"))
+}
+
+/// Insert/update one env key. Overwrites when absent or `can_overwrite(current)`; never
+/// clobbers a foreign value.
+fn set_env_if(
+    env_obj: &mut serde_json::Map<String, Value>,
+    key: &str,
+    want: &str,
+    can_overwrite: impl Fn(&str) -> bool,
+) -> bool {
+    match env_obj.get(key).and_then(Value::as_str) {
+        Some(cur) if cur == want => false,
+        Some(cur) if !can_overwrite(cur) => false,
+        _ => {
+            env_obj.insert(key.to_string(), Value::String(want.to_string()));
+            true
+        }
+    }
+}
+
+fn drop_env_if(
+    env_obj: &mut serde_json::Map<String, Value>,
+    key: &str,
+    should_drop: impl Fn(&str) -> bool,
+) {
+    if env_obj
+        .get(key)
+        .and_then(Value::as_str)
+        .is_some_and(should_drop)
+    {
+        env_obj.remove(key);
+    }
+}
+
+/// Insert/update our skip-login package keys on `env_obj`. Returns whether anything changed.
+///
+/// Proxy/CA keys are only written when `proxy` is `Some`. Existing values are overwritten only
+/// when absent or already ours (loopback llmtrim URL / llmtrim CA path) — never a foreign proxy.
+///
+/// `NODE_USE_ENV_PROXY` is forced to `"1"` whenever we own the package: a foreign `"0"` would
+/// leave undici ignoring `HTTPS_PROXY` and reintroduce the 401.
+fn ensure_sub_auth_package(
+    env_obj: &mut serde_json::Map<String, Value>,
+    proxy: Option<&SubAuthProxyEnv>,
+) -> bool {
+    let mut changed = false;
+
+    // Always force undici to honor HTTPS_PROXY while skip-login owns the process.
+    if set_env_if(
+        env_obj,
+        NODE_USE_ENV_PROXY_KEY,
+        NODE_USE_ENV_PROXY_VALUE,
+        |_| true,
+    ) {
+        changed = true;
+    }
+
+    let Some(proxy) = proxy else {
+        return changed;
+    };
+
+    if set_env_if(
+        env_obj,
+        HTTPS_PROXY_KEY,
+        &proxy.proxy_url,
+        is_llmtrim_proxy_url,
+    ) {
+        changed = true;
+    }
+    if set_env_if(
+        env_obj,
+        HTTP_PROXY_KEY,
+        &proxy.proxy_url,
+        is_llmtrim_proxy_url,
+    ) {
+        changed = true;
+    }
+    // Same bypass list as the shell profile — Claude (and children) must not MITM loopback.
+    if set_env_if(
+        env_obj,
+        NO_PROXY_KEY,
+        crate::setup::NO_PROXY,
+        |cur| cur == crate::setup::NO_PROXY,
+    ) {
+        changed = true;
+    }
+    if set_env_if(
+        env_obj,
+        NO_PROXY_LOWER_KEY,
+        crate::setup::NO_PROXY,
+        |cur| cur == crate::setup::NO_PROXY,
+    ) {
+        changed = true;
+    }
+    if let Some(ca) = proxy.ca_certs.as_deref() {
+        if set_env_if(env_obj, NODE_EXTRA_CA_KEY, ca, is_llmtrim_ca_path) {
+            changed = true;
+        }
+    }
+    if let Some(bundle) = proxy.ca_bundle.as_deref() {
+        if set_env_if(env_obj, SSL_CERT_FILE_KEY, bundle, is_llmtrim_ca_path) {
+            changed = true;
+        }
+        if set_env_if(env_obj, CURL_CA_BUNDLE_KEY, bundle, is_llmtrim_ca_path) {
+            changed = true;
+        }
+    }
+    changed
+}
+
+/// Drop keys we own from `env_obj`.
+///
+/// Removal is shape-based (loopback MITM URL / `~/.llmtrim/` CA path), not exact-value-only:
+/// if the daemon moved ports after we wrote settings, teardown must still clear the stale URL
+/// rather than leave a dead `HTTPS_PROXY` after `sub off` / uninstall.
+fn remove_sub_auth_package(
+    env_obj: &mut serde_json::Map<String, Value>,
+    proxy: Option<&SubAuthProxyEnv>,
+) {
+    env_obj.remove(SUB_AUTH_TOKEN_KEY);
+    if env_obj.get(NODE_USE_ENV_PROXY_KEY).and_then(Value::as_str) == Some(NODE_USE_ENV_PROXY_VALUE)
+    {
+        env_obj.remove(NODE_USE_ENV_PROXY_KEY);
+    }
+
+    // Exact match when known, else any loopback MITM URL we would have written.
+    drop_env_if(env_obj, HTTPS_PROXY_KEY, |cur| {
+        proxy.is_some_and(|p| cur == p.proxy_url) || is_llmtrim_proxy_url(cur)
+    });
+    drop_env_if(env_obj, HTTP_PROXY_KEY, |cur| {
+        proxy.is_some_and(|p| cur == p.proxy_url) || is_llmtrim_proxy_url(cur)
+    });
+    drop_env_if(env_obj, NO_PROXY_KEY, |cur| cur == crate::setup::NO_PROXY);
+    drop_env_if(env_obj, NO_PROXY_LOWER_KEY, |cur| cur == crate::setup::NO_PROXY);
+
+    drop_env_if(env_obj, NODE_EXTRA_CA_KEY, |cur| {
+        proxy
+            .and_then(|p| p.ca_certs.as_deref())
+            .is_some_and(|ca| cur == ca)
+            || is_llmtrim_ca_path(cur)
+    });
+    drop_env_if(env_obj, SSL_CERT_FILE_KEY, |cur| {
+        proxy
+            .and_then(|p| p.ca_bundle.as_deref())
+            .is_some_and(|b| cur == b)
+            || is_llmtrim_ca_path(cur)
+    });
+    drop_env_if(env_obj, CURL_CA_BUNDLE_KEY, |cur| {
+        proxy
+            .and_then(|p| p.ca_bundle.as_deref())
+            .is_some_and(|b| cur == b)
+            || is_llmtrim_ca_path(cur)
+    });
+
+    // Legacy cleanup: early 0.11.8-dev also wrote CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1
+    // alongside our sentinel. Drop it when tearing down our package.
+    const LEGACY_NONESSENTIAL_KEY: &str = "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC";
+    if env_obj.get(LEGACY_NONESSENTIAL_KEY).and_then(Value::as_str) == Some("1") {
+        env_obj.remove(LEGACY_NONESSENTIAL_KEY);
+    }
+}
+
 /// Pure mutation of a parsed Claude settings object.
 ///
-/// - `want = true`: set `env.ANTHROPIC_AUTH_TOKEN` to [`SUB_AUTH_TOKEN_VALUE`] (and
-///   `NODE_USE_ENV_PROXY=1`) unless a foreign (non-sentinel) token is already there.
+/// - `want = true`: set `env.ANTHROPIC_AUTH_TOKEN` to [`SUB_AUTH_TOKEN_VALUE`],
+///   `NODE_USE_ENV_PROXY=1`, and (when `proxy` is provided) the MITM `HTTPS_PROXY` + CA trust
+///   keys — unless a foreign (non-sentinel) token is already there.
 /// - `want = false`: remove those keys only when the token holds our sentinel.
-pub fn apply_sub_auth_env(settings: &mut Value, want: bool) -> Result<SubAuthEnvChange> {
+pub fn apply_sub_auth_env(
+    settings: &mut Value,
+    want: bool,
+    proxy: Option<&SubAuthProxyEnv>,
+) -> Result<SubAuthEnvChange> {
     let root = settings
         .as_object_mut()
         .context("Claude settings root must be an object")?;
@@ -1322,24 +1541,19 @@ pub fn apply_sub_auth_env(settings: &mut Value, want: bool) -> Result<SubAuthEnv
     if want {
         match current.as_deref() {
             Some(SUB_AUTH_TOKEN_VALUE) => {
-                // Ours already — still ensure Node honors HTTPS_PROXY (upgrade path for
-                // installs that got the dummy token before NODE_USE_ENV_PROXY was added).
+                // Ours already — still ensure the full skip-login package (upgrade path for
+                // installs that got the dummy token before NODE_USE_ENV_PROXY / settings-level
+                // HTTPS_PROXY were added).
                 let env = root
                     .entry("env")
                     .or_insert_with(|| Value::Object(Default::default()));
                 let env_obj = env
                     .as_object_mut()
                     .context("Claude settings env must be an object")?;
-                let proxy_ok = env_obj.get(NODE_USE_ENV_PROXY_KEY).and_then(Value::as_str)
-                    == Some(NODE_USE_ENV_PROXY_VALUE);
-                if proxy_ok {
-                    return Ok(SubAuthEnvChange::Unchanged);
+                if ensure_sub_auth_package(env_obj, proxy) {
+                    return Ok(SubAuthEnvChange::Injected);
                 }
-                env_obj.insert(
-                    NODE_USE_ENV_PROXY_KEY.to_string(),
-                    Value::String(NODE_USE_ENV_PROXY_VALUE.to_string()),
-                );
-                return Ok(SubAuthEnvChange::Injected);
+                return Ok(SubAuthEnvChange::Unchanged);
             }
             Some(_) => return Ok(SubAuthEnvChange::Unchanged), // foreign — leave alone
             None => {
@@ -1353,10 +1567,7 @@ pub fn apply_sub_auth_env(settings: &mut Value, want: bool) -> Result<SubAuthEnv
                     SUB_AUTH_TOKEN_KEY.to_string(),
                     Value::String(SUB_AUTH_TOKEN_VALUE.to_string()),
                 );
-                env_obj.insert(
-                    NODE_USE_ENV_PROXY_KEY.to_string(),
-                    Value::String(NODE_USE_ENV_PROXY_VALUE.to_string()),
-                );
+                ensure_sub_auth_package(env_obj, proxy);
                 return Ok(SubAuthEnvChange::Injected);
             }
         }
@@ -1372,21 +1583,38 @@ pub fn apply_sub_auth_env(settings: &mut Value, want: bool) -> Result<SubAuthEnv
     let Some(env_obj) = env.as_object_mut() else {
         return Ok(SubAuthEnvChange::Unchanged);
     };
-    env_obj.remove(SUB_AUTH_TOKEN_KEY);
-    if env_obj.get(NODE_USE_ENV_PROXY_KEY).and_then(Value::as_str) == Some(NODE_USE_ENV_PROXY_VALUE)
-    {
-        env_obj.remove(NODE_USE_ENV_PROXY_KEY);
-    }
-    // Legacy cleanup: early 0.11.8-dev also wrote CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1
-    // alongside our sentinel. Drop it when tearing down our package.
-    const LEGACY_NONESSENTIAL_KEY: &str = "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC";
-    if env_obj.get(LEGACY_NONESSENTIAL_KEY).and_then(Value::as_str) == Some("1") {
-        env_obj.remove(LEGACY_NONESSENTIAL_KEY);
-    }
+    remove_sub_auth_package(env_obj, proxy);
     if env_obj.is_empty() {
         root.remove("env");
     }
     Ok(SubAuthEnvChange::Removed)
+}
+
+/// Resolve the MITM proxy URL + CA paths that skip-login should pin into Claude settings.
+/// Prefer the live daemon port, then the port wired into shell profiles, then the default.
+///
+/// Always returns `Some`: a missing CA must not block writing `HTTPS_PROXY` (dummy token
+/// without a proxy is the 401 footgun this package exists to prevent).
+fn resolve_sub_auth_proxy_env() -> SubAuthProxyEnv {
+    let port = crate::daemon::running()
+        .map(|s| s.port)
+        .or_else(crate::setup::configured_port)
+        .unwrap_or(crate::setup::DEFAULT_PORT);
+    let (ca_certs, ca_bundle) = match crate::serve::ca_cert_path() {
+        Ok(ca) if ca.is_file() => {
+            let bundle_path = ca.with_file_name("ca-bundle.pem");
+            let ca_bundle = bundle_path
+                .is_file()
+                .then(|| bundle_path.to_string_lossy().into_owned());
+            (Some(ca.to_string_lossy().into_owned()), ca_bundle)
+        }
+        _ => (None, None),
+    };
+    SubAuthProxyEnv {
+        proxy_url: format!("http://127.0.0.1:{port}"),
+        ca_certs,
+        ca_bundle,
+    }
 }
 
 /// Reconcile `~/.claude/settings.json` with whether we should skip Anthropic login.
@@ -1404,7 +1632,8 @@ pub fn sync_sub_auth_env(want: bool) -> Result<SubAuthEnvChange> {
         serde_json::from_str(&existing)
             .with_context(|| format!("{} is not valid JSON", path.display()))?
     };
-    let change = apply_sub_auth_env(&mut settings, want)?;
+    let proxy = resolve_sub_auth_proxy_env();
+    let change = apply_sub_auth_env(&mut settings, want, Some(&proxy))?;
     if matches!(
         change,
         SubAuthEnvChange::Injected | SubAuthEnvChange::Removed
@@ -2110,11 +2339,20 @@ mod tests {
         assert!(clear_statusline(&mut settings, p).is_err());
     }
 
+    fn sample_proxy() -> SubAuthProxyEnv {
+        SubAuthProxyEnv {
+            proxy_url: "http://127.0.0.1:43117".into(),
+            ca_certs: Some("/home/u/.llmtrim/ca.pem".into()),
+            ca_bundle: Some("/home/u/.llmtrim/ca-bundle.pem".into()),
+        }
+    }
+
     #[test]
     fn sub_auth_env_injects_sentinel_and_removes_only_ours() {
         let mut settings = serde_json::json!({ "theme": "dark" });
+        let proxy = sample_proxy();
         assert_eq!(
-            apply_sub_auth_env(&mut settings, true).unwrap(),
+            apply_sub_auth_env(&mut settings, true, Some(&proxy)).unwrap(),
             SubAuthEnvChange::Injected
         );
         assert_eq!(
@@ -2122,14 +2360,26 @@ mod tests {
             SUB_AUTH_TOKEN_VALUE
         );
         assert_eq!(settings["env"]["NODE_USE_ENV_PROXY"], "1");
-        // Idempotent when already ours (token + proxy flag).
+        assert_eq!(settings["env"]["HTTPS_PROXY"], "http://127.0.0.1:43117");
+        assert_eq!(settings["env"]["HTTP_PROXY"], "http://127.0.0.1:43117");
+        assert_eq!(settings["env"]["NO_PROXY"], crate::setup::NO_PROXY);
+        assert_eq!(settings["env"]["no_proxy"], crate::setup::NO_PROXY);
         assert_eq!(
-            apply_sub_auth_env(&mut settings, true).unwrap(),
+            settings["env"]["NODE_EXTRA_CA_CERTS"],
+            "/home/u/.llmtrim/ca.pem"
+        );
+        assert_eq!(
+            settings["env"]["SSL_CERT_FILE"],
+            "/home/u/.llmtrim/ca-bundle.pem"
+        );
+        // Idempotent when already ours (full package).
+        assert_eq!(
+            apply_sub_auth_env(&mut settings, true, Some(&proxy)).unwrap(),
             SubAuthEnvChange::Unchanged
         );
         // Remove on want=false.
         assert_eq!(
-            apply_sub_auth_env(&mut settings, false).unwrap(),
+            apply_sub_auth_env(&mut settings, false, Some(&proxy)).unwrap(),
             SubAuthEnvChange::Removed
         );
         assert!(settings.get("env").is_none(), "empty env object dropped");
@@ -2141,13 +2391,18 @@ mod tests {
         let mut settings = serde_json::json!({
             "env": { "ANTHROPIC_AUTH_TOKEN": "sk-ant-real", "OTHER": "keep" }
         });
+        let proxy = sample_proxy();
         assert_eq!(
-            apply_sub_auth_env(&mut settings, true).unwrap(),
+            apply_sub_auth_env(&mut settings, true, Some(&proxy)).unwrap(),
             SubAuthEnvChange::Unchanged
         );
         assert_eq!(settings["env"]["ANTHROPIC_AUTH_TOKEN"], "sk-ant-real");
+        assert!(
+            settings["env"].get("HTTPS_PROXY").is_none(),
+            "foreign token blocks the whole package"
+        );
         assert_eq!(
-            apply_sub_auth_env(&mut settings, false).unwrap(),
+            apply_sub_auth_env(&mut settings, false, Some(&proxy)).unwrap(),
             SubAuthEnvChange::Unchanged
         );
         assert_eq!(settings["env"]["ANTHROPIC_AUTH_TOKEN"], "sk-ant-real");
@@ -2163,7 +2418,7 @@ mod tests {
             }
         });
         assert_eq!(
-            apply_sub_auth_env(&mut settings, false).unwrap(),
+            apply_sub_auth_env(&mut settings, false, None).unwrap(),
             SubAuthEnvChange::Removed
         );
         assert!(settings["env"].get("ANTHROPIC_AUTH_TOKEN").is_none());
@@ -2176,16 +2431,21 @@ mod tests {
             "env": {
                 "ANTHROPIC_AUTH_TOKEN": SUB_AUTH_TOKEN_VALUE,
                 "NODE_USE_ENV_PROXY": "1",
+                "HTTPS_PROXY": "http://127.0.0.1:43117",
                 "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1",
                 "CLAUDE_CODE_EFFORT_LEVEL": "low"
             }
         });
         assert_eq!(
-            apply_sub_auth_env(&mut settings, false).unwrap(),
+            apply_sub_auth_env(&mut settings, false, None).unwrap(),
             SubAuthEnvChange::Removed
         );
         assert!(settings["env"].get("ANTHROPIC_AUTH_TOKEN").is_none());
         assert!(settings["env"].get("NODE_USE_ENV_PROXY").is_none());
+        assert!(
+            settings["env"].get("HTTPS_PROXY").is_none(),
+            "loopback MITM proxy cleaned without resolved package"
+        );
         assert!(
             settings["env"]
                 .get("CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC")
@@ -2196,15 +2456,130 @@ mod tests {
     }
 
     #[test]
-    fn sub_auth_env_upgrades_existing_token_with_node_proxy_flag() {
+    fn sub_auth_env_upgrades_existing_token_with_proxy_package() {
+        // Pre-fix installs only wrote the dummy token (+ maybe NODE_USE_ENV_PROXY). A
+        // reconcile must add HTTPS_PROXY + CA so Claude does not need shell profile env.
         let mut settings = serde_json::json!({
             "env": { "ANTHROPIC_AUTH_TOKEN": SUB_AUTH_TOKEN_VALUE }
         });
+        let proxy = sample_proxy();
         assert_eq!(
-            apply_sub_auth_env(&mut settings, true).unwrap(),
+            apply_sub_auth_env(&mut settings, true, Some(&proxy)).unwrap(),
             SubAuthEnvChange::Injected
         );
         assert_eq!(settings["env"]["NODE_USE_ENV_PROXY"], "1");
+        assert_eq!(settings["env"]["HTTPS_PROXY"], "http://127.0.0.1:43117");
+        assert_eq!(settings["env"]["NO_PROXY"], crate::setup::NO_PROXY);
+        assert_eq!(
+            settings["env"]["NODE_EXTRA_CA_CERTS"],
+            "/home/u/.llmtrim/ca.pem"
+        );
+    }
+
+    #[test]
+    fn sub_auth_env_rewrites_stale_loopback_proxy_port() {
+        let mut settings = serde_json::json!({
+            "env": {
+                "ANTHROPIC_AUTH_TOKEN": SUB_AUTH_TOKEN_VALUE,
+                "NODE_USE_ENV_PROXY": "1",
+                "HTTPS_PROXY": "http://127.0.0.1:9999",
+                "HTTP_PROXY": "http://127.0.0.1:9999"
+            }
+        });
+        let proxy = sample_proxy();
+        assert_eq!(
+            apply_sub_auth_env(&mut settings, true, Some(&proxy)).unwrap(),
+            SubAuthEnvChange::Injected
+        );
+        assert_eq!(settings["env"]["HTTPS_PROXY"], "http://127.0.0.1:43117");
+        assert_eq!(settings["env"]["HTTP_PROXY"], "http://127.0.0.1:43117");
+    }
+
+    #[test]
+    fn sub_auth_env_remove_clears_stale_port_when_resolved_port_differs() {
+        // Wrote :43117 earlier; daemon now lives on :8787. Teardown must still drop the
+        // stale loopback URL (exact-match-only remove left it behind).
+        let mut settings = serde_json::json!({
+            "env": {
+                "ANTHROPIC_AUTH_TOKEN": SUB_AUTH_TOKEN_VALUE,
+                "NODE_USE_ENV_PROXY": "1",
+                "HTTPS_PROXY": "http://127.0.0.1:43117",
+                "HTTP_PROXY": "http://127.0.0.1:43117",
+                "NODE_EXTRA_CA_CERTS": "/home/u/.llmtrim/ca.pem",
+                "CLAUDE_CODE_EFFORT_LEVEL": "low"
+            }
+        });
+        let current = SubAuthProxyEnv {
+            proxy_url: "http://127.0.0.1:8787".into(),
+            ca_certs: Some("/home/u/.llmtrim/ca.pem".into()),
+            ca_bundle: None,
+        };
+        assert_eq!(
+            apply_sub_auth_env(&mut settings, false, Some(&current)).unwrap(),
+            SubAuthEnvChange::Removed
+        );
+        assert!(settings["env"].get("HTTPS_PROXY").is_none());
+        assert!(settings["env"].get("HTTP_PROXY").is_none());
+        assert!(settings["env"].get("NODE_EXTRA_CA_CERTS").is_none());
+        assert_eq!(settings["env"]["CLAUDE_CODE_EFFORT_LEVEL"], "low");
+    }
+
+    #[test]
+    fn sub_auth_env_forces_node_use_env_proxy_over_zero() {
+        let mut settings = serde_json::json!({
+            "env": {
+                "ANTHROPIC_AUTH_TOKEN": SUB_AUTH_TOKEN_VALUE,
+                "NODE_USE_ENV_PROXY": "0"
+            }
+        });
+        let proxy = sample_proxy();
+        assert_eq!(
+            apply_sub_auth_env(&mut settings, true, Some(&proxy)).unwrap(),
+            SubAuthEnvChange::Injected
+        );
+        assert_eq!(settings["env"]["NODE_USE_ENV_PROXY"], "1");
+    }
+
+    #[test]
+    fn sub_auth_env_proxy_url_without_ca_still_writes_https_proxy() {
+        let mut settings = serde_json::json!({ "theme": "dark" });
+        let proxy = SubAuthProxyEnv {
+            proxy_url: "http://127.0.0.1:43117".into(),
+            ca_certs: None,
+            ca_bundle: None,
+        };
+        assert_eq!(
+            apply_sub_auth_env(&mut settings, true, Some(&proxy)).unwrap(),
+            SubAuthEnvChange::Injected
+        );
+        assert_eq!(settings["env"]["HTTPS_PROXY"], "http://127.0.0.1:43117");
+        assert!(settings["env"].get("NODE_EXTRA_CA_CERTS").is_none());
+    }
+
+    #[test]
+    fn sub_auth_env_does_not_clobber_foreign_https_proxy() {
+        let mut settings = serde_json::json!({
+            "env": {
+                "ANTHROPIC_AUTH_TOKEN": SUB_AUTH_TOKEN_VALUE,
+                "HTTPS_PROXY": "http://corp-proxy.example:8080"
+            }
+        });
+        let proxy = sample_proxy();
+        assert_eq!(
+            apply_sub_auth_env(&mut settings, true, Some(&proxy)).unwrap(),
+            SubAuthEnvChange::Injected
+        );
+        assert_eq!(
+            settings["env"]["HTTPS_PROXY"],
+            "http://corp-proxy.example:8080",
+            "user corporate proxy left alone"
+        );
+        // Still adds the CA + NODE_USE_ENV_PROXY bits.
+        assert_eq!(settings["env"]["NODE_USE_ENV_PROXY"], "1");
+        assert_eq!(
+            settings["env"]["NODE_EXTRA_CA_CERTS"],
+            "/home/u/.llmtrim/ca.pem"
+        );
     }
 
     #[test]
@@ -2215,7 +2590,7 @@ mod tests {
             }
         });
         assert_eq!(
-            apply_sub_auth_env(&mut settings, false).unwrap(),
+            apply_sub_auth_env(&mut settings, false, None).unwrap(),
             SubAuthEnvChange::Unchanged
         );
         assert_eq!(
