@@ -1,9 +1,10 @@
-//! The tabbed cost-breakdown TUI: event loop, terminal lifecycle, and the three views.
+//! The tabbed cost-breakdown TUI: event loop, terminal lifecycle, and the views.
 //!
 //! Tabs: **Overview** (the savings dashboard, supplied by the caller as plain text),
-//! **Sessions** (every session grouped agent → project → session), and **Detail** (drill
+//! **Sessions** (every session grouped agent → project → session), **Detail** (drill
 //! into a session: context-window occupancy on top, per-source cost down to each MCP
-//! server below). Keyboard driven; live-refreshes the ledger on a timer.
+//! server below), and **Sub** (subscription routing presets + tier map). Keyboard driven;
+//! live-refreshes the ledger on a timer.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -28,6 +29,20 @@ use ratatui::{Frame, Terminal};
 use super::db::{BreakdownDb, CostRow, OccupancyRow, SessionRow};
 use super::palette;
 use super::tree::{Activate, Column, TreeNode, TreeTable};
+
+/// When set, the next [`run`] opens on the Sub tab (consumed once). The optional
+/// provider is preselected (not applied) so `sub setup kimi` highlights Kimi.
+#[cfg(feature = "intercept")]
+static START_ON_SUB: std::sync::Mutex<Option<Option<crate::reroute::SubProvider>>> =
+    std::sync::Mutex::new(None);
+
+/// Open the next status TUI on the Sub tab. `provider` is highlighted for apply/edit.
+#[cfg(feature = "intercept")]
+pub fn open_on_sub_next(provider: Option<crate::reroute::SubProvider>) {
+    if let Ok(mut g) = START_ON_SUB.lock() {
+        *g = Some(provider);
+    }
+}
 
 /// Spoken health of the proxy — plain words, no port/pid/CA jargon. `Off` is the dangerous
 /// state (wired but not running); `fix`/`uninstall` are the literal commands to type.
@@ -121,6 +136,9 @@ enum Tab {
     Overview,
     Sessions,
     Detail,
+    /// Subscription routing (presets + map). Only meaningful with `intercept`.
+    #[cfg(feature = "intercept")]
+    Sub,
 }
 
 /// Sessions-tree payload: only session leaves are drillable.
@@ -254,6 +272,17 @@ pub fn run(
 
     let mut app = App::new(None, refresh);
     app.detail_req = Some(detail_tx);
+    // `llmtrim sub setup` calls [`open_on_sub_next`] so status lands on the Sub tab.
+    #[cfg(feature = "intercept")]
+    if let Ok(mut g) = START_ON_SUB.lock()
+        && let Some(provider) = g.take()
+    {
+        app.tab = Tab::Sub;
+        app.sub.refresh();
+        if let Some(p) = provider {
+            app.sub.preselect_provider(p);
+        }
+    }
 
     // Redraw only when something changed — a key, a fresh snapshot, or the once-a-second
     // animation tick (clock/mascot/quip). Idle repaints ~1×/s instead of the ~4×/s the 250ms
@@ -335,6 +364,8 @@ pub fn run(
     let action = app.action;
     let pending_ensure = app.pending_ensure;
     let pending_sub_login = app.pending_sub_login;
+    #[cfg(feature = "intercept")]
+    let pending_sub_apply = app.pending_sub_apply || app.sub.needs_apply;
     // Leave alt-screen before any normal stdout work (ensure / sub hints).
     drop(terminal);
     drop(guard);
@@ -347,6 +378,10 @@ pub fn run(
         println!("  llmtrim sub auth codex login   # ChatGPT / Codex plan");
         println!("  llmtrim sub auth kimi login    # Kimi coding plan");
         println!("  llmtrim sub on codex           # enable after login");
+    }
+    #[cfg(feature = "intercept")]
+    if pending_sub_apply {
+        println!("{}", super::sub_panel::apply_pending_changes());
     }
     Ok(action)
 }
@@ -404,6 +439,12 @@ struct App {
     pending_ensure: bool,
     /// Print sub login steps after the TUI tears down.
     pending_sub_login: bool,
+    /// Sub-tab wrote config that needs Claude-auth sync + daemon restart after exit.
+    #[cfg(feature = "intercept")]
+    pending_sub_apply: bool,
+    /// Subscription routing panel (Tab 4).
+    #[cfg(feature = "intercept")]
+    sub: super::sub_panel::SubPanel,
 }
 
 impl App {
@@ -429,6 +470,10 @@ impl App {
             show_sub_nudge: crate::ensure::should_show_sub_nudge(),
             pending_ensure: false,
             pending_sub_login: false,
+            #[cfg(feature = "intercept")]
+            pending_sub_apply: false,
+            #[cfg(feature = "intercept")]
+            sub: super::sub_panel::SubPanel::new(),
         }
     }
 
@@ -503,11 +548,22 @@ impl App {
                 };
                 return true;
             }
-            // One-time sub onboarding: `s` = show login steps (after exit), `n` = never again.
+            // One-time sub onboarding: `s` opens the Sub tab (or prints login steps when
+            // intercept is off); `n` = never again.
             KeyCode::Char('s') if self.show_sub_nudge && self.tab == Tab::Overview => {
                 self.show_sub_nudge = false;
-                self.pending_sub_login = true;
-                return true;
+                let _ = crate::ensure::mark_sub_nudge_shown();
+                #[cfg(feature = "intercept")]
+                {
+                    self.tab = Tab::Sub;
+                    self.sub.refresh();
+                    return false;
+                }
+                #[cfg(not(feature = "intercept"))]
+                {
+                    self.pending_sub_login = true;
+                    return true;
+                }
             }
             KeyCode::Char('n') if self.show_sub_nudge && self.tab == Tab::Overview => {
                 self.show_sub_nudge = false;
@@ -531,6 +587,11 @@ impl App {
             KeyCode::Char('1') => self.tab = Tab::Overview,
             KeyCode::Char('2') => self.tab = Tab::Sessions,
             KeyCode::Char('3') => self.tab = Tab::Detail,
+            #[cfg(feature = "intercept")]
+            KeyCode::Char('4') => {
+                self.tab = Tab::Sub;
+                self.sub.refresh();
+            }
             // Tab cycles the top-level tabs everywhere (consistent). Shift-Tab steps the
             // Detail panes when there (else previous tab), so Tab never changes meaning.
             KeyCode::Tab => self.cycle_tab(),
@@ -547,6 +608,13 @@ impl App {
                 Tab::Overview => self.overview_key(code),
                 Tab::Sessions => self.sessions_key(code),
                 Tab::Detail => self.detail_key(code),
+                #[cfg(feature = "intercept")]
+                Tab::Sub => {
+                    let _ = self.sub.handle_key(code);
+                    if self.sub.needs_apply {
+                        self.pending_sub_apply = true;
+                    }
+                }
             },
         }
         false
@@ -556,15 +624,31 @@ impl App {
         self.tab = match self.tab {
             Tab::Overview => Tab::Sessions,
             Tab::Sessions => Tab::Detail,
+            #[cfg(feature = "intercept")]
+            Tab::Detail => {
+                self.sub.refresh();
+                Tab::Sub
+            }
+            #[cfg(not(feature = "intercept"))]
             Tab::Detail => Tab::Overview,
+            #[cfg(feature = "intercept")]
+            Tab::Sub => Tab::Overview,
         };
     }
 
     fn cycle_tab_back(&mut self) {
         self.tab = match self.tab {
+            #[cfg(feature = "intercept")]
+            Tab::Overview => {
+                self.sub.refresh();
+                Tab::Sub
+            }
+            #[cfg(not(feature = "intercept"))]
             Tab::Overview => Tab::Detail,
             Tab::Sessions => Tab::Overview,
             Tab::Detail => Tab::Sessions,
+            #[cfg(feature = "intercept")]
+            Tab::Sub => Tab::Detail,
         };
     }
 
@@ -690,6 +774,8 @@ impl App {
             Tab::Overview => self.render_overview(f, chunks[1]),
             Tab::Sessions => self.sessions.render(f, chunks[1], true),
             Tab::Detail => self.render_detail(f, chunks[1]),
+            #[cfg(feature = "intercept")]
+            Tab::Sub => self.sub.render(f, chunks[1]),
         }
         self.render_help(f, chunks[2]);
         if self.show_help {
@@ -702,6 +788,14 @@ impl App {
         // so focus reads instantly as navigation; inactive tabs recede to dim muted text and
         // the Detail tab is dimmer still until a session is drilled. The accent owns focus
         // everywhere, which frees blue to mean only money.
+        #[cfg(feature = "intercept")]
+        let tabs = [
+            (" 1 Overview ", Tab::Overview),
+            (" 2 Sessions ", Tab::Sessions),
+            (" 3 Detail ", Tab::Detail),
+            (" 4 Sub ", Tab::Sub),
+        ];
+        #[cfg(not(feature = "intercept"))]
         let tabs = [
             (" 1 Overview ", Tab::Overview),
             (" 2 Sessions ", Tab::Sessions),
@@ -898,6 +992,8 @@ impl App {
             Tab::Overview => String::from(" Tab tabs · c %"),
             Tab::Sessions => String::from(" Tab tabs · ↑↓ move · →/← expand · ⏎ drill"),
             Tab::Detail => String::from(" Tab tabs · ⇧Tab pane · ↑↓ move · →/← expand"),
+            #[cfg(feature = "intercept")]
+            Tab::Sub => String::from(self.sub.help_keys()),
         };
         if problem {
             keys.push_str(" · d doctor");
@@ -916,6 +1012,8 @@ impl App {
         }
         keys.push_str(match self.tab {
             Tab::Overview => " · t theme · ? help · q quit",
+            #[cfg(feature = "intercept")]
+            Tab::Sub => " · ? help · q quit",
             _ => " · t theme · q",
         });
         // A persistent bottom status bar: filled surface tone with muted text so it reads as
@@ -945,7 +1043,7 @@ impl App {
 fn render_help_overlay(f: &mut Frame, tray: bool) {
     let area = f.area();
     let w = 56.min(area.width);
-    let h = (if tray { 21 } else { 20 }).min(area.height);
+    let h = (if tray { 23 } else { 22 }).min(area.height);
     let rect = Rect::new(
         area.x + (area.width.saturating_sub(w)) / 2,
         area.y + (area.height.saturating_sub(h)) / 2,
@@ -955,7 +1053,7 @@ fn render_help_overlay(f: &mut Frame, tray: bool) {
     let mut lines = vec![
         Line::from(""),
         Line::from("  Tab / Shift-Tab    next / previous tab"),
-        Line::from("  1 / 2 / 3          jump to Overview / Sessions / Detail"),
+        Line::from("  1 / 2 / 3 / 4      jump to Overview / Sessions / Detail / Sub"),
         Line::from("  ↑ ↓  or  j k       move cursor / scroll"),
         Line::from("  g / G              top / bottom"),
         Line::from("  → ← or l h         expand / collapse a row"),
@@ -972,7 +1070,8 @@ fn render_help_overlay(f: &mut Frame, tray: bool) {
         Line::from("  f                  fix integrations (ensure)"),
         Line::from("  d                  doctor (diagnose)"),
         Line::from("  u                  update / restart stale daemon"),
-        Line::from("  s / n              sub setup / dismiss (when shown)"),
+        Line::from("  s / n              open Sub tab / dismiss (when shown)"),
+        Line::from("  4                  Sub tab: ←→ preset · ⏎ apply · e map"),
         Line::from(""),
         Line::from("  \"you paid\" = what the proxy billed (same as Sessions)."),
         Line::from("  \"saved$\" = input $ off at rates locked per turn."),
@@ -2473,7 +2572,17 @@ mod tests {
         assert!(!app.whole_prompt);
 
         // On the other tabs there is no size figure to reframe, so `c` is a no-op.
-        for tab in [Tab::Sessions, Tab::Detail] {
+        let other = {
+            #[cfg(feature = "intercept")]
+            {
+                vec![Tab::Sessions, Tab::Detail, Tab::Sub]
+            }
+            #[cfg(not(feature = "intercept"))]
+            {
+                vec![Tab::Sessions, Tab::Detail]
+            }
+        };
+        for tab in other {
             app.tab = tab;
             app.handle_key(KeyCode::Char('c'));
             assert!(
@@ -2481,6 +2590,35 @@ mod tests {
                 "c must not toggle the basis off Overview"
             );
         }
+    }
+
+    #[cfg(feature = "intercept")]
+    #[test]
+    fn four_key_and_tab_cycle_reach_sub() {
+        let mut app = App::new(None, Duration::from_secs(2));
+        assert!(matches!(app.tab, Tab::Overview));
+        app.handle_key(KeyCode::Char('4'));
+        assert!(matches!(app.tab, Tab::Sub));
+        // Forward cycle: Sub → Overview
+        app.cycle_tab();
+        assert!(matches!(app.tab, Tab::Overview));
+        // Back cycle from Overview lands on Sub
+        app.cycle_tab_back();
+        assert!(matches!(app.tab, Tab::Sub));
+    }
+
+    #[cfg(feature = "intercept")]
+    #[test]
+    fn open_on_sub_next_is_consumed_once() {
+        open_on_sub_next(Some(crate::reroute::SubProvider::Kimi));
+        {
+            let g = START_ON_SUB.lock().unwrap();
+            assert_eq!(*g, Some(Some(crate::reroute::SubProvider::Kimi)));
+        }
+        // Simulate the run() consume path.
+        let taken = START_ON_SUB.lock().unwrap().take();
+        assert_eq!(taken, Some(Some(crate::reroute::SubProvider::Kimi)));
+        assert!(START_ON_SUB.lock().unwrap().is_none());
     }
 
     #[test]
@@ -3205,7 +3343,14 @@ mod tests {
                 let n = projects.len();
                 let label = projects
                     .entry(p.clone())
-                    .or_insert_with(|| format!("project-{}", (b'a' + n as u8) as char))
+                    .or_insert_with(|| {
+                        // letter for the first 26, then project-27… — never overflow on big ledgers
+                        if n < 26 {
+                            format!("project-{}", (b'a' + n as u8) as char)
+                        } else {
+                            format!("project-{}", n + 1)
+                        }
+                    })
                     .clone();
                 r.project = Some(label);
             }
@@ -3275,13 +3420,27 @@ mod tests {
         let canvas_w = cw_px + 2 * PAD;
         let canvas_h = ch_px + TITLE + 2 * PAD;
 
-        // Opacity keyframes for a 3-tab crossfade loop.
+        // Opacity keyframes for a 4-tab crossfade loop (Overview → Sessions → Detail → Sub).
+        // Each tab holds ~22% of the cycle with a short crossfade between holds.
         let anim = [
-            ("1;1;0;0;0;0;1", "0;0.30;0.34;0.64;0.68;0.97;1"),
-            ("0;0;1;1;0;0", "0;0.30;0.34;0.64;0.68;1"),
-            ("0;0;1;1;0", "0;0.64;0.68;0.97;1"),
+            // Overview: hold, fade out, stay off, fade in at end for loop
+            ("1;1;0;0;0;0;0;0;1", "0;0.22;0.25;0.47;0.50;0.72;0.75;0.97;1"),
+            // Sessions
+            ("0;0;1;1;0;0;0;0", "0;0.22;0.25;0.47;0.50;0.72;0.75;1"),
+            // Detail
+            ("0;0;1;1;0;0;0", "0;0.47;0.50;0.72;0.75;0.97;1"),
+            // Sub
+            ("0;0;1;1;0", "0;0.72;0.75;0.97;1"),
         ];
+        #[cfg(feature = "intercept")]
+        let tabs = [Tab::Overview, Tab::Sessions, Tab::Detail, Tab::Sub];
+        #[cfg(not(feature = "intercept"))]
         let tabs = [Tab::Overview, Tab::Sessions, Tab::Detail];
+
+        // Stable Sub-tab demo state (not the machine's live routing) so the asset
+        // always shows a readable Always→Codex map with mixed auth.
+        #[cfg(feature = "intercept")]
+        app.sub.seed_export_demo();
 
         for (flavor, file) in [
             (palette::Flavor::Mocha, "status-watch-dark.svg"),
@@ -3348,7 +3507,11 @@ mod tests {
                     }
                 }
                 let init = if i == 0 { "1" } else { "0" };
-                svg.push_str(&format!("<g opacity=\"{init}\"><animate attributeName=\"opacity\" dur=\"12s\" repeatCount=\"indefinite\" values=\"{}\" keyTimes=\"{}\"/>{body}</g>", anim[i].0, anim[i].1));
+                // 16s cycle so four tabs each get a readable hold.
+                svg.push_str(&format!(
+                    "<g opacity=\"{init}\"><animate attributeName=\"opacity\" dur=\"16s\" repeatCount=\"indefinite\" values=\"{}\" keyTimes=\"{}\"/>{body}</g>",
+                    anim[i].0, anim[i].1
+                ));
             }
             svg.push_str("</svg>\n");
 

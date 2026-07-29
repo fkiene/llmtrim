@@ -307,7 +307,8 @@ impl Tier {
         }
     }
 
-    pub const ALL: [Tier; 4] = [Tier::Opus, Tier::Sonnet, Tier::Haiku, Tier::Fable];
+    /// Display / editor order: flagship first (Fable), then Opus → Sonnet → Haiku.
+    pub const ALL: [Tier; 4] = [Tier::Fable, Tier::Opus, Tier::Sonnet, Tier::Haiku];
 }
 
 /// Classify an incoming Anthropic model id into a [`Tier`] by substring, matching both the family

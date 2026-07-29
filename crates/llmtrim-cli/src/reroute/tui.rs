@@ -1,6 +1,6 @@
 //! `llmtrim sub setup` — a small ratatui editor for the Claude-tier → provider-model mapping.
 //!
-//! Rows are the four Claude tiers Claude Code selects between (Opus/Sonnet/Haiku/Fable). Each row's
+//! Rows are the four Claude tiers Claude Code selects between (Fable/Opus/Sonnet/Haiku). Each row's
 //! target is chosen from the provider catalog ([`super::catalog`]) with live pricing shown. Saving
 //! writes `sub = <provider>` plus `[sub.<provider>.tiers]` to the config file via
 //! [`llmtrim_core::config::write_sub_mapping`]. Kimi exposes a single model, so its mapping is

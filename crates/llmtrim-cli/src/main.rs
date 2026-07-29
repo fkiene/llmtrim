@@ -1205,7 +1205,22 @@ fn run_sub(action: SubCmd) -> Result<()> {
     match action {
         SubCmd::Setup { provider } => {
             let p = parse(&provider)?;
-            #[cfg(feature = "breakdown")]
+            // The interactive editor lives in `llmtrim status` tab 4 (Sub). Prefer that
+            // surface so mode + provider routing share one TUI; keep the standalone
+            // mapping editor as a fallback when status isn't available.
+            #[cfg(all(feature = "breakdown", feature = "intercept"))]
+            {
+                use std::io::IsTerminal;
+                if std::io::stdout().is_terminal() {
+                    llmtrim::breakdown::app::open_on_sub_next(Some(p));
+                    // Same live dashboard as `llmtrim status`, focused on the Sub tab
+                    // with the named provider highlighted (Enter applies).
+                    return run_monitor(2, false, false, false, false, false, false, false);
+                }
+                // Non-TTY: fall through to the headless mapping editor.
+                llmtrim::reroute::tui::run(p)
+            }
+            #[cfg(all(feature = "breakdown", not(feature = "intercept")))]
             {
                 llmtrim::reroute::tui::run(p)
             }

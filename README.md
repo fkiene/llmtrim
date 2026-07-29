@@ -30,7 +30,7 @@
 <p align="center">
   <picture>
     <source media="(prefers-color-scheme: light)" srcset="assets/status-watch-light.svg">
-    <img src="assets/status-watch-dark.svg" alt="llmtrim status: a live dashboard showing tokens trimmed, dollars saved off your real bill, input/output savings bars, and a per-model breakdown" width="760">
+    <img src="assets/status-watch-dark.svg" alt="llmtrim status: Overview savings dashboard, Sessions, Detail, and Sub routing tab (presets + tier map)" width="760">
   </picture>
 </p>
 
@@ -318,6 +318,9 @@ llmtrim sub mode fallback       # only when Anthropic fails
 llmtrim sub chain codex,kimi,grok
 llmtrim sub off
 ```
+
+Interactive: `llmtrim status` → tab **4 Sub** (or `llmtrim sub setup`) — cycle routing
+presets with ←/→, Enter to apply, `e` to edit the tier→model map.
 
 Route only a delegated Claude Code subagent while leaving the parent window unchanged:
 

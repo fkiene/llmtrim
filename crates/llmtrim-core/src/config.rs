@@ -570,6 +570,18 @@ pub fn write_sub_mapping(
     write_sub_mapping_at(&path, provider, tiers)
 }
 
+/// Write only `[sub.<provider>.tiers]` without activating that provider. Merges into an existing
+/// `[sub.<provider>]` table so sibling keys (`effort`, …) and the rest of `[sub]` (`active`,
+/// `mode`, `chain`, other providers) are preserved. Unlike [`write_sub_mapping`], this never
+/// sets `active` — used when editing a backend's map without making it the live selection.
+pub fn write_sub_tiers(
+    provider: &str,
+    tiers: &std::collections::BTreeMap<String, String>,
+) -> Result<()> {
+    let path = config_path().ok_or_else(|| anyhow::anyhow!("no config path (HOME/XDG unset)"))?;
+    write_sub_tiers_at(&path, provider, tiers)
+}
+
 /// Disable subscription reroute: set `sub.active = "off"` (the reader filters `off` to unset),
 /// preserving the saved `[sub.<provider>.tiers]` mapping and `mode` so re-enabling with
 /// `sub on` restores them. The provider being turned off is remembered in `sub.last` so a bare
@@ -654,6 +666,30 @@ fn write_sub_mapping_at(
         let mut prov_tbl = toml_edit::Table::new();
         prov_tbl["tiers"] = toml_edit::Item::Table(tiers_tbl);
         t[&provider] = toml_edit::Item::Table(prov_tbl);
+    })
+}
+
+/// Path-taking counterpart of [`write_sub_tiers`] for unit tests.
+fn write_sub_tiers_at(
+    path: &std::path::Path,
+    provider: &str,
+    tiers: &std::collections::BTreeMap<String, String>,
+) -> Result<()> {
+    let mut tiers_tbl = toml_edit::Table::new();
+    for (k, v) in tiers {
+        tiers_tbl[k] = toml_edit::value(v.clone());
+    }
+    let provider = provider.to_string();
+    edit_sub_table_at(path, |t| {
+        // Merge into the existing provider table so keys like `effort` survive; only
+        // replace the `tiers` sub-table. Do not touch `active`.
+        let prov = t
+            .entry(&provider)
+            .or_insert_with(|| toml_edit::Item::Table(toml_edit::Table::new()));
+        let Some(prov) = prov.as_table_like_mut() else {
+            return;
+        };
+        prov.insert("tiers", toml_edit::Item::Table(tiers_tbl));
     })
 }
 
@@ -1206,7 +1242,11 @@ fn resolve_sub_fallback(env: &impl Fn(&str) -> Option<String>, file: Option<&tom
 pub fn sub_always_on() -> bool {
     let file = load_config_file();
     let env = |k: &str| std::env::var(k).ok();
-    resolve_sub_provider(&env, file.as_ref()).is_some()
+    // `resolve_sub_provider` still returns `Some("off")` after `disable_sub` so the raw
+    // presence of a value is not enough — filter the same way RuntimeConfig does.
+    resolve_sub_provider(&env, file.as_ref())
+        .filter(|s| s != "off" && !s.is_empty())
+        .is_some()
         && !resolve_sub_fallback(&env, file.as_ref())
 }
 
@@ -1778,6 +1818,187 @@ mod tests {
         assert_eq!(
             file.get("preset").and_then(toml::Value::as_str),
             Some("auto")
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn write_sub_tiers_does_not_activate_provider() {
+        let dir = std::env::temp_dir().join(format!(
+            "llmtrim-sub-tiers-activate-{}-{}",
+            std::process::id(),
+            line!()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("config.toml");
+
+        // Seed active=codex with a mapping.
+        let mut codex_tiers = std::collections::BTreeMap::new();
+        codex_tiers.insert("opus".to_string(), "gpt-5.5".to_string());
+        write_sub_mapping_at(&path, "codex", &codex_tiers).unwrap();
+
+        // Writing grok tiers must not flip active away from codex.
+        let mut grok_tiers = std::collections::BTreeMap::new();
+        grok_tiers.insert("opus".to_string(), "grok-4".to_string());
+        grok_tiers.insert("haiku".to_string(), "grok-3-mini".to_string());
+        write_sub_tiers_at(&path, "grok", &grok_tiers).unwrap();
+
+        let file: toml::Value = toml::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        let no_env = |_: &str| None;
+        assert_eq!(
+            resolve_sub_provider(&no_env, Some(&file)).as_deref(),
+            Some("codex"),
+            "write_sub_tiers must not set active"
+        );
+        // Active provider's tiers still resolve.
+        let active = resolve_sub_tiers(&no_env, Some(&file));
+        assert_eq!(active.get("opus").map(String::as_str), Some("gpt-5.5"));
+        // Grok's map was written under its own provider table.
+        let grok = sub_tiers_from_file(Some(&file), "grok");
+        assert_eq!(grok.get("opus").map(String::as_str), Some("grok-4"));
+        assert_eq!(grok.get("haiku").map(String::as_str), Some("grok-3-mini"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn write_sub_tiers_updates_active_provider_map_keeps_active() {
+        let dir = std::env::temp_dir().join(format!(
+            "llmtrim-sub-tiers-active-{}-{}",
+            std::process::id(),
+            line!()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("config.toml");
+
+        let mut tiers = std::collections::BTreeMap::new();
+        tiers.insert("opus".to_string(), "gpt-5.5".to_string());
+        write_sub_mapping_at(&path, "codex", &tiers).unwrap();
+
+        // Also seed effort so we can prove the provider table is merged, not replaced.
+        edit_sub_table_at(&path, |t| {
+            let prov = t
+                .entry("codex")
+                .or_insert_with(|| toml_edit::Item::Table(toml_edit::Table::new()));
+            prov.as_table_like_mut()
+                .unwrap()
+                .insert("effort", toml_edit::value("high"));
+        })
+        .unwrap();
+
+        let mut updated = std::collections::BTreeMap::new();
+        updated.insert("opus".to_string(), "gpt-5.4".to_string());
+        updated.insert("sonnet".to_string(), "gpt-5.4-mini".to_string());
+        write_sub_tiers_at(&path, "codex", &updated).unwrap();
+
+        let file: toml::Value = toml::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        let no_env = |_: &str| None;
+        assert_eq!(
+            resolve_sub_provider(&no_env, Some(&file)).as_deref(),
+            Some("codex")
+        );
+        let read = resolve_sub_tiers(&no_env, Some(&file));
+        assert_eq!(read.get("opus").map(String::as_str), Some("gpt-5.4"));
+        assert_eq!(read.get("sonnet").map(String::as_str), Some("gpt-5.4-mini"));
+        assert_eq!(
+            resolve_sub_effort(&no_env, Some(&file)).as_deref(),
+            Some("high"),
+            "effort under [sub.codex] must survive write_sub_tiers"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn write_sub_tiers_preserves_mode_and_chain() {
+        let dir = std::env::temp_dir().join(format!(
+            "llmtrim-sub-tiers-mode-{}-{}",
+            std::process::id(),
+            line!()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("config.toml");
+
+        let mut tiers = std::collections::BTreeMap::new();
+        tiers.insert("opus".to_string(), "gpt-5.5".to_string());
+        write_sub_mapping_at(&path, "codex", &tiers).unwrap();
+        edit_sub_table_at(&path, |t| {
+            t["mode"] = toml_edit::value("fallback");
+            t["chain"] = toml_edit::value(
+                ["kimi", "codex"]
+                    .into_iter()
+                    .map(String::from)
+                    .collect::<toml_edit::Array>(),
+            );
+        })
+        .unwrap();
+
+        let mut grok = std::collections::BTreeMap::new();
+        grok.insert("opus".to_string(), "grok-4".to_string());
+        write_sub_tiers_at(&path, "grok", &grok).unwrap();
+
+        let file: toml::Value = toml::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        let no_env = |_: &str| None;
+        assert_eq!(
+            resolve_sub_provider(&no_env, Some(&file)).as_deref(),
+            Some("codex")
+        );
+        assert!(
+            resolve_sub_fallback(&no_env, Some(&file)),
+            "mode=fallback must survive write_sub_tiers"
+        );
+        assert_eq!(
+            resolve_sub_chain(&no_env, Some(&file)),
+            vec!["kimi".to_string(), "codex".to_string()],
+            "chain must survive write_sub_tiers"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn sub_always_on_is_false_when_active_is_off() {
+        let dir = std::env::temp_dir().join(format!(
+            "llmtrim-sub-always-off-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("config.toml");
+        let mut tiers = std::collections::BTreeMap::new();
+        tiers.insert("opus".to_string(), "gpt-5.5".to_string());
+        write_sub_mapping_at(&path, "codex", &tiers).unwrap();
+        // mode stays always by default; disable only flips active.
+        disable_sub_at(&path).unwrap();
+        // Point the process config path at our temp file via HOME/XDG is hard; call the
+        // resolve helpers directly the same way sub_always_on does.
+        let file: toml::Value = toml::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        let no_env = |_: &str| None;
+        assert_eq!(
+            resolve_sub_provider(&no_env, Some(&file)).as_deref(),
+            Some("off")
+        );
+        assert!(
+            resolve_sub_provider(&no_env, Some(&file))
+                .filter(|s| s != "off" && !s.is_empty())
+                .is_none(),
+            "active=off must not count as always-on"
+        );
+        assert!(
+            !resolve_sub_fallback(&no_env, Some(&file)),
+            "default mode is always, not fallback"
+        );
+        // With mode forced to fallback while off, still not always-on.
+        edit_sub_table_at(&path, |t| {
+            t["mode"] = toml_edit::value("fallback");
+        })
+        .unwrap();
+        let file: toml::Value = toml::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert!(resolve_sub_fallback(&no_env, Some(&file)));
+        assert!(
+            resolve_sub_provider(&no_env, Some(&file))
+                .filter(|s| s != "off" && !s.is_empty())
+                .is_none()
         );
         let _ = std::fs::remove_dir_all(&dir);
     }
