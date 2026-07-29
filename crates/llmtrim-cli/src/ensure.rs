@@ -14,9 +14,6 @@ use crate::ui;
 
 const CURRENT: &str = env!("CARGO_PKG_VERSION");
 const STATE_FILE: &str = "integrations.json";
-/// Sidecar opt-out for routed subagents. Kept out of [`OptOut`] so adding the feature does not
-/// change that constructible public struct (cargo-semver-checks / 0.11.x patch).
-const ROUTE_AGENTS_OPT_OUT: &str = "route-agents.opt-out";
 
 /// User opt-outs, remembered forever so ensure never re-prompts after an explicit no.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
@@ -33,34 +30,45 @@ pub struct OptOut {
     pub sub_nudge: bool,
 }
 
-fn route_agents_opted_out_at(home: &Path) -> bool {
-    home.join(ROUTE_AGENTS_OPT_OUT).is_file()
-}
+/// Sidecar opt-out for routed subagents. Kept out of [`OptOut`] so adding the feature does not
+/// change that constructible public struct (cargo-semver-checks / 0.11.x patch).
+#[cfg(feature = "intercept")]
+mod route_agents_opt_out {
+    use super::*;
 
-fn set_route_agents_opt_out_at(home: &Path, value: bool) -> Result<()> {
-    let path = home.join(ROUTE_AGENTS_OPT_OUT);
-    if value {
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)
-                .with_context(|| format!("create {}", parent.display()))?;
-        }
-        std::fs::write(&path, b"").with_context(|| format!("write {}", path.display()))?;
-    } else if path.exists() {
-        std::fs::remove_file(&path).with_context(|| format!("remove {}", path.display()))?;
+    const MARKER: &str = "route-agents.opt-out";
+
+    pub(super) fn opted_out_at(home: &Path) -> bool {
+        home.join(MARKER).is_file()
     }
-    Ok(())
+
+    pub(super) fn set_at(home: &Path, value: bool) -> Result<()> {
+        let path = home.join(MARKER);
+        if value {
+            if let Some(parent) = path.parent() {
+                std::fs::create_dir_all(parent)
+                    .with_context(|| format!("create {}", parent.display()))?;
+            }
+            std::fs::write(&path, b"").with_context(|| format!("write {}", path.display()))?;
+        } else if path.exists() {
+            std::fs::remove_file(&path).with_context(|| format!("remove {}", path.display()))?;
+        }
+        Ok(())
+    }
+
+    pub(crate) fn opted_out() -> bool {
+        crate::daemon::home_dir()
+            .map(|home| opted_out_at(&home))
+            .unwrap_or(false)
+    }
+
+    pub(super) fn set(value: bool) -> Result<()> {
+        set_at(&crate::daemon::home_dir()?, value)
+    }
 }
 
-/// Whether the user opted out of installing subscription-routed Claude Code subagents.
-pub(crate) fn route_agents_opted_out() -> bool {
-    crate::daemon::home_dir()
-        .map(|home| route_agents_opted_out_at(&home))
-        .unwrap_or(false)
-}
-
-fn set_route_agents_opt_out(value: bool) -> Result<()> {
-    set_route_agents_opt_out_at(&crate::daemon::home_dir()?, value)
-}
+#[cfg(feature = "intercept")]
+use route_agents_opt_out::opted_out as route_agents_opted_out;
 
 /// Persistent integration state under `~/.llmtrim/integrations.json`.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
@@ -727,8 +735,9 @@ pub fn run_cli(quiet: bool) -> Result<()> {
 /// Record an opt-out (e.g. after `guard uninstall`).
 pub fn set_opt_out(id: &str, value: bool) -> Result<()> {
     // Routed-subagent opt-out is a sidecar file so [`OptOut`]'s public field set stays stable.
+    #[cfg(feature = "intercept")]
     if matches!(id, "route_agents" | "route-agents" | "agents") {
-        return set_route_agents_opt_out(value);
+        return route_agents_opt_out::set(value);
     }
     let mut state = State::load()?;
     match id {
@@ -981,6 +990,7 @@ mod tests {
         assert!(!s.opt_out.window_sub);
     }
 
+    #[cfg(feature = "intercept")]
     #[test]
     fn route_agents_opt_out_is_sidecar_not_optout_field() {
         let dir = std::env::temp_dir().join(format!(
@@ -993,14 +1003,14 @@ mod tests {
         ));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
-        assert!(!route_agents_opted_out_at(&dir));
-        set_route_agents_opt_out_at(&dir, true).unwrap();
-        assert!(route_agents_opted_out_at(&dir));
-        assert!(dir.join(ROUTE_AGENTS_OPT_OUT).is_file());
+        assert!(!route_agents_opt_out::opted_out_at(&dir));
+        route_agents_opt_out::set_at(&dir, true).unwrap();
+        assert!(route_agents_opt_out::opted_out_at(&dir));
+        assert!(dir.join("route-agents.opt-out").is_file());
         // Public OptOut shape is unchanged — no route_agents field to set.
         assert_eq!(State::default().opt_out, OptOut::default());
-        set_route_agents_opt_out_at(&dir, false).unwrap();
-        assert!(!route_agents_opted_out_at(&dir));
+        route_agents_opt_out::set_at(&dir, false).unwrap();
+        assert!(!route_agents_opt_out::opted_out_at(&dir));
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
