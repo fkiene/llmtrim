@@ -1159,12 +1159,140 @@ mod imp {
             || text.contains("\"stop_reason\": \"")
     }
 
+    /// True when the accumulated Anthropic SSE contains an `error` frame. Used to split mid-stream
+    /// server errors from client aborts. Matches `event: error` lines, or a `data:` line whose
+    /// JSON root `"type"` is `"error"` — not a raw substring scan (tool/text deltas can embed
+    /// `"type":"error"` in payload text).
+    fn sse_has_error_frame(buf: &[u8]) -> bool {
+        let Ok(text) = std::str::from_utf8(buf) else {
+            return false;
+        };
+        // Event line is definitive (our encoder and Anthropic both emit it).
+        if text.contains("event: error\n") || text.contains("event: error\r\n") {
+            return true;
+        }
+        for line in text.lines() {
+            let Some(data) = line.strip_prefix("data:") else {
+                continue;
+            };
+            let data = data.trim();
+            if !data.starts_with('{') {
+                continue;
+            }
+            if let Ok(v) = serde_json::from_str::<Value>(data)
+                && v.get("type").and_then(Value::as_str) == Some("error")
+            {
+                return true;
+            }
+        }
+        false
+    }
+
+    /// Client-visible ReduceEvents (text / thinking / tools / signatures). `Finish` and `Error`
+    /// alone are not semantic output — a success terminal with no semantic events is the empty
+    /// completion pattern claude-code-proxy retries (#70/#71).
+    fn reduce_event_is_semantic(ev: &ReduceEvent) -> bool {
+        !matches!(ev, ReduceEvent::Finish { .. } | ReduceEvent::Error { .. })
+    }
+
+    /// Short label for mid-stream diagnostics (last event before death).
+    fn reduce_event_kind(ev: &ReduceEvent) -> &'static str {
+        match ev {
+            ReduceEvent::ThinkingStart => "thinking_start",
+            ReduceEvent::ThinkingDelta(_) => "thinking_delta",
+            ReduceEvent::ThinkingSignatureDelta(_) => "thinking_signature",
+            ReduceEvent::ThinkingStop => "thinking_stop",
+            ReduceEvent::TextStart => "text_start",
+            ReduceEvent::TextDelta(_) => "text_delta",
+            ReduceEvent::TextStop => "text_stop",
+            ReduceEvent::ToolStart { .. } => "tool_start",
+            ReduceEvent::ToolDelta(_) => "tool_delta",
+            ReduceEvent::ToolStop => "tool_stop",
+            ReduceEvent::Finish { .. } => "finish",
+            ReduceEvent::Error { .. } => "error",
+        }
+    }
+
+    /// Bounded full-context reissues when a sub ends a 2xx stream with a success terminal and
+    /// zero semantic output (claude-code-proxy #70/#71). Capped below the proxy's 10 because
+    /// our reissues are fully buffered HTTP (each can be large + slow); 3 + exponential backoff
+    /// is enough to ride a flaky empty completion without multi-minute hammering.
+    const MAX_EMPTY_COMPLETION_RETRIES: u32 = 3;
+
+    /// Typed 503 when empty-completion retries are exhausted or cannot even be attempted.
+    /// Always fails closed — never falls through to a hollow HTTP 200 stream.
+    fn empty_completion_error_response(
+        pending: Pending,
+        info: &RerouteInfo,
+        ledger: &Sender<Record>,
+        breakdown_ledger: &Sender<BreakdownPayload>,
+        detail: &str,
+    ) -> Response<Body> {
+        let message = format!(
+            "llmtrim: {} subscription backend completed without producing output ({detail})",
+            info.provider.as_str()
+        );
+        log_stream_ghost(&pending, "empty_stream", detail, None);
+        let acc = Arc::new(Mutex::new(message.clone().into_bytes()));
+        let _finalize = Finalize::new(acc, Some(pending), ledger.clone(), breakdown_ledger.clone());
+        anthropic_error_typed(503, "api_error", &message, None)
+    }
+
+    /// True when a buffered upstream body reduces to a success `Finish` with no text/thinking/
+    /// tool/signature events. Those translate to empty Anthropic `end_turn` if streamed as-is.
+    fn is_empty_buffered_reroute_success(
+        provider: crate::reroute::SubProvider,
+        model: &str,
+        raw: &[u8],
+    ) -> bool {
+        let mut reducer = crate::reroute::StreamReducer::new(provider, model);
+        let mut events = reducer.push(raw);
+        events.extend(reducer.finish());
+        let mut semantic = false;
+        let mut saw_finish = false;
+        for ev in &events {
+            match ev {
+                ReduceEvent::Finish { .. } => saw_finish = true,
+                ReduceEvent::Error { .. } => return false,
+                _ if reduce_event_is_semantic(ev) => semantic = true,
+                _ => {}
+            }
+        }
+        saw_finish && !semantic
+    }
+
+    /// Full-context body for an empty-completion retry: prefer the pre-delta `logical_body`,
+    /// strip any `previous_response_id`, fall back to the sent replay body. Empty Arc when
+    /// neither is usable.
+    fn full_context_replay_body(info: &RerouteInfo) -> Arc<Vec<u8>> {
+        let strip_prev = |mut v: Value| -> Option<Vec<u8>> {
+            if let Some(obj) = v.as_object_mut() {
+                obj.remove("previous_response_id");
+            }
+            serde_json::to_vec(&v).ok()
+        };
+        if let Some(logical) = info.logical_body.as_ref()
+            && let Some(bytes) = strip_prev(logical.clone())
+        {
+            return Arc::new(bytes);
+        }
+        if let Some(replay) = info.replay.as_ref() {
+            if let Ok(v) = serde_json::from_slice::<Value>(&replay.body)
+                && let Some(bytes) = strip_prev(v)
+            {
+                return Arc::new(bytes);
+            }
+            return replay.body.clone();
+        }
+        Arc::new(Vec::new())
+    }
+
     /// Classify a turn whose harvested usage is all-zero / missing. Returns `None` for a real
     /// completion (positive provider usage). Otherwise:
     /// - `empty_stream` — no client-visible content (empty body, or only synthetic
     ///   `message_start` zeros before the client/upstream dropped)
     /// - `incomplete_stream` — content was emitted but the stream never delivered real usage
-    ///   (client abort mid-turn, quiet EOF, truncated upstream)
+    ///   (client abort mid-turn, quiet EOF, truncated upstream, or mid-stream SSE error)
     ///
     /// Distinct from `transport_reset`, which is reserved for `handle_error` (request never
     /// got a response at all).
@@ -1177,6 +1305,25 @@ mod imp {
         } else {
             Some("empty_stream")
         }
+    }
+
+    /// Detail string for an `incomplete_stream` / `empty_stream` ghost row. Separates mid-stream
+    /// SSE errors (what Claude Code shows as "Server error mid-response") from client aborts
+    /// and quiet EOF with a terminal frame.
+    fn ghost_stream_detail(outcome: &str, buf: &[u8]) -> &'static str {
+        if buf.is_empty() {
+            return "no response bytes accumulated";
+        }
+        if outcome == "incomplete_stream" {
+            if sse_has_error_frame(buf) {
+                return "content emitted, SSE error frame (upstream/stream error mid-response)";
+            }
+            if !sse_has_terminal_frame(buf) {
+                return "content emitted, no terminal frame (client abort mid-stream)";
+            }
+            return "content emitted, terminal with zero usage (upstream truncate or finish_if_open)";
+        }
+        "synthetic zero usage only (message_start / finish_if_open, no real content)"
     }
 
     /// Greppable stderr line for a stream that finalized without measurable usage.
@@ -1220,6 +1367,29 @@ mod imp {
             .unwrap_or_default();
         eprintln!(
             "llmtrim: stream {outcome} model={model} sub={sub} session={session} ts={ts}{dur}: {detail}"
+        );
+        let _ = std::io::Write::flush(&mut std::io::stderr());
+    }
+
+    /// Greppable stderr line for a live reroute upstream body death (transport error or quiet
+    /// EOF). Includes `cause=`, `open_secs=`, `encoder_open=`, and `last_event=` so multi-minute
+    /// reasoning kills can be classified without a Claude transcript dig.
+    fn log_stream_upstream(
+        model: &str,
+        sub: &str,
+        session: &str,
+        kind: &str,
+        cause: &str,
+        open_secs: u64,
+        encoder_open: bool,
+        last_event: &str,
+    ) {
+        let ts = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+        // Sanitize cause for a single log line (hyper errors can embed newlines).
+        let cause = cause.replace(['\n', '\r'], " ");
+        eprintln!(
+            "llmtrim: stream {kind} model={model} sub={sub} session={session} ts={ts} \
+             open_secs={open_secs} encoder_open={encoder_open} last_event={last_event} cause={cause}"
         );
         let _ = std::io::Write::flush(&mut std::io::stderr());
     }
@@ -2591,47 +2761,102 @@ mod imp {
                 );
             }
 
-            // Peek the head of the 2xx stream: drive the reducer until its first content event or a
-            // terminal. An upstream that fails the whole turn on an HTTP 200 stream (e.g.
-            // `context_length_exceeded` as an `error`/`response.failed`) is surfaced as a real typed
-            // error instead of a 200 stream Claude Code rejects as empty/malformed.
+            // Peek the head of the 2xx stream: drive the reducer until its first *semantic*
+            // content event (or a fatal error). An upstream that fails the whole turn on an
+            // HTTP 200 stream (e.g. `context_length_exceeded` as an `error`/`response.failed`)
+            // is surfaced as a real typed error instead of a 200 stream Claude Code rejects as
+            // empty/malformed. A success terminal with no semantic events is the empty-
+            // completion pattern (#70/#71) — retried full-context before anything reaches the
+            // client.
             use hudsucker::futures::StreamExt;
+            let peek_started = std::time::Instant::now();
             let mut inner = BodyStream::new(body);
             let mut reducer = crate::reroute::StreamReducer::new(info.provider, &info.model);
             let mut encoder = AnthropicSseEncoder::new(&info.client_model);
             let mut prelude = String::new();
-            let mut committed = false;
+            let mut semantic = false;
+            let mut saw_finish = false;
+            let mut last_event = "none";
             let mut fatal: Option<String> = None;
-            while !committed && fatal.is_none() {
+            while !semantic && fatal.is_none() {
                 match inner.next().await {
                     Some(Ok(frame)) => {
                         let Ok(chunk) = frame.into_data() else {
                             continue;
                         };
                         for ev in reducer.push(&chunk) {
-                            record_codex_continuation(
-                                &ev,
-                                &mut reducer,
-                                info.provider,
-                                info.logical_body.as_ref(),
-                                info.session_id.as_deref(),
-                            );
+                            last_event = reduce_event_kind(&ev);
                             match &ev {
                                 ReduceEvent::Error { message } => {
                                     fatal.get_or_insert_with(|| message.clone());
+                                    // Only encode pre-commit errors into the typed-error path;
+                                    // do not put them on a prelude we might discard.
                                 }
-                                ReduceEvent::Finish { .. } => {}
-                                _ => committed = true,
+                                ReduceEvent::Finish { .. } => {
+                                    // Hold off encoding until we know this is not an empty
+                                    // success terminal (retried, not streamed as hollow end_turn).
+                                    // If semantic content already landed in this peek, encode now.
+                                    saw_finish = true;
+                                    if semantic {
+                                        record_codex_continuation(
+                                            &ev,
+                                            &mut reducer,
+                                            info.provider,
+                                            info.logical_body.as_ref(),
+                                            info.session_id.as_deref(),
+                                        );
+                                        encoder.encode(&ev, &mut prelude);
+                                    }
+                                }
+                                _ if reduce_event_is_semantic(&ev) => {
+                                    semantic = true;
+                                    record_codex_continuation(
+                                        &ev,
+                                        &mut reducer,
+                                        info.provider,
+                                        info.logical_body.as_ref(),
+                                        info.session_id.as_deref(),
+                                    );
+                                    encoder.encode(&ev, &mut prelude);
+                                }
+                                _ => {}
                             }
-                            encoder.encode(&ev, &mut prelude);
                         }
                     }
-                    Some(Err(_)) => {
-                        fatal.get_or_insert_with(|| "llmtrim: upstream stream error".to_string());
+                    Some(Err(e)) => {
+                        let cause = e.to_string();
+                        log_stream_upstream(
+                            &info.model,
+                            info.provider.as_str(),
+                            info.session_id.as_deref().unwrap_or("-"),
+                            "peek_error",
+                            &cause,
+                            peek_started.elapsed().as_secs(),
+                            encoder.is_open(),
+                            last_event,
+                        );
+                        fatal.get_or_insert_with(|| {
+                            format!("llmtrim: upstream stream error ({cause})")
+                        });
                     }
-                    None => break,
+                    None => {
+                        if !semantic && !saw_finish {
+                            log_stream_upstream(
+                                &info.model,
+                                info.provider.as_str(),
+                                info.session_id.as_deref().unwrap_or("-"),
+                                "peek_eof",
+                                "upstream closed 2xx body before content",
+                                peek_started.elapsed().as_secs(),
+                                encoder.is_open(),
+                                last_event,
+                            );
+                        }
+                        break;
+                    }
                 }
             }
+            let committed = semantic;
 
             if let Some(detail) = fatal {
                 // Only latch when nothing client-visible was committed. A single chunk can yield
@@ -2666,49 +2891,69 @@ mod imp {
                 return anthropic_error_typed(status, reroute_error_kind(status), &message, None);
             }
 
+            // Empty success terminal (Finish, no semantic output): full-context retries before the
+            // client sees a hollow end_turn. Always returns a Response (fail closed).
+            if !committed && saw_finish {
+                return self
+                    .retry_empty_completion(pending, &info, /*empties_so_far=*/ 0)
+                    .await;
+            }
+
             // Quiet EOF before any client-visible content: the upstream accepted the request
             // (HTTP 2xx) then closed without a single content/finish event. That is the
-            // measured Grok full-body ghost pattern — no handle_error, no transport_reset.
-            // One buffered re-issue when we still hold the replay body; if it lands 2xx we
-            // stream the retry. Past this point the client already owns nothing, so a retry
-            // cannot double-bill a delivered answer. Do not retry once content was committed
-            // (client may have seen bytes).
-            if !committed
-                && prelude.is_empty()
-                && let Some(replay) = info.replay.as_ref()
-            {
-                log_stream_ghost(
-                    &pending,
-                    "empty_stream",
-                    "upstream closed 2xx stream before content; retrying once",
-                    None,
-                );
-                if let Some((s, raw, _ra)) = self
-                    .reissue_reroute(&replay.url, replay.headers.clone(), replay.body.clone())
-                    .await
-                {
-                    if (200..300).contains(&s) {
-                        return self.finish_buffered_reroute(pending, &info, raw);
-                    }
-                    // Retry got a real non-2xx: fall through to typed error surface below via
-                    // the buffered path's own classification.
-                    let message = reroute_upstream_error_message(info.provider, s, &raw);
-                    let acc = Arc::new(Mutex::new(message.clone().into_bytes()));
-                    let _finalize = Finalize::new(
-                        acc,
-                        Some(pending),
-                        self.ledger.clone(),
-                        self.breakdown_ledger.clone(),
+            // measured Grok full-body ghost pattern. One buffered re-issue; if that lands an
+            // empty success terminal, fold into the same full-context empty-completion helper.
+            // Fail closed on transport failure — never stream a hollow 200.
+            if !committed && !saw_finish && prelude.is_empty() {
+                if let Some(replay) = info.replay.as_ref() {
+                    log_stream_ghost(
+                        &pending,
+                        "empty_stream",
+                        "upstream closed 2xx stream before content; retrying once",
+                        None,
                     );
-                    return anthropic_error_typed(s, reroute_error_kind(s), &message, None);
+                    match self
+                        .reissue_reroute(&replay.url, replay.headers.clone(), replay.body.clone())
+                        .await
+                    {
+                        Some((s, raw, _ra)) if (200..300).contains(&s) => {
+                            if is_empty_buffered_reroute_success(info.provider, &info.model, &raw) {
+                                return self
+                                    .retry_empty_completion(
+                                        pending, &info, /*empties_so_far=*/ 1,
+                                    )
+                                    .await;
+                            }
+                            return self.finish_buffered_reroute(pending, &info, raw);
+                        }
+                        Some((s, raw, _ra)) => {
+                            let message = reroute_upstream_error_message(info.provider, s, &raw);
+                            let acc = Arc::new(Mutex::new(message.clone().into_bytes()));
+                            let _finalize = Finalize::new(
+                                acc,
+                                Some(pending),
+                                self.ledger.clone(),
+                                self.breakdown_ledger.clone(),
+                            );
+                            return anthropic_error_typed(s, reroute_error_kind(s), &message, None);
+                        }
+                        None => {
+                            return empty_completion_error_response(
+                                pending,
+                                &info,
+                                &self.ledger,
+                                &self.breakdown_ledger,
+                                "quiet-EOF reissue transport failed",
+                            );
+                        }
+                    }
                 }
-                // Retry transport failed: keep going and record empty_stream on Finalize drop
-                // so the ghost is greppable even without a successful re-issue.
-                log_stream_ghost(
-                    &pending,
-                    "empty_stream",
-                    "empty-stream retry failed; recording ghost row",
-                    None,
+                return empty_completion_error_response(
+                    pending,
+                    &info,
+                    &self.ledger,
+                    &self.breakdown_ledger,
+                    "quiet EOF with no replay body",
                 );
             }
 
@@ -2744,10 +2989,14 @@ mod imp {
                 /// ping). Drives the 15s Anthropic `ping` so Claude Code's ~180s idle-stream
                 /// watchdog does not kill a quiet reasoning / buffered-tool-arg turn.
                 last_emit: std::time::Instant,
+                /// When the live body phase began (for open_secs= on death logs).
+                open_at: std::time::Instant,
+                last_event: &'static str,
                 // For continuation recording on terminal Finish during live stream
                 provider: crate::reroute::SubProvider,
                 logical_body: Option<Value>,
                 session_id: Option<String>,
+                model: String,
             }
             let st = St {
                 inner,
@@ -2758,9 +3007,12 @@ mod imp {
                 phase: Phase::Prelude,
                 prelude,
                 last_emit: std::time::Instant::now(),
+                open_at: std::time::Instant::now(),
+                last_event,
                 provider: info.provider,
                 logical_body: info.logical_body.clone(),
                 session_id: info.session_id.clone(),
+                model: info.model.clone(),
             };
 
             let stream = hudsucker::futures::stream::unfold(st, |mut st| async move {
@@ -2770,6 +3022,7 @@ mod imp {
                         Phase::Prelude => {
                             // Emit the bytes buffered while peeking, then stream the rest.
                             st.phase = Phase::Body;
+                            st.open_at = std::time::Instant::now();
                             if st.prelude.is_empty() {
                                 continue;
                             }
@@ -2786,6 +3039,7 @@ mod imp {
                         Phase::Flush => {
                             let mut out = String::new();
                             for ev in st.reducer.finish() {
+                                st.last_event = reduce_event_kind(&ev);
                                 record_codex_continuation(
                                     &ev,
                                     &mut st.reducer,
@@ -2826,6 +3080,7 @@ mod imp {
                                         };
                                         let mut out = String::new();
                                         for ev in st.reducer.push(&chunk) {
+                                            st.last_event = reduce_event_kind(&ev);
                                             record_codex_continuation(
                                                 &ev,
                                                 &mut st.reducer,
@@ -2854,16 +3109,27 @@ mod imp {
                                         let bytes = Bytes::from(out.into_bytes());
                                         return Some((Ok(bytes), st));
                                     }
-                                    Some(Err(_)) => {
-                                        // Transport error mid-stream: surface it as an Anthropic
-                                        // `error` frame so the client can tell a dropped provider
-                                        // connection from a clean end-of-turn, instead of a
-                                        // silently truncated answer.
+                                    Some(Err(e)) => {
+                                        // Transport error mid-stream: log the real cause, then
+                                        // surface an Anthropic `error` frame so the client can
+                                        // tell a dropped provider connection from a clean end.
+                                        let cause = e.to_string();
+                                        log_stream_upstream(
+                                            &st.model,
+                                            st.provider.as_str(),
+                                            st.session_id.as_deref().unwrap_or("-"),
+                                            "mid_stream_error",
+                                            &cause,
+                                            st.open_at.elapsed().as_secs(),
+                                            st.encoder.is_open(),
+                                            st.last_event,
+                                        );
                                         let mut out = String::new();
                                         st.encoder.encode(
                                             &ReduceEvent::Error {
-                                                message: "llmtrim: upstream stream error"
-                                                    .to_string(),
+                                                message: format!(
+                                                    "llmtrim: upstream stream error ({cause})"
+                                                ),
                                             },
                                             &mut out,
                                         );
@@ -2877,6 +3143,21 @@ mod imp {
                                         return Some((Ok(Bytes::from(out.into_bytes())), st));
                                     }
                                     None => {
+                                        // Quiet upstream EOF. If the message is still open the
+                                        // client will see finish_if_open / incomplete — log so
+                                        // multi-minute silent closes are greppable.
+                                        if st.encoder.is_open() {
+                                            log_stream_upstream(
+                                                &st.model,
+                                                st.provider.as_str(),
+                                                st.session_id.as_deref().unwrap_or("-"),
+                                                "mid_stream_eof",
+                                                "upstream closed body without terminal",
+                                                st.open_at.elapsed().as_secs(),
+                                                true,
+                                                st.last_event,
+                                            );
+                                        }
                                         st.phase = Phase::Flush;
                                         continue;
                                     }
@@ -2913,6 +3194,106 @@ mod imp {
             builder
                 .body(Body::from_stream(stream))
                 .unwrap_or_else(|_| Response::new(Body::empty()))
+        }
+
+        /// Full-context reissues after an empty success terminal (no semantic output).
+        ///
+        /// `empties_so_far` counts empty successes already observed (0 after a live peek Finish
+        /// with no content; 1 after a quiet-EOF reissue that itself was empty). Always returns a
+        /// client Response — either buffered SSE with real content, a typed non-2xx, or 503.
+        /// Never falls through to a hollow HTTP 200 stream.
+        async fn retry_empty_completion(
+            &self,
+            pending: Pending,
+            info: &RerouteInfo,
+            mut empties_so_far: u32,
+        ) -> Response<Body> {
+            let Some(replay) = info.replay.as_ref() else {
+                return empty_completion_error_response(
+                    pending,
+                    info,
+                    &self.ledger,
+                    &self.breakdown_ledger,
+                    "empty success terminal with no replay body",
+                );
+            };
+
+            loop {
+                if empties_so_far >= MAX_EMPTY_COMPLETION_RETRIES {
+                    return empty_completion_error_response(
+                        pending,
+                        info,
+                        &self.ledger,
+                        &self.breakdown_ledger,
+                        &format!(
+                            "exhausted {MAX_EMPTY_COMPLETION_RETRIES} full-context empty-completion reissues"
+                        ),
+                    );
+                }
+
+                // Backoff before every reissue after the first empty observation. attempt index
+                // is empties_so_far (0-based): 1s, 2s, 4s… capped by REROUTE_RETRY_CAP_MS.
+                if empties_so_far > 0
+                    && let Some(ms) = reroute_backoff_ms(empties_so_far.saturating_sub(1), None)
+                {
+                    tokio::time::sleep(std::time::Duration::from_millis(ms)).await;
+                }
+
+                let detail = if empties_so_far == 0 {
+                    "empty success terminal (no semantic output); retrying full-context"
+                } else {
+                    "empty success terminal again; retrying full-context"
+                };
+                log_stream_ghost(&pending, "empty_stream", detail, None);
+
+                // Full logical body with previous_response_id stripped — do not wipe the
+                // session continuation store (a later successful turn re-records; a total
+                // failure still has the prior turn's id for the next user message's candidate
+                // logic to decide).
+                let body = full_context_replay_body(info);
+                if body.is_empty() {
+                    return empty_completion_error_response(
+                        pending,
+                        info,
+                        &self.ledger,
+                        &self.breakdown_ledger,
+                        "empty-completion retry has no full-context body",
+                    );
+                }
+
+                match self
+                    .reissue_reroute(&replay.url, replay.headers.clone(), body)
+                    .await
+                {
+                    Some((s, raw, _ra)) if (200..300).contains(&s) => {
+                        if is_empty_buffered_reroute_success(info.provider, &info.model, &raw) {
+                            empties_so_far += 1;
+                            continue;
+                        }
+                        return self.finish_buffered_reroute(pending, info, raw);
+                    }
+                    Some((s, raw, _ra)) => {
+                        let message = reroute_upstream_error_message(info.provider, s, &raw);
+                        let acc = Arc::new(Mutex::new(message.clone().into_bytes()));
+                        let _finalize = Finalize::new(
+                            acc,
+                            Some(pending),
+                            self.ledger.clone(),
+                            self.breakdown_ledger.clone(),
+                        );
+                        return anthropic_error_typed(s, reroute_error_kind(s), &message, None);
+                    }
+                    None => {
+                        return empty_completion_error_response(
+                            pending,
+                            info,
+                            &self.ledger,
+                            &self.breakdown_ledger,
+                            "empty-completion reissue transport failed",
+                        );
+                    }
+                }
+            }
         }
 
         /// Re-issue a rerouted upstream request (blocking, buffered `forward_post` like the replay
@@ -4124,17 +4505,9 @@ mod imp {
             }
             if let Some(outcome) = ghost_outcome {
                 let duration_ms = self.started_at.elapsed().as_millis() as u64;
-                // Prefer a specific detail when the buffer can already separate abort from
-                // truncate — the old fixed string forced a Claude-jsonl dig every time.
-                let detail = if buf.is_empty() {
-                    "no response bytes accumulated"
-                } else if outcome == "incomplete_stream" && !sse_has_terminal_frame(&buf) {
-                    "content emitted, no terminal frame (client abort mid-stream)"
-                } else if outcome == "incomplete_stream" {
-                    "content emitted, terminal with zero usage (upstream truncate or finish_if_open)"
-                } else {
-                    "synthetic zero usage only (message_start / finish_if_open, no real content)"
-                };
+                // Prefer a specific detail when the buffer can already separate abort / SSE
+                // error / truncate — the old fixed string forced a Claude-jsonl dig every time.
+                let detail = ghost_stream_detail(outcome, &buf);
                 log_stream_ghost(&p, outcome, detail, Some(duration_ms));
             }
             if let Some(x) = build_breakdown(&p, &usage) {
@@ -5745,6 +6118,108 @@ mod imp {
             assert!(
                 !sse_has_terminal_frame(start_only.as_bytes()),
                 "stop_reason:null on message_start must not count as a terminal frame"
+            );
+
+            // Mid-stream SSE error (what Claude Code renders as "Server error mid-response")
+            // must not be labeled "client abort".
+            let mid_err = concat!(
+                "event: message_start\n",
+                "data: {\"type\":\"message_start\",\"message\":{\"usage\":{\"input_tokens\":0,\"output_tokens\":0}}}\n\n",
+                "event: content_block_delta\n",
+                "data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"thinking_delta\",\"thinking\":\"hmm\"}}\n\n",
+                "event: error\n",
+                "data: {\"type\":\"error\",\"error\":{\"type\":\"api_error\",\"message\":\"llmtrim: upstream stream error (connection reset)\"}}\n\n",
+            );
+            assert!(sse_has_error_frame(mid_err.as_bytes()));
+            assert!(sse_has_content_delta(mid_err.as_bytes()));
+            assert_eq!(
+                ghost_stream_detail("incomplete_stream", mid_err.as_bytes()),
+                "content emitted, SSE error frame (upstream/stream error mid-response)"
+            );
+            assert_eq!(
+                ghost_stream_detail("incomplete_stream", partial.as_bytes()),
+                "content emitted, no terminal frame (client abort mid-stream)"
+            );
+            assert_eq!(
+                ghost_stream_detail("incomplete_stream", truncated.as_bytes()),
+                "content emitted, terminal with zero usage (upstream truncate or finish_if_open)"
+            );
+
+            // Embedded `"type":"error"` inside a text delta must not look like an SSE error frame.
+            let embedded = concat!(
+                "event: content_block_delta\n",
+                "data: {\"type\":\"content_block_delta\",\"delta\":{\"type\":\"text_delta\",\"text\":\"see {\\\"type\\\":\\\"error\\\"}\"}}\n\n",
+            );
+            assert!(
+                !sse_has_error_frame(embedded.as_bytes()),
+                "payload text containing type:error must not trip the frame detector"
+            );
+            // data-only error frame (no event: line) still counts when JSON root type is error.
+            let data_only = "data: {\"type\":\"error\",\"error\":{\"type\":\"api_error\",\"message\":\"x\"}}\n\n";
+            assert!(sse_has_error_frame(data_only.as_bytes()));
+        }
+
+        #[test]
+        fn reduce_event_semantic_and_kind_labels() {
+            assert!(reduce_event_is_semantic(&ReduceEvent::TextStart));
+            assert!(reduce_event_is_semantic(&ReduceEvent::ThinkingDelta(
+                "x".into()
+            )));
+            assert!(reduce_event_is_semantic(
+                &ReduceEvent::ThinkingSignatureDelta("sig".into())
+            ));
+            assert!(reduce_event_is_semantic(&ReduceEvent::ToolStart {
+                id: "t".into(),
+                name: "Read".into(),
+            }));
+            assert!(!reduce_event_is_semantic(&ReduceEvent::Finish {
+                stop_reason: crate::reroute::sse::StopReason::EndTurn,
+                usage: crate::reroute::sse::Usage::default(),
+                response_id: None,
+                continuation_eligible: false,
+            }));
+            assert!(!reduce_event_is_semantic(&ReduceEvent::Error {
+                message: "x".into(),
+            }));
+            assert_eq!(
+                reduce_event_kind(&ReduceEvent::TextDelta("a".into())),
+                "text_delta"
+            );
+            assert_eq!(
+                reduce_event_kind(&ReduceEvent::ThinkingStart),
+                "thinking_start"
+            );
+        }
+
+        #[test]
+        fn empty_buffered_reroute_success_detects_terminal_only() {
+            // Codex-shaped success terminal with no content — the #70/#71 pattern.
+            let terminal_only = concat!(
+                "data: {\"type\":\"response.created\",\"response\":{\"id\":\"r1\"}}\n\n",
+                "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"r1\",\"usage\":{\"input_tokens\":1,\"output_tokens\":0}}}\n\n",
+            );
+            assert!(
+                is_empty_buffered_reroute_success(
+                    crate::reroute::SubProvider::Codex,
+                    "gpt-5.6-sol",
+                    terminal_only.as_bytes(),
+                ),
+                "completed with no semantic output must be empty success"
+            );
+
+            let with_text = concat!(
+                "data: {\"type\":\"response.output_item.added\",\"output_index\":0,\"item\":{\"type\":\"message\",\"id\":\"m1\",\"role\":\"assistant\",\"content\":[]}}\n\n",
+                "data: {\"type\":\"response.output_text.delta\",\"output_index\":0,\"delta\":\"hi\"}\n\n",
+                "data: {\"type\":\"response.output_item.done\",\"output_index\":0,\"item\":{\"type\":\"message\",\"id\":\"m1\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"hi\"}]}}\n\n",
+                "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"r1\",\"usage\":{\"input_tokens\":1,\"output_tokens\":1}}}\n\n",
+            );
+            assert!(
+                !is_empty_buffered_reroute_success(
+                    crate::reroute::SubProvider::Codex,
+                    "gpt-5.6-sol",
+                    with_text.as_bytes(),
+                ),
+                "text delta must not count as empty success"
             );
         }
 
