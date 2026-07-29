@@ -1025,16 +1025,25 @@ pub(crate) struct BreakdownRates {
     pub cache_write: f64,
 }
 
-/// Resolve the frozen rates for a (provider, model) pair. Unknown models price at 0
-/// (the TUI then shows a blank cost cell rather than a misleading $0.00).
+/// Resolve the frozen rates for a (provider, model) pair. Pricing overrides from
+/// config take precedence over the built-in provider data.
 #[cfg(feature = "intercept")]
 pub(crate) fn rates_for(provider: &str, model: Option<&str>) -> BreakdownRates {
-    let (input, output) = model.and_then(llm_prices).unwrap_or((0.0, 0.0));
+    let (input, output, cache_override) = model
+        .and_then(|m| {
+            // Check pricing overrides first
+            let config = llmtrim_core::config::RuntimeConfig::get();
+            config.pricing_overrides.get(m).map(|ov| (ov.input, ov.output, ov.cache_read))
+        })
+        .or_else(|| {
+            model.and_then(llm_prices).map(|(i, o)| (i, o, -1.0))
+        })
+        .unwrap_or((0.0, 0.0, -1.0));
     let (read_mult, write_mult) = cache_multipliers(provider);
     BreakdownRates {
         input,
         output,
-        cache_read: input * read_mult,
+        cache_read: if cache_override > 0.0 { cache_override } else { input * read_mult },
         cache_write: input * write_mult,
     }
 }
@@ -1228,12 +1237,19 @@ pub fn overview_data(
 /// upstream brand), then the embedded models.dev snapshot for models the registry hasn't
 /// shipped yet (e.g. day-one releases like claude-fable-5 on 0.14.3).
 pub(crate) fn llm_prices(model_id: &str) -> Option<(f64, f64)> {
+    // 1. Check user-configured pricing overrides first (LLMTRIM_PRICING env / TOML [pricing])
+    let config = llmtrim_core::config::RuntimeConfig::get();
+    if let Some(ov) = config.pricing_overrides.get(model_id) {
+        return Some((ov.input, ov.output));
+    }
+    // 2. Check live provider data
     #[cfg(feature = "intercept")]
     for &provider_id in llm_providers::get_providers_data().keys() {
         if let Some(model) = llm_providers::get_model_ref(provider_id, model_id) {
             return Some((model.input_price, model.output_price));
         }
     }
+    // 3. Fall back to compiled-in pricing.json snapshot
     snapshot_prices(model_id)
 }
 

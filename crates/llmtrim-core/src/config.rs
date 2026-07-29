@@ -24,6 +24,15 @@ use std::str::FromStr;
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
+/// Per-model pricing override, USD per 1M tokens. Used in [`RuntimeConfig::pricing_overrides`].
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PricingOverride {
+    pub input: f64,
+    pub output: f64,
+    #[serde(default)]
+    pub cache_read: f64,
+}
+
 /// The Stage D format legend, embedded at build time and injected into the prompt
 /// so the model can read the columnar encoding (always include a legend).
 /// Validated non-empty by `build.rs`.
@@ -867,6 +876,11 @@ pub struct RuntimeConfig {
     /// Capture corpus size ceiling in MB (env `LLMTRIM_CAPTURE_MAX_MB` / file
     /// `capture_max_mb`); `Some(0)` disables the cap, `None` means use the default.
     pub capture_max_mb: Option<u64>,
+    /// Per-model pricing overrides, USD per 1M tokens (env `LLMTRIM_PRICING` as JSON,
+    /// or file `[pricing."model-id"]` table). Each entry maps `input`, `output`,
+    /// and optional `cache_read` rates. When set, these override the built-in
+    /// provider pricing for the matched model ids.
+    pub pricing_overrides: std::collections::HashMap<String, PricingOverride>,
     /// Context-window override for the cost breakdown (env `LLMTRIM_BREAKDOWN_WINDOW` / file
     /// `breakdown_window`); positive only.
     pub breakdown_window: Option<i64>,
@@ -981,6 +995,7 @@ impl RuntimeConfig {
             capture_max_mb: env_set("LLMTRIM_CAPTURE_MAX_MB")
                 .and_then(|s| s.trim().parse::<u64>().ok())
                 .or_else(|| fint("capture_max_mb").and_then(|n| u64::try_from(n).ok())),
+            pricing_overrides: resolve_pricing_overrides(&env, file),
             breakdown_window: positive(
                 env_set("LLMTRIM_BREAKDOWN_WINDOW")
                     .and_then(|s| s.trim().parse::<i64>().ok())
@@ -1610,6 +1625,52 @@ pub fn max_rows() -> Option<i64> {
 /// Configured breakdown retention cap (in turns), or `None` to fall back to the built-in default.
 pub fn max_breakdown_turns() -> Option<i64> {
     RuntimeConfig::get().max_breakdown_turns
+}
+
+/// Parse pricing overrides from the `LLMTRIM_PRICING` env var (JSON) or the
+/// `[pricing."model-id"]` TOML section. Returns a map of model id → PricingOverride.
+fn resolve_pricing_overrides(
+    env: &impl Fn(&str) -> Option<String>,
+    file: Option<&toml::Value>,
+) -> std::collections::HashMap<String, PricingOverride> {
+    // Env var: LLMTRIM_PRICING as JSON
+    if let Some(json_str) = env("LLMTRIM_PRICING").filter(|s| !s.is_empty()) {
+        if let Ok(map) =
+            serde_json::from_str::<std::collections::HashMap<String, PricingOverride>>(&json_str)
+        {
+            return map;
+        }
+    }
+    // TOML file: [pricing."model-id"]
+    if let Some(pricing) =
+        file.and_then(|v| v.get("pricing"))
+            .and_then(toml::Value::as_table)
+    {
+        let mut map = std::collections::HashMap::new();
+        for (key, val) in pricing {
+            if let Some(ov) = parse_pricing_override(val) {
+                map.insert(key.clone(), ov);
+            }
+        }
+        if !map.is_empty() {
+            return map;
+        }
+    }
+    std::collections::HashMap::new()
+}
+
+fn parse_pricing_override(val: &toml::Value) -> Option<PricingOverride> {
+    let table = val.as_table()?;
+    let input = table.get("input").and_then(toml::Value::as_float)?;
+    let output = table.get("output").and_then(toml::Value::as_float)?;
+    let cache_read = table
+        .get("cache_read")
+        .and_then(toml::Value::as_float)
+        .unwrap_or(0.0);
+    if input <= 0.0 || output <= 0.0 {
+        return None;
+    }
+    Some(PricingOverride { input, output, cache_read })
 }
 
 #[cfg(test)]
