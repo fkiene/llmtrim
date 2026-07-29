@@ -22,6 +22,7 @@ pub struct OptOut {
     pub statusline: bool,
     pub guard: bool,
     pub window_sub: bool,
+    pub route_agents: bool,
     pub compact: bool,
     pub tray_autostart: bool,
     /// User declined the optional Linux tray download.
@@ -190,6 +191,23 @@ fn probe_with(state: &State) -> Vec<Gap> {
                 detail: "stale (binary path)".into(),
             }),
             crate::window_sub::OwnedStatus::Current => {}
+        }
+    }
+
+    #[cfg(feature = "intercept")]
+    if claude && !state.opt_out.route_agents {
+        match crate::route_agents::status() {
+            Ok(status) if status.installed == 0 => gaps.push(Gap {
+                id: "route_agents",
+                label: "Subagents".into(),
+                detail: "subscription-routed Claude Code subagents not installed".into(),
+            }),
+            Ok(status) if status.current < status.expected => gaps.push(Gap {
+                id: "route_agents",
+                label: "Subagents".into(),
+                detail: "routed subagent definitions are stale".into(),
+            }),
+            Ok(_) | Err(_) => {}
         }
     }
 
@@ -369,6 +387,47 @@ pub fn apply(opts: Options) -> Result<Report> {
         report
             .rows
             .push((ui::NOTE, "/sub".into(), "opted out".into()));
+    }
+
+    #[cfg(feature = "intercept")]
+    if claude && !state.opt_out.route_agents {
+        match crate::route_agents::status() {
+            Ok(status) => {
+                let missing = status.installed == 0;
+                let skip_missing = !opts.install_missing && missing;
+                if !skip_missing {
+                    match crate::route_agents::install() {
+                        Ok(after) => {
+                            if status.current < status.expected {
+                                report.applied.push("route_agents");
+                            }
+                            report.rows.push((
+                                ui::OK,
+                                "Subagents".into(),
+                                format!(
+                                    "{}/{} routed provider/model agents current",
+                                    after.current, after.expected
+                                ),
+                            ));
+                        }
+                        Err(e) => report.rows.push((
+                            ui::WARN,
+                            "Subagents".into(),
+                            format!("not installed: {e:#}"),
+                        )),
+                    }
+                }
+            }
+            Err(e) => report.rows.push((
+                ui::WARN,
+                "Subagents".into(),
+                format!("could not inspect: {e:#}"),
+            )),
+        }
+    } else if claude && state.opt_out.route_agents {
+        report
+            .rows
+            .push((ui::NOTE, "Subagents".into(), "opted out".into()));
     }
 
     if claude
@@ -641,6 +700,7 @@ pub fn set_opt_out(id: &str, value: bool) -> Result<()> {
         "statusline" => state.opt_out.statusline = value,
         "guard" => state.opt_out.guard = value,
         "window_sub" | "window-sub" | "sub" => state.opt_out.window_sub = value,
+        "route_agents" | "route-agents" | "agents" => state.opt_out.route_agents = value,
         "compact" => state.opt_out.compact = value,
         "tray_autostart" | "tray" => state.opt_out.tray_autostart = value,
         "tray_download" => state.opt_out.tray_download = value,
@@ -885,5 +945,6 @@ mod tests {
         assert!(!s.opt_out.statusline);
         assert!(!s.opt_out.guard);
         assert!(!s.opt_out.window_sub);
+        assert!(!s.opt_out.route_agents);
     }
 }

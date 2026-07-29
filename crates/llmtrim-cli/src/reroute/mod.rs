@@ -21,6 +21,7 @@ pub mod grok;
 pub mod kimi;
 pub mod quota;
 pub mod read_rewrite;
+pub mod route;
 pub mod sse;
 #[cfg(feature = "breakdown")]
 pub mod tui;
@@ -65,6 +66,47 @@ pub(crate) fn build_upstream_for_model(
     token: &auth::TokenSet,
     session_id: Option<&str>,
 ) -> Result<UpstreamRewrite> {
+    build_upstream_with_model(
+        provider,
+        anthropic_body,
+        logical_model,
+        overrides,
+        token,
+        session_id,
+        false,
+    )
+}
+
+/// Build a request for a concrete model selected by a routed custom agent. Unlike compact/tier
+/// routing, this never substitutes another model behind the explicit selection.
+pub(crate) fn build_upstream_for_explicit_model(
+    provider: SubProvider,
+    anthropic_body: &Value,
+    model: &str,
+    overrides: &BTreeMap<String, String>,
+    token: &auth::TokenSet,
+    session_id: Option<&str>,
+) -> Result<UpstreamRewrite> {
+    build_upstream_with_model(
+        provider,
+        anthropic_body,
+        Some(model),
+        overrides,
+        token,
+        session_id,
+        true,
+    )
+}
+
+fn build_upstream_with_model(
+    provider: SubProvider,
+    anthropic_body: &Value,
+    logical_model: Option<&str>,
+    overrides: &BTreeMap<String, String>,
+    token: &auth::TokenSet,
+    session_id: Option<&str>,
+    explicit: bool,
+) -> Result<UpstreamRewrite> {
     let incoming = logical_model.unwrap_or_else(|| {
         anthropic_body
             .get("model")
@@ -74,7 +116,7 @@ pub(crate) fn build_upstream_for_model(
     let mut model = resolve_model(provider, incoming, overrides);
     // Hosted web_search needs the full Responses API; luna only exists on the lite lane and
     // 404s there as a `-free` id, so upgrade to the nearest full-lane sibling.
-    if provider == SubProvider::Codex && codex::has_hosted_web_search(anthropic_body) {
+    if !explicit && provider == SubProvider::Codex && codex::has_hosted_web_search(anthropic_body) {
         model = codex::full_lane_web_search_model(&model).to_string();
     }
     let (host, path, body, headers) = match provider {
@@ -649,6 +691,29 @@ mod tests {
             parsed["tool_choice"]["tools"],
             serde_json::json!([{ "type": "web_search" }])
         );
+    }
+
+    #[test]
+    fn explicit_codex_model_is_not_upgraded_for_web_search() {
+        let token = auth::TokenSet {
+            access: "tok".into(),
+            account_id: None,
+        };
+        let body = serde_json::json!({
+            "model": "claude-sonnet-5",
+            "messages": [],
+            "tools": [{ "type": "web_search_20250305", "name": "web_search" }]
+        });
+        let up = build_upstream_for_explicit_model(
+            SubProvider::Codex,
+            &body,
+            "gpt-5.6-luna",
+            &BTreeMap::new(),
+            &token,
+            None,
+        )
+        .expect("build");
+        assert_eq!(up.model, "gpt-5.6-luna");
     }
 
     #[test]

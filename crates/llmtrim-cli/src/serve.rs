@@ -1972,6 +1972,21 @@ mod imp {
             // (401 → "Please run /login"). Messages that aren't rerouted (e.g. window `/sub off`)
             // must not reach Anthropic either — return a clear llmtrim error instead.
             let mut fallback_arm: Option<(Vec<crate::reroute::SubProvider>, Option<String>)> = None;
+            // A generated custom agent can carry one trusted, standalone system marker. Read and
+            // remove it before every later stage so it never becomes prompt/cache/capture content.
+            let (req, request_route) = if matches!(provider, Some(ProviderKind::Anthropic))
+                && req.method() == Method::POST
+                && matches!(
+                    classify_anthropic_api_path(req.uri().path()),
+                    AnthropicApiPath::Messages | AnthropicApiPath::CountTokens
+                ) {
+                match Self::strip_request_route_marker(req).await {
+                    Ok(value) => value,
+                    Err(message) => return anthropic_error(400, &message).into(),
+                }
+            } else {
+                (req, None)
+            };
             if matches!(provider, Some(ProviderKind::Anthropic)) {
                 let path_kind = classify_anthropic_api_path(req.uri().path());
                 // The filesystem registry is consulted per request, keyed by Claude Code's
@@ -1990,7 +2005,18 @@ mod imp {
                 };
                 let window_disabled =
                     matches!(window_intent, Some(crate::window_sub::Intent::Disabled));
-                if !window_disabled && (!self.sub_fallback || window_sub.is_some()) {
+                // An explicit marker is a direct route, including when this window selected off
+                // or the daemon is configured for fallback-only. It never arms fallback state.
+                if let Some(route) = request_route {
+                    if req.method() == Method::POST && path_kind == AnthropicApiPath::CountTokens {
+                        return self.reroute_count_tokens(req).await;
+                    }
+                    if req.method() == Method::POST && path_kind == AnthropicApiPath::Messages {
+                        return self
+                            .reroute_messages(req, route.provider, route.model)
+                            .await;
+                    }
+                } else if !window_disabled && (!self.sub_fallback || window_sub.is_some()) {
                     if let Some(sub) = window_sub.or(self.sub) {
                         if req.method() == Method::POST
                             && path_kind == AnthropicApiPath::CountTokens
@@ -1998,7 +2024,7 @@ mod imp {
                             return self.reroute_count_tokens(req).await;
                         }
                         if req.method() == Method::POST && path_kind == AnthropicApiPath::Messages {
-                            return self.reroute_messages(req, sub).await;
+                            return self.reroute_messages(req, sub, None).await;
                         }
                     }
                 } else if !window_disabled
@@ -2305,6 +2331,35 @@ mod imp {
             Request::from_parts(parts, new_body).into()
         }
 
+        /// Parse a body once at the trusted Anthropic boundary and remove an agent marker before
+        /// any path can compress, count, capture, cache, replay, or translate it.
+        async fn strip_request_route_marker(
+            req: Request<Body>,
+        ) -> Result<(Request<Body>, Option<crate::reroute::route::RequestRoute>), String> {
+            let (mut parts, body) = req.into_parts();
+            let collected = body
+                .collect()
+                .await
+                .map_err(|_| "llmtrim: could not read request body".to_string())?
+                .to_bytes();
+            let decoded = decode_request_body(&parts.headers, &collected);
+            let bytes = decoded.as_deref().unwrap_or(&collected);
+            let Ok(mut value) = serde_json::from_slice::<Value>(bytes) else {
+                return Ok((Request::from_parts(parts, Body::from(collected)), None));
+            };
+            let route =
+                crate::reroute::route::take_marker(&mut value).map_err(|e| e.to_string())?;
+            if route.is_some() || decoded.is_some() {
+                let encoded = serde_json::to_vec(&value)
+                    .map_err(|_| "llmtrim: could not encode cleaned request".to_string())?;
+                parts.headers.remove(header::CONTENT_LENGTH);
+                parts.headers.remove(header::CONTENT_ENCODING);
+                Ok((Request::from_parts(parts, Body::from(encoded)), route))
+            } else {
+                Ok((Request::from_parts(parts, Body::from(collected)), None))
+            }
+        }
+
         /// Answer Claude Code's `/v1/messages/count_tokens` locally (see
         /// [`crate::reroute::count_tokens_json`]). The request can't be proxied to Anthropic once a
         /// `sub` is active (it would be billed against the sub), so short-circuit with a JSON reply.
@@ -2333,6 +2388,7 @@ mod imp {
             &mut self,
             req: Request<Body>,
             sub: crate::reroute::SubProvider,
+            explicit_model: Option<String>,
         ) -> RequestOrResponse {
             let (mut parts, body) = req.into_parts();
             let session_id = parts
@@ -2386,8 +2442,14 @@ mod imp {
             let compact_cache_warm = session_id
                 .as_deref()
                 .is_some_and(crate::statusline::session_cache_warm);
+            // A request-local explicit model is authoritative: do not substitute hidden compact
+            // candidates and accidentally route the delegated turn elsewhere.
             let mut compact_candidates = crate::compact::detect(&anthropic)
-                .filter(|_| !self.compact_models.is_empty() && !compact_cache_warm)
+                .filter(|_| {
+                    explicit_model.is_none()
+                        && !self.compact_models.is_empty()
+                        && !compact_cache_warm
+                })
                 .map(|original| {
                     let tiers = llmtrim_core::config::sub_tiers_for(sub.as_str());
                     crate::compact::plan(&self.compact_models, &original, Some(sub), &tiers)
@@ -2514,14 +2576,26 @@ mod imp {
             // with global `sub = codex` must use `[sub.grok.tiers]` (or Grok defaults), not the
             // Codex mapping snapshotted into `self.sub_tiers` at daemon start.
             let tiers = llmtrim_core::config::sub_tiers_for(sub.as_str());
-            let rewrite = match crate::reroute::build_upstream_for_model(
-                sub,
-                &translate_value,
-                compact_current.as_ref().map(|c| c.logical_model.as_str()),
-                &tiers,
-                &token,
-                session_id.as_deref(),
-            ) {
+            let rewrite_result = if let Some(model) = explicit_model.as_deref() {
+                crate::reroute::build_upstream_for_explicit_model(
+                    sub,
+                    &translate_value,
+                    model,
+                    &tiers,
+                    &token,
+                    session_id.as_deref(),
+                )
+            } else {
+                crate::reroute::build_upstream_for_model(
+                    sub,
+                    &translate_value,
+                    compact_current.as_ref().map(|c| c.logical_model.as_str()),
+                    &tiers,
+                    &token,
+                    session_id.as_deref(),
+                )
+            };
+            let rewrite = match rewrite_result {
                 Ok(r) => r,
                 Err(e) => {
                     return anthropic_error(

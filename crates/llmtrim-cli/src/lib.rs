@@ -22,6 +22,8 @@ pub mod monitor;
 pub mod quality;
 #[cfg(feature = "intercept")]
 pub mod reroute;
+#[cfg(feature = "intercept")]
+pub mod route_agents;
 pub mod serve;
 pub mod setup;
 pub mod statusline;

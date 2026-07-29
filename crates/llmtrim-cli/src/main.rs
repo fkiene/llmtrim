@@ -52,6 +52,7 @@ Get started:
   ensure     Bring this machine to the recommended current state
   wrap       Launch an agent (claude, codex, …) routed through the interceptor
   sub        Reroute Claude Code to another subscription's backend (codex|kimi|grok)
+  agents     Install routed Claude Code subagents (Grok, Codex/Terra, Kimi)
   tray       Open the desktop tray app (savings menu-bar / system-tray)
 
 Daemon:
@@ -120,6 +121,16 @@ enum Commands {
     Sub {
         #[command(subcommand)]
         action: SubCmd,
+    },
+    /// Install request-local subscription-routed Claude Code subagents
+    ///
+    /// Generated agents let prompts such as "use a Grok subagent" or "implement with Terra"
+    /// delegate only that child thread to the selected subscription provider/model. The parent
+    /// window keeps its existing Anthropic or `/sub` route.
+    #[cfg(feature = "intercept")]
+    Agents {
+        #[command(subcommand)]
+        action: AgentsCmd,
     },
     /// Configure cheaper models for Claude Code `/compact`
     ///
@@ -439,6 +450,18 @@ enum BenchCmd {
     Latency(LatencyArgs),
     /// Head-to-head vs a third-party compressor (Python comparators).
     Compare(CompareArgs),
+}
+
+/// Manage request-local subscription-routed Claude Code subagents.
+#[cfg(feature = "intercept")]
+#[derive(Subcommand)]
+enum AgentsCmd {
+    /// Install or refresh all llmtrim-owned routed subagents
+    Install,
+    /// Show how many routed subagents are installed
+    Status,
+    /// Remove only llmtrim-owned routed subagents
+    Uninstall,
 }
 
 /// Subscription reroute: send Claude Code traffic to another subscription's backend.
@@ -1136,6 +1159,35 @@ fn run_compact(action: CompactCmd) -> Result<()> {
     }
 }
 
+#[cfg(feature = "intercept")]
+fn run_agents(action: AgentsCmd) -> Result<()> {
+    match action {
+        AgentsCmd::Install => {
+            let status = llmtrim::route_agents::install()?;
+            llmtrim::ensure::set_opt_out("route_agents", false)?;
+            println!(
+                "Installed {} routed Claude Code subagents in {}.",
+                status.current,
+                llmtrim::route_agents::agents_dir()?.display()
+            );
+            println!("Restart Claude Code, then ask for a Grok, Terra, Codex, or Kimi subagent.");
+        }
+        AgentsCmd::Status => {
+            let status = llmtrim::route_agents::status()?;
+            println!(
+                "Routed Claude Code subagents: {}/{} current ({} installed).",
+                status.current, status.expected, status.installed
+            );
+        }
+        AgentsCmd::Uninstall => {
+            let removed = llmtrim::route_agents::uninstall()?;
+            llmtrim::ensure::set_opt_out("route_agents", true)?;
+            println!("Removed {removed} llmtrim-owned routed Claude Code subagents.");
+        }
+    }
+    Ok(())
+}
+
 /// Handle `llmtrim sub <setup|on|off|status>`.
 #[cfg(feature = "intercept")]
 fn run_sub(action: SubCmd) -> Result<()> {
@@ -1778,6 +1830,8 @@ fn run() -> Result<()> {
             ),
         },
         Commands::Sub { action } => run_sub(action)?,
+        #[cfg(feature = "intercept")]
+        Commands::Agents { action } => run_agents(action)?,
         Commands::Compact { action } => run_compact(action)?,
         Commands::WindowSub { args } => {
             let hook = args.first().is_some_and(|arg| arg.starts_with("hook-"));

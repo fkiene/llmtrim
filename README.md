@@ -319,6 +319,18 @@ llmtrim sub chain codex,kimi,grok
 llmtrim sub off
 ```
 
+Route only a delegated Claude Code subagent while leaving the parent window unchanged:
+
+```bash
+llmtrim agents install          # also installed/refreshed by setup, update, and ensure
+```
+
+Then ask naturally: `Implement it using a Grok subagent`, `use Terra`, or `review this with GPT Terra`.
+Provider-only agents preserve the child request's Claude tier through the configured mapping; an
+explicit model agent pins that provider model. Request-local agents override the window `/sub` and
+global policy only for their own requests. `llmtrim agents uninstall` removes only llmtrim-owned
+agent files and records an opt-out so `ensure` leaves them removed.
+
 This window only (installed with ensure; includes subagents; survives `/clear`):
 
 ```text
