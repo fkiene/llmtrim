@@ -5,7 +5,9 @@
 //! a resumed session re-writes its whole context on the next request, billed at the cache-write
 //! rate. Nothing at the prompt says so. So on the first submit after a long idle gap on a big
 //! context, emit a JSON block decision and exit 2 — Claude Code blocks the prompt with no API
-//! call, and a resend goes straight through.
+//! call, and a resend goes straight through. Local-only slash commands that never reach the
+//! model (today: `/sub`) pass through without acking the gap, so the next real prompt still
+//! warns.
 //!
 //! The block response sets `suppressOriginalPrompt` so Claude Code does not append the blocked
 //! text as `Original prompt:` (that echo nested the warning inside itself on every resend). The
@@ -136,6 +138,25 @@ fn scan(reader: impl BufRead) -> Option<Scan> {
 /// context big enough that re-writing it costs real money.
 fn should_warn(idle_secs: i64, tokens: i64) -> bool {
     idle_secs >= CACHE_TTL_SECS && tokens >= MIN_TOKENS
+}
+
+/// Slash command names (no leading `/`) that never hit the model. Owned by the modules that
+/// install them — add a new entry when a new bang-only / `disable-model-invocation` skill lands.
+/// `/compact` is deliberately *not* here; it re-sends the whole context.
+const LOCAL_ONLY_SLASH_COMMANDS: &[&str] = &[crate::window_sub::COMMAND_NAME];
+
+/// Prompts that never reach the model — no cold-cache rewrite, so the guard has nothing to warn
+/// about. Match each name as a whole slash word so prose like `/subscribe` still warns. Does not
+/// ack the gap: the next real chat prompt after a local command must still warn.
+fn is_local_only_prompt(prompt: &str) -> bool {
+    let trimmed = prompt.trim_start();
+    let Some(body) = trimmed.strip_prefix('/') else {
+        return false;
+    };
+    LOCAL_ONLY_SLASH_COMMANDS.iter().any(|name| {
+        body.strip_prefix(name)
+            .is_some_and(|rest| rest.is_empty() || rest.starts_with(char::is_whitespace))
+    })
 }
 
 // ── the once-per-gap marker ──────────────────────────────────────────────────────
@@ -341,6 +362,11 @@ fn decide_in(input: &str, now: DateTime<Utc>, dir: &Path) -> Verdict {
     let Some(hook) = parse_hook(input) else {
         return Verdict::Pass;
     };
+    // Local-only slash commands never hit the API. Pass without acking the gap and without
+    // consuming a stashed draft — the next real prompt still owns the cold-cache decision.
+    if is_local_only_prompt(&hook.prompt) {
+        return Verdict::Pass;
+    }
     let Ok(file) = std::fs::File::open(&hook.transcript_path) else {
         return Verdict::Pass;
     };
@@ -698,6 +724,49 @@ mod tests {
     fn cold_and_big_blocks() {
         let (payload, dir) = fixture(&[entry(&ago(7200), 150_000, false)]);
         assert_eq!(verdict(&payload, &dir), BLOCK);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn local_only_prompt_recognises_sub_as_a_whole_word() {
+        let slash = format!("/{}", crate::window_sub::COMMAND_NAME);
+        assert!(is_local_only_prompt(&slash));
+        assert!(is_local_only_prompt(&format!("{slash} on codex")));
+        assert!(is_local_only_prompt(&format!("  {slash} off")));
+        assert!(is_local_only_prompt(&format!("{slash}\ton")));
+        assert!(!is_local_only_prompt(&format!(
+            "/{}scribe",
+            crate::window_sub::COMMAND_NAME
+        )));
+        assert!(!is_local_only_prompt("/compact"));
+        assert!(!is_local_only_prompt(&format!("please {slash} on codex")));
+        assert!(!is_local_only_prompt("carry on"));
+    }
+
+    #[test]
+    fn cold_sub_slash_command_passes_without_acking() {
+        // `/sub` is bang-shell only — no cold rewrite. Must not consume the gap, so the next
+        // real prompt still gets the warning.
+        let (payload, dir) = fixture(&[entry(&ago(7200), 150_000, false)]);
+        let mut v: Value = serde_json::from_str(&payload).unwrap();
+        v["prompt"] = Value::String(format!("/{} on codex", crate::window_sub::COMMAND_NAME));
+        assert_eq!(
+            decide_verdict(&v.to_string(), &dir),
+            Verdict::Pass,
+            "/sub must not be blocked"
+        );
+        let session = v["session_id"].as_str().unwrap();
+        assert!(
+            !marker_path(&dir, session).exists(),
+            "local command must not ack the gap"
+        );
+        // Real chat after /sub still warns.
+        v["prompt"] = Value::String("carry on".into());
+        assert_eq!(
+            verdict(&v.to_string(), &dir),
+            BLOCK,
+            "next real prompt still sees the cold gap"
+        );
         std::fs::remove_dir_all(dir).unwrap();
     }
 

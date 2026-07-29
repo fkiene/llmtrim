@@ -13,7 +13,9 @@ use serde::{Deserialize, Serialize};
 
 const TTL: Duration = Duration::from_secs(30 * 60);
 const TOUCH: Duration = Duration::from_secs(60);
-const COMMAND_NAME: &str = "sub";
+/// Claude Code skill / slash name (`/sub`). Shared with [`crate::guard`] so the cold-cache
+/// hook exempts the same command this module installs.
+pub(crate) const COMMAND_NAME: &str = "sub";
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 struct Registry {

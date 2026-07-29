@@ -274,7 +274,7 @@ Owned settings rewrite themselves when the binary path or payload changes. To op
 
 Resuming a large session after the prompt-cache TTL rewrites the whole context at cache-write rates (often a few dollars) with no warning at the prompt.
 
-Guard is a free `UserPromptSubmit` hook. It blocks one turn, prints idle time, context size, estimated cost, and the draft you typed (Claude Code clears the input box and would otherwise drop it), then lets a resend through. If you type something else next, the blocked text is also reinjected as model context. `/compact` pays that cold write too, because it has to read the full context to summarize.
+Guard is a free `UserPromptSubmit` hook. It blocks one turn, prints idle time, context size, estimated cost, and the draft you typed (Claude Code clears the input box and would otherwise drop it), then lets a resend through. If you type something else next, the blocked text is also reinjected as model context. `/compact` pays that cold write too, because it has to read the full context to summarize. Local-only slash commands that never hit the model (today: `/sub`) pass through without acking the gap, so the next real prompt still warns.
 
 Opt out: `llmtrim guard uninstall`. `ensure` remembers that choice.
 
