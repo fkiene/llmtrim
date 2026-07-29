@@ -651,7 +651,7 @@ mod tests {
     }
 
     #[test]
-    fn recovery_hinted_boundary_uses_live_shaping_and_query() {
+    fn recovery_hinted_boundary_uses_tighter_budget_and_query() {
         let log = (0..90)
             .map(|i| format!("INFO routine line {i} with unrelated payload"))
             .chain(std::iter::once(
@@ -677,6 +677,7 @@ mod tests {
         let pointer = "/messages/1/content/0/content".to_string();
         let mut cfg = config::DenseConfig::preset("agent").unwrap();
         cfg.toolout_template = false;
+        cfg.toolout_max_lines = 40;
         let recovered = compress_with_config_model_and_recovery(
             &boundary.to_string(),
             Some(ProviderKind::Anthropic),
@@ -709,14 +710,16 @@ mod tests {
             .and_then(Value::as_str)
             .unwrap();
         let ordinary_shaped = live_body.pointer(&pointer).and_then(Value::as_str).unwrap();
-        assert_eq!(
-            shaped
-                .strip_suffix(
-                    "\n[llmtrim: full output: llmtrim recall r_a; if unavailable, re-run the tool]"
-                )
-                .unwrap(),
-            ordinary_shaped,
-            "boundary uses the identical shaping pipeline before its marker"
+        let recovered_inline = shaped
+            .strip_suffix(
+                "\n[llmtrim: full output: llmtrim recall r_a; if unavailable, re-run the tool]",
+            )
+            .unwrap();
+        assert!(
+            recovered_inline.lines().count() < ordinary_shaped.lines().count(),
+            "recoverable boundary uses a tighter inline budget: {} vs {} lines",
+            recovered_inline.lines().count(),
+            ordinary_shaped.lines().count()
         );
         assert!(shaped.contains("relevant_identifier_omega"));
         assert!(shaped.ends_with("llmtrim recall r_a; if unavailable, re-run the tool]"));

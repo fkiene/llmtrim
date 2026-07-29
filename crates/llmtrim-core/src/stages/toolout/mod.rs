@@ -183,6 +183,14 @@ impl Transform for ToolOutputStage {
             template: self.template,
             mode: self.mode,
         };
+        // A durable raw copy changes the boundary trade-off: keep half the ordinary inline budget
+        // and prefer signal-only selection where the kind supports it. The model can recover exact
+        // omitted bytes instead of carrying a cautious window through every cached turn.
+        let recovery_ctx = Ctx {
+            max_lines: self.max_lines.div_ceil(2).max(MIN_KEEP),
+            template: self.template,
+            mode: ModeSetting::Aggressive,
+        };
 
         // Build one request-derived ask for both the ordinary and recoverable boundary paths.
         // The boundary is frozen by its marker, so its preceding user ask may be frozen too.
@@ -199,7 +207,7 @@ impl Transform for ToolOutputStage {
                 continue;
             };
             if let Some(handle) = req.recovery_hint(&pointer)
-                && let Some(shaped) = shape_lossy(raw, &ctx, &query, self.min_lines)
+                && let Some(shaped) = shape_lossy(raw, &recovery_ctx, &query, self.min_lines)
             {
                 req.set(&pointer, Value::String(format!(
                     "{shaped}\n[llmtrim: full output: llmtrim recall {handle}; if unavailable, re-run the tool]"
