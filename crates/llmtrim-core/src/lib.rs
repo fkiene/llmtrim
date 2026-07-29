@@ -651,12 +651,15 @@ mod tests {
     }
 
     #[test]
-    fn recovery_hinted_boundary_uses_tighter_budget_and_query() {
-        let log = (0..90)
+    fn recovery_hinted_boundary_uses_aggressive_mode_and_query() {
+        // Sparse errors under AUTO_MIN_LINES so ordinary Auto/Adaptive keeps a windowed
+        // view, while recovery forces Aggressive → errors-only. Same max_lines both paths.
+        let log = (0..40)
             .map(|i| format!("INFO routine line {i} with unrelated payload"))
             .chain(std::iter::once(
-                "INFO relevant_identifier_omega must survive".to_string(),
+                "ERROR relevant_identifier_omega disk full on /dev/sda1".to_string(),
             ))
+            .chain(std::iter::once("    at main.rs:12:5".to_string()))
             .collect::<Vec<_>>()
             .join("\n");
         let boundary = serde_json::json!({
@@ -678,6 +681,8 @@ mod tests {
         let mut cfg = config::DenseConfig::preset("agent").unwrap();
         cfg.toolout_template = false;
         cfg.toolout_max_lines = 40;
+        // Pin adaptive so the live-zone comparison is not mode-coupled to recovery.
+        cfg.toolout_mode = "adaptive".to_string();
         let recovered = compress_with_config_model_and_recovery(
             &boundary.to_string(),
             Some(ProviderKind::Anthropic),
@@ -717,9 +722,13 @@ mod tests {
             .unwrap();
         assert!(
             recovered_inline.lines().count() < ordinary_shaped.lines().count(),
-            "recoverable boundary uses a tighter inline budget: {} vs {} lines",
+            "recoverable boundary uses Aggressive signal-only selection: {} vs {} lines",
             recovered_inline.lines().count(),
             ordinary_shaped.lines().count()
+        );
+        assert!(
+            recovered_inline.starts_with("[log:"),
+            "Aggressive log path emits the summary header: {recovered_inline}"
         );
         assert!(shaped.contains("relevant_identifier_omega"));
         assert!(shaped.ends_with("llmtrim recall r_a; if unavailable, re-run the tool]"));

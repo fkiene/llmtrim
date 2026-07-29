@@ -183,11 +183,12 @@ impl Transform for ToolOutputStage {
             template: self.template,
             mode: self.mode,
         };
-        // A durable raw copy changes the boundary trade-off: keep half the ordinary inline budget
-        // and prefer signal-only selection where the kind supports it. The model can recover exact
-        // omitted bytes instead of carrying a cautious window through every cached turn.
+        // A durable raw copy changes the boundary trade-off: prefer signal-only selection
+        // (Aggressive) where the kind supports it, under the same line budget as live-zone
+        // shaping. The model can recover exact omitted bytes instead of carrying a cautious
+        // adaptive window through every cached turn.
         let recovery_ctx = Ctx {
-            max_lines: self.max_lines.div_ceil(2).max(MIN_KEEP),
+            max_lines: self.max_lines,
             template: self.template,
             mode: ModeSetting::Aggressive,
         };

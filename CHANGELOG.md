@@ -12,9 +12,10 @@ All notable changes to this project are documented here. The format follows
   aggressively selected view of logs, diffs, grep results, and dumps in the prompt cache while the
   exact raw result remains in bounded daemon memory for five hours by default. An emitted
   `llmtrim recall r_…` command restores the original bytes on demand. Recovery is enabled by
-  default, uses a tighter inline budget than ordinary live-zone shaping, works through subscription
-  reroutes, and falls back to normalization-only cache writes when admission or recovery is not
-  available. Set `first_arrival_recall = false` to opt out.
+  default, forces signal-only (`Aggressive`) selection where the tool-output kind supports it
+  under the ordinary live-zone line budget, works through subscription reroutes, and falls back
+  to normalization-only cache writes when admission or recovery is not available. Set
+  `first_arrival_recall = false` to opt out.
 
 ### Fixed
 
