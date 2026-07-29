@@ -3424,7 +3424,10 @@ mod tests {
         // Each tab holds ~22% of the cycle with a short crossfade between holds.
         let anim = [
             // Overview: hold, fade out, stay off, fade in at end for loop
-            ("1;1;0;0;0;0;0;0;1", "0;0.22;0.25;0.47;0.50;0.72;0.75;0.97;1"),
+            (
+                "1;1;0;0;0;0;0;0;1",
+                "0;0.22;0.25;0.47;0.50;0.72;0.75;0.97;1",
+            ),
             // Sessions
             ("0;0;1;1;0;0;0;0", "0;0.22;0.25;0.47;0.50;0.72;0.75;1"),
             // Detail
