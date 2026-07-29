@@ -4228,7 +4228,14 @@ mod imp {
 
     /// Recovery is available only when the caller actually supplied a Bash tool definition. A
     /// model mentioning Bash in prose is not evidence that it can execute `llmtrim recall`.
-    fn has_bash_tool_definition(value: &Value) -> bool {
+    fn is_recall_command_tool_name(name: &str) -> bool {
+        matches!(
+            name.to_ascii_lowercase().as_str(),
+            "bash" | "shell" | "terminal" | "execute_command" | "run_command"
+        )
+    }
+
+    fn has_recall_command_tool(value: &Value) -> bool {
         value
             .get("tools")
             .and_then(Value::as_array)
@@ -4239,7 +4246,7 @@ mod imp {
                     .or_else(|| tool.pointer("/function/name"))
                     .and_then(Value::as_str)
             })
-            .any(|name| name.eq_ignore_ascii_case("bash"))
+            .any(is_recall_command_tool_name)
     }
 
     /// A successful recall is already the recovery path. Its Bash result must pass through rather
@@ -4269,7 +4276,10 @@ mod imp {
             .any(|block| {
                 block.get("type").and_then(Value::as_str) == Some("tool_use")
                     && block.get("id").and_then(Value::as_str) == Some(tool_use_id)
-                    && block.get("name").and_then(Value::as_str) == Some("Bash")
+                    && block
+                        .get("name")
+                        .and_then(Value::as_str)
+                        .is_some_and(is_recall_command_tool_name)
                     && block
                         .pointer("/input/command")
                         .and_then(Value::as_str)
@@ -4346,18 +4356,24 @@ mod imp {
             .and_then(|v| llmtrim_core::provider::detect(&v))
             .unwrap_or(provider);
         let started = std::time::Instant::now();
-        // Fail closed unless the request proves both Claude Code identity (its session header)
-        // and practical recovery availability (an actual Bash definition).
+        let value: Value = serde_json::from_str(text).ok()?;
+        // Recovery is client-agnostic, but it requires an actual local command tool. Prefer the
+        // client's session identity for rerun scoping; unidentified agents share a conservative
+        // daemon-local bucket, where a false repeat only passes a result through in full.
+        let identity = llmtrim_core::attribution::extract_identity(&value, kind);
+        let recovery_scope = cc_session_id
+            .clone()
+            .or(identity.session_id)
+            .unwrap_or_else(|| "local-anthropic-agent".to_string());
         let mut recovery_hints = std::collections::BTreeMap::new();
         let mut admissions = AdmissionGuard {
             recall,
             entries: Vec::new(),
         };
-        let value: Value = serde_json::from_str(text).ok()?;
         if RuntimeConfig::get().first_arrival_recall
             && kind == ProviderKind::Anthropic
-            && let (Some(session), Some(recall)) = (cc_session_id.as_deref(), recall)
-            && has_bash_tool_definition(&value)
+            && let Some(recall) = recall
+            && has_recall_command_tool(&value)
         {
             let req = llmtrim_core::ir::Request::from_value(kind, value.clone());
             let adapter = llmtrim_core::provider::for_kind(kind);
@@ -4367,7 +4383,7 @@ mod imp {
                 if !is_recall_tool_result(&value, &pointer)
                     && let Some(raw) = req.get_str(&pointer)
                     && let Ok(crate::recall::Admission::Stored(handle)) =
-                        recall.admit(session, raw.as_bytes().to_vec())
+                        recall.admit(&recovery_scope, raw.as_bytes().to_vec())
                 {
                     recovery_hints.insert(pointer.clone(), handle.clone());
                     admissions.entries.push((pointer, handle));

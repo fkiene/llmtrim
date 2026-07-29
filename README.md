@@ -88,7 +88,7 @@ npm install -g @llmtrim/cli@latest && llmtrim setup
 llmtrim status
 ```
 
-That's it. `setup` starts a local proxy, wires your shell, and (when Claude Code is present) turns on the status line, cold-cache guard, `/sub`, and cheaper `/compact`. You do not run a separate install for each of those.
+That's it. `setup` starts a local proxy, wires your shell, and enables recoverable tool-output shaping. When Claude Code is present, it also turns on the status line, cold-cache guard, `/sub`, and cheaper `/compact`. You do not run a separate install for each of those.
 
 | You want | Run |
 |---|---|
@@ -137,7 +137,7 @@ Same technique as [mitmproxy](https://mitmproxy.org), scoped to LLM API hosts on
 2. Shell env: `HTTPS_PROXY` + CA trust
 3. Login service: daemon at login
 
-No API keys stored (your tool's auth is forwarded). Prompts never touch disk; only anonymous token counts. Full threat model: [SECURITY.md](SECURITY.md).
+No API keys stored (your tool's auth is forwarded). Prompts never touch disk; only anonymous token counts. Recoverable tool results stay in bounded daemon RAM for five hours by default and disappear on restart. Full threat model: [SECURITY.md](SECURITY.md).
 
 ```bash
 llmtrim ca
@@ -214,7 +214,7 @@ Log folding is one stage. Others kick in on different waste:
 > [!IMPORTANT]
 > Compression cannot raise your bill or break a request. Each stage is re-measured with the provider's real tokenizer and undone if it does not save tokens. If the provider rejects the compressed body, the original is resent. Worst case is zero savings.
 
-Prompt-cache prefixes (`cache_control`) are left alone.
+Existing prompt-cache prefixes (`cache_control`) are left alone. On shell-capable agent turns, a newly arriving tool result may be shaped once before its first cache write; the exact raw result remains recoverable with the emitted `llmtrim recall r_…` command.
 
 <details>
 <summary><b>All 10 compressors</b></summary>
@@ -223,7 +223,7 @@ Stages run in savings order. Nothing under a `cache_control` marker is rewritten
 
 | Stage | What it does | When it runs |
 |---|---|---|
-| **tool-output** | Lossless template fold first, then window logs · diffs · grep · dumps down to errors / changes / matches | tool results |
+| **tool-output** | Lossless template fold first, then window logs · diffs · grep · dumps down to errors / changes / matches; shell-capable agents can restore omitted first-arrival results with `llmtrim recall` | tool results |
 | **cache discipline** | Mark + stabilize the invariant prefix (sort tools/schema · OpenAI `prompt_cache_key`) so it stays cached | tools |
 | **lexical retrieval** | BM25+ ranking with RM3 feedback · TextTiling topic cuts · budgeted non-redundant selection; question protected | long context |
 | **skeletonization** | tree-sitter keeps relevant function bodies, drops the rest to signatures (14 languages) | code |
@@ -518,6 +518,8 @@ These knobs are orthogonal to compression. Each resolves env-first, then from th
 | `LLMTRIM_DB_PATH` | `db_path` | ledger location |
 | `LLMTRIM_CAPTURE_DIR` | `capture_dir` | before/after QA capture directory |
 | `LLMTRIM_CAPTURE_MAX_MB` | `capture_max_mb` | capture corpus size ceiling (`0` disables) |
+| `LLMTRIM_FIRST_ARRIVAL_RECALL` | `first_arrival_recall` | recoverable first-arrival tool-output shaping (default `true`; set `false` for normalization-only cache writes) |
+| `LLMTRIM_FIRST_ARRIVAL_RECALL_TTL_SECS` | `first_arrival_recall_ttl_secs` | in-memory raw-result lifetime (default 18,000 seconds / five hours) |
 | `LLMTRIM_BIND` | `bind` | listen IP (default loopback; `0.0.0.0` for containers) |
 | `LLMTRIM_BREAKDOWN_WINDOW` | `breakdown_window` | context-window override for the cost breakdown |
 | `LLMTRIM_RETENTION_DAYS` | `retention_days` | ledger age-retention in days |

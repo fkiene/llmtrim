@@ -443,11 +443,16 @@ mod tests {
     #[test]
     fn replay_is_transactional_until_selected_body_is_recorded() {
         let memo = Memo::with_capacity(DEFAULT_CAPACITY);
+        let salt = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+            .to_le_bytes();
         let a = json!({"messages": [user("context one. detail"), user("question one")]});
         let mut ca = fake_compress(&a);
-        assert_eq!(replay(&memo, b"t", &a, &mut ca), 0);
+        assert_eq!(replay(&memo, &salt, &a, &mut ca), 0);
         assert!(memo.is_empty(), "a candidate replay must not record itself");
-        record(&memo, b"t", &a, &ca);
+        record(&memo, &salt, &a, &ca);
         assert!(
             !memo.is_empty(),
             "the selected wire body is committed explicitly"
@@ -459,7 +464,7 @@ mod tests {
             user("new appended turn")
         ]});
         let mut cb = fake_compress(&b);
-        assert_eq!(replay(&memo, b"t", &b, &mut cb), 2);
+        assert_eq!(replay(&memo, &salt, &b, &mut cb), 2);
     }
 
     #[test]
