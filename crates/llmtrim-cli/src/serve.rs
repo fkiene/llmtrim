@@ -1371,25 +1371,36 @@ mod imp {
         let _ = std::io::Write::flush(&mut std::io::stderr());
     }
 
+    /// Context for [`log_stream_upstream`] — kept as a struct so the greppable death line can grow
+    /// fields without tripping `clippy::too_many_arguments` (CI `-D warnings`).
+    struct StreamUpstreamLog<'a> {
+        model: &'a str,
+        sub: &'a str,
+        session: &'a str,
+        kind: &'a str,
+        cause: &'a str,
+        open_secs: u64,
+        encoder_open: bool,
+        last_event: &'a str,
+    }
+
     /// Greppable stderr line for a live reroute upstream body death (transport error or quiet
     /// EOF). Includes `cause=`, `open_secs=`, `encoder_open=`, and `last_event=` so multi-minute
     /// reasoning kills can be classified without a Claude transcript dig.
-    fn log_stream_upstream(
-        model: &str,
-        sub: &str,
-        session: &str,
-        kind: &str,
-        cause: &str,
-        open_secs: u64,
-        encoder_open: bool,
-        last_event: &str,
-    ) {
+    fn log_stream_upstream(log: StreamUpstreamLog<'_>) {
         let ts = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
         // Sanitize cause for a single log line (hyper errors can embed newlines).
-        let cause = cause.replace(['\n', '\r'], " ");
+        let cause = log.cause.replace(['\n', '\r'], " ");
         eprintln!(
             "llmtrim: stream {kind} model={model} sub={sub} session={session} ts={ts} \
-             open_secs={open_secs} encoder_open={encoder_open} last_event={last_event} cause={cause}"
+             open_secs={open_secs} encoder_open={encoder_open} last_event={last_event} cause={cause}",
+            kind = log.kind,
+            model = log.model,
+            sub = log.sub,
+            session = log.session,
+            open_secs = log.open_secs,
+            encoder_open = log.encoder_open,
+            last_event = log.last_event,
         );
         let _ = std::io::Write::flush(&mut std::io::stderr());
     }
@@ -2825,32 +2836,32 @@ mod imp {
                     }
                     Some(Err(e)) => {
                         let cause = e.to_string();
-                        log_stream_upstream(
-                            &info.model,
-                            info.provider.as_str(),
-                            info.session_id.as_deref().unwrap_or("-"),
-                            "peek_error",
-                            &cause,
-                            peek_started.elapsed().as_secs(),
-                            encoder.is_open(),
+                        log_stream_upstream(StreamUpstreamLog {
+                            model: &info.model,
+                            sub: info.provider.as_str(),
+                            session: info.session_id.as_deref().unwrap_or("-"),
+                            kind: "peek_error",
+                            cause: &cause,
+                            open_secs: peek_started.elapsed().as_secs(),
+                            encoder_open: encoder.is_open(),
                             last_event,
-                        );
+                        });
                         fatal.get_or_insert_with(|| {
                             format!("llmtrim: upstream stream error ({cause})")
                         });
                     }
                     None => {
                         if !semantic && !saw_finish {
-                            log_stream_upstream(
-                                &info.model,
-                                info.provider.as_str(),
-                                info.session_id.as_deref().unwrap_or("-"),
-                                "peek_eof",
-                                "upstream closed 2xx body before content",
-                                peek_started.elapsed().as_secs(),
-                                encoder.is_open(),
+                            log_stream_upstream(StreamUpstreamLog {
+                                model: &info.model,
+                                sub: info.provider.as_str(),
+                                session: info.session_id.as_deref().unwrap_or("-"),
+                                kind: "peek_eof",
+                                cause: "upstream closed 2xx body before content",
+                                open_secs: peek_started.elapsed().as_secs(),
+                                encoder_open: encoder.is_open(),
                                 last_event,
-                            );
+                            });
                         }
                         break;
                     }
@@ -3114,16 +3125,16 @@ mod imp {
                                         // surface an Anthropic `error` frame so the client can
                                         // tell a dropped provider connection from a clean end.
                                         let cause = e.to_string();
-                                        log_stream_upstream(
-                                            &st.model,
-                                            st.provider.as_str(),
-                                            st.session_id.as_deref().unwrap_or("-"),
-                                            "mid_stream_error",
-                                            &cause,
-                                            st.open_at.elapsed().as_secs(),
-                                            st.encoder.is_open(),
-                                            st.last_event,
-                                        );
+                                        log_stream_upstream(StreamUpstreamLog {
+                                            model: &st.model,
+                                            sub: st.provider.as_str(),
+                                            session: st.session_id.as_deref().unwrap_or("-"),
+                                            kind: "mid_stream_error",
+                                            cause: &cause,
+                                            open_secs: st.open_at.elapsed().as_secs(),
+                                            encoder_open: st.encoder.is_open(),
+                                            last_event: st.last_event,
+                                        });
                                         let mut out = String::new();
                                         st.encoder.encode(
                                             &ReduceEvent::Error {
@@ -3147,16 +3158,16 @@ mod imp {
                                         // client will see finish_if_open / incomplete — log so
                                         // multi-minute silent closes are greppable.
                                         if st.encoder.is_open() {
-                                            log_stream_upstream(
-                                                &st.model,
-                                                st.provider.as_str(),
-                                                st.session_id.as_deref().unwrap_or("-"),
-                                                "mid_stream_eof",
-                                                "upstream closed body without terminal",
-                                                st.open_at.elapsed().as_secs(),
-                                                true,
-                                                st.last_event,
-                                            );
+                                            log_stream_upstream(StreamUpstreamLog {
+                                                model: &st.model,
+                                                sub: st.provider.as_str(),
+                                                session: st.session_id.as_deref().unwrap_or("-"),
+                                                kind: "mid_stream_eof",
+                                                cause: "upstream closed body without terminal",
+                                                open_secs: st.open_at.elapsed().as_secs(),
+                                                encoder_open: true,
+                                                last_event: st.last_event,
+                                            });
                                         }
                                         st.phase = Phase::Flush;
                                         continue;
