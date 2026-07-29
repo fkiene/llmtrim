@@ -542,6 +542,11 @@ pub(crate) const RUNTIME_ONLY_KEYS: &[&str] = &[
     "theme",
     "sub",
     "compact",
+    "first_arrival_recall",
+    "first_arrival_recall_ttl_secs",
+    "first_arrival_recall_max_entries",
+    "first_arrival_recall_max_bytes",
+    "first_arrival_recall_max_entry_bytes",
 ];
 
 /// The resolved config-file path (`LLMTRIM_CONFIG`, else `$XDG_CONFIG_HOME`/`$HOME/.config` +
@@ -924,6 +929,18 @@ pub struct RuntimeConfig {
     /// model substitution is disabled. File-only: model routing is persistent policy, not an
     /// environment toggle.
     pub compact_models: Vec<String>,
+    /// Enable recoverable lossy first-arrival tool-output shaping (default true). It activates on
+    /// auto-routed agent requests; set false to retain normalization-only cache writes. Raw output
+    /// remains only in daemon memory and can be recalled for the configured TTL.
+    pub first_arrival_recall: bool,
+    /// Recall-store TTL in seconds; unset uses five hours (18,000 seconds).
+    pub first_arrival_recall_ttl_secs: Option<u64>,
+    /// Recall-store entry cap; unset uses 256.
+    pub first_arrival_recall_max_entries: Option<usize>,
+    /// Recall-store aggregate byte cap; unset uses 64 MiB.
+    pub first_arrival_recall_max_bytes: Option<usize>,
+    /// Recall-store per-entry byte cap; unset uses 8 MiB.
+    pub first_arrival_recall_max_entry_bytes: Option<usize>,
 }
 
 impl RuntimeConfig {
@@ -1012,6 +1029,36 @@ impl RuntimeConfig {
             sub_effort: resolve_sub_effort(&env, file),
             sub_codex_previous_response_id: resolve_sub_codex_continuation(&env, file),
             compact_models: resolve_compact_models(file),
+            first_arrival_recall: env_set("LLMTRIM_FIRST_ARRIVAL_RECALL")
+                .and_then(|s| s.parse().ok())
+                .or_else(|| fbool("first_arrival_recall"))
+                .unwrap_or(true),
+            first_arrival_recall_ttl_secs: env_set("LLMTRIM_FIRST_ARRIVAL_RECALL_TTL_SECS")
+                .and_then(|s| s.parse().ok())
+                .or_else(|| {
+                    fint("first_arrival_recall_ttl_secs").and_then(|n| u64::try_from(n).ok())
+                })
+                .filter(|n| *n > 0),
+            first_arrival_recall_max_entries: env_set("LLMTRIM_FIRST_ARRIVAL_RECALL_MAX_ENTRIES")
+                .and_then(|s| s.parse().ok())
+                .or_else(|| {
+                    fint("first_arrival_recall_max_entries").and_then(|n| usize::try_from(n).ok())
+                })
+                .filter(|n| *n > 0),
+            first_arrival_recall_max_bytes: env_set("LLMTRIM_FIRST_ARRIVAL_RECALL_MAX_BYTES")
+                .and_then(|s| s.parse().ok())
+                .or_else(|| {
+                    fint("first_arrival_recall_max_bytes").and_then(|n| usize::try_from(n).ok())
+                })
+                .filter(|n| *n > 0),
+            first_arrival_recall_max_entry_bytes: env_set(
+                "LLMTRIM_FIRST_ARRIVAL_RECALL_MAX_ENTRY_BYTES",
+            )
+            .and_then(|s| s.parse().ok())
+            .or_else(|| {
+                fint("first_arrival_recall_max_entry_bytes").and_then(|n| usize::try_from(n).ok())
+            })
+            .filter(|n| *n > 0),
         }
     }
 }
@@ -2790,6 +2837,29 @@ active = \"off\"
             c.hygiene && c.serialize,
             "retention_days is ignored by DenseConfig"
         );
+    }
+
+    #[test]
+    fn first_arrival_recall_defaults_on_allows_opt_out_and_parses_limits() {
+        let defaults = resolve_file("");
+        assert!(defaults.first_arrival_recall);
+        assert_eq!(defaults.first_arrival_recall_ttl_secs, None);
+        assert!(!resolve_file("first_arrival_recall = false").first_arrival_recall);
+        let c = resolve_env(
+            &[
+                ("LLMTRIM_FIRST_ARRIVAL_RECALL", "true"),
+                ("LLMTRIM_FIRST_ARRIVAL_RECALL_TTL_SECS", "60"),
+                ("LLMTRIM_FIRST_ARRIVAL_RECALL_MAX_ENTRIES", "2"),
+                ("LLMTRIM_FIRST_ARRIVAL_RECALL_MAX_BYTES", "1024"),
+                ("LLMTRIM_FIRST_ARRIVAL_RECALL_MAX_ENTRY_BYTES", "256"),
+            ],
+            "first_arrival_recall = false\nfirst_arrival_recall_ttl_secs = 1",
+        );
+        assert!(c.first_arrival_recall);
+        assert_eq!(c.first_arrival_recall_ttl_secs, Some(60));
+        assert_eq!(c.first_arrival_recall_max_entries, Some(2));
+        assert_eq!(c.first_arrival_recall_max_bytes, Some(1024));
+        assert_eq!(c.first_arrival_recall_max_entry_bytes, Some(256));
     }
 
     #[test]

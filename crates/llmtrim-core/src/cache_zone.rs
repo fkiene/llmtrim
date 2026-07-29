@@ -7,8 +7,10 @@
 //! false economy" trap). So content-mutating stages ordinarily compress only the **live zone**:
 //! the segments after the last `cache_control` marker. Tool output has one narrow exception: a
 //! tool result in the final marked message receives terminal-equivalent normalization as that
-//! cache entry is first written, then the turn memo replays the emitted bytes verbatim. Template
-//! folding and lossy windowing remain confined to the live zone.
+//! cache entry is first written, then the turn memo replays the emitted bytes verbatim. An
+//! experimental opt-in may lossily shape an admitted result and attach a daemon-memory recall
+//! handle (five-hour default TTL); without that admission, template folding and lossy windowing
+//! remain confined to the live zone.
 //!
 //! No markers ⇒ no known cache ⇒ everything is compressible (behavior unchanged):
 //! determinism keeps an identical prefix cache-stable across calls, and Stage A's OpenAI
@@ -36,7 +38,8 @@ pub fn compressible_pointers(req: &Request, provider: &dyn Provider) -> Vec<Stri
 
 /// Tool-result pointers entering the cache at the final breakpoint. Claude Code may append a
 /// system reminder carrying the marker after the result, so skip those trailing system messages
-/// and select the adjacent tool-result message. Lossy transforms remain confined to the live zone.
+/// and select the adjacent tool-result message. Callers must still require a durable recovery
+/// admission before applying any lossy transform at these otherwise-frozen pointers.
 pub fn first_arrival_tool_result_pointers(req: &Request, provider: &dyn Provider) -> Vec<String> {
     let Some(messages) = req.raw().get("messages").and_then(Value::as_array) else {
         return Vec::new();

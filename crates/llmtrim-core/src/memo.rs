@@ -304,17 +304,20 @@ fn plan(salt: &[u8], original: &Value, compressed: &Value) -> Option<PrefixPlan>
 /// reused, i.e. behavior identical to no memo). Pure and synchronous; never panics; on any
 /// structural surprise it makes no change and returns 0 (full stateless fallback).
 pub fn apply(memo: &Memo, salt: &[u8], original: &Value, compressed: &mut Value) -> usize {
+    let reused = replay(memo, salt, original, compressed);
+    record(memo, salt, original, compressed);
+    reused
+}
+
+/// Replay an already-recorded contiguous prefix without mutating the memo. This split lets callers
+/// decide whether the resulting request is actually forwarded before committing new entries.
+pub fn replay(memo: &Memo, salt: &[u8], original: &Value, compressed: &mut Value) -> usize {
     if memo.cap == 0 {
         return 0;
     }
     let Some(plan) = plan(salt, original, compressed) else {
         return 0;
     };
-    let offset = plan.offset;
-
-    // Longest already-seen prefix: stored values to splice in, in original order. We stop at the
-    // first cold boundary — reuse must be a contiguous prefix (the suffix is this turn's new
-    // work), matching the provider cache's prefix semantics.
     let mut reused: Vec<(usize, Value)> = Vec::new();
     for (idx, h, _) in &plan.entries {
         match memo.get(*h) {
@@ -322,35 +325,39 @@ pub fn apply(memo: &Memo, salt: &[u8], original: &Value, compressed: &mut Value)
             None => break,
         }
     }
-
     let reused_count = reused.len();
     if reused_count > 0
         && let Some(comp_msgs) = compressed.get_mut(plan.key).and_then(Value::as_array_mut)
     {
         for (idx, stored) in reused {
-            if let Some(slot) = comp_msgs.get_mut(idx + offset)
+            if let Some(slot) = comp_msgs.get_mut(idx + plan.offset)
                 && let Some(obj) = slot.as_object_mut()
             {
                 obj.insert("content".to_string(), stored);
             }
         }
     }
+    reused_count
+}
 
-    // Record THIS turn for next time — including the messages we just reused (so the entry stays
-    // hot and a longer prefix can freeze next turn). We re-read the (now possibly rewritten)
-    // compressed content so what we store is exactly what we emit on the wire.
+/// Record exactly the content that the caller selected for forwarding.
+pub fn record(memo: &Memo, salt: &[u8], original: &Value, forwarded: &Value) {
+    if memo.cap == 0 {
+        return;
+    }
+    let Some(plan) = plan(salt, original, forwarded) else {
+        return;
+    };
     for (idx, h, fresh_content) in plan.entries {
-        let to_store = compressed
+        let to_store = forwarded
             .get(plan.key)
             .and_then(Value::as_array)
-            .and_then(|a| a.get(idx + offset))
+            .and_then(|a| a.get(idx + plan.offset))
             .and_then(|m| m.get("content"))
             .cloned()
             .unwrap_or(fresh_content);
         memo.put(h, to_store);
     }
-
-    reused_count
 }
 
 #[cfg(test)]
@@ -431,6 +438,28 @@ mod tests {
         // Same context still works (the salt isn't accidentally over-invalidating).
         let mut cb2 = fake_compress(&b);
         assert_eq!(apply(&memo, b"ctx-rag", &b, &mut cb2), 2);
+    }
+
+    #[test]
+    fn replay_is_transactional_until_selected_body_is_recorded() {
+        let memo = Memo::with_capacity(DEFAULT_CAPACITY);
+        let a = json!({"messages": [user("context one. detail"), user("question one")]});
+        let mut ca = fake_compress(&a);
+        assert_eq!(replay(&memo, b"t", &a, &mut ca), 0);
+        assert!(memo.is_empty(), "a candidate replay must not record itself");
+        record(&memo, b"t", &a, &ca);
+        assert!(
+            !memo.is_empty(),
+            "the selected wire body is committed explicitly"
+        );
+
+        let b = json!({"messages": [
+            user("context one. detail"),
+            user("question one"),
+            user("new appended turn")
+        ]});
+        let mut cb = fake_compress(&b);
+        assert_eq!(replay(&memo, b"t", &b, &mut cb), 2);
     }
 
     #[test]

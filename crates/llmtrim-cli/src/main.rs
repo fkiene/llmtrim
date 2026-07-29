@@ -67,6 +67,7 @@ When something's wrong:
 Pipes & one-shots:
   compress   Compress a request from stdin to stdout
   send       Compress a request, send it to the provider, print the response
+  recall     Recover raw bytes from an ephemeral recall handle
   serve      Run the HTTPS interceptor in the foreground
   ca         Print the local CA certificate path and how to trust it
 
@@ -235,6 +236,11 @@ enum Commands {
         /// The agent binary to launch, followed by its arguments (use `--` before flags).
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
+    },
+    /// Print an ephemeral raw tool result recovered from the running daemon.
+    Recall {
+        /// Opaque handle from recoverable first-arrival shaping (memory-only; five-hour default TTL).
+        handle: String,
     },
     /// Stop the background interceptor daemon
     Stop,
@@ -1770,6 +1776,13 @@ fn run() -> Result<()> {
             if llmtrim::daemon::running().is_none() {
                 std::process::exit(1);
             }
+        }
+        Commands::Recall { handle } => {
+            let bytes = llmtrim::recall::request(&handle)?;
+            std::io::stdout()
+                .lock()
+                .write_all(&bytes)
+                .context("failed to write stdout")?;
         }
         Commands::Stop => match llmtrim::daemon::stop()? {
             Some(pid) => {

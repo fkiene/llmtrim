@@ -1735,6 +1735,8 @@ mod imp {
         /// clones so a conversation's earlier-turn compressed prefix is reusable on its next
         /// turn — keeping the provider prefix cache warm on agent loops. In-memory only.
         memo: Arc<Memo>,
+        /// Same daemon-owned store served by the local recall IPC endpoint.
+        recall: Option<crate::recall::SharedStore>,
         /// The compressed request awaiting its response (set in `handle_request`).
         pending: Option<Pending>,
         /// Whether this request asked for a streamed reply (set in `handle_request`, read by
@@ -2208,6 +2210,7 @@ mod imp {
                             ProviderKind::Anthropic,
                             None,
                             &memo,
+                            None,
                             sid,
                         )
                     })
@@ -2260,6 +2263,7 @@ mod imp {
             // everyone). Cheap to move in: `Bytes` is ref-counted, `config` is an `Arc`.
             let config = self.config.clone();
             let memo = self.memo.clone();
+            let recall = self.recall.clone();
             let body_for_compress = bytes.clone();
             // Gemini/Vertex carry the model in the URL, not the body; capture it so the
             // capability gate can see it (the body-only lookup returns nothing for them).
@@ -2271,6 +2275,7 @@ mod imp {
                     provider,
                     model_override.as_deref(),
                     &memo,
+                    recall.as_deref(),
                     cc_session_id,
                 )
             })
@@ -2468,10 +2473,19 @@ mod imp {
             if compact_candidates.is_empty() {
                 let config = self.config.clone();
                 let memo = self.memo.clone();
+                let recall = self.recall.clone();
                 let raw = bytes.clone();
                 let sid = session_id.clone();
                 compressed = tokio::task::spawn_blocking(move || {
-                    compress_blocking(&config, &raw, ProviderKind::Anthropic, None, &memo, sid)
+                    compress_blocking(
+                        &config,
+                        &raw,
+                        ProviderKind::Anthropic,
+                        None,
+                        &memo,
+                        recall.as_deref(),
+                        sid,
+                    )
                 })
                 .await
                 .ok()
@@ -2490,6 +2504,7 @@ mod imp {
                             ProviderKind::Anthropic,
                             Some(&model),
                             &memo,
+                            None,
                             sid,
                         )
                     })
@@ -3806,6 +3821,7 @@ mod imp {
                         ProviderKind::Anthropic,
                         Some(&model),
                         &memo,
+                        None,
                         sid,
                     )
                 })
@@ -3930,7 +3946,15 @@ mod imp {
                 let memo = self.memo.clone();
                 let sid = state.session_id.clone();
                 let (json, next) = tokio::task::spawn_blocking(move || {
-                    compress_blocking(&config, &raw, ProviderKind::Anthropic, None, &memo, sid)
+                    compress_blocking(
+                        &config,
+                        &raw,
+                        ProviderKind::Anthropic,
+                        None,
+                        &memo,
+                        None,
+                        sid,
+                    )
                 })
                 .await
                 .ok()
@@ -4202,12 +4226,112 @@ mod imp {
         (!model.is_empty()).then_some(model)
     }
 
+    /// Recovery is available only when the caller actually supplied a Bash tool definition. A
+    /// model mentioning Bash in prose is not evidence that it can execute `llmtrim recall`.
+    fn has_bash_tool_definition(value: &Value) -> bool {
+        value
+            .get("tools")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(|tool| {
+                tool.get("name")
+                    .or_else(|| tool.pointer("/function/name"))
+                    .and_then(Value::as_str)
+            })
+            .any(|name| name.eq_ignore_ascii_case("bash"))
+    }
+
+    /// A successful recall is already the recovery path. Its Bash result must pass through rather
+    /// than being admitted and windowed again, which would turn recovery into a marker loop.
+    fn is_recall_tool_result(value: &Value, content_pointer: &str) -> bool {
+        let Some(block_pointer) = content_pointer.strip_suffix("/content") else {
+            return false;
+        };
+        let Some(tool_use_id) = value
+            .pointer(&format!("{block_pointer}/tool_use_id"))
+            .and_then(Value::as_str)
+        else {
+            return false;
+        };
+        value
+            .get("messages")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .flat_map(|message| {
+                message
+                    .get("content")
+                    .and_then(Value::as_array)
+                    .into_iter()
+                    .flatten()
+            })
+            .any(|block| {
+                block.get("type").and_then(Value::as_str) == Some("tool_use")
+                    && block.get("id").and_then(Value::as_str) == Some(tool_use_id)
+                    && block.get("name").and_then(Value::as_str) == Some("Bash")
+                    && block
+                        .pointer("/input/command")
+                        .and_then(Value::as_str)
+                        .is_some_and(|command| {
+                            let words: Vec<&str> = command.split_ascii_whitespace().collect();
+                            words.len() == 3
+                                && words[0].ends_with("llmtrim")
+                                && words[1] == "recall"
+                                && words[2].starts_with("r_")
+                        })
+            })
+    }
+
+    /// Rolls back every stored recall entry unless its exact marker reaches the intended JSON
+    /// pointer in the final body. This covers parse/compression failures and every token/body gate.
+    struct AdmissionGuard<'a> {
+        recall: Option<&'a crate::recall::RecallStore>,
+        entries: Vec<(String, String)>,
+    }
+
+    impl AdmissionGuard<'_> {
+        fn commit(&mut self, body: &str) {
+            let Ok(value) = serde_json::from_str::<Value>(body) else {
+                return;
+            };
+            let mut committed = Vec::new();
+            for (pointer, handle) in self.entries.drain(..) {
+                let present = value.pointer(&pointer).and_then(Value::as_str).is_some_and(|text| {
+                    text.lines().any(|line| line == format!(
+                        "[llmtrim: full output: llmtrim recall {handle}; if unavailable, re-run the tool]"
+                    ))
+                });
+                if !present {
+                    if let Some(recall) = self.recall {
+                        recall.rollback(&handle);
+                    }
+                } else {
+                    committed.push((pointer, handle));
+                }
+            }
+            // Kept entries are committed: suppress Drop cleanup.
+            drop(committed);
+        }
+    }
+
+    impl Drop for AdmissionGuard<'_> {
+        fn drop(&mut self) {
+            if let Some(recall) = self.recall {
+                for (_, handle) in &self.entries {
+                    recall.rollback(handle);
+                }
+            }
+        }
+    }
+
     fn compress_blocking(
         config: &DenseConfig,
         body: &[u8],
         provider: ProviderKind,
         model_override: Option<&str>,
         memo: &Memo,
+        recall: Option<&crate::recall::RecallStore>,
         cc_session_id: Option<String>,
     ) -> Option<(String, Pending)> {
         let text = std::str::from_utf8(body).ok()?;
@@ -4222,9 +4346,45 @@ mod imp {
             .and_then(|v| llmtrim_core::provider::detect(&v))
             .unwrap_or(provider);
         let started = std::time::Instant::now();
-        let mut result =
-            llmtrim_core::compress_with_config_model(text, Some(kind), config, model_override)
-                .ok()?;
+        // Fail closed unless the request proves both Claude Code identity (its session header)
+        // and practical recovery availability (an actual Bash definition).
+        let mut recovery_hints = std::collections::BTreeMap::new();
+        let mut admissions = AdmissionGuard {
+            recall,
+            entries: Vec::new(),
+        };
+        let value: Value = serde_json::from_str(text).ok()?;
+        if RuntimeConfig::get().first_arrival_recall
+            && kind == ProviderKind::Anthropic
+            && let (Some(session), Some(recall)) = (cc_session_id.as_deref(), recall)
+            && has_bash_tool_definition(&value)
+        {
+            let req = llmtrim_core::ir::Request::from_value(kind, value.clone());
+            let adapter = llmtrim_core::provider::for_kind(kind);
+            for pointer in
+                llmtrim_core::cache_zone::first_arrival_tool_result_pointers(&req, adapter.as_ref())
+            {
+                if !is_recall_tool_result(&value, &pointer)
+                    && let Some(raw) = req.get_str(&pointer)
+                    && let Ok(crate::recall::Admission::Stored(handle)) =
+                        recall.admit(session, raw.as_bytes().to_vec())
+                {
+                    recovery_hints.insert(pointer.clone(), handle.clone());
+                    admissions.entries.push((pointer, handle));
+                }
+            }
+        }
+        let mut result = llmtrim_core::compress_with_config_model_and_recovery(
+            text,
+            Some(kind),
+            config,
+            model_override,
+            recovery_hints,
+        )
+        .ok()?;
+        // Replay previously-forwarded prefix bytes before deciding whether this turn has a net
+        // win. A turn with no fresh savings may still need replay to preserve the provider cache.
+        apply_turn_memo(config, memo, kind, text, &mut result);
         // Never forward a request larger than we received. On tiny or non-chat bodies (e.g.
         // token-count / auxiliary calls) the input-side stages can't offset the output-control
         // instruction's fixed cost, so the compressed form is a net token *increase*. Forward
@@ -4232,10 +4392,9 @@ mod imp {
         // zero-savings row: the dashboard's request count and savings %s must describe ALL
         // proxied chat traffic, not just the wins (else the % is a self-selected best case).
         //
-        // The turn-stability memo runs only on the compression-*success* path below, so its
-        // invariant is clean — it stores and replays exactly the bytes we forward as the
-        // compressed body. Passthrough requests (the original is forwarded) are left stateless,
-        // so a later turn never replays a compressed prefix the provider never actually cached.
+        // Memo replay ran above because an older shaped prefix must stay byte-stable even when
+        // this turn has no fresh savings. Recording remains below this gate: passthrough requests
+        // never commit candidate bytes the provider did not actually cache.
         if result.input_tokens_after >= result.input_tokens_before {
             let pending = Pending {
                 provider: kind,
@@ -4263,13 +4422,12 @@ mod imp {
             };
             return Some((text.to_string(), pending));
         }
-        // Compression won: replay an already-seen conversation prefix's compressed bytes verbatim
-        // across turns so the provider prefix cache stays warm (the highest-traffic agent-loop
-        // shape). The memo only reuses bytes it itself produced for a byte-identical earlier
-        // message and keeps the result ≤ the original, so it can't flip this win into a loss;
-        // it recomputes `input_after` over the rewritten body so the ledger stays honest.
-        apply_turn_memo(config, memo, kind, text, &mut result);
+        // The selected body is a real win (fresh compression and/or stable-prefix replay). Only
+        // now commit it for the next turn; a body reverted above must never enter the memo.
+        record_turn_memo(config, memo, kind, text, &result);
         let compress_micros = started.elapsed().as_micros() as i64;
+        let admitted = admissions.entries.clone();
+        admissions.commit(&result.request_json);
         let pending = Pending {
             // The detected kind, not the host fallback — `handle_response` reads the response
             // usage with this provider's field shapes, so it must match what we compressed as.
@@ -4296,7 +4454,13 @@ mod imp {
             fallback: None,
             compact: None,
         };
-        capture_pair(text, &result.request_json, &pending, &result.stages);
+        capture_pair(
+            text,
+            &result.request_json,
+            &pending,
+            &result.stages,
+            &admitted,
+        );
         Some((result.request_json, pending))
     }
 
@@ -4332,11 +4496,20 @@ mod imp {
         }
     }
 
+    /// Capture artifacts are audit data, not a capability channel. Never persist recall handles.
+    fn redact_recall_handles(text: &str) -> String {
+        regex::Regex::new(r"r_[A-Za-z0-9_-]{43}")
+            .expect("constant recall-handle regex")
+            .replace_all(text, "r_[redacted]")
+            .into_owned()
+    }
+
     fn capture_pair(
         before: &str,
         after: &str,
         pending: &Pending,
         stages: &[llmtrim_core::pipeline::StageReport],
+        admitted: &[(String, String)],
     ) {
         let Some(dir_path) = RuntimeConfig::get().capture_dir.clone() else {
             return;
@@ -4350,6 +4523,21 @@ mod imp {
             .filter(|s| s.applied)
             .map(|s| s.name.as_str())
             .collect();
+        // Capture artifacts historically store request bodies as JSON *strings*. Parse only to
+        // sanitize admitted pointers, then serialize straight back to that schema.
+        let captured_before = match serde_json::from_str::<Value>(before) {
+            Ok(mut value) => {
+                for (pointer, _) in admitted {
+                    if let Some(value) = value.pointer_mut(pointer) {
+                        *value =
+                            Value::String("[llmtrim: admitted tool output redacted]".to_string());
+                    }
+                }
+                serde_json::to_string(&value).unwrap_or_else(|_| before.to_string())
+            }
+            Err(_) => before.to_string(),
+        };
+        let captured_after = redact_recall_handles(after);
         let record = serde_json::json!({
             "ts": chrono::Utc::now().to_rfc3339(),
             "provider": pending.provider.as_str(),
@@ -4359,8 +4547,8 @@ mod imp {
             "output_shaped": pending.output_shaped,
             "stages": stages_applied,
             "plan": pending.plan,
-            "before": before,
-            "after": after,
+            "before": captured_before,
+            "after": captured_after,
         });
         let name = format!(
             "{}-{:x}.json",
@@ -4433,7 +4621,7 @@ mod imp {
 
     /// Apply the turn-stability memo to a freshly compressed `result`, in place. Replays an
     /// already-seen conversation prefix's compressed `content` verbatim (keeping the provider
-    /// prefix cache warm) and records this turn for the next one. On reuse it recomputes
+    /// prefix cache warm) without recording this candidate. On reuse it recomputes
     /// `input_tokens_after` over the rewritten body so the recorded savings reflect what is
     /// actually sent. No-op (full stateless behavior) when the flag is off, the n-gram carve-out
     /// applies, or the JSON can't be re-parsed.
@@ -4478,7 +4666,7 @@ mod imp {
             "{kind:?}|{lineup}|{}",
             serde_json::to_string(config).unwrap_or_default()
         );
-        let reused = llmtrim_core::memo::apply(memo, salt.as_bytes(), &original, &mut compressed);
+        let reused = llmtrim_core::memo::replay(memo, salt.as_bytes(), &original, &mut compressed);
         if reused == 0 {
             // Either nothing matched (cold prefix) or an unmodelled shape: `compressed` is
             // unchanged from `result.request_json`, so leave the result (and its counts) as-is.
@@ -4490,14 +4678,51 @@ mod imp {
         let Ok(rewritten) = serde_json::to_string(&compressed) else {
             return;
         };
-        if let Ok(counter) = llmtrim_core::tokenizer::counter_for(kind, result.model.as_deref()) {
-            let adapter = llmtrim_core::provider::for_kind(kind);
-            let req = llmtrim_core::ir::Request::from_value(kind, compressed);
-            let after =
-                llmtrim_core::pipeline::content_tokens(&req, adapter.as_ref(), counter.as_ref());
-            result.input_tokens_after = llmtrim_core::tokenizer::Tokens(after);
+        let Ok(counter) = llmtrim_core::tokenizer::counter_for(kind, result.model.as_deref())
+        else {
+            return;
+        };
+        let adapter = llmtrim_core::provider::for_kind(kind);
+        let req = llmtrim_core::ir::Request::from_value(kind, compressed);
+        let after =
+            llmtrim_core::pipeline::content_tokens(&req, adapter.as_ref(), counter.as_ref());
+        // A context-dependent earlier representation can be larger than this turn's fresh
+        // compression. Cache stability never justifies forwarding a request that lost its win.
+        if after >= result.input_tokens_before.0 {
+            return;
         }
+        result.input_tokens_after = llmtrim_core::tokenizer::Tokens(after);
         result.request_json = rewritten;
+    }
+
+    /// Commit exactly the selected wire body after all token and admission gates accepted it.
+    fn record_turn_memo(
+        config: &DenseConfig,
+        memo: &Memo,
+        kind: ProviderKind,
+        original_body: &str,
+        result: &llmtrim_core::CompressResult,
+    ) {
+        if !config.memo || result.stages.iter().any(|s| s.applied && s.name == "ngram") {
+            return;
+        }
+        let (Ok(original), Ok(forwarded)) = (
+            serde_json::from_str::<Value>(original_body),
+            serde_json::from_str::<Value>(&result.request_json),
+        ) else {
+            return;
+        };
+        let lineup = result
+            .stages
+            .iter()
+            .map(|s| s.name.as_str())
+            .collect::<Vec<_>>()
+            .join(",");
+        let salt = format!(
+            "{kind:?}|{lineup}|{}",
+            serde_json::to_string(config).unwrap_or_default()
+        );
+        llmtrim_core::memo::record(memo, salt.as_bytes(), &original, &forwarded);
     }
 
     /// Owns the accumulated response bytes; on drop (stream complete/aborted) it measures
@@ -5084,6 +5309,9 @@ mod imp {
             domains: Arc::new(covered_domains()),
             // One process-wide turn-stability memo, shared across the per-request handler clones.
             memo: Arc::new(Memo::with_capacity(llmtrim_core::memo::DEFAULT_CAPACITY)),
+            recall: RuntimeConfig::get()
+                .first_arrival_recall
+                .then(|| crate::recall::from_runtime(RuntimeConfig::get())),
             pending: None,
             streaming: false,
             upstream_proxy: upstream_proxy.clone(),
@@ -5144,6 +5372,12 @@ mod imp {
                 }
             })?,
         );
+        // Only opt-in recall starts a control endpoint. Do this after the proxy pre-flight
+        // bind, so a second daemon failing to claim the proxy port never touches its endpoint.
+        if let Some(recall) = handler.recall.clone() {
+            crate::recall::serve(recall).await?;
+        }
+
         eprintln!("llmtrim: MITM interceptor on http://{addr}");
         eprintln!("  export HTTPS_PROXY=http://{addr}");
         eprintln!(
@@ -6790,17 +7024,49 @@ mod imp {
         }
 
         #[test]
+        fn recalled_bash_result_is_never_readmitted() {
+            let value = serde_json::json!({
+                "messages": [
+                    {"role": "assistant", "content": [{
+                        "type": "tool_use", "id": "call_recall", "name": "Bash",
+                        "input": {"command": format!("llmtrim recall r_{}", "A".repeat(43))}
+                    }]},
+                    {"role": "user", "content": [{
+                        "type": "tool_result", "tool_use_id": "call_recall", "content": "raw"
+                    }]}
+                ]
+            });
+            assert!(is_recall_tool_result(
+                &value,
+                "/messages/1/content/0/content"
+            ));
+            assert!(!is_recall_tool_result(
+                &value,
+                "/messages/0/content/0/content"
+            ));
+        }
+
+        #[test]
         fn compress_blocking_rejects_non_json() {
             use llmtrim_core::config::DenseConfig;
             use llmtrim_core::ir::ProviderKind;
             let cfg = DenseConfig::default();
             let memo = Memo::with_capacity(llmtrim_core::memo::DEFAULT_CAPACITY);
             assert!(
-                compress_blocking(&cfg, b"not json", ProviderKind::OpenAi, None, &memo, None)
-                    .is_none()
+                compress_blocking(
+                    &cfg,
+                    b"not json",
+                    ProviderKind::OpenAi,
+                    None,
+                    &memo,
+                    None,
+                    None
+                )
+                .is_none()
             );
             assert!(
-                compress_blocking(&cfg, b"", ProviderKind::OpenAi, None, &memo, None).is_none()
+                compress_blocking(&cfg, b"", ProviderKind::OpenAi, None, &memo, None, None)
+                    .is_none()
             );
         }
 
@@ -6820,6 +7086,7 @@ mod imp {
                 ProviderKind::OpenAi,
                 None,
                 &memo,
+                None,
                 None,
             ) {
                 assert!(
@@ -6853,6 +7120,7 @@ mod imp {
                 ProviderKind::OpenAi,
                 None,
                 &memo,
+                None,
                 None,
             )
             .expect("50 identical log lines must produce a net token win");
@@ -7027,6 +7295,7 @@ mod imp {
                 None,
                 &memo,
                 None,
+                None,
             ) {
                 // compress_blocking now always returns Some for valid JSON, even on zero-savings
                 // inputs (the caller records the row; `input_after == input_before` means
@@ -7070,6 +7339,7 @@ mod imp {
                 breakdown_ledger: breakdown_tx,
                 domains: Arc::new(intercept_domains().into_iter().collect()),
                 memo: Arc::new(Memo::with_capacity(llmtrim_core::memo::DEFAULT_CAPACITY)),
+                recall: None,
                 pending: None,
                 streaming: false,
                 upstream_proxy: None,

@@ -20,6 +20,7 @@ pub mod guard;
 pub mod mcp;
 pub mod monitor;
 pub mod quality;
+pub mod recall;
 #[cfg(feature = "intercept")]
 pub mod reroute;
 #[cfg(feature = "intercept")]

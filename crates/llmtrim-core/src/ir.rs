@@ -9,6 +9,8 @@
 
 use std::str::FromStr;
 
+use std::collections::BTreeMap;
+
 use anyhow::{Context, Result, bail};
 use serde_json::Value;
 
@@ -52,6 +54,8 @@ pub struct Request {
     /// Out-of-band model id for providers that don't carry it in the body (Gemini puts the
     /// model in the URL path). Never serialized — `to_json_string` emits only `raw`.
     model_hint: Option<String>,
+    /// Opaque, request-local recovery handles keyed by content pointer. Never serialized.
+    recovery_hints: BTreeMap<String, String>,
 }
 
 impl Request {
@@ -62,6 +66,7 @@ impl Request {
             kind,
             raw,
             model_hint: None,
+            recovery_hints: BTreeMap::new(),
         })
     }
 
@@ -71,6 +76,7 @@ impl Request {
             kind,
             raw,
             model_hint: None,
+            recovery_hints: BTreeMap::new(),
         }
     }
 
@@ -82,6 +88,14 @@ impl Request {
     /// body). Never affects serialization; only [`Request::model_id`] reads it.
     pub fn set_model_hint(&mut self, model: Option<&str>) {
         self.model_hint = model.map(str::to_string);
+    }
+
+    pub(crate) fn set_recovery_hints(&mut self, hints: BTreeMap<String, String>) {
+        self.recovery_hints = hints;
+    }
+
+    pub(crate) fn recovery_hint(&self, pointer: &str) -> Option<&str> {
+        self.recovery_hints.get(pointer).map(String::as_str)
     }
 
     /// The request's model id: the body's `model` field if present, else the out-of-band hint.

@@ -34,6 +34,8 @@
 //! ```
 //!
 
+use std::collections::BTreeMap;
+
 use anyhow::{Context, Result};
 use serde_json::Value;
 
@@ -292,6 +294,25 @@ pub fn compress_with_config_model(
     config: &config::DenseConfig,
     model_override: Option<&str>,
 ) -> Result<CompressResult> {
+    compress_with_config_model_and_recovery(
+        input,
+        provider,
+        config,
+        model_override,
+        BTreeMap::new(),
+    )
+}
+
+/// Internal integration entrypoint carrying opaque request-local recovery capabilities without
+/// changing the public configuration structs.
+#[doc(hidden)]
+pub fn compress_with_config_model_and_recovery(
+    input: &str,
+    provider: Option<ProviderKind>,
+    config: &config::DenseConfig,
+    model_override: Option<&str>,
+    recovery_hints: BTreeMap<String, String>,
+) -> Result<CompressResult> {
     let value: Value = serde_json::from_str(input).context("request body is not valid JSON")?;
     let kind = match provider {
         Some(k) => k,
@@ -308,6 +329,7 @@ pub fn compress_with_config_model(
     let adapter = provider::for_kind(kind);
     let mut req = Request::from_value(kind, value);
     req.set_model_hint(model_override);
+    req.set_recovery_hints(recovery_hints);
 
     // `auto` resolves the preset from the request shape (structural, zero-model).
     let routed;
@@ -625,6 +647,83 @@ mod tests {
         assert_eq!(
             result.frozen_input_tokens.0, expected_frozen,
             "the frozen-zone meter must describe the normalized bytes actually forwarded"
+        );
+    }
+
+    #[test]
+    fn recovery_hinted_boundary_uses_live_shaping_and_query() {
+        let log = (0..90)
+            .map(|i| format!("INFO routine line {i} with unrelated payload"))
+            .chain(std::iter::once(
+                "INFO relevant_identifier_omega must survive".to_string(),
+            ))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let boundary = serde_json::json!({
+            "model": "claude-3-5-sonnet-20241022",
+            "messages": [
+                {"role": "user", "content": "find relevant_identifier_omega"},
+                {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "t", "content": log}]},
+                {"role": "system", "content": [{"type": "text", "text": "cached", "cache_control": {"type": "ephemeral"}}]}
+            ]
+        });
+        let ordinary = serde_json::json!({
+            "model": "claude-3-5-sonnet-20241022",
+            "messages": [
+                {"role": "user", "content": "find relevant_identifier_omega"},
+                {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "t", "content": log}]}
+            ]
+        });
+        let pointer = "/messages/1/content/0/content".to_string();
+        let mut cfg = config::DenseConfig::preset("agent").unwrap();
+        cfg.toolout_template = false;
+        let recovered = compress_with_config_model_and_recovery(
+            &boundary.to_string(),
+            Some(ProviderKind::Anthropic),
+            &cfg,
+            None,
+            BTreeMap::from([(pointer.clone(), "r_a".to_string())]),
+        )
+        .unwrap();
+        let auto_cfg = config::DenseConfig::auto();
+        let auto_recovered = compress_with_config_model_and_recovery(
+            &boundary.to_string(),
+            Some(ProviderKind::Anthropic),
+            &auto_cfg,
+            None,
+            BTreeMap::from([(pointer.clone(), "r_auto".to_string())]),
+        )
+        .unwrap();
+        assert!(
+            auto_recovered
+                .request_json
+                .contains("llmtrim recall r_auto"),
+            "auto routing must preserve daemon-issued recovery hints"
+        );
+        let live = compress_with_config(&ordinary.to_string(), Some(ProviderKind::Anthropic), &cfg)
+            .unwrap();
+        let recovered_body: Value = serde_json::from_str(&recovered.request_json).unwrap();
+        let live_body: Value = serde_json::from_str(&live.request_json).unwrap();
+        let shaped = recovered_body
+            .pointer(&pointer)
+            .and_then(Value::as_str)
+            .unwrap();
+        let ordinary_shaped = live_body.pointer(&pointer).and_then(Value::as_str).unwrap();
+        assert_eq!(
+            shaped
+                .strip_suffix(
+                    "\n[llmtrim: full output: llmtrim recall r_a; if unavailable, re-run the tool]"
+                )
+                .unwrap(),
+            ordinary_shaped,
+            "boundary uses the identical shaping pipeline before its marker"
+        );
+        assert!(shaped.contains("relevant_identifier_omega"));
+        assert!(shaped.ends_with("llmtrim recall r_a; if unavailable, re-run the tool]"));
+        assert_eq!(
+            recovered_body.pointer("/messages/2/content/0/cache_control"),
+            boundary.pointer("/messages/2/content/0/cache_control"),
+            "cache control remains exact"
         );
     }
 

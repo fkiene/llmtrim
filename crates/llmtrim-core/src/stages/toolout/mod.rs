@@ -34,10 +34,13 @@
 //! 3. **Never inflate** (`elide_into`): an elision marker is emitted only when it is
 //!    shorter than the lines it hides; a lone `--` separator survives as itself.
 //!
-//! Live-zone windowing is lossy. First-arrival cache-boundary results receive only terminal-
-//! equivalent normalization; even template folding stays live-zone-only because it rewrites
-//! literal values into compact notation. The combined stage is `InputTokens`-gated (reverts if it
-//! doesn't cut tokens), `Content`-scoped, and uses zero model calls.
+//! Live-zone windowing is lossy. First-arrival cache-boundary results receive recoverable
+//! windowing by default on auto-routed agent requests: an admitted result gets an opaque recall
+//! handle, while its raw bytes live only in the daemon memory store for five hours by default.
+//! When recovery is disabled or admission fails, the boundary receives terminal-equivalent
+//! normalization only. Without an admission hint, template folding and lossy
+//! windowing stay live-zone-only. The combined stage is `InputTokens`-gated (reverts if it doesn't
+//! cut tokens), `Content`-scoped, and uses zero model calls.
 //!
 //! Note on universality: the level/failure keywords scored below are tokens
 //! *machine-emitted* by runtimes and build tools (`ERROR`, `FATAL`, `Traceback`,
@@ -171,19 +174,46 @@ impl Transform for ToolOutputStage {
         provider: &dyn Provider,
         _plan: &mut Vec<PlanEntry>,
     ) -> Result<()> {
+        // Lossy classification and windowing ordinarily remain restricted to the live zone.
+        let pointers = crate::cache_zone::compressible_pointers(req, provider);
         let first_arrival = crate::cache_zone::first_arrival_tool_result_pointers(req, provider);
+
+        let ctx = Ctx {
+            max_lines: self.max_lines,
+            template: self.template,
+            mode: self.mode,
+        };
+
+        // Build one request-derived ask for both the ordinary and recoverable boundary paths.
+        // The boundary is frozen by its marker, so its preceding user ask may be frozen too.
+        let query: HashSet<String> = provider
+            .content_text_pointers(req)
+            .into_iter()
+            .filter_map(|p| req.get_str(&p).map(normalize::normalize))
+            .filter(|(text, _)| text.lines().count() < self.min_lines)
+            .flat_map(|(text, _)| lex_words(&text))
+            .collect();
+
         for pointer in first_arrival {
             let Some(raw) = req.get_str(&pointer) else {
                 continue;
             };
-            let (shaped, changed) = normalize::normalize(raw);
-            if changed {
-                req.set(&pointer, Value::String(shaped));
+            if let Some(handle) = req.recovery_hint(&pointer)
+                && let Some(shaped) = shape_lossy(raw, &ctx, &query, self.min_lines)
+            {
+                req.set(&pointer, Value::String(format!(
+                    "{shaped}\n[llmtrim: full output: llmtrim recall {handle}; if unavailable, re-run the tool]"
+                )));
+            } else {
+                // A cache-boundary result without a durable recovery hint is normalization-only.
+                let (normalized, changed) = normalize::normalize(raw);
+                if changed {
+                    req.set(&pointer, Value::String(normalized));
+                }
             }
         }
 
-        // Lossy classification and windowing remain restricted to the ordinary live zone.
-        let pointers = crate::cache_zone::compressible_pointers(req, provider);
+        // The shared shaping pipeline below applies only to ordinary live-zone candidates.
 
         // Pre-pass (feature #6): strip ANSI escapes and collapse carriage-return progress
         // on each candidate *before* detection. This is lossless for the model and lets
@@ -198,22 +228,6 @@ impl Transform for ToolOutputStage {
             .iter()
             .map(|t| t.as_ref().and_then(|(t, _)| detect::detect(t)))
             .collect();
-
-        // The "ask" = the short segments (instruction / question). Tool-output lines
-        // overlapping it are biased to survive. Built from length, not kind, so it stays
-        // the question even when the long segments are unrecognized (PlainText) output.
-        let query: HashSet<String> = texts
-            .iter()
-            .filter_map(|t| t.as_ref().map(|(t, _)| t.as_str()))
-            .filter(|t| t.lines().count() < self.min_lines)
-            .flat_map(lex_words)
-            .collect();
-
-        let ctx = Ctx {
-            max_lines: self.max_lines,
-            template: self.template,
-            mode: self.mode,
-        };
 
         // Rail: repeat → passthrough. A candidate whose content already appears at an
         // earlier content pointer is a re-invocation returning the same output — the
@@ -254,17 +268,8 @@ impl Transform for ToolOutputStage {
                 }
                 continue;
             }
-            let compressed = match kind {
-                Some(OutKind::Log) => log::compress(text, &ctx, &query),
-                Some(OutKind::Grep) => grep::compress(text, &ctx, &query),
-                Some(OutKind::Diff) => diff::compress(text, &ctx, &query),
-                // Unrecognized shape. First try the generated/lockfile near-total elision
-                // (feature #7, high-confidence machine-noise shapes only); otherwise the
-                // redundancy-gated generic fallback ("any tool").
-                None => {
-                    generated::compress(text).or_else(|| plaintext::compress(text, &ctx, &query))
-                }
-            };
+            let compressed = compress_shaped(text, &ctx, &query, *kind);
+
             if let Some(compressed) = compressed {
                 req.set(ptr, Value::String(compressed));
             } else if *normalized {
@@ -274,6 +279,32 @@ impl Transform for ToolOutputStage {
             }
         }
         Ok(())
+    }
+}
+
+/// Apply normalization plus the shared lossy shaping pipeline. `None` means no information was
+/// omitted, so a cache-boundary caller must keep only the normalization and discard its handle.
+fn shape_lossy(text: &str, ctx: &Ctx, query: &HashSet<String>, min_lines: usize) -> Option<String> {
+    let (normalized, _) = normalize::normalize(text);
+    if normalized.lines().count() < min_lines {
+        return None;
+    }
+    compress_shaped(&normalized, ctx, query, detect::detect(&normalized))
+}
+
+/// The single lossy shaping dispatch used by ordinary live results and recovery-admitted
+/// first-arrival boundary results.
+fn compress_shaped(
+    text: &str,
+    ctx: &Ctx,
+    query: &HashSet<String>,
+    kind: Option<OutKind>,
+) -> Option<String> {
+    match kind {
+        Some(OutKind::Log) => log::compress(text, ctx, query),
+        Some(OutKind::Grep) => grep::compress(text, ctx, query),
+        Some(OutKind::Diff) => diff::compress(text, ctx, query),
+        None => generated::compress(text).or_else(|| plaintext::compress(text, ctx, query)),
     }
 }
 

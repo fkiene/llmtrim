@@ -3141,6 +3141,7 @@ dependencies = [
  "llm_providers",
  "llmtrim-core",
  "llmtrim-ledger",
+ "nix",
  "once_cell",
  "owo-colors",
  "rand 0.8.6",
@@ -3160,6 +3161,7 @@ dependencies = [
  "ureq",
  "uuid",
  "wait-timeout",
+ "windows-sys 0.61.2",
  "winreg 0.56.0",
  "zstd",
 ]
