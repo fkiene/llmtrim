@@ -1027,6 +1027,11 @@ pub(crate) struct BreakdownRates {
 
 /// Resolve the frozen rates for a (provider, model) pair. Unknown models price at 0
 /// (the TUI then shows a blank cost cell rather than a misleading $0.00).
+///
+/// `provider` is the wire-shape name the ledger records (`anthropic` / `openai` /
+/// `google`). It only drives cache multipliers — list rates come from [`llm_prices`],
+/// which picks the primary brand's USD offering for the model id (resellers and CNY
+/// rows share bare ids with the real upstream).
 #[cfg(feature = "intercept")]
 pub(crate) fn rates_for(provider: &str, model: Option<&str>) -> BreakdownRates {
     let (input, output) = model.and_then(llm_prices).unwrap_or((0.0, 0.0));
@@ -1223,18 +1228,57 @@ pub fn overview_data(
     }
 }
 
-/// Per-1M-token `(input, output)` price for a model: the `llm_providers` registry first,
-/// matched across every provider (the ledger records the wire-shape provider, not the
-/// upstream brand), then the embedded models.dev snapshot for models the registry hasn't
-/// shipped yet (e.g. day-one releases like claude-fable-5 on 0.14.3).
+/// Per-1M-token `(input, output)` price for a model.
+///
+/// The ledger stores the wire-shape provider (`openai` / `anthropic` / `google`), not the
+/// upstream brand, so a bare model id has to be resolved across the whole registry. The
+/// previous first-match over `get_providers_data().keys()` was PHF-hash order: for
+/// multi-homed ids like `deepseek-v4-pro` it returned Tencent's reseller row (12/24)
+/// instead of DeepSeek global USD (0.435/0.87), and even the primary brand's top-level
+/// row is the CNY endpoint. Prefer non-reseller + USD offerings, then fall back to the
+/// embedded models.dev snapshot for models the registry hasn't shipped yet.
 pub(crate) fn llm_prices(model_id: &str) -> Option<(f64, f64)> {
     #[cfg(feature = "intercept")]
-    for &provider_id in llm_providers::get_providers_data().keys() {
-        if let Some(model) = llm_providers::get_model_ref(provider_id, model_id) {
-            return Some((model.input_price, model.output_price));
-        }
+    if let Some(prices) = registry_prices(model_id) {
+        return Some(prices);
     }
     snapshot_prices(model_id)
+}
+
+/// Best `(input, output)` per model id from `llm_providers` offerings.
+/// Preference (lower score wins): non-reseller + USD → reseller + USD → non-reseller
+/// non-USD → reseller non-USD. Built once; offerings are static.
+#[cfg(feature = "intercept")]
+fn registry_prices(model_id: &str) -> Option<(f64, f64)> {
+    static TABLE: once_cell::sync::Lazy<std::collections::HashMap<&'static str, (f64, f64)>> =
+        once_cell::sync::Lazy::new(build_registry_price_table);
+    let bare = model_id.rsplit('/').next().unwrap_or(model_id);
+    TABLE.get(model_id).or_else(|| TABLE.get(bare)).copied()
+}
+
+#[cfg(feature = "intercept")]
+fn build_registry_price_table() -> std::collections::HashMap<&'static str, (f64, f64)> {
+    // score bits: bit0 = reseller, bit1 = non-USD. Lower wins.
+    let mut best: std::collections::HashMap<&'static str, (u8, f64, f64)> =
+        std::collections::HashMap::new();
+    for o in llm_providers::list_offerings() {
+        let score = (u8::from(o.price_currency != "USD") << 1)
+            | u8::from(llm_providers::is_reseller_provider(o.provider_id));
+        let prices = (o.model.input_price, o.model.output_price);
+        match best.entry(o.model.id) {
+            std::collections::hash_map::Entry::Vacant(slot) => {
+                slot.insert((score, prices.0, prices.1));
+            }
+            std::collections::hash_map::Entry::Occupied(mut slot) => {
+                if score < slot.get().0 {
+                    slot.insert((score, prices.0, prices.1));
+                }
+            }
+        }
+    }
+    best.into_iter()
+        .map(|(id, (_, input, output))| (id, (input, output)))
+        .collect()
 }
 
 /// Fallback table: the pinned models.dev snapshot the bench prices from, embedded at
@@ -2256,5 +2300,46 @@ mod tests {
         assert_eq!(v["daemon"]["running"], false);
         assert_eq!(v["daemon"]["health"], "stopped");
         assert_eq!(v["daemon"]["pid"], serde_json::Value::Null);
+    }
+
+    /// Regression for the first-match-across-providers bug: `deepseek-v4-pro` is also
+    /// listed by tencent/volcengine resellers and the DeepSeek CNY endpoint. Dashboard
+    /// dollars must track the primary brand's USD offering, not PHF iteration order.
+    #[cfg(feature = "intercept")]
+    #[test]
+    fn llm_prices_prefers_primary_usd_over_reseller_and_cny() {
+        let want = llm_providers::get_model_for_endpoint("deepseek:global", "deepseek-v4-pro")
+            .expect("deepseek global offering in registry");
+        let (input, output) = llm_prices("deepseek-v4-pro").expect("priced");
+        assert_eq!(
+            (input, output),
+            (want.model.input_price, want.model.output_price),
+            "expected deepseek:global USD rates, not reseller/CNY"
+        );
+        // Explicit guards against the two wrong rows that used to win.
+        assert_ne!(input, 12.0, "tencent/volcengine reseller row");
+        assert_ne!(input, 3.0, "deepseek CNY top-level / cn endpoint");
+
+        // Prefixed ids strip to the same bare model.
+        let (input2, output2) = llm_prices("deepseek/deepseek-v4-pro").expect("prefixed");
+        assert_eq!((input2, output2), (input, output));
+
+        // rates_for must inherit the same list rates (provider only affects cache mult).
+        let rates = rates_for("openai", Some("deepseek-v4-pro"));
+        assert_eq!(rates.input, input);
+        assert_eq!(rates.output, output);
+    }
+
+    /// Same class of bug for Moonshot: top-level / cn is CNY, global is USD.
+    #[cfg(feature = "intercept")]
+    #[test]
+    fn llm_prices_prefers_usd_endpoint_for_kimi() {
+        let want = llm_providers::get_model_for_endpoint("moonshot:global", "kimi-k2.6")
+            .expect("moonshot global offering in registry");
+        let (input, output) = llm_prices("kimi-k2.6").expect("priced");
+        assert_eq!(
+            (input, output),
+            (want.model.input_price, want.model.output_price)
+        );
     }
 }
