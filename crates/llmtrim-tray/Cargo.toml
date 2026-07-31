@@ -20,7 +20,9 @@ tauri-build = { version = "2", features = [] }
 llmtrim-ledger = { path = "../llmtrim-ledger", version = "0.12.2-dev" }
 # image-png: required for Image::from_bytes to decode the embedded PNG tray icon.
 tauri = { version = "2", features = ["tray-icon", "image-png"] }
-tauri-plugin-positioner = { version = "2", features = ["tray-icon"] }
+# 2.3.3+ returns Err instead of panicking when a still-hidden window has no
+# current monitor (KDE Plasma Wayland). See issue #240.
+tauri-plugin-positioner = { version = "2.3.3", features = ["tray-icon"] }
 tauri-plugin-single-instance = "2"
 anyhow = "1"
 chrono = "0.4"

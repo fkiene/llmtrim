@@ -598,8 +598,17 @@ fn show_popover(app: &AppHandle) {
     let Some(popover) = app.get_webview_window("popover") else {
         return;
     };
-    let _ = popover.move_window(Position::TrayCenter);
-    let _ = popover.show();
+    // Prefer position-then-show so the window never flashes at a default origin.
+    // On some Wayland compositors (notably KDE Plasma) a still-hidden window has
+    // no current monitor, so the positioner fails. tauri-plugin-positioner
+    // 2.3.3+ returns Err instead of panicking (#240); show first in that case
+    // and retry once the window is mapped.
+    if popover.move_window(Position::TrayCenter).is_err() {
+        let _ = popover.show();
+        let _ = popover.move_window(Position::TrayCenter);
+    } else {
+        let _ = popover.show();
+    }
     let _ = popover.set_focus();
 }
 

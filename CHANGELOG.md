@@ -6,6 +6,13 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Fixed
+
+- **Linux tray no longer panics when opening the popover on KDE Plasma Wayland.**
+  `tauri-plugin-positioner` 2.3.2 unwrapped a missing current-monitor on still-hidden
+  windows. Bump to 2.3.3 (returns `Err` instead) and, on that failure path, show the
+  window first then retry `TrayCenter` positioning so the popover still opens. (#240)
+
 ## [0.12.1] - 2026-07-29
 
 ### Added
