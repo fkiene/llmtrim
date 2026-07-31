@@ -8,6 +8,13 @@ All notable changes to this project are documented here. The format follows
 
 ### Fixed
 
+- **`claude-opus-5` savings are priced in `llmtrim status`.** Claude Code 2.1.220+ sends the bare
+  wire id `claude-opus-5`, but the embedded models.dev pricing snapshot (last refreshed 2026-07-12,
+  before Opus 5's 2026-07-24 release) had no row for it. Compression still ran (~15% saved) while
+  `cost_saved_usd` stayed `null` and dashboard dollar totals skipped every Opus 5 turn. Refresh the
+  pricing, context-window, and reasoning snapshots so `claude-opus-5` (and `anthropic/claude-opus-5`)
+  resolve at Anthropic list rates ($5 / $25 per 1M). (#239)
+
 - **Linux tray no longer panics when opening the popover on KDE Plasma Wayland.**
   `tauri-plugin-positioner` 2.3.2 unwrapped a missing current-monitor on still-hidden
   windows. Bump to 2.3.3 (returns `Err` instead) and, on that failure path, show the

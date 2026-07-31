@@ -2342,4 +2342,18 @@ mod tests {
             (want.model.input_price, want.model.output_price)
         );
     }
+
+    /// Claude Code ships `claude-opus-5` as a bare wire id. The models.dev snapshot must
+    /// price it so status `cost_saved_usd` is not null (#239). Rates match Anthropic list
+    /// ($5 / $25 per 1M) — same band as opus-4.5..4.8.
+    #[test]
+    fn llm_prices_prices_claude_opus_5() {
+        let (input, output) = llm_prices("claude-opus-5").expect("claude-opus-5 must be priced");
+        assert_eq!((input, output), (5.0, 25.0));
+        // Prefixed openrouter-style id strips to the same rates.
+        assert_eq!(
+            llm_prices("anthropic/claude-opus-5").expect("prefixed"),
+            (5.0, 25.0)
+        );
+    }
 }

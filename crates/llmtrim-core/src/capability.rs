@@ -151,7 +151,7 @@ pub(crate) fn model_is_reasoning_capable(model_id: &str) -> bool {
 /// Context window (tokens) for a wire model id, from the embedded models.dev snapshot
 /// ([`CONTEXT_SNAPSHOT`]). Normalizes the id (lowercase, drop a `provider/` prefix) and looks it up
 /// directly — models.dev keys the registry by the bare ids the wire sends (`gpt-5.6-terra`,
-/// `claude-opus-4-8`), so no date-suffix fallback is needed here (unlike the dated LMArena board).
+/// `claude-opus-5`), so no date-suffix fallback is needed here (unlike the dated LMArena board).
 /// `None` on a genuine miss, so the caller keeps its own default.
 pub(crate) fn context_window_for(model_id: &str) -> Option<u32> {
     let id = model_id.to_ascii_lowercase();
@@ -210,7 +210,7 @@ mod tests {
         );
         assert_eq!(
             latest_model_for_family("opus").as_deref(),
-            Some("claude-opus-4-8")
+            Some("claude-opus-5")
         );
         // An unknown family is a miss, so the caller keeps its own default.
         assert_eq!(latest_model_for_family("nonesuch"), None);
@@ -254,6 +254,7 @@ mod tests {
         for id in [
             "claude-sonnet-5",
             "anthropic/claude-sonnet-5", // provider prefix stripped
+            "claude-opus-5",
             "claude-opus-4-8",
             "gpt-5",
             "o3",
@@ -283,10 +284,11 @@ mod tests {
         // Real per-model windows, resolved from the id shapes the wire actually sends.
         for (id, window) in [
             ("gpt-5", 400_000),
-            ("gpt-5-codex", 400_000),
+            ("gpt-5.3-codex", 400_000),
             ("gpt-5.6-terra", 1_050_000),
             ("openai/gpt-5", 400_000), // provider prefix stripped
             ("gpt-4o", 128_000),
+            ("claude-opus-5", 1_000_000),
         ] {
             assert_eq!(context_window_for(id), Some(window), "{id}");
         }
