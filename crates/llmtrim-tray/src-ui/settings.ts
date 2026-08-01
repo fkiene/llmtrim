@@ -19,6 +19,8 @@ export interface SettingsExtras {
   intervalSelect: HTMLSelectElement;
   /** Quit button; its click handler lives in main.ts. */
   quitBtn: HTMLElement;
+  /** Hide-window control; main header is hidden while settings is open. */
+  closeBtn: HTMLElement;
 }
 
 const SVG_NS = "http://www.w3.org/2000/svg";
@@ -124,7 +126,7 @@ export function createSettingsView(
   onClose: () => void,
   extras: SettingsExtras,
 ): SettingsView {
-  // --- header: back + title ---
+  // --- header: back + title + hide (main header/X is display:none while open) ---
   const back = el(
     "button",
     { class: "set-back", type: "button", "aria-label": "Back to savings" },
@@ -135,6 +137,7 @@ export function createSettingsView(
   const head = el("header", { class: "set-head" }, [
     back,
     el("span", { class: "set-title" }, ["Settings"]),
+    extras.closeBtn,
   ]);
 
   // --- autostart: the proxy and the tray are independent login items ---
@@ -247,10 +250,7 @@ export function createSettingsView(
     body,
   ]);
 
-  // Escape closes the view while it is open.
-  root.addEventListener("keydown", (ev) => {
-    if (ev.key === "Escape") onClose();
-  });
+  // Escape is handled document-wide in main.ts (settings → back, else hide).
 
   async function refresh(): Promise<void> {
     proxyStatus.hidden = true;

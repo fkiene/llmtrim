@@ -380,18 +380,28 @@ fn main() {
                 let _ = popover.show();
             }
 
-            // Auto-hide on blur (works on both macOS and Windows). Record the
-            // dismiss time so the tray click that caused this blur doesn't
-            // immediately re-open the window (see `toggle_popover`).
-            let popover_blur = popover.clone();
-            let blur_handle = app.handle().clone();
-            popover.on_window_event(move |event| {
-                if let tauri::WindowEvent::Focused(false) = event {
-                    let _ = popover_blur.hide();
-                    let state = blur_handle.state::<Arc<Mutex<TrayState>>>();
-                    lock_state(&state).last_dismiss = Some(Instant::now());
-                }
-            });
+            // Auto-hide on blur on macOS/Windows. Record the dismiss time so the
+            // tray click that caused this blur doesn't immediately re-open the
+            // window (see `toggle_popover`).
+            //
+            // Linux is excluded: WebKitGTK reports Focused(false) when a native
+            // popup (e.g. <select>) opens, and hiding the parent unmaps the
+            // popover while the popup is still up (issue #243, KDE Wayland).
+            // Without blur-hide, Linux dismiss is explicit: close (X) on main and
+            // Settings, Escape, tray menu "Hide", or left-click toggle when the
+            // host delivers it (often unreliable under StatusNotifier).
+            #[cfg(not(target_os = "linux"))]
+            {
+                let popover_blur = popover.clone();
+                let blur_handle = app.handle().clone();
+                popover.on_window_event(move |event| {
+                    if let tauri::WindowEvent::Focused(false) = event {
+                        let _ = popover_blur.hide();
+                        let state = blur_handle.state::<Arc<Mutex<TrayState>>>();
+                        lock_state(&state).last_dismiss = Some(Instant::now());
+                    }
+                });
+            }
 
             // ----------------------------------------------------------------
             // Tray icon with macOS title and tooltip.
@@ -407,6 +417,9 @@ fn main() {
             // Linux users reach the popover. On macOS/Windows the menu is the
             // right-click companion to the left-click toggle.
             let open_item = MenuItemBuilder::with_id("open", "Open llmtrim").build(app)?;
+            // Explicit hide for Linux, where blur-dismiss is disabled (#243) and
+            // left-click toggle is not reliably delivered by StatusNotifier hosts.
+            let hide_item = MenuItemBuilder::with_id("hide", "Hide").build(app)?;
             // One toggling item, not separate Start/Stop lines: the label tracks the proxy's
             // state and the click runs the matching action (see the "proxy" menu event). The
             // initial label is corrected by `refresh_proxy_menu` once the state is known.
@@ -416,6 +429,7 @@ fn main() {
             let menu = MenuBuilder::new(app)
                 .items(&[
                     &open_item,
+                    &hide_item,
                     &PredefinedMenuItem::separator(app)?,
                     &proxy_item,
                     &PredefinedMenuItem::separator(app)?,
@@ -445,6 +459,11 @@ fn main() {
                 .show_menu_on_left_click(false)
                 .on_menu_event(move |_app, event| match event.id().as_ref() {
                     "open" => show_popover(&menu_app),
+                    "hide" => {
+                        if let Some(popover) = menu_app.get_webview_window("popover") {
+                            let _ = popover.hide();
+                        }
+                    }
                     // Run on a worker thread: `run_llmtrim` blocks until the CLI
                     // exits (first-run CA generation can take a moment) and menu
                     // events fire on the main event loop, so calling inline would

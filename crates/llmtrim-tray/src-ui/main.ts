@@ -52,14 +52,28 @@ const mark = el("span", { class: "mark", "aria-hidden": "true" });
 const wordmark = el("span", { class: "wordmark" }, ["llmtrim"]);
 const brand = el("div", { class: "brand" }, [mark, wordmark]);
 
-// Close (hide) the popover. The window also auto-hides on blur; this is the
-// explicit affordance for dismissing it without clicking away.
+// Hide the popover. On macOS/Windows the window also auto-hides on blur; on
+// Linux blur-hide is off (native popups steal focus — #243), so dismiss is
+// explicit: this control (also mirrored in Settings), Escape, or tray menu Hide.
+function hidePopover(): void {
+  void getCurrentWindow().hide();
+}
+
 const closeBtn = el(
   "button",
   { class: "icon-btn close-btn", type: "button", "aria-label": "Hide window" },
   [closeIcon()],
 );
-closeBtn.addEventListener("click", () => void getCurrentWindow().hide());
+closeBtn.addEventListener("click", hidePopover);
+
+// Same control for Settings: the main header (and its X) is display:none while
+// settings-open, so without this the #243 surface has no one-click hide.
+const settingsCloseBtn = el(
+  "button",
+  { class: "icon-btn close-btn", type: "button", "aria-label": "Hide window" },
+  [closeIcon()],
+);
+settingsCloseBtn.addEventListener("click", hidePopover);
 
 const header = el("header", { class: "header" }, [
   el("div", { class: "header-top" }, [brand, closeBtn]),
@@ -121,7 +135,11 @@ const footer = el("footer", { class: "footer" }, [
 // The interval selector and Quit live in Settings; the footer keeps only the
 // countdown and the gear. Both nodes are built here so `applyDashboard` can keep
 // the selector in sync and the quit handler stays in one place.
-const settingsView = createSettingsView(closeSettings, { intervalSelect, quitBtn });
+const settingsView = createSettingsView(closeSettings, {
+  intervalSelect,
+  quitBtn,
+  closeBtn: settingsCloseBtn,
+});
 
 app.append(header, list, footer, settingsView.root);
 
@@ -137,6 +155,19 @@ function closeSettings(): void {
   appRoot.classList.remove("settings-open");
   settingsBtn.focus();
 }
+
+// Escape: leave Settings first, then hide the window. Needed on Linux where
+// blur no longer dismisses the always-on-top popover (#243).
+document.addEventListener("keydown", (ev) => {
+  if (ev.key !== "Escape") return;
+  if (appRoot.classList.contains("settings-open")) {
+    closeSettings();
+    ev.preventDefault();
+    return;
+  }
+  hidePopover();
+  ev.preventDefault();
+});
 
 // ---------------------------------------------------------------------------
 // Countdown — drives "Next update in Ns" from `next_update_secs`.

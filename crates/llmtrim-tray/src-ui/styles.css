@@ -587,6 +587,16 @@ body {
   border-bottom: 1px solid var(--border);
 }
 
+/* Title grows; hide control pins to the trailing edge (matches main header). */
+.set-head .set-title {
+  flex: 1;
+  min-width: 0;
+}
+
+.set-head .close-btn {
+  margin-left: auto;
+}
+
 .set-back {
   display: inline-flex;
   align-items: center;

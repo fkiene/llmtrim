@@ -17,6 +17,12 @@ All notable changes to this project are documented here. The format follows
   models stay blank; valid frozen rates are never touched. Self-heals any future
   snapshot-lag model, not only Opus 5. (#244)
 
+- **Linux tray popover no longer disappears when opening Settings “Refresh interval”.**
+  WebKitGTK reports focus loss when a native `<select>` popup opens; the blur-hide
+  handler was unmapping the parent under the still-open popup (KDE Wayland). Blur-hide
+  is disabled on Linux; dismiss via the close control (main and Settings), Escape, or
+  the tray menu **Hide** item. (#243)
+
 ## [0.12.2] - 2026-07-31
 
 ### Fixed
