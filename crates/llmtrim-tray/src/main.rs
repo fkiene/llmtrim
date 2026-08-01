@@ -366,7 +366,11 @@ fn main() {
 
             // ----------------------------------------------------------------
             // Popover window — hidden at start; toggled by tray click.
+            // Handle is only needed for debug DevTools and non-Linux blur-hide;
+            // on Linux release builds neither path runs, so skip the binding
+            // (avoids unused-variable under -D warnings).
             // ----------------------------------------------------------------
+            #[cfg(any(debug_assertions, not(target_os = "linux")))]
             let popover = app
                 .get_webview_window("popover")
                 .expect("popover window not found — check tauri.conf.json");
