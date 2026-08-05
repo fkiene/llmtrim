@@ -4702,11 +4702,10 @@ mod imp {
         let req = llmtrim_core::ir::Request::from_value(kind, compressed);
         let after =
             llmtrim_core::pipeline::content_tokens(&req, adapter.as_ref(), counter.as_ref());
-        // A context-dependent earlier representation can be larger than this turn's fresh
-        // compression. Cache stability never justifies forwarding a request that lost its win.
-        if after >= result.input_tokens_before.0 {
-            return;
-        }
+        // Memo hit: always forward the frozen-prefix body. Discarding it to chase a
+        // slightly smaller fresh compression rewrites historical items and busts the
+        // provider prefix cache (OMP/Grok agent loops). `after` is still recorded so
+        // the ledger reflects the bytes actually sent.
         result.input_tokens_after = llmtrim_core::tokenizer::Tokens(after);
         result.request_json = rewritten;
     }

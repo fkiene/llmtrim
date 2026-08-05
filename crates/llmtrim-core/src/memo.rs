@@ -28,17 +28,22 @@
 //!   turn leaves every earlier `prefix_hash[k]` unchanged; changing one byte of an old message
 //!   changes that boundary and every one after it.
 //! - **Store.** An in-memory, size-capped, generation-evicted map from `prefix_hash[k]` to the
-//!   **compressed `content` value** llmtrim emitted for original message `k` last time it was
-//!   the head of a prefix. No prompt text is read back from anywhere on disk — see *Privacy*.
+//!   **entire compressed conversation item** llmtrim emitted for original message `k` last time
+//!   it was the head of a prefix (chat `messages[]` objects, Responses `input[]` items including
+//!   `function_call` / `function_call_output`, Gemini `contents[]`, …). Storing the whole item —
+//!   not only a `content` field — is required for agent wire shapes where the compressible text
+//!   lives under `output` / `arguments` rather than `content`. No prompt text is read back from
+//!   anywhere on disk — see *Privacy*.
 //! - **Reuse.** On a new request, walk the original messages front-to-back; the longest run
 //!   `0..=m` whose every boundary hash is present in the store is the *frozen prefix*. We still
 //!   run the normal full-request pipeline (so all legend/injection/Stage-A logic stays exactly
-//!   correct), then overwrite the frozen-prefix messages' `content` in the compressed output
-//!   with the stored bytes — making them identical to last turn's output, which is what the
-//!   provider cache keys on. Only the *suffix* (new messages) carries this turn's fresh
-//!   content compression; the input-token gate still governs whatever was freshly compressed.
-//! - **Record.** After rewriting, store this request's `(prefix_hash[k] -> compressed content)`
-//!   for every conversation message, so the next turn can freeze one message further.
+//!   correct), then overwrite the frozen-prefix slots in the compressed output with the stored
+//!   items — making them identical to last turn's output, which is what the provider cache keys
+//!   on. Only the *suffix* (new messages) carries this turn's fresh content compression; the
+//!   input-token gate still governs whatever was freshly compressed.
+//! - **Record.** After rewriting, store this request's `(prefix_hash[k] -> compressed item)`
+//!   for every conversation message **that is not already memoized** (first-write-wins), so
+//!   the next turn can freeze one message further without ever remutating a prior freeze.
 //!
 //! ## Legend / instruction interaction & the v1 carve-out
 //!
@@ -70,7 +75,7 @@
 //! The store lives **only in process memory** and is never written to disk, logged, or sent
 //! anywhere — the same in-memory-only treatment the `serve` proxy already gives prompt bytes.
 //! Keys are 128-bit hashes of the original prefix (not the text). Values are the compressed
-//! `content` fragments — which are *already* in flight to the provider on this very request — so
+//! conversation items — which are *already* in flight to the provider on this very request — so
 //! the memo retains nothing the proxy isn't already handling in memory for the duration of the
 //! call. It is size-capped (LRU/generation eviction) so memory stays bounded on a long-running
 //! daemon.
@@ -129,8 +134,8 @@ impl PrefixHasher {
     }
 }
 
-/// In-memory, size-capped map: original-message-prefix fingerprint → the compressed `content`
-/// value llmtrim emitted for that message. Generation-evicted: when the live map reaches `2×`
+/// In-memory, size-capped map: original-message-prefix fingerprint → the compressed conversation
+/// item llmtrim emitted for that message. Generation-evicted: when the live map reaches `2×`
 /// cap it is demoted to a victim cache and a fresh map starts, bounding memory at ~`2×` cap
 /// while keeping recently-seen prefixes hot (an entry promotes back on its next hit). No LRU
 /// bookkeeping on the hot path — a single `len` check per insert.
@@ -171,8 +176,10 @@ impl Memo {
         None
     }
 
-    /// Record a prefix fingerprint → its compressed `content`. Rolls a new generation (and
-    /// drops the oldest) once the live map fills, keeping memory bounded.
+    /// Record a prefix fingerprint → its compressed conversation item. **First write wins:**
+    /// once a prefix has been forwarded, later turns must not overwrite it with a divergent
+    /// compression (e.g. when a freeze was discarded by the token gate and a fresh body was
+    /// selected). Rolls a new generation (and drops the oldest) once the live map fills.
     fn put(&self, key: PrefixHash, content: Value) {
         if self.cap == 0 {
             return;
@@ -180,6 +187,15 @@ impl Memo {
         let Ok(mut store) = self.inner.lock() else {
             return;
         };
+        // Sticky freeze: never replace an already-recorded prefix. Promote a victim hit
+        // back to live so generation eviction does not thrash hot sessions, but keep bytes.
+        if store.live.contains_key(&key) {
+            return;
+        }
+        if let Some(prev) = store.prev.remove(&key) {
+            store.live.insert(key, prev);
+            return;
+        }
         if store.live.len() >= self.cap {
             let full = std::mem::take(&mut store.live);
             store.prev = full;
@@ -226,21 +242,28 @@ fn conversation(req: &Value) -> Option<(&'static str, &Vec<Value>)> {
     None
 }
 
-/// Per-message compressed `content`, keyed by original-prefix fingerprint, harvested from a
-/// freshly compressed request so it can be replayed verbatim next turn. Pairs each entry with
-/// the original message index it came from, so the caller can both store it and (on the
-/// reuse path) overwrite the matching slot.
+/// Per-message compressed conversation item, keyed by original-prefix fingerprint, harvested
+/// from a freshly compressed request so it can be replayed verbatim next turn. Pairs each entry
+/// with the original message index it came from, so the caller can both store it and (on the
+/// reuse path) overwrite the matching slot. Items are stored whole so Responses
+/// `function_call_output.output` / `function_call.arguments` freeze the same way chat
+/// `message.content` does — a `content`-only memo silently dropped the OMP/Grok agent path.
 struct PrefixPlan {
-    /// `(original_index, prefix_hash, compressed_content)` for every conversation message.
+    /// `(original_index, prefix_hash, compressed_item)` for every conversation message.
     entries: Vec<(usize, PrefixHash, Value)>,
     /// Index offset from original messages to compressed-output messages: `1` when a leading
     /// `system` message was injected (so original `k` lives at compressed `k + 1`), else `0`.
     offset: usize,
     /// The conversation array key in the compressed output (`messages` / `input` / `contents`).
     key: &'static str,
+    /// Sticky top-level envelope fields (not in the conversation array) that llmtrim may
+    /// reshape — primarily Responses `instructions` and `tools`. Keyed by conversation
+    /// identity so a freeze restores them with the prefix; without this, output-control
+    /// appends mid-session and busts the provider cache at byte 0 even when history is frozen.
+    envelope_key: Option<PrefixHash>,
 }
 
-/// Build the [`PrefixPlan`] linking each original message to the compressed `content` at its
+/// Build the [`PrefixPlan`] linking each original message to the compressed item at its
 /// aligned slot. Returns `None` (→ fallback) if either side lacks a conversation array or the
 /// arrays don't align by a 0/1 leading-system offset.
 fn plan(salt: &[u8], original: &Value, compressed: &Value) -> Option<PrefixPlan> {
@@ -274,20 +297,30 @@ fn plan(salt: &[u8], original: &Value, compressed: &Value) -> Option<PrefixPlan>
     for orig in orig_msgs.iter() {
         let i = entries.len();
         let h = hasher.push(&message_bytes(orig));
-        // The compressed content at the aligned slot. If the slot or its `content` is missing
-        // (shouldn't happen given the length check, but never index blindly), skip this entry —
-        // it just won't be memoized/reused, no panic.
-        if let Some(content) = comp_msgs.get(i + offset).and_then(|m| m.get("content")) {
-            entries.push((i, h, content.clone()));
+        // Whole compressed item at the aligned slot (not just `content`). Chat messages put
+        // text under `content`; OpenAI Responses agent turns put tool results under `output`
+        // and call args under `arguments` — freezing only `content` left those items out of
+        // the memo and re-broke the provider cache on every subsequent turn.
+        if let Some(item) = comp_msgs.get(i + offset) {
+            entries.push((i, h, item.clone()));
         } else {
             // A hole would break the contiguous-prefix invariant; stop so we never reuse past it.
             break;
         }
     }
+    // Envelope: top-level fields outside the turn array. Hash identity from salt + first
+    // original message so the same conversation reuses one sticky envelope; a new chat
+    // (different first message) starts clean.
+    let envelope_key = orig_msgs.first().map(|first| {
+        let mut eh = PrefixHasher::new(salt);
+        eh.push(b"envelope|");
+        eh.push(&message_bytes(first))
+    });
     Some(PrefixPlan {
         entries,
         offset,
         key,
+        envelope_key,
     })
 }
 
@@ -295,9 +328,9 @@ fn plan(salt: &[u8], original: &Value, compressed: &Value) -> Option<PrefixPlan>
 /// JSON and the pipeline's **compressed** output JSON, this:
 ///
 /// 1. finds the longest original-message prefix already in `memo`,
-/// 2. overwrites those messages' `content` in `compressed` with the stored (last-turn) bytes —
+/// 2. overwrites those conversation slots in `compressed` with the stored (last-turn) items —
 ///    making the frozen prefix byte-identical to last turn's output (provider cache hit),
-/// 3. records this turn's `(prefix_hash -> compressed content)` for every conversation message,
+/// 3. records this turn's `(prefix_hash -> compressed item)` for every conversation message,
 ///    so next turn can freeze one further.
 ///
 /// Returns the number of prefix messages whose content was reused verbatim (0 = nothing
@@ -330,17 +363,30 @@ pub fn replay(memo: &Memo, salt: &[u8], original: &Value, compressed: &mut Value
         && let Some(comp_msgs) = compressed.get_mut(plan.key).and_then(Value::as_array_mut)
     {
         for (idx, stored) in reused {
-            if let Some(slot) = comp_msgs.get_mut(idx + plan.offset)
-                && let Some(obj) = slot.as_object_mut()
-            {
-                obj.insert("content".to_string(), stored);
+            if let Some(slot) = comp_msgs.get_mut(idx + plan.offset) {
+                // Replace the whole item so tool-result `output`, function-call `arguments`,
+                // and chat `content` all stay byte-identical to the prior turn.
+                *slot = stored;
+            }
+        }
+        // Restore sticky envelope (instructions/tools/system) from the first forward of
+        // this conversation. Output-control and tool_trim are deterministic *per request*
+        // but still produce different top-level bytes across turns (e.g. first-turn-only
+        // directives); without this the history freeze is wasted at the prompt head.
+        if let Some(ek) = plan.envelope_key
+            && let Some(env) = memo.get(ek)
+            && let Some(obj) = env.as_object()
+            && let Some(root) = compressed.as_object_mut()
+        {
+            for (k, v) in obj {
+                root.insert(k.clone(), v.clone());
             }
         }
     }
     reused_count
 }
 
-/// Record exactly the content that the caller selected for forwarding.
+/// Record exactly the conversation items that the caller selected for forwarding.
 pub fn record(memo: &Memo, salt: &[u8], original: &Value, forwarded: &Value) {
     if memo.cap == 0 {
         return;
@@ -348,15 +394,32 @@ pub fn record(memo: &Memo, salt: &[u8], original: &Value, forwarded: &Value) {
     let Some(plan) = plan(salt, original, forwarded) else {
         return;
     };
-    for (idx, h, fresh_content) in plan.entries {
+    for (idx, h, fresh_item) in plan.entries {
+        // Prefer the post-selection item (may differ from the pre-gate compress when a
+        // caller swaps bodies). Fall back to the planned item if the slot vanished.
         let to_store = forwarded
             .get(plan.key)
             .and_then(Value::as_array)
             .and_then(|a| a.get(idx + plan.offset))
-            .and_then(|m| m.get("content"))
             .cloned()
-            .unwrap_or(fresh_content);
+            .unwrap_or(fresh_item);
         memo.put(h, to_store);
+    }
+    if let Some(ek) = plan.envelope_key {
+        // Rebuild envelope from the *forwarded* body (post-gates), first-write-wins via put.
+        let mut env = serde_json::Map::new();
+        if let Some(v) = forwarded.get("instructions") {
+            env.insert("instructions".into(), v.clone());
+        }
+        if let Some(v) = forwarded.get("tools") {
+            env.insert("tools".into(), v.clone());
+        }
+        if let Some(v) = forwarded.get("system") {
+            env.insert("system".into(), v.clone());
+        }
+        if !env.is_empty() {
+            memo.put(ek, Value::Object(env));
+        }
     }
 }
 
@@ -741,6 +804,568 @@ mod tests {
             apply(&memo, b"t", &b, &mut cb),
             2,
             "the `input` (Responses) shape is memoized like `messages`"
+        );
+    }
+
+    /// OMP / Grok (and Codex agent) wire tool results as Responses `function_call_output`
+    /// items with text under `output`, not `content`. The memo must freeze the whole item or
+    /// every subsequent turn rewrites earlier toolouts and busts the provider prefix cache.
+    #[test]
+    fn responses_function_call_output_freezes_across_turns() {
+        let memo = Memo::with_capacity(DEFAULT_CAPACITY);
+
+        let find_toolout = |req: &Value, call_id: &str| -> Value {
+            req.get("input")
+                .and_then(Value::as_array)
+                .unwrap()
+                .iter()
+                .find(|m| {
+                    m.get("type").and_then(Value::as_str) == Some("function_call_output")
+                        && m.get("call_id").and_then(Value::as_str) == Some(call_id)
+                })
+                .cloned()
+                .unwrap_or_else(|| panic!("missing function_call_output {call_id}"))
+        };
+
+        let tool_out_v1 = format!(
+            "{}{}",
+            "ERROR boom\n".repeat(40),
+            "INFO noise\n".repeat(200)
+        );
+        let a = json!({
+            "input": [
+                {"role":"user","content":[{"type":"input_text","text":"look at the log"}]},
+                {"type":"function_call","call_id":"c1","name":"bash","arguments":"{\"command\":\"cat log\"}"},
+                {"type":"function_call_output","call_id":"c1","output": tool_out_v1},
+                {"role":"user","content":[{"type":"input_text","text":"why did it fail?"}]},
+            ]
+        });
+
+        // Context-sensitive "compressor": rewrite every function_call_output.output using the
+        // *last* item's length, so without the memo the old toolout would diverge each turn.
+        let comp = |req: &Value| -> Value {
+            let mut out = req.clone();
+            let qlen = out
+                .get("input")
+                .and_then(Value::as_array)
+                .and_then(|arr| arr.last())
+                .map(|m| m.to_string().len())
+                .unwrap_or(0);
+            if let Some(arr) = out.get_mut("input").and_then(Value::as_array_mut) {
+                for m in arr.iter_mut() {
+                    let is_toolout =
+                        m.get("type").and_then(Value::as_str) == Some("function_call_output");
+                    if !is_toolout {
+                        continue;
+                    }
+                    if let Some(obj) = m.as_object_mut() {
+                        let raw = obj
+                            .get("output")
+                            .and_then(Value::as_str)
+                            .unwrap_or("")
+                            .to_string();
+                        let kept = raw.lines().take(3).collect::<Vec<_>>().join("\n");
+                        obj.insert("output".into(), json!(format!("{kept}\n[trimmed q{qlen}]")));
+                    }
+                }
+            }
+            out
+        };
+
+        let mut ca = comp(&a);
+        assert_eq!(apply(&memo, b"omp-grok", &a, &mut ca), 0, "cold prefix");
+        let frozen_c1 = find_toolout(&ca, "c1");
+
+        let b = json!({
+            "input": [
+                {"role":"user","content":[{"type":"input_text","text":"look at the log"}]},
+                {"type":"function_call","call_id":"c1","name":"bash","arguments":"{\"command\":\"cat log\"}"},
+                {"type":"function_call_output","call_id":"c1","output": tool_out_v1},
+                {"role":"user","content":[{"type":"input_text","text":"why did it fail?"}]},
+                {"type":"function_call","call_id":"c2","name":"bash","arguments":"{\"command\":\"ls\"}"},
+                {"type":"function_call_output","call_id":"c2","output":"file1\nfile2\n"},
+                {"role":"user","content":[{"type":"input_text","text":"continue investigating with more context please"}]},
+            ]
+        });
+        let mut cb = comp(&b);
+        assert_ne!(
+            find_toolout(&cb, "c1").get("output"),
+            frozen_c1.get("output"),
+            "sanity: context-sensitive compress would diverge without memo"
+        );
+
+        let reused = apply(&memo, b"omp-grok", &b, &mut cb);
+        assert!(
+            reused >= 3,
+            "shared prefix including function_call_output must freeze, got {reused}"
+        );
+        assert_eq!(
+            find_toolout(&cb, "c1"),
+            frozen_c1,
+            "function_call_output item must be byte-identical to the prior turn"
+        );
+        let frozen_c2 = find_toolout(&cb, "c2");
+
+        let c = json!({
+            "input": [
+                {"role":"user","content":[{"type":"input_text","text":"look at the log"}]},
+                {"type":"function_call","call_id":"c1","name":"bash","arguments":"{\"command\":\"cat log\"}"},
+                {"type":"function_call_output","call_id":"c1","output": tool_out_v1},
+                {"role":"user","content":[{"type":"input_text","text":"why did it fail?"}]},
+                {"type":"function_call","call_id":"c2","name":"bash","arguments":"{\"command\":\"ls\"}"},
+                {"type":"function_call_output","call_id":"c2","output":"file1\nfile2\n"},
+                {"role":"user","content":[{"type":"input_text","text":"continue investigating with more context please"}]},
+                {"role":"user","content":[{"type":"input_text","text":"one more question about the same logs"}]},
+            ]
+        });
+        let mut cc = comp(&c);
+        let reused_c = apply(&memo, b"omp-grok", &c, &mut cc);
+        assert!(
+            reused_c >= 6,
+            "prefix through c2 must freeze on turn C, got {reused_c}"
+        );
+        assert_eq!(
+            find_toolout(&cc, "c1"),
+            frozen_c1,
+            "c1 must never remutate after first forward"
+        );
+        assert_eq!(
+            find_toolout(&cc, "c2"),
+            frozen_c2,
+            "c2 must never remutate after first forward"
+        );
+    }
+
+    /// Even if a later turn re-records the same original prefix with different compressed
+    /// bytes (e.g. freeze discarded by a token gate), the memo must keep the first forward.
+    #[test]
+    fn first_write_wins_never_overwrites_frozen_prefix() {
+        let memo = Memo::with_capacity(DEFAULT_CAPACITY);
+        let a = json!({"input": [
+            {"role":"user","content":"stable history blob one"},
+            {"role":"user","content":"query a"},
+        ]});
+        let mut ca = json!({"input": [
+            {"role":"user","content":"COMPRESSED-A"},
+            {"role":"user","content":"query a"},
+        ]});
+        assert_eq!(apply(&memo, b"t", &a, &mut ca), 0);
+
+        // Same original prefix, different compressed bytes for message 0.
+        let b = json!({"input": [
+            {"role":"user","content":"stable history blob one"},
+            {"role":"user","content":"query a"},
+            {"role":"user","content":"query b appended"},
+        ]});
+        let mut cb = json!({"input": [
+            {"role":"user","content":"COMPRESSED-B-DIVERGENT"},
+            {"role":"user","content":"query a"},
+            {"role":"user","content":"query b appended"},
+        ]});
+        let reused = apply(&memo, b"t", &b, &mut cb);
+        assert!(reused >= 1, "prefix message 0 must hit memo, got {reused}");
+        assert_eq!(
+            cb["input"][0]["content"], "COMPRESSED-A",
+            "first forwarded compression must stick forever"
+        );
+        // And recording the divergent body must not poison the memo for turn C.
+        let mut cc = json!({"input": [
+            {"role":"user","content":"COMPRESSED-C-ALSO-DIVERGENT"},
+            {"role":"user","content":"query a"},
+            {"role":"user","content":"query b appended"},
+            {"role":"user","content":"query c"},
+        ]});
+        let c = json!({"input": [
+            {"role":"user","content":"stable history blob one"},
+            {"role":"user","content":"query a"},
+            {"role":"user","content":"query b appended"},
+            {"role":"user","content":"query c"},
+        ]});
+        apply(&memo, b"t", &c, &mut cc);
+        assert_eq!(cc["input"][0]["content"], "COMPRESSED-A");
+    }
+
+    /// Top-level `instructions` (Responses system prompt) must freeze with the conversation.
+    /// Output-control appends mid-session otherwise bust the cache at the prompt head even
+    /// when every `input[]` item is byte-stable.
+    #[test]
+    fn instructions_envelope_freezes_across_turns() {
+        let memo = Memo::with_capacity(DEFAULT_CAPACITY);
+        let a = json!({
+            "instructions": "SYSTEM-A",
+            "tools": [{"name":"bash","description":"run"}],
+            "input": [
+                {"role":"user","content":"hello world context"},
+                {"type":"function_call_output","call_id":"c1","output":"log line\n".repeat(50)},
+            ]
+        });
+        // Fresh compress "grows" instructions and trims toolout using query length.
+        let mut ca = a.clone();
+        ca["instructions"] = json!("SYSTEM-A\nBe concise appended");
+        ca["tools"] = json!([{"name":"bash","description":"r"}]);
+        ca["input"][1]["output"] = json!("log line\nlog line\n[trim]");
+        assert_eq!(apply(&memo, b"env", &a, &mut ca), 0);
+        let frozen_instr = ca["instructions"].clone();
+        let frozen_tools = ca["tools"].clone();
+        let frozen_out = ca["input"][1].clone();
+
+        let b = json!({
+            "instructions": "SYSTEM-A",
+            "tools": [{"name":"bash","description":"run"}],
+            "input": [
+                {"role":"user","content":"hello world context"},
+                {"type":"function_call_output","call_id":"c1","output":"log line\n".repeat(50)},
+                {"role":"user","content":"follow up with a much longer query that would change trims"},
+            ]
+        });
+        let mut cb = b.clone();
+        cb["instructions"] = json!("SYSTEM-A\nBe concise appended\nEXTRA-SHOULD-NOT-STICK");
+        cb["tools"] = json!([{"name":"bash","description":"DIFFERENT"}]);
+        cb["input"][1]["output"] = json!("totally different trim");
+        let reused = apply(&memo, b"env", &b, &mut cb);
+        assert!(reused >= 1, "history must freeze, got {reused}");
+        assert_eq!(cb["instructions"], frozen_instr, "instructions must stick");
+        assert_eq!(cb["tools"], frozen_tools, "tools must stick");
+        assert_eq!(cb["input"][1], frozen_out, "toolout item must stick");
+    }
+
+    // ---------------------------------------------------------------------
+    // Cache-stability contract suite
+    //
+    // These tests encode the product rule: once a conversation prefix (history
+    // items + envelope) has been forwarded, later turns MUST emit those bytes
+    // unchanged. Any future "optimization" that rewrites old toolouts,
+    // instructions, tools, or function_call args should fail this suite.
+    // ---------------------------------------------------------------------
+
+    /// Context-sensitive compressor stand-in: every compressible field is tagged
+    /// with the *current* turn count so a naive per-request compress diverges.
+    fn divergent_compress(req: &Value, turn: usize) -> Value {
+        let mut out = req.clone();
+        // Stamp turn markers onto every field a real compressor might touch. Clone-then-write
+        // avoids holding a borrow across the mutable insert.
+        if let Some(s) = out
+            .get("instructions")
+            .and_then(Value::as_str)
+            .map(str::to_string)
+        {
+            out.as_object_mut()
+                .unwrap()
+                .insert("instructions".into(), json!(format!("{s}|t{turn}")));
+        }
+        if let Some(s) = out
+            .get("system")
+            .and_then(Value::as_str)
+            .map(str::to_string)
+        {
+            out.as_object_mut()
+                .unwrap()
+                .insert("system".into(), json!(format!("{s}|t{turn}")));
+        }
+        if let Some(tools) = out.get_mut("tools").and_then(Value::as_array_mut) {
+            for tool in tools.iter_mut() {
+                if let Some(obj) = tool.as_object_mut() {
+                    let d = obj
+                        .get("description")
+                        .and_then(Value::as_str)
+                        .unwrap_or("")
+                        .to_string();
+                    obj.insert("description".into(), json!(format!("{d}|t{turn}")));
+                }
+            }
+        }
+        let key = if out.get("input").is_some() {
+            "input"
+        } else {
+            "messages"
+        };
+        if let Some(arr) = out.get_mut(key).and_then(Value::as_array_mut) {
+            for item in arr.iter_mut() {
+                let Some(obj) = item.as_object_mut() else {
+                    continue;
+                };
+                if let Some(o) = obj
+                    .get("output")
+                    .and_then(Value::as_str)
+                    .map(str::to_string)
+                {
+                    obj.insert("output".into(), json!(format!("{o}|t{turn}")));
+                }
+                if let Some(a) = obj
+                    .get("arguments")
+                    .and_then(Value::as_str)
+                    .map(str::to_string)
+                {
+                    obj.insert("arguments".into(), json!(format!("{a}|t{turn}")));
+                }
+                let content = obj.get("content").cloned();
+                if let Some(c) = content {
+                    if let Some(s) = c.as_str() {
+                        obj.insert("content".into(), json!(format!("{s}|t{turn}")));
+                    } else if let Some(parts) = c.as_array() {
+                        let mut new_parts = Vec::new();
+                        for p in parts {
+                            if let Some(po) = p.as_object() {
+                                let mut np = po.clone();
+                                if let Some(tx) =
+                                    np.get("text").and_then(Value::as_str).map(str::to_string)
+                                {
+                                    np.insert("text".into(), json!(format!("{tx}|t{turn}")));
+                                }
+                                if let Some(inner) = np
+                                    .get("content")
+                                    .and_then(Value::as_str)
+                                    .map(str::to_string)
+                                {
+                                    np.insert("content".into(), json!(format!("{inner}|t{turn}")));
+                                }
+                                new_parts.push(Value::Object(np));
+                            } else {
+                                new_parts.push(p.clone());
+                            }
+                        }
+                        obj.insert("content".into(), Value::Array(new_parts));
+                    }
+                }
+            }
+        }
+        out
+    }
+
+    /// Full OMP-shaped multi-turn contract: after turn 1 is recorded, turns 2..N must keep
+    /// the entire prior prefix (envelope + every prior input item) byte-identical.
+    #[test]
+    fn cache_stability_contract_omp_multiturn_never_rewrites_prefix() {
+        let memo = Memo::with_capacity(DEFAULT_CAPACITY);
+        let salt = b"cache-contract-omp";
+
+        // Growing original conversation (what the client resends).
+        let mut original_items = vec![
+            json!({"role":"user","content":[{"type":"input_text","text":"debug this failure"}]}),
+            json!({"type":"function_call","call_id":"c1","name":"bash","arguments":"{\"command\":\"cat log\"}"}),
+            json!({"type":"function_call_output","call_id":"c1","output":"ERROR boom\n".repeat(30)}),
+        ];
+
+        let base = |items: &[Value], turn_label: &str| {
+            json!({
+                "instructions": "You are omp",
+                "tools": [
+                    {"name":"bash","description":"run a shell command with a long schema text"},
+                    {"name":"read","description":"read a file from disk carefully"},
+                ],
+                "input": items,
+                "prompt_cache_key": "session-contract",
+                "meta_turn": turn_label, // ignored by memo (not hashed); just for humans
+            })
+        };
+
+        // Turn 1: cold
+        let o1 = base(&original_items, "1");
+        let mut c1 = divergent_compress(&o1, 1);
+        assert_eq!(apply(&memo, salt, &o1, &mut c1), 0);
+        let mut frozen_prefix = c1.clone();
+
+        // Turns 2..6: append user/tool pairs; divergent compress would rewrite everything.
+        for turn in 2..=6 {
+            original_items.push(json!({
+                "role":"user",
+                "content":[{"type":"input_text","text": format!("follow-up {turn}")}],
+            }));
+            original_items.push(json!({
+                "type":"function_call",
+                "call_id": format!("c{turn}"),
+                "name":"bash",
+                "arguments": format!("{{\"command\":\"echo {turn}\"}}"),
+            }));
+            original_items.push(json!({
+                "type":"function_call_output",
+                "call_id": format!("c{turn}"),
+                "output": format!("output for turn {turn}\n").repeat(10),
+            }));
+
+            let ot = base(&original_items, &turn.to_string());
+            let mut ct = divergent_compress(&ot, turn);
+            // Sanity: without memo the old toolout would differ
+            assert_ne!(
+                ct["input"][2], frozen_prefix["input"][2],
+                "turn {turn}: divergent_compress must change history without memo"
+            );
+            let reused = apply(&memo, salt, &ot, &mut ct);
+            assert!(
+                reused >= 3,
+                "turn {turn}: must reuse at least the initial 3-item prefix, got {reused}"
+            );
+
+            // CONTRACT: every previously frozen item + envelope stays identical.
+            assert_eq!(
+                ct["instructions"], frozen_prefix["instructions"],
+                "turn {turn}: instructions rewritten — cache break at prompt head"
+            );
+            assert_eq!(
+                ct["tools"], frozen_prefix["tools"],
+                "turn {turn}: tools rewritten — cache break in tool prefix"
+            );
+            let n_frozen = frozen_prefix["input"].as_array().unwrap().len();
+            for i in 0..n_frozen {
+                assert_eq!(
+                    &ct["input"][i], &frozen_prefix["input"][i],
+                    "turn {turn}: input[{i}] rewritten — mid-history cache break"
+                );
+            }
+
+            // Extend frozen snapshot to include newly committed suffix items for next loop.
+            // After apply+record, the memo holds the frozen prefix; capture current full
+            // forwarded body as the new freeze baseline for items 0..len.
+            frozen_prefix = ct.clone();
+            let _ = frozen_prefix; // used next iteration via reassignment below
+            // actually need mut - fix by outer mut
+            let _ = turn;
+        }
+    }
+
+    /// `function_call.arguments` (not only function_call_output.output) must freeze.
+    #[test]
+    fn cache_stability_contract_function_call_arguments_freeze() {
+        let memo = Memo::with_capacity(DEFAULT_CAPACITY);
+        let a = json!({
+            "input": [
+                {"type":"function_call","call_id":"c1","name":"bash","arguments":"{\"command\":\"long args\"}"},
+                {"type":"function_call_output","call_id":"c1","output":"ok"},
+            ]
+        });
+        let mut ca = divergent_compress(&a, 1);
+        apply(&memo, b"args", &a, &mut ca);
+        let frozen_args = ca["input"][0].clone();
+
+        let b = json!({
+            "input": [
+                {"type":"function_call","call_id":"c1","name":"bash","arguments":"{\"command\":\"long args\"}"},
+                {"type":"function_call_output","call_id":"c1","output":"ok"},
+                {"role":"user","content":"next"},
+            ]
+        });
+        let mut cb = divergent_compress(&b, 2);
+        assert!(apply(&memo, b"args", &b, &mut cb) >= 1);
+        assert_eq!(
+            cb["input"][0], frozen_args,
+            "function_call item (arguments) must be frozen whole"
+        );
+    }
+
+    /// Anthropic-style `system` + `messages` tool_result content must freeze.
+    #[test]
+    fn cache_stability_contract_anthropic_system_and_tool_result_freeze() {
+        let memo = Memo::with_capacity(DEFAULT_CAPACITY);
+        let a = json!({
+            "system": "SYS",
+            "messages": [
+                {"role":"user","content":[
+                    {"type":"tool_result","tool_use_id":"t1","content":"TOOLLOG\n".repeat(40)}
+                ]},
+                {"role":"user","content":"why?"},
+            ]
+        });
+        let mut ca = divergent_compress(&a, 1);
+        apply(&memo, b"anth", &a, &mut ca);
+        let frozen_sys = ca["system"].clone();
+        let frozen_msg0 = ca["messages"][0].clone();
+
+        let b = json!({
+            "system": "SYS",
+            "messages": [
+                {"role":"user","content":[
+                    {"type":"tool_result","tool_use_id":"t1","content":"TOOLLOG\n".repeat(40)}
+                ]},
+                {"role":"user","content":"why?"},
+                {"role":"user","content":"more?"},
+            ]
+        });
+        let mut cb = divergent_compress(&b, 2);
+        assert!(apply(&memo, b"anth", &b, &mut cb) >= 1);
+        assert_eq!(cb["system"], frozen_sys, "system envelope must freeze");
+        assert_eq!(
+            cb["messages"][0], frozen_msg0,
+            "tool_result message must freeze"
+        );
+    }
+
+    /// Editing an old original message invalidates from that point; earlier prefix stays.
+    #[test]
+    fn cache_stability_contract_edit_invalidates_only_from_edit_point() {
+        let memo = Memo::with_capacity(DEFAULT_CAPACITY);
+        let a = json!({"input":[
+            {"role":"user","content":"one"},
+            {"role":"user","content":"two"},
+            {"role":"user","content":"three"},
+        ]});
+        let mut ca = divergent_compress(&a, 1);
+        apply(&memo, b"edit", &a, &mut ca);
+        let frozen0 = ca["input"][0].clone();
+        let frozen1 = ca["input"][1].clone();
+
+        // Client edited message 1 ("two" -> "TWO-EDITED"); message 0 unchanged.
+        let b = json!({"input":[
+            {"role":"user","content":"one"},
+            {"role":"user","content":"TWO-EDITED"},
+            {"role":"user","content":"three"},
+            {"role":"user","content":"four"},
+        ]});
+        let mut cb = divergent_compress(&b, 2);
+        let reused = apply(&memo, b"edit", &b, &mut cb);
+        assert_eq!(reused, 1, "only message 0 still matches the hash chain");
+        assert_eq!(
+            cb["input"][0], frozen0,
+            "pre-edit prefix must remain frozen"
+        );
+        assert_ne!(
+            cb["input"][1], frozen1,
+            "edited message must NOT reuse stale compressed bytes"
+        );
+    }
+
+    /// replay alone must not record; only record()/apply() commits. Prevents poisoning
+    /// the memo with a body that was never forwarded.
+    #[test]
+    fn cache_stability_contract_unforwarded_replay_does_not_poison_memo() {
+        let memo = Memo::with_capacity(DEFAULT_CAPACITY);
+        let a = json!({"input":[{"role":"user","content":"x"}]});
+        let mut ca = json!({"input":[{"role":"user","content":"X-FORWARDED"}]});
+        apply(&memo, b"poison", &a, &mut ca);
+
+        // Candidate compress for turn B (must keep array length aligned with original).
+        let b = json!({"input":[
+            {"role":"user","content":"x"},
+            {"role":"user","content":"y"},
+        ]});
+        let mut bad = json!({"input":[
+            {"role":"user","content":"X-BAD-NOT-FORWARDED"},
+            {"role":"user","content":"Y-BAD"},
+        ]});
+        // replay only — must restore FORWARDED for msg0, and must not record BAD.
+        let reused = replay(&memo, b"poison", &b, &mut bad);
+        assert!(
+            reused >= 1,
+            "msg0 must hit memo on replay-only, got {reused}"
+        );
+        assert_eq!(bad["input"][0]["content"], "X-FORWARDED");
+
+        // Explicit record of a *different* body must still first-write-win on msg0.
+        let forwarded_bad = json!({"input":[
+            {"role":"user","content":"X-BAD-NOT-FORWARDED"},
+            {"role":"user","content":"Y-BAD"},
+        ]});
+        record(&memo, b"poison", &b, &forwarded_bad);
+
+        let c_orig = json!({"input":[
+            {"role":"user","content":"x"},
+            {"role":"user","content":"y"},
+            {"role":"user","content":"z"},
+        ]});
+        let mut c = divergent_compress(&c_orig, 9);
+        apply(&memo, b"poison", &c_orig, &mut c);
+        assert_eq!(
+            c["input"][0]["content"], "X-FORWARDED",
+            "first real forward must win over later record attempts"
         );
     }
 }
