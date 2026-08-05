@@ -227,8 +227,36 @@ impl Memo {
 /// next turn's prefix come from the *same* client serializing the *same* retained history — so
 /// byte-for-byte stability across turns holds without a canonicalizer. (A mismatch only costs a
 /// cache miss → fallback, never correctness.)
+///
+/// **Ephemeral fields stripped.** Claude Code (and similar clients) attach `cache_control`
+/// markers to the *newest* tool_result / message boundary and move them every turn. Hashing
+/// those markers would break the original-prefix chain exactly at the multi-`tool_result`
+/// user message that first-arrival toolout just shaped — so the memo would miss, re-emit the
+/// full historical toolouts, and bust the provider prefix cache mid-session. Stripping
+/// `cache_control` before hashing keeps identity on semantic history only; a real content
+/// edit still invalidates from that point.
 fn message_bytes(msg: &Value) -> Vec<u8> {
-    serde_json::to_vec(msg).unwrap_or_default()
+    serde_json::to_vec(&strip_ephemeral_fields(msg)).unwrap_or_default()
+}
+
+/// Drop client-ephemeral fields that move across turns without changing conversation meaning.
+/// Currently only `cache_control` (Anthropic prompt-cache breakpoints). Recursive so markers
+/// nested under `content[]` blocks are removed too.
+fn strip_ephemeral_fields(v: &Value) -> Value {
+    match v {
+        Value::Object(map) => {
+            let mut out = serde_json::Map::with_capacity(map.len());
+            for (k, val) in map {
+                if k == "cache_control" {
+                    continue;
+                }
+                out.insert(k.clone(), strip_ephemeral_fields(val));
+            }
+            Value::Object(out)
+        }
+        Value::Array(arr) => Value::Array(arr.iter().map(strip_ephemeral_fields).collect()),
+        other => other.clone(),
+    }
 }
 
 /// The conversation array (`messages` / `input` / `contents`) and the key under which it lives,
@@ -1300,6 +1328,224 @@ mod tests {
         assert_eq!(
             cb["messages"][0], frozen_msg0,
             "tool_result message must freeze"
+        );
+    }
+
+    /// Production residual after #254 (session 8c8a03b7…, v0.12.4): Claude Code packs multiple
+    /// `tool_result` blocks into **one** user message and parks `cache_control` on the last block.
+    /// Next turn the marker moves off that message onto a newer boundary, so a naive original-byte
+    /// hash misses at that multi-tool_result message. First-arrival toolout then leaves the
+    /// historical results full (or recompresses differently) → same `tool_use_id` / `call_id`
+    /// remutates on the Anthropic after *and* the Responses `function_call_output` wire.
+    ///
+    /// The memo must treat cache_control as ephemeral and freeze the first-forward multi-tool
+    /// message (truncated toolouts) even when the client moves the marker.
+    #[test]
+    fn multi_tool_result_cache_control_move_freezes_first_forward_toolouts() {
+        let memo = Memo::with_capacity(DEFAULT_CAPACITY);
+        let salt = test_salt("multi-tr-cc");
+
+        let tool_body = |id: &str, n: usize| -> String {
+            format!("TOOL-{id}-LINE\n").repeat(n)
+        };
+
+        // Turn A: four tool_results in one user message; cache_control on the last block
+        // (Claude Code first-arrival boundary). Compressor windows each tool_result body.
+        let a = json!({
+            "messages": [
+                {"role":"user","content":"look at these outputs"},
+                {"role":"assistant","content":[
+                    {"type":"tool_use","id":"call-2","name":"Bash","input":{"command":"gh pr view"}},
+                    {"type":"tool_use","id":"call-3","name":"Bash","input":{"command":"pwd"}},
+                    {"type":"tool_use","id":"call-4","name":"Bash","input":{"command":"ps"}},
+                    {"type":"tool_use","id":"call-5","name":"Bash","input":{"command":"find"}},
+                ]},
+                {"role":"user","content":[
+                    {"type":"tool_result","tool_use_id":"call-2","content": tool_body("2", 80), "is_error": false},
+                    {"type":"tool_result","tool_use_id":"call-3","content": tool_body("3", 10), "is_error": false},
+                    {"type":"tool_result","tool_use_id":"call-4","content": tool_body("4", 60), "is_error": false},
+                    {"type":"tool_result","tool_use_id":"call-5","content": tool_body("5", 50), "is_error": false,
+                     "cache_control": {"type":"ephemeral"}},
+                ]},
+            ]
+        });
+
+        // Context-sensitive "toolout": window each tool_result using the *last* message length,
+        // so without the memo a later turn would remutate historical toolouts. Also strips
+        // cache_control from compressed output sometimes (pipeline may or may not keep it).
+        let toolout_compress = |req: &Value, turn: usize| -> Value {
+            let mut out = req.clone();
+            let qlen = out
+                .get("messages")
+                .and_then(Value::as_array)
+                .and_then(|a| a.last())
+                .map(|m| m.to_string().len())
+                .unwrap_or(0);
+            if let Some(msgs) = out.get_mut("messages").and_then(Value::as_array_mut) {
+                for m in msgs.iter_mut() {
+                    let Some(blocks) = m.get_mut("content").and_then(Value::as_array_mut) else {
+                        continue;
+                    };
+                    for b in blocks.iter_mut() {
+                        if b.get("type").and_then(Value::as_str) != Some("tool_result") {
+                            continue;
+                        }
+                        let raw = b
+                            .get("content")
+                            .and_then(Value::as_str)
+                            .unwrap_or("")
+                            .to_string();
+                        // Keep first 3 lines + a turn/query-sensitive trailer (the remutation).
+                        let kept: String = raw.lines().take(3).collect::<Vec<_>>().join("\n");
+                        let shaped = format!(
+                            "[llmtrim: showing 3 of {} lines — re-run the tool for the full output]\n{kept}\n[trim t{turn} q{qlen}]",
+                            raw.lines().count()
+                        );
+                        if let Some(obj) = b.as_object_mut() {
+                            obj.insert("content".into(), json!(shaped));
+                        }
+                    }
+                }
+            }
+            out
+        };
+
+        let mut ca = toolout_compress(&a, 1);
+        assert_eq!(apply(&memo, &salt, &a, &mut ca), 0, "cold prefix");
+        let frozen_multi = ca["messages"][2].clone();
+        let frozen_call2 = ca["messages"][2]["content"][0]["content"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        assert!(
+            frozen_call2.contains("showing 3 of"),
+            "sanity: turn A toolout must window call-2"
+        );
+
+        // Turn B: same logical history but Claude Code *moved* cache_control off the multi
+        // tool_result message onto a new trailing system reminder. Appended new tool turn.
+        // Fresh toolout would re-window historical toolouts with a different qlen trailer.
+        let b = json!({
+            "messages": [
+                {"role":"user","content":"look at these outputs"},
+                {"role":"assistant","content":[
+                    {"type":"tool_use","id":"call-2","name":"Bash","input":{"command":"gh pr view"}},
+                    {"type":"tool_use","id":"call-3","name":"Bash","input":{"command":"pwd"}},
+                    {"type":"tool_use","id":"call-4","name":"Bash","input":{"command":"ps"}},
+                    {"type":"tool_use","id":"call-5","name":"Bash","input":{"command":"find"}},
+                ]},
+                // SAME tool_result bodies, NO cache_control (marker moved).
+                {"role":"user","content":[
+                    {"type":"tool_result","tool_use_id":"call-2","content": tool_body("2", 80), "is_error": false},
+                    {"type":"tool_result","tool_use_id":"call-3","content": tool_body("3", 10), "is_error": false},
+                    {"type":"tool_result","tool_use_id":"call-4","content": tool_body("4", 60), "is_error": false},
+                    {"type":"tool_result","tool_use_id":"call-5","content": tool_body("5", 50), "is_error": false},
+                ]},
+                {"role":"assistant","content":[
+                    {"type":"tool_use","id":"call-6","name":"Bash","input":{"command":"echo next"}},
+                ]},
+                {"role":"user","content":[
+                    {"type":"tool_result","tool_use_id":"call-6","content": tool_body("6", 40), "is_error": false},
+                ]},
+                {"role":"system","content":[
+                    {"type":"text","text":"system reminder","cache_control":{"type":"ephemeral"}},
+                ]},
+            ]
+        });
+
+        let cb_fresh = toolout_compress(&b, 2);
+        assert_ne!(
+            cb_fresh["messages"][2]["content"][0]["content"],
+            frozen_call2,
+            "sanity: without memo, call-2 remutates across turns"
+        );
+        // Original msg[2] bytes differ solely by cache_control — must NOT bust the hash chain.
+        assert_ne!(
+            serde_json::to_vec(&a["messages"][2]).unwrap(),
+            serde_json::to_vec(&b["messages"][2]).unwrap(),
+            "sanity: raw original multi-tool_result JSON differs by cache_control"
+        );
+
+        let mut cb = toolout_compress(&b, 2);
+        let reused = apply(&memo, &salt, &b, &mut cb);
+        assert!(
+            reused >= 3,
+            "prefix through multi-tool_result message must freeze despite cache_control move, got {reused}"
+        );
+        assert_eq!(
+            cb["messages"][2], frozen_multi,
+            "multi-tool_result user message must be byte-identical to first forward"
+        );
+        assert_eq!(
+            cb["messages"][2]["content"][0]["content"].as_str().unwrap(),
+            frozen_call2,
+            "call-2 toolout must not remutate"
+        );
+        // Sibling tool_results in the same user message freeze together.
+        for i in 0..4 {
+            assert_eq!(
+                cb["messages"][2]["content"][i], frozen_multi["content"][i],
+                "tool_result block {i} must freeze with the multi-tool message"
+            );
+        }
+
+        // Responses-shaped twin: same multi-item history as separate function_call_output
+        // items (what Grok sees after Anthropic→Responses reshape). Whole-item freeze already
+        // covers this shape; assert cache_control-free identity still chains.
+        let memo_r = Memo::with_capacity(DEFAULT_CAPACITY);
+        let salt_r = test_salt("multi-tr-cc-responses");
+        let ar = json!({
+            "input": [
+                {"role":"user","content":[{"type":"input_text","text":"look"}]},
+                {"type":"function_call","call_id":"call-2","name":"Bash","arguments":"{}"},
+                {"type":"function_call_output","call_id":"call-2","output": tool_body("2", 80)},
+                {"type":"function_call","call_id":"call-3","name":"Bash","arguments":"{}"},
+                {"type":"function_call_output","call_id":"call-3","output": tool_body("3", 10)},
+            ]
+        });
+        let comp_r = |req: &Value, turn: usize| -> Value {
+            let mut out = req.clone();
+            let qlen = out
+                .get("input")
+                .and_then(Value::as_array)
+                .map(|a| a.len())
+                .unwrap_or(0);
+            if let Some(arr) = out.get_mut("input").and_then(Value::as_array_mut) {
+                for m in arr.iter_mut() {
+                    if m.get("type").and_then(Value::as_str) != Some("function_call_output") {
+                        continue;
+                    }
+                    let raw = m.get("output").and_then(Value::as_str).unwrap_or("").to_string();
+                    let kept = raw.lines().take(2).collect::<Vec<_>>().join("\n");
+                    if let Some(obj) = m.as_object_mut() {
+                        obj.insert(
+                            "output".into(),
+                            json!(format!("{kept}\n[trim t{turn} n{qlen}]")),
+                        );
+                    }
+                }
+            }
+            out
+        };
+        let mut car = comp_r(&ar, 1);
+        apply(&memo_r, &salt_r, &ar, &mut car);
+        let frozen_fco = car["input"][2].clone();
+
+        let br = json!({
+            "input": [
+                {"role":"user","content":[{"type":"input_text","text":"look"}]},
+                {"type":"function_call","call_id":"call-2","name":"Bash","arguments":"{}"},
+                {"type":"function_call_output","call_id":"call-2","output": tool_body("2", 80)},
+                {"type":"function_call","call_id":"call-3","name":"Bash","arguments":"{}"},
+                {"type":"function_call_output","call_id":"call-3","output": tool_body("3", 10)},
+                {"role":"user","content":[{"type":"input_text","text":"continue"}]},
+            ]
+        });
+        let mut cbr = comp_r(&br, 2);
+        assert!(apply(&memo_r, &salt_r, &br, &mut cbr) >= 3);
+        assert_eq!(
+            cbr["input"][2], frozen_fco,
+            "Responses function_call_output must stay frozen across turns"
         );
     }
 
