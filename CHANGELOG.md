@@ -8,6 +8,14 @@ All notable changes to this project are documented here. The format follows
 
 ### Fixed
 
+- **Agent prompt-cache freeze covers whole items and envelope fields.** The turn-stability
+  memo only stored message `content`, so OMP/Grok/Codex Responses traffic
+  (`function_call_output.output`, `function_call.arguments`) remutated mid-session and
+  busted the provider prefix cache. Memo now freezes whole conversation items plus
+  sticky first-write-wins `instructions`/`tools`/`system`, and never drops a memo hit
+  to chase a slightly smaller fresh body. Contract tests lock the no-rewrite rule.
+  (#254)
+
 - **Bare wire model ids resolve against `provider/id` pricing rows.** The models.dev
   snapshot keys many models as `x-ai/grok-4.5` (etc.), while the ledger and status path
   record bare ids like `grok-4.5`. Lookup only stripped a prefix when one was present, so
