@@ -1345,9 +1345,7 @@ mod tests {
         let memo = Memo::with_capacity(DEFAULT_CAPACITY);
         let salt = test_salt("multi-tr-cc");
 
-        let tool_body = |id: &str, n: usize| -> String {
-            format!("TOOL-{id}-LINE\n").repeat(n)
-        };
+        let tool_body = |id: &str, n: usize| -> String { format!("TOOL-{id}-LINE\n").repeat(n) };
 
         // Turn A: four tool_results in one user message; cache_control on the last block
         // (Claude Code first-arrival boundary). Compressor windows each tool_result body.
@@ -1455,8 +1453,7 @@ mod tests {
 
         let cb_fresh = toolout_compress(&b, 2);
         assert_ne!(
-            cb_fresh["messages"][2]["content"][0]["content"],
-            frozen_call2,
+            cb_fresh["messages"][2]["content"][0]["content"], frozen_call2,
             "sanity: without memo, call-2 remutates across turns"
         );
         // Original msg[2] bytes differ solely by cache_control — must NOT bust the hash chain.
@@ -1515,7 +1512,11 @@ mod tests {
                     if m.get("type").and_then(Value::as_str) != Some("function_call_output") {
                         continue;
                     }
-                    let raw = m.get("output").and_then(Value::as_str).unwrap_or("").to_string();
+                    let raw = m
+                        .get("output")
+                        .and_then(Value::as_str)
+                        .unwrap_or("")
+                        .to_string();
                     let kept = raw.lines().take(2).collect::<Vec<_>>().join("\n");
                     if let Some(obj) = m.as_object_mut() {
                         obj.insert(
