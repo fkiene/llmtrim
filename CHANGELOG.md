@@ -6,6 +6,17 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Fixed
+
+- **Bare wire model ids resolve against `provider/id` pricing rows.** The models.dev
+  snapshot keys many models as `x-ai/grok-4.5` (etc.), while the ledger and status path
+  record bare ids like `grok-4.5`. Lookup only stripped a prefix when one was present, so
+  bare ids missed the snapshot, froze `input_rate`/`bill_micros` at zero, and dropped out
+  of Overview dollar lists / understated totals. `load_pricing` now dual-indexes unique
+  bare aliases (never overwriting an explicit bare row; never aliasing when prefixed
+  siblings disagree). Combined with the daily zero-rate reprice (#244), historical
+  unpriced turns heal on the next ledger open once rates are known.
+
 ## [0.12.3] - 2026-08-01
 
 ### Fixed

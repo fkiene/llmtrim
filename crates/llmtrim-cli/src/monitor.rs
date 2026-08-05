@@ -1282,10 +1282,12 @@ fn build_registry_price_table() -> std::collections::HashMap<&'static str, (f64,
 }
 
 /// Fallback table: the pinned models.dev snapshot the bench prices from, embedded at
-/// compile time (the package re-includes bench/pricing.json for this). Exact id first,
-/// then with the `provider/` prefix stripped, mirroring [`crate::bench::resolve_pricing`]
-/// — but zero-priced rows (free tiers, parse gaps) return `None` so an unknown model
-/// shows a blank cost cell rather than a misleading $0.00.
+/// compile time (the package re-includes bench/pricing.json for this). Exact id first
+/// (including bare aliases dual-indexed by [`crate::bench::load_pricing`] for unique
+/// `provider/id` rows such as `grok-4.5` ← `x-ai/grok-4.5`), then with the `provider/`
+/// prefix stripped, mirroring [`crate::bench::resolve_pricing`] — but zero-priced rows
+/// (free tiers, parse gaps) return `None` so an unknown model shows a blank cost cell
+/// rather than a misleading $0.00.
 fn snapshot_prices(model_id: &str) -> Option<(f64, f64)> {
     use crate::bench;
     static TABLE: once_cell::sync::Lazy<bench::PriceTable> =
@@ -2354,6 +2356,18 @@ mod tests {
         assert_eq!(
             llm_prices("anthropic/claude-opus-5").expect("prefixed"),
             (5.0, 25.0)
+        );
+    }
+
+    #[test]
+    fn llm_prices_resolves_bare_grok_4_5() {
+        // Ledger/wire id is bare; models.dev snapshot keys x-ai/grok-4.5.
+        let (input, output) = llm_prices("grok-4.5").expect("bare grok-4.5 must be priced");
+        assert!((input - 2.0).abs() < 1e-9, "input $/1M got {input}");
+        assert!((output - 6.0).abs() < 1e-9, "output $/1M got {output}");
+        assert_eq!(
+            llm_prices("x-ai/grok-4.5").expect("prefixed form"),
+            (input, output)
         );
     }
 }

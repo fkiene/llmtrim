@@ -713,12 +713,54 @@ pub fn load_pricing(json: &str) -> PriceTable {
             },
         );
     }
+    // models.dev keys are often `provider/id` while wire/ledger traffic records the bare
+    // id (`grok-4.5`). Index a bare alias when it is unambiguous so exact lookup works
+    // for both shapes. Never overwrite an explicit bare row, and never invent an alias
+    // when several prefixed rows disagree on price.
+    index_unique_bare_aliases(&mut table);
     table
 }
 
+/// For each `provider/id` row whose bare `id` is not already keyed, insert `id → price`
+/// when every prefixed candidate shares the same rates. Leaves collisions alone.
+fn index_unique_bare_aliases(table: &mut PriceTable) {
+    let mut candidates: std::collections::HashMap<String, Pricing> =
+        std::collections::HashMap::new();
+    let mut ambiguous = std::collections::HashSet::new();
+    for (id, price) in table.iter() {
+        let Some((_, bare)) = id.split_once('/') else {
+            continue;
+        };
+        if table.contains_key(bare) || ambiguous.contains(bare) {
+            continue;
+        }
+        match candidates.get(bare) {
+            None => {
+                candidates.insert(bare.to_string(), *price);
+            }
+            Some(existing) if pricing_eq(existing, price) => {}
+            Some(_) => {
+                candidates.remove(bare);
+                ambiguous.insert(bare.to_string());
+            }
+        }
+    }
+    for (bare, price) in candidates {
+        // Re-check: an explicit bare key may have been present from the start.
+        table.entry(bare).or_insert(price);
+    }
+}
+
+fn pricing_eq(a: &Pricing, b: &Pricing) -> bool {
+    a.input_per_1k == b.input_per_1k
+        && a.output_per_1k == b.output_per_1k
+        && a.cache_per_1k == b.cache_per_1k
+}
+
 /// Resolve pricing for a model: the pinned table first (exact id, then with the
-/// `provider/` prefix stripped), else the hardcoded fallback. Lets the live snapshot
-/// drive cost while staying correct offline.
+/// `provider/` prefix stripped). Bare ids also hit when [`load_pricing`] indexed a unique
+/// `provider/id` alias (e.g. wire `grok-4.5` → snapshot `x-ai/grok-4.5`). Else the
+/// hardcoded fallback. Lets the live snapshot drive cost while staying correct offline.
 pub fn resolve_pricing(table: &PriceTable, model: &str) -> Pricing {
     if let Some(p) = table.get(model) {
         return *p;
@@ -1578,6 +1620,46 @@ mod tests {
         assert!(resolve_pricing(&table, "gpt-4o-mini").output_per_1k > 0.0);
         // garbage json → empty table → fallback still works.
         assert!(load_pricing("not json").is_empty());
+    }
+
+    #[test]
+    fn bare_id_aliases_unique_prefixed_snapshot_rows() {
+        // Wire traffic often records bare ids; models.dev keys are provider-prefixed.
+        let snap = r#"{"source":"x","unit":"usd_per_1m","models":{
+            "x-ai/grok-4.5":{"input":2,"output":6,"cache_read":0.5},
+            "anthropic/claude-sonnet-4":{"input":3,"output":15,"cache_read":0.3},
+            "deepseek-chat":{"input":0.14,"output":0.28,"cache_read":0},
+            "deepseek/deepseek-chat":{"input":0.2002,"output":0.8001,"cache_read":0},
+            "acme/twin":{"input":1,"output":2,"cache_read":0},
+            "other/twin":{"input":9,"output":9,"cache_read":0}
+        }}"#;
+        let table = load_pricing(snap);
+
+        // Unique prefixed → bare alias.
+        let grok = resolve_pricing(&table, "grok-4.5");
+        assert!((grok.input_per_1k - 0.002).abs() < 1e-9, "2/1M = 0.002/1k");
+        assert!((grok.output_per_1k - 0.006).abs() < 1e-9);
+        assert!((grok.cache_per_1k - 0.0005).abs() < 1e-9);
+        // Prefixed form still works.
+        assert_eq!(
+            resolve_pricing(&table, "x-ai/grok-4.5").input_per_1k,
+            grok.input_per_1k
+        );
+
+        let sonnet = resolve_pricing(&table, "claude-sonnet-4");
+        assert!((sonnet.input_per_1k - 0.003).abs() < 1e-9);
+
+        // Explicit bare row wins over a disagreeing prefixed sibling.
+        let ds = resolve_pricing(&table, "deepseek-chat");
+        assert!(
+            (ds.input_per_1k - 0.00014).abs() < 1e-9,
+            "bare snapshot row wins"
+        );
+
+        // Ambiguous bare name with disagreeing prices → no alias (hardcoded fallback = 0).
+        let twin = resolve_pricing(&table, "twin");
+        assert_eq!(twin.input_per_1k, 0.0);
+        assert_eq!(twin.output_per_1k, 0.0);
     }
 
     #[test]
