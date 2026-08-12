@@ -714,7 +714,7 @@ pub fn load_pricing(json: &str) -> PriceTable {
         );
     }
     // models.dev keys are often `provider/id` while wire/ledger traffic records the bare
-    // id (`grok-4.5`). Index a bare alias when it is unambiguous so exact lookup works
+    // id (`grok-4.6`). Index a bare alias when it is unambiguous so exact lookup works
     // for both shapes. Never overwrite an explicit bare row, and never invent an alias
     // when several prefixed rows disagree on price.
     index_unique_bare_aliases(&mut table);
@@ -759,7 +759,7 @@ fn pricing_eq(a: &Pricing, b: &Pricing) -> bool {
 
 /// Resolve pricing for a model: the pinned table first (exact id, then with the
 /// `provider/` prefix stripped). Bare ids also hit when [`load_pricing`] indexed a unique
-/// `provider/id` alias (e.g. wire `grok-4.5` → snapshot `x-ai/grok-4.5`). Else the
+/// `provider/id` alias (e.g. wire `grok-4.6` → snapshot `x-ai/grok-4.6`). Else the
 /// hardcoded fallback. Lets the live snapshot drive cost while staying correct offline.
 pub fn resolve_pricing(table: &PriceTable, model: &str) -> Pricing {
     if let Some(p) = table.get(model) {
@@ -1626,7 +1626,7 @@ mod tests {
     fn bare_id_aliases_unique_prefixed_snapshot_rows() {
         // Wire traffic often records bare ids; models.dev keys are provider-prefixed.
         let snap = r#"{"source":"x","unit":"usd_per_1m","models":{
-            "x-ai/grok-4.5":{"input":2,"output":6,"cache_read":0.5},
+            "x-ai/grok-4.6":{"input":2,"output":6,"cache_read":0.5},
             "anthropic/claude-sonnet-4":{"input":3,"output":15,"cache_read":0.3},
             "deepseek-chat":{"input":0.14,"output":0.28,"cache_read":0},
             "deepseek/deepseek-chat":{"input":0.2002,"output":0.8001,"cache_read":0},
@@ -1636,13 +1636,13 @@ mod tests {
         let table = load_pricing(snap);
 
         // Unique prefixed → bare alias.
-        let grok = resolve_pricing(&table, "grok-4.5");
+        let grok = resolve_pricing(&table, "grok-4.6");
         assert!((grok.input_per_1k - 0.002).abs() < 1e-9, "2/1M = 0.002/1k");
         assert!((grok.output_per_1k - 0.006).abs() < 1e-9);
         assert!((grok.cache_per_1k - 0.0005).abs() < 1e-9);
         // Prefixed form still works.
         assert_eq!(
-            resolve_pricing(&table, "x-ai/grok-4.5").input_per_1k,
+            resolve_pricing(&table, "x-ai/grok-4.6").input_per_1k,
             grok.input_per_1k
         );
 

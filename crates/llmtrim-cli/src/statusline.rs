@@ -610,7 +610,7 @@ fn reroute_real_window(
 }
 
 /// Parallel to [`reroute_real_window`]: returns the concrete upstream model id (e.g.
-/// "gpt-5.6-terra" / "grok-4.5") chosen by tier mapping for the status line. `None` for Kimi,
+/// "gpt-5.6-terra" / "grok-4.6") chosen by tier mapping for the status line. `None` for Kimi,
 /// whose tiers all collapse to one internal wire id: the shortname is what a reader wants there.
 #[cfg(feature = "intercept")]
 fn reroute_resolved_model(
@@ -2009,9 +2009,9 @@ mod tests {
         let mut l = led(Health::Healthy);
         l.reroute = Some("grok".to_string());
         l.resolved_model = reroute_resolved_model("grok", "claude-opus-4-8", &tiers);
-        assert_eq!(l.resolved_model.as_deref(), Some("grok-4.5"));
+        assert_eq!(l.resolved_model.as_deref(), Some("grok-4.6"));
         let out = render_line(&cc(72_000), &l, 0, true);
-        assert!(out.contains("→grok-4.5"), "grok arrow shows model: {out}");
+        assert!(out.contains("→grok-4.6"), "grok arrow shows model: {out}");
     }
 
     fn ledger_row(sub: Option<&str>, model: Option<&str>) -> SessionLedgerRow {

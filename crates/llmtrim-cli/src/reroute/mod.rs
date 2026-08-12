@@ -344,12 +344,11 @@ pub fn default_codex_tier_model(tier: Tier) -> &'static str {
     }
 }
 
-/// Built-in Grok tier preset: flagship for Opus/Sonnet, Grok 4.6 for Fable, composer-fast for
-/// Haiku (background title/token calls).
+/// Built-in Grok tier preset: flagship for heavy tiers, composer-fast for Haiku (background
+/// title/token calls).
 pub fn default_grok_tier_model(tier: Tier) -> &'static str {
     match tier {
-        Tier::Opus | Tier::Sonnet => "grok-4.5",
-        Tier::Fable => "grok-4.6",
+        Tier::Opus | Tier::Sonnet | Tier::Fable => "grok-4.6",
         Tier::Haiku => "grok-composer-2.5-fast",
     }
 }
@@ -358,7 +357,7 @@ pub fn default_grok_tier_model(tier: Tier) -> &'static str {
 pub const KIMI_MODEL: &str = "kimi-for-coding";
 
 /// Grok models the CLI subscription endpoint accepts.
-pub const GROK_MODELS: [&str; 3] = ["grok-4.6", "grok-4.5", "grok-composer-2.5-fast"];
+pub const GROK_MODELS: [&str; 2] = ["grok-4.6", "grok-composer-2.5-fast"];
 
 /// Resolve the incoming Anthropic model id to the upstream provider model for `provider`, applying
 /// (in order): an exact-id override, then the tier's override, then the preset default. `overrides`
@@ -595,9 +594,9 @@ mod tests {
         let ov = BTreeMap::new();
         assert_eq!(
             resolve_model(SubProvider::Grok, "claude-opus-4-8", &ov),
-            "grok-4.5"
+            "grok-4.6"
         );
-        assert_eq!(resolve_model(SubProvider::Grok, "sonnet", &ov), "grok-4.5");
+        assert_eq!(resolve_model(SubProvider::Grok, "sonnet", &ov), "grok-4.6");
         assert_eq!(
             resolve_model(SubProvider::Grok, "claude-fable-5", &ov),
             "grok-4.6"
@@ -629,24 +628,24 @@ mod tests {
         ov.insert("haiku".to_string(), "gpt-5.4-mini".to_string());
         assert_eq!(
             resolve_model(SubProvider::Grok, "claude-opus-4-8", &ov),
-            "grok-4.5"
+            "grok-4.6"
         );
         assert_eq!(
             resolve_model(SubProvider::Grok, "haiku", &ov),
             "grok-composer-2.5-fast"
         );
         // A legitimate Grok override still wins.
-        ov.insert("opus".to_string(), "grok-4.5".to_string());
+        ov.insert("opus".to_string(), "grok-4.6".to_string());
         assert_eq!(
             resolve_model(SubProvider::Grok, "claude-opus-4-8", &ov),
-            "grok-4.5"
+            "grok-4.6"
         );
     }
 
     #[test]
     fn codex_ignores_grok_tier_overrides() {
         let mut ov = BTreeMap::new();
-        ov.insert("opus".to_string(), "grok-4.5".to_string());
+        ov.insert("opus".to_string(), "grok-4.6".to_string());
         assert_eq!(
             resolve_model(SubProvider::Codex, "claude-opus-4-8", &ov),
             "gpt-5.6-terra"

@@ -2231,7 +2231,7 @@
 "input": 1.25,
 "output": 2.5
 },
-"x-ai/grok-4.5": {
+"x-ai/grok-4.6": {
 "cache_read": 0.3,
 "input": 2,
 "output": 6

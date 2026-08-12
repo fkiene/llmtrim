@@ -5,9 +5,8 @@
 //! back into the shared [`ReduceEvent`] stream that
 //! [`crate::reroute::sse::AnthropicSseEncoder`] re-encodes as Anthropic SSE.
 //!
-//! Wire models: `grok-4.6` (Fable), `grok-4.5` (Opus/Sonnet flagship), and
-//! `grok-composer-2.5-fast` (cheap/fast). Auth is OAuth against `auth.x.ai` (see
-//! [`crate::reroute::auth`]).
+//! Wire models: `grok-4.6` (flagship) and `grok-composer-2.5-fast` (cheap/fast). Auth is OAuth
+//! against `auth.x.ai` (see [`crate::reroute::auth`]).
 
 use anyhow::Result;
 use serde_json::{Map, Value, json};
@@ -121,7 +120,7 @@ pub fn build_request_body(
     // Ask cli-chat-proxy for `encrypted_content` on reasoning items so the next turn can
     // replay it. Live probe: without `include`, items only carry `summary`; with it, done
     // items gain `encrypted_content`. xAI docs list omitted prior reasoning as a top cause
-    // of cache misses on reasoning models (grok-4.5 bills large `reasoning_tokens`).
+    // of cache misses on reasoning models (grok-4.6 bills large `reasoning_tokens`).
     body.insert("include".into(), json!(["reasoning.encrypted_content"]));
 
     if let Some(max) = anthropic.get("max_tokens").and_then(Value::as_u64) {
@@ -1472,7 +1471,7 @@ mod tests {
     fn system_becomes_instructions() {
         let body = build_request_body(
             &json!({ "system": "Be concise.", "messages": [] }),
-            "grok-4.5",
+            "grok-4.6",
             None,
         )
         .expect("build");
@@ -1482,7 +1481,7 @@ mod tests {
                 .unwrap()
                 .starts_with("Be concise.")
         );
-        assert_eq!(body["model"], "grok-4.5");
+        assert_eq!(body["model"], "grok-4.6");
         assert_eq!(body["stream"], true);
         assert_eq!(body["store"], false);
         assert_eq!(
@@ -1509,7 +1508,7 @@ mod tests {
                     {"role":"user","content":"again"}
                 ]
             }),
-            "grok-4.5",
+            "grok-4.6",
             Some("sess-think"),
         )
         .expect("build");
@@ -1546,7 +1545,7 @@ mod tests {
                     ]}
                 ]
             }),
-            "grok-4.5",
+            "grok-4.6",
             None,
         )
         .expect("build");
@@ -1579,7 +1578,7 @@ mod tests {
                     ]}
                 ]
             }),
-            "grok-4.5",
+            "grok-4.6",
             None,
         )
         .expect("build");
@@ -1607,7 +1606,7 @@ mod tests {
                     ]}
                 ]
             }),
-            "grok-4.5",
+            "grok-4.6",
             None,
         )
         .expect("build");
@@ -1632,7 +1631,7 @@ mod tests {
                     {"role":"assistant","content":"plain reply"}
                 ]
             }),
-            "grok-4.5",
+            "grok-4.6",
             None,
         )
         .expect("build");
@@ -1655,7 +1654,7 @@ mod tests {
                     { "name": "WebSearch", "description": "search", "input_schema": {} }
                 ]
             }),
-            "grok-4.5",
+            "grok-4.6",
             None,
         )
         .expect("build");
@@ -1732,7 +1731,7 @@ mod tests {
     fn prompt_cache_key_from_session_id() {
         let body = build_request_body(
             &json!({ "messages": [{"role": "user", "content": "hi"}] }),
-            "grok-4.5",
+            "grok-4.6",
             Some("sess-1"),
         )
         .expect("build");
@@ -1743,7 +1742,7 @@ mod tests {
     fn prompt_cache_key_omitted_without_session() {
         let body = build_request_body(
             &json!({ "messages": [{"role": "user", "content": "hi"}] }),
-            "grok-4.5",
+            "grok-4.6",
             None,
         )
         .expect("build");
@@ -1800,7 +1799,7 @@ mod tests {
             "output_tokens": 41,
             "output_tokens_details": {"reasoning_tokens": 40},
         });
-        write_upstream_usage_capture(&dir, &raw, "grok-4.5", "grok");
+        write_upstream_usage_capture(&dir, &raw, "grok-4.6", "grok");
         let files: Vec<_> = std::fs::read_dir(&dir)
             .unwrap()
             .filter_map(|e| e.ok())
@@ -1816,7 +1815,7 @@ mod tests {
             serde_json::from_str(&std::fs::read_to_string(&files[0]).unwrap()).unwrap();
         assert_eq!(rec["kind"], "upstream_usage");
         assert_eq!(rec["provider"], "grok");
-        assert_eq!(rec["model"], "grok-4.5");
+        assert_eq!(rec["model"], "grok-4.6");
         assert_eq!(rec["usage"]["input_tokens_details"]["cached_tokens"], 128);
         assert_eq!(rec["mapped"]["cache_read"], 128);
         assert_eq!(rec["mapped"]["input"], 90); // 218 - 128
@@ -1826,7 +1825,7 @@ mod tests {
 
     #[test]
     fn reducer_finish_maps_cached_tokens_into_usage() {
-        let mut r = Reducer::new("grok-4.5");
+        let mut r = Reducer::new("grok-4.6");
         let chunk = concat!(
             "data: {\"type\":\"response.output_text.delta\",\"delta\":\"hi\"}\n\n",
             "data: {\"type\":\"response.completed\",\"response\":{\"usage\":{\"input_tokens\":100,\"input_tokens_details\":{\"cached_tokens\":40},\"output_tokens\":5}}}\n\n",
@@ -1853,7 +1852,7 @@ mod tests {
 
     #[test]
     fn reducer_streams_text_and_tools() {
-        let mut r = Reducer::new("grok-4.5");
+        let mut r = Reducer::new("grok-4.6");
         let chunk = concat!(
             "data: {\"type\":\"response.output_text.delta\",\"delta\":\"hi\"}\n\n",
             "data: {\"type\":\"response.output_item.added\",\"item\":{\"type\":\"function_call\",\"call_id\":\"c1\",\"name\":\"Bash\"},\"output_index\":1}\n\n",
@@ -1881,7 +1880,7 @@ mod tests {
 
     #[test]
     fn reducer_maps_reasoning_to_thinking() {
-        let mut r = Reducer::new("grok-4.5");
+        let mut r = Reducer::new("grok-4.6");
         let chunk = concat!(
             "data: {\"type\":\"response.reasoning_text.delta\",\"delta\":\"hmm\"}\n\n",
             "data: {\"type\":\"response.output_text.delta\",\"delta\":\"ok\"}\n\n",
@@ -1902,7 +1901,7 @@ mod tests {
 
     #[test]
     fn reducer_tunnels_encrypted_reasoning_as_thinking_signature() {
-        let mut r = Reducer::new("grok-4.5");
+        let mut r = Reducer::new("grok-4.6");
         let chunk = concat!(
             "data: {\"type\":\"response.output_item.added\",\"item\":{\"type\":\"reasoning\",\"id\":\"rs_1\",\"summary\":[],\"status\":\"in_progress\"}}\n\n",
             "data: {\"type\":\"response.reasoning_summary_text.delta\",\"delta\":\"ponder\"}\n\n",
@@ -1944,7 +1943,7 @@ mod tests {
 
     #[test]
     fn reducer_buffers_interleaved_tool_args_by_call_id() {
-        let mut r = Reducer::new("grok-4.5");
+        let mut r = Reducer::new("grok-4.6");
         // Two function calls; argument deltas arrive interleaved without output_index.
         let chunk = concat!(
             "data: {\"type\":\"response.output_item.added\",\"item\":{\"type\":\"function_call\",\"call_id\":\"c1\",\"name\":\"Bash\",\"id\":\"item_1\"}}\n\n",
@@ -2002,7 +2001,7 @@ mod tests {
 
     #[test]
     fn web_search_call_emits_server_tool_blocks_before_text() {
-        let mut r = Reducer::new("grok-4.5");
+        let mut r = Reducer::new("grok-4.6");
         let sse = concat!(
             "data: {\"type\":\"response.output_item.added\",\"item\":{\"type\":\"web_search_call\",\"id\":\"ws_1\"}}\n\n",
             "data: {\"type\":\"response.web_search_call.in_progress\",\"item_id\":\"ws_1\"}\n\n",
@@ -2068,7 +2067,7 @@ mod tests {
 
     #[test]
     fn x_search_custom_tool_call_emits_server_tool_blocks() {
-        let mut r = Reducer::new("grok-4.5");
+        let mut r = Reducer::new("grok-4.6");
         let sse = concat!(
             "data: {\"type\":\"response.output_item.added\",\"item\":{\"type\":\"custom_tool_call\",\"name\":\"x_search\",\"id\":\"xs_1\"}}\n\n",
             "data: {\"type\":\"response.custom_tool_call_input.delta\",\"item_id\":\"xs_1\",\"delta\":\"{\\\"query\\\":\\\"claude-code-proxy\\\"}\"}\n\n",
@@ -2118,7 +2117,7 @@ mod tests {
 
     #[test]
     fn x_keyword_search_normalizes_to_x_search() {
-        let mut r = Reducer::new("grok-4.5");
+        let mut r = Reducer::new("grok-4.6");
         let sse = concat!(
             "data: {\"type\":\"response.output_item.added\",\"item\":{\"type\":\"custom_tool_call\",\"name\":\"x_keyword_search\",\"id\":\"search_1\"}}\n\n",
             "data: {\"type\":\"response.custom_tool_call_input.delta\",\"item_id\":\"search_1\",\"delta\":\"{\\\"query\\\":\\\"test\\\"}\"}\n\n",
@@ -2152,7 +2151,7 @@ mod tests {
                     ]
                 }]
             }),
-            "grok-4.5",
+            "grok-4.6",
             None,
         )
         .expect("build");
@@ -2181,7 +2180,7 @@ mod tests {
                     }]
                 }]
             }),
-            "grok-4.5",
+            "grok-4.6",
             None,
         )
         .expect("build");
@@ -2210,7 +2209,7 @@ mod tests {
                     }]
                 }]
             }),
-            "grok-4.5",
+            "grok-4.6",
             None,
         )
         .expect("build");
@@ -2238,7 +2237,7 @@ mod tests {
                     }]
                 }]
             }),
-            "grok-4.5",
+            "grok-4.6",
             None,
         )
         .expect("build");

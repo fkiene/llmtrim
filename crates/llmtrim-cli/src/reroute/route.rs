@@ -129,8 +129,7 @@ pub fn resolve_explicit_model(provider: SubProvider, value: &str) -> Result<Stri
             _ => value,
         },
         SubProvider::Grok => match normalized.as_str() {
-            "grok" | "grok45" => "grok-4.5",
-            "grok46" => "grok-4.6",
+            "grok" | "grok46" | "grok45" => "grok-4.6",
             "composer" | "grokcomposer" | "grokcomposer25fast" => "grok-composer-2.5-fast",
             _ => value,
         },
