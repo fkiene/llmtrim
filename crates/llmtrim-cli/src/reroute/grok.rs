@@ -5,8 +5,9 @@
 //! back into the shared [`ReduceEvent`] stream that
 //! [`crate::reroute::sse::AnthropicSseEncoder`] re-encodes as Anthropic SSE.
 //!
-//! Wire models: `grok-4.5` (flagship) and `grok-composer-2.5-fast` (cheap/fast). Auth is OAuth
-//! against `auth.x.ai` (see [`crate::reroute::auth`]).
+//! Wire models: `grok-4.6` (Fable), `grok-4.5` (Opus/Sonnet flagship), and
+//! `grok-composer-2.5-fast` (cheap/fast). Auth is OAuth against `auth.x.ai` (see
+//! [`crate::reroute::auth`]).
 
 use anyhow::Result;
 use serde_json::{Map, Value, json};

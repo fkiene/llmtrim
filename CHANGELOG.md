@@ -6,6 +6,11 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Changed
+
+- **Grok Fable tier maps to `grok-4.6`.** Default Grok tier preset now sends Claude Fable to
+  `grok-4.6`; Opus/Sonnet stay on `grok-4.5` and Haiku on `grok-composer-2.5-fast`.
+
 ## [0.12.6] - 2026-08-11
 
 ### Fixed

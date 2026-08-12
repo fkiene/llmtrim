@@ -60,6 +60,7 @@ fn display_name(model: &str) -> &str {
         "gpt-5.6-luna" => "Luna (GPT Luna)",
         "gpt-5.6-sol" => "Sol (GPT Sol)",
         "gpt-5.4-mini" => "Mini (GPT Mini)",
+        "grok-4.6" => "Grok 4.6",
         "grok-4.5" => "Grok 4.5",
         "grok-composer-2.5-fast" => "Grok Composer",
         "kimi-for-coding" => "Kimi",
