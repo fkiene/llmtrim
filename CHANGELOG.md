@@ -6,6 +6,15 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Fixed
+
+- **0.13 upgrade keeps the old `sub` map.** Status tab 4 and `sub = on` were
+  reading only `[sub.on.tiers]`. A pre-0.13 `[sub.grok.tiers]` (or
+  codex/kimi) pin such as opus → `grok-4.6` looked like empty
+  `(pass through)` and the output picker had no models if the official
+  catalog fetch failed. The live `on` table now inherits the last
+  legacy map, and the picker falls back to a small built-in list.
+
 ## [0.13.1] - 2026-08-16
 
 ### Fixed

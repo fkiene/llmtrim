@@ -355,17 +355,49 @@ pub fn official_models() -> Vec<OfficialModel> {
     }
     match fetch_official_models() {
         Ok(list) if !list.is_empty() => list,
-        _ => list_models()
-            .unwrap_or_default()
-            .into_iter()
-            .map(|m| OfficialModel {
-                id: m.id,
-                owned_by: m.owned_by,
-                display_name: String::new(),
-                family: String::new(),
-            })
-            .collect(),
+        _ => {
+            let live = list_models()
+                .unwrap_or_default()
+                .into_iter()
+                .map(|m| OfficialModel {
+                    id: m.id,
+                    owned_by: m.owned_by,
+                    display_name: String::new(),
+                    family: String::new(),
+                })
+                .collect::<Vec<_>>();
+            if live.is_empty() {
+                fallback_official_models()
+            } else {
+                live
+            }
+        }
     }
+}
+
+/// Offline / failed-catalog picker so tab 4 is not empty after a 0.13 upgrade.
+fn fallback_official_models() -> Vec<OfficialModel> {
+    const ROWS: &[(&str, &str, &str, &str)] = &[
+        ("grok-4.6", "xai", "Grok 4.6", "grok"),
+        (
+            "grok-composer-2.5-fast",
+            "xai",
+            "Grok Composer 2.5 Fast",
+            "grok",
+        ),
+        ("gpt-5.6-terra", "openai", "GPT-5.6 Terra", "codex"),
+        ("gpt-5.6-luna", "openai", "GPT-5.6 Luna", "codex"),
+        ("gpt-5.4-mini", "openai", "GPT-5.4 Mini", "codex"),
+        ("kimi-k2.5", "moonshot", "Kimi K2.5", "kimi"),
+    ];
+    ROWS.iter()
+        .map(|(id, owned_by, display_name, family)| OfficialModel {
+            id: (*id).into(),
+            owned_by: (*owned_by).into(),
+            display_name: (*display_name).into(),
+            family: (*family).into(),
+        })
+        .collect()
 }
 
 fn read_official_cache() -> Option<Vec<OfficialModel>> {
@@ -1544,6 +1576,13 @@ mod tests {
             Some("grok-composer-2.5-fast")
         );
         assert!(!map.values().any(|v| v == "claude-opus-5"));
+    }
+
+    #[test]
+    fn fallback_catalog_lists_grok_46() {
+        let cat = fallback_official_models();
+        assert!(cat.iter().any(|m| m.id == "grok-4.6"));
+        assert!(cat.iter().any(|m| m.id == "grok-composer-2.5-fast"));
     }
 
     const PNG_2X2: &str = "iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAIAAAD91JpzAAAAEElEQVR4nGP4z8AARAwQCgAf7gP9i18U1AAAAABJRU5ErkJggg==";

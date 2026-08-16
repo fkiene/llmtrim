@@ -1146,14 +1146,18 @@ pub fn sub_tiers_for(provider: &str) -> std::collections::BTreeMap<String, Strin
     sub_tiers_from_file(file.as_ref(), &provider)
 }
 
-fn sub_tiers_from_file(
-    file: Option<&toml::Value>,
+fn is_cliproxy_provider(provider: &str) -> bool {
+    matches!(
+        provider,
+        "on" | "cliproxy" | "cli-proxy" | "cli-proxy-api" | "cliproxyapi"
+    )
+}
+
+fn provider_tiers_table(
+    file: &toml::Value,
     provider: &str,
 ) -> std::collections::BTreeMap<String, String> {
     let mut map = std::collections::BTreeMap::new();
-    let Some(file) = file else {
-        return map;
-    };
     if let Some(tiers) = file
         .get("sub")
         .and_then(|v| v.get(provider))
@@ -1167,6 +1171,49 @@ fn sub_tiers_from_file(
         }
     }
     map
+}
+
+/// Pre-0.13 configs stored opus/sonnet/haiku/fable under `[sub.grok.tiers]` (or
+/// codex/kimi). 0.13 writes the live map at `[sub.on.tiers]`. When that table is
+/// missing, keep using the old one so an upgrade does not wipe the user's pin.
+fn inherit_legacy_sub_tiers(file: &toml::Value) -> std::collections::BTreeMap<String, String> {
+    const LEGACY: &[&str] = &[
+        "grok", "codex", "kimi", "claude", "gemini", "vertex", "qwen", "copilot",
+    ];
+    if let Some(last) = file
+        .get("sub")
+        .and_then(|v| v.get("last"))
+        .and_then(toml::Value::as_str)
+    {
+        let last = last.trim().to_ascii_lowercase();
+        if !last.is_empty() && !is_cliproxy_provider(&last) {
+            let map = provider_tiers_table(file, &last);
+            if !map.is_empty() {
+                return map;
+            }
+        }
+    }
+    for provider in LEGACY {
+        let map = provider_tiers_table(file, provider);
+        if !map.is_empty() {
+            return map;
+        }
+    }
+    std::collections::BTreeMap::new()
+}
+
+fn sub_tiers_from_file(
+    file: Option<&toml::Value>,
+    provider: &str,
+) -> std::collections::BTreeMap<String, String> {
+    let Some(file) = file else {
+        return std::collections::BTreeMap::new();
+    };
+    let map = provider_tiers_table(file, provider);
+    if !map.is_empty() || !is_cliproxy_provider(provider) {
+        return map;
+    }
+    inherit_legacy_sub_tiers(file)
 }
 
 /// Codex reasoning effort for the active provider: env `LLMTRIM_CODEX_EFFORT` wins, else the file
@@ -2083,6 +2130,68 @@ mod tests {
         std::fs::write(&path, "preset = \"auto\"\n").unwrap();
         assert_eq!(sub_reenable_provider_at(&path), None);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn cliproxy_on_inherits_legacy_grok_tiers() {
+        let no_env = |_: &str| None;
+        let file: toml::Value = toml::from_str(
+            r#"
+[sub]
+active = "on"
+[sub.grok.tiers]
+opus = "grok-4.6"
+sonnet = "grok-4.6"
+fable = "grok-4.6"
+haiku = "grok-composer-2.5-fast"
+"#,
+        )
+        .unwrap();
+        let tiers = resolve_sub_tiers(&no_env, Some(&file));
+        assert_eq!(tiers.get("opus").map(String::as_str), Some("grok-4.6"));
+        assert_eq!(
+            tiers.get("haiku").map(String::as_str),
+            Some("grok-composer-2.5-fast")
+        );
+        let on_only = sub_tiers_from_file(Some(&file), "on");
+        assert_eq!(on_only.get("sonnet").map(String::as_str), Some("grok-4.6"));
+        let grok = sub_tiers_from_file(Some(&file), "grok");
+        assert_eq!(grok.get("fable").map(String::as_str), Some("grok-4.6"));
+    }
+
+    #[test]
+    fn cliproxy_on_table_wins_over_legacy_grok() {
+        let file: toml::Value = toml::from_str(
+            r#"
+[sub]
+active = "on"
+[sub.on.tiers]
+opus = "gpt-5.6-terra"
+[sub.grok.tiers]
+opus = "grok-4.6"
+"#,
+        )
+        .unwrap();
+        let on = sub_tiers_from_file(Some(&file), "on");
+        assert_eq!(on.get("opus").map(String::as_str), Some("gpt-5.6-terra"));
+    }
+
+    #[test]
+    fn cliproxy_on_prefers_sub_last_legacy_table() {
+        let file: toml::Value = toml::from_str(
+            r#"
+[sub]
+active = "on"
+last = "codex"
+[sub.grok.tiers]
+opus = "grok-4.6"
+[sub.codex.tiers]
+opus = "gpt-5.6-terra"
+"#,
+        )
+        .unwrap();
+        let on = sub_tiers_from_file(Some(&file), "on");
+        assert_eq!(on.get("opus").map(String::as_str), Some("gpt-5.6-terra"));
     }
 
     #[test]
