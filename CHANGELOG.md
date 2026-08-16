@@ -15,6 +15,12 @@ All notable changes to this project are documented here. The format follows
   catalog fetch failed. The live `on` table now inherits the last
   legacy map, and the picker falls back to a small built-in list.
 
+- **`ensure` / `sub on` reclaim port 18317 from a leftover llmtrim sidecar.**
+  A previous install (`~/.llmtrim/cpa/cli-proxy-api`) holding the port made the
+  new sidecar exit on bind; the health check then hit the old process, got 401,
+  and reported `/v1/models is not answering`. We now stop llmtrim-owned leftovers
+  under `~/.llmtrim/` and only error if something else still owns the port.
+
 ## [0.13.1] - 2026-08-16
 
 ### Fixed

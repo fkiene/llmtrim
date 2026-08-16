@@ -644,6 +644,145 @@ pub fn is_healthy() -> bool {
     probe_models().is_ok()
 }
 
+/// True when something already accepts connections on the managed sidecar address.
+/// Used to fail fast instead of spawning a second CLIProxyAPI that dies on bind.
+fn listen_addr_busy() -> bool {
+    std::net::TcpListener::bind((DEFAULT_HOST, DEFAULT_PORT)).is_err()
+}
+
+fn log_path_display() -> String {
+    logfile()
+        .map(|p| p.display().to_string())
+        .unwrap_or_else(|_| "cliproxy.log".into())
+}
+
+/// Last bind/exit line from a CLIProxyAPI log, if any.
+fn log_exit_hint(text: &str) -> Option<&str> {
+    text.lines().rev().map(str::trim).find(|l| {
+        let lower = l.to_ascii_lowercase();
+        lower.contains("[error]")
+            || lower.contains("address already in use")
+            || lower.contains("bind:")
+    })
+}
+
+fn sidecar_fail_detail() -> String {
+    let path = log_path_display();
+    let hint = logfile()
+        .ok()
+        .and_then(|p| fs::read_to_string(p).ok())
+        .and_then(|t| log_exit_hint(&t).map(str::to_string));
+    match hint {
+        Some(line) => format!("{line} — see {path}"),
+        None => path,
+    }
+}
+
+fn port_busy_message() -> String {
+    let extra = crate::daemon::home_dir()
+        .ok()
+        .map(|h| h.join("cpa").join("cli-proxy-api"))
+        .filter(|p| p.exists())
+        .map(|p| format!(" (previous install at {})", p.display()))
+        .unwrap_or_default();
+    format!(
+        "CLIProxyAPI port {DEFAULT_HOST}:{DEFAULT_PORT} is already in use{extra} — stop that process, or set {URL_ENV}"
+    )
+}
+
+#[cfg(any(test, target_os = "linux"))]
+fn is_sidecar_bin_name(path: &Path) -> bool {
+    let raw = path.as_os_str().to_string_lossy();
+    let name = raw.rsplit(['/', '\\']).next().unwrap_or("");
+    let n = name.to_ascii_lowercase();
+    n == "cliproxyapi" || n == "cli-proxy-api" || n == "cliproxyapi.exe"
+}
+
+/// Older llmtrim layouts (notably `~/.llmtrim/cpa/cli-proxy-api`) sit on the same
+/// port as the managed sidecar. They are ours; stop them so `sub on` can bind.
+fn leftover_home_sidecar_pids() -> Vec<u32> {
+    #[cfg(target_os = "linux")]
+    {
+        let Ok(home) = crate::daemon::home_dir() else {
+            return Vec::new();
+        };
+        let ours = bin_path().ok();
+        let mut pids = Vec::new();
+        if let Ok(proc) = fs::read_dir("/proc") {
+            for ent in proc.flatten() {
+                let Some(pid) = ent.file_name().to_str().and_then(|s| s.parse::<u32>().ok()) else {
+                    continue;
+                };
+                let Ok(exe) = fs::read_link(ent.path().join("exe")) else {
+                    continue;
+                };
+                if !exe.starts_with(&home) {
+                    continue;
+                }
+                if ours.as_ref().is_some_and(|o| *o == exe) {
+                    continue;
+                }
+                if is_sidecar_bin_name(&exe) {
+                    pids.push(pid);
+                }
+            }
+        }
+        pids.sort_unstable();
+        pids.dedup();
+        pids
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        Vec::new()
+    }
+}
+
+fn stop_pid(pid: u32) {
+    #[cfg(unix)]
+    {
+        let _ = std::process::Command::new("kill")
+            .arg(pid.to_string())
+            .status();
+    }
+    #[cfg(windows)]
+    {
+        let _ = std::process::Command::new("taskkill")
+            .args(["/PID", &pid.to_string(), "/F"])
+            .status();
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        let _ = pid;
+    }
+}
+
+fn stop_leftover_home_sidecars() -> usize {
+    let pids = leftover_home_sidecar_pids();
+    for pid in &pids {
+        stop_pid(*pid);
+    }
+    if !pids.is_empty() {
+        for _ in 0..20 {
+            if !listen_addr_busy() {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+    }
+    pids.len()
+}
+
+fn reclaim_default_port() -> Result<()> {
+    if is_healthy() || !listen_addr_busy() {
+        return Ok(());
+    }
+    let _ = stop_leftover_home_sidecars();
+    if is_healthy() || !listen_addr_busy() {
+        return Ok(());
+    }
+    bail!("{}", port_busy_message())
+}
+
 pub fn is_running() -> bool {
     is_healthy() || pid_running().is_some()
 }
@@ -1080,29 +1219,37 @@ pub fn ensure_running() -> Result<()> {
     if is_healthy() {
         return Ok(());
     }
-    if pid_running().is_some() {
+    if let Some(pid) = pid_running() {
         // Process up but not healthy yet — give it a moment.
         for _ in 0..20 {
             std::thread::sleep(Duration::from_millis(150));
             if is_healthy() {
                 return Ok(());
             }
+            if !process_alive(pid) {
+                break;
+            }
         }
     }
-    start()?;
+    reclaim_default_port()?;
+    let pid = start()?;
     for _ in 0..40 {
         if is_healthy() {
             return Ok(());
         }
+        if !process_alive(pid) {
+            bail!("CLIProxyAPI exited — {}", sidecar_fail_detail());
+        }
         std::thread::sleep(Duration::from_millis(150));
     }
-    bail!(
-        "CLIProxyAPI started but {}/v1/models is not answering — see {}",
-        base_url(),
-        logfile()
-            .map(|p| p.display().to_string())
-            .unwrap_or_else(|_| "cliproxy.log".into())
-    );
+    match probe_models() {
+        Ok(_) => Ok(()),
+        Err(e) => bail!(
+            "CLIProxyAPI started but {}/v1/models is not answering ({e:#}) — see {}",
+            base_url(),
+            log_path_display()
+        ),
+    }
 }
 
 pub fn start() -> Result<u32> {
@@ -1114,6 +1261,7 @@ pub fn start() -> Result<u32> {
     }
     ensure_installed()?;
     ensure_config()?;
+    reclaim_default_port()?;
     let bin = bin_path()?;
     let cfg = config_path()?;
     let log = fs::File::create(logfile()?)?;
@@ -1140,6 +1288,12 @@ pub fn start() -> Result<u32> {
         .with_context(|| format!("spawn {}", bin.display()))?;
     let pid = child.id();
     fs::write(pidfile()?, pid.to_string())?;
+    // Bind failures (port in use) kill the process after it logs "started".
+    std::thread::sleep(Duration::from_millis(250));
+    if !process_alive(pid) {
+        let _ = fs::remove_file(pidfile()?);
+        bail!("CLIProxyAPI exited — {}", sidecar_fail_detail());
+    }
     Ok(pid)
 }
 
@@ -1413,6 +1567,34 @@ mod tests {
     #[test]
     fn asset_name_unknown_none() {
         assert_eq!(release_asset_for("7.2.130", "linux", "riscv64"), None);
+    }
+
+    #[test]
+    fn sidecar_bin_name_matches_legacy_and_current() {
+        assert!(is_sidecar_bin_name(Path::new(
+            "/home/x/.llmtrim/cpa/cli-proxy-api"
+        )));
+        assert!(is_sidecar_bin_name(Path::new(
+            "/home/x/.llmtrim/cliproxy/CLIProxyAPI"
+        )));
+        assert!(is_sidecar_bin_name(Path::new(
+            "C:\\Users\\x\\.llmtrim\\cliproxy\\CLIProxyAPI.exe"
+        )));
+        assert!(!is_sidecar_bin_name(Path::new(
+            "/home/x/.llmtrim/cliproxy/config.yaml"
+        )));
+    }
+
+    #[test]
+    fn log_exit_hint_picks_bind_error() {
+        let log = "\
+CLIProxyAPI Version: 7.2.133
+API server started successfully on: 127.0.0.1:18317
+[2026-08-16 17:27:26] [--------] [error] [run.go:66] proxy service exited with error: failed to start HTTP server: listen tcp 127.0.0.1:18317: bind: address already in use
+";
+        let hint = log_exit_hint(log).unwrap();
+        assert!(hint.contains("address already in use"), "{hint}");
+        assert!(log_exit_hint("info only\nstarted\n").is_none());
     }
 
     #[test]
