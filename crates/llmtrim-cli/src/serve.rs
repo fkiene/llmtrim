@@ -5500,9 +5500,30 @@ mod imp {
             // verification. The tokio-rustls ClientConfig uses whatever CryptoProvider is
             // installed at process start — we call aws_lc_rs::default_provider() at startup,
             // so origin TLS automatically uses aws-lc-rs throughout.
-            let proxy_connector =
+            #[allow(unused_mut)] // the cfg(windows) block re-seeds the origin TLS via set_tls
+            let mut proxy_connector =
                 ProxyConnector::from_proxy(HttpConnector::new(), upstream_proxy_spec)
                     .map_err(|e| anyhow::anyhow!("failed to build upstream ProxyConnector: {e}"))?;
+            #[cfg(windows)]
+            {
+                // Parity with the direct Windows path (#257): `from_proxy` builds the origin
+                // TLS leg via rustls-native-certs `load_native_certs()`, which preferentially
+                // reads inherited `SSL_CERT_FILE` / `SSL_CERT_DIR` and skips the OS stores —
+                // leaving an enterprise user whose TLS is inspected by both a proxy AND a
+                // corporate CA back on `UnknownIssuer`. Replace the origin trust set with the
+                // same Windows store builder the direct path uses (CurrentUser + optional
+                // LocalMachine ROOT, serverAuth EKU, time-valid). rustls verification itself
+                // is untouched; only which roots are trusted changes.
+                let tls_config = hudsucker::rustls::ClientConfig::builder_with_provider(Arc::new(
+                    aws_lc_rs::default_provider(),
+                ))
+                .with_safe_default_protocol_versions()
+                .context("failed to configure Windows upstream-proxy origin TLS protocol versions")?
+                .with_root_certificates(windows_root_store()?)
+                .with_no_client_auth();
+                proxy_connector
+                    .set_tls(Some(tokio_rustls::TlsConnector::from(Arc::new(tls_config))));
+            }
             Proxy::builder()
                 .with_addr(addr)
                 .with_ca(ca)

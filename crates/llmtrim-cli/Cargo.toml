@@ -147,6 +147,10 @@ hyper-rustls = { version = "0.27", default-features = false, features = [
   "http1",
   "http2",
 ], optional = true }
+# Re-seeds the UPSTREAM-PROXY origin TLS leg from the Windows store builder
+# (a stock ProxyConnector::from_proxy origin TLS would honor inherited
+# SSL_CERT_FILE / SSL_CERT_DIR instead — see #259).
+tokio-rustls = { version = "0.26", optional = true }
 schannel = { version = "0.1.29", optional = true }
 winreg = "0.56"
 windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_System_Pipes"] }
@@ -169,6 +173,7 @@ intercept = [
   "dep:time",
   "dep:hyper-http-proxy",
   "dep:hyper-rustls",
+  "dep:tokio-rustls",
   "dep:hyper-util",
   "dep:schannel",
   "dep:uuid",

@@ -3187,6 +3187,7 @@ dependencies = [
  "statrs",
  "time",
  "tokio",
+ "tokio-rustls",
  "toml 1.1.2+spec-1.1.0",
  "unicode-width",
  "ureq",
