@@ -1025,6 +1025,17 @@ pub(crate) struct BreakdownRates {
     pub cache_write: f64,
 }
 
+/// DeepSeek peak windows are Beijing time (UTC+8): 09:00–12:00 and 14:00–18:00.
+/// Off-peak is exactly half price. Pure so it is unit-testable at fixed instants.
+// Test-only until `rates_for` wires the DeepSeek branch (Task 3) — drop the
+// expect there, or the unfulfilled expectation fails under -D warnings.
+#[cfg_attr(not(test), expect(dead_code))]
+pub(crate) fn is_beijing_peak(now: chrono::DateTime<chrono::Utc>) -> bool {
+    use chrono::Timelike;
+    let bj_hour = (now + chrono::Duration::hours(8)).time().hour();
+    (9..12).contains(&bj_hour) || (14..18).contains(&bj_hour)
+}
+
 /// Resolve the frozen rates for a (provider, model) pair. Unknown models price at 0
 /// (the TUI then shows a blank cost cell rather than a misleading $0.00).
 ///
@@ -1333,6 +1344,23 @@ mod tests {
             live_saved: 10.0,
             out_spend_shaped: 0.0,
         }
+    }
+
+    #[test]
+    fn beijing_peak_windows_match_official() {
+        use chrono::{TimeZone, Utc};
+        let at = |utc_h: u32, utc_min: u32| Utc.with_ymd_and_hms(2026, 8, 17, utc_h, utc_min, 0).unwrap();
+        // Beijing = UTC+8: 09:00–12:00 Beijing = 01:00–04:00 UTC.
+        assert!(is_beijing_peak(at(1, 0)), "09:00 Beijing start");
+        assert!(is_beijing_peak(at(3, 59)), "11:59 Beijing");
+        assert!(!is_beijing_peak(at(4, 0)), "12:00 Beijing end");
+        // 14:00–18:00 Beijing = 06:00–10:00 UTC.
+        assert!(is_beijing_peak(at(6, 0)), "14:00 Beijing start");
+        assert!(is_beijing_peak(at(9, 59)), "17:59 Beijing");
+        assert!(!is_beijing_peak(at(10, 0)), "18:00 Beijing end");
+        // Off-peak middle.
+        assert!(!is_beijing_peak(at(0, 0)), "midnight Beijing");
+        assert!(!is_beijing_peak(at(12, 0)), "20:00 Beijing");
     }
 
     #[test]
