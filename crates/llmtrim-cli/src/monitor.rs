@@ -1298,6 +1298,16 @@ pub fn overview_data(
 /// embedded models.dev snapshot for models the registry hasn't shipped yet.
 pub(crate) fn llm_prices(model_id: &str) -> Option<(f64, f64)> {
     #[cfg(feature = "intercept")]
+    {
+        // DeepSeek flash/pro: the vendored llm_providers registry predates the
+        // official restructure, so prefer the tiered model's OFF-PEAK USD rates
+        // (the conservative flat figure; per-turn breakdowns still apply the
+        // Beijing peak window via rates_for_at).
+        if let Some((_, off_peak)) = deepseek_rates(model_id) {
+            return Some((off_peak.input, off_peak.output));
+        }
+    }
+    #[cfg(feature = "intercept")]
     if let Some(prices) = registry_prices(model_id) {
         return Some(prices);
     }
@@ -2493,15 +2503,29 @@ mod tests {
     fn llm_prices_prefers_primary_usd_over_reseller_and_cny() {
         let want = llm_providers::get_model_for_endpoint("deepseek:global", "deepseek-v4-pro")
             .expect("deepseek global offering in registry");
-        let (input, output) = llm_prices("deepseek-v4-pro").expect("priced");
+        // The registry (vendored, pre-restructure) still resolves the primary
+        // brand's USD offering — assert that lookup directly so the reseller/CNY
+        // regression guard survives even though llm_prices no longer uses it.
+        let reg = registry_prices("deepseek-v4-pro").expect("registry priced");
         assert_eq!(
-            (input, output),
+            reg,
             (want.model.input_price, want.model.output_price),
             "expected deepseek:global USD rates, not reseller/CNY"
         );
         // Explicit guards against the two wrong rows that used to win.
-        assert_ne!(input, 12.0, "tencent/volcengine reseller row");
-        assert_ne!(input, 3.0, "deepseek CNY top-level / cn endpoint");
+        assert_ne!(reg.0, 12.0, "tencent/volcengine reseller row");
+        assert_ne!(reg.0, 3.0, "deepseek CNY top-level / cn endpoint");
+
+        // llm_prices now overrides flash/pro with the tiered OFF-PEAK USD rates
+        // (the vendored registry predates the official restructure) — assert the
+        // override wins for both bare and prefixed ids.
+        let off_peak = deepseek_rates("deepseek-v4-pro").expect("pro tiered").1;
+        let (input, output) = llm_prices("deepseek-v4-pro").expect("priced");
+        assert_eq!(
+            (input, output),
+            (off_peak.input, off_peak.output),
+            "expected tiered off-peak USD rates for deepseek flash/pro"
+        );
 
         // Prefixed ids strip to the same bare model.
         let (input2, output2) = llm_prices("deepseek/deepseek-v4-pro").expect("prefixed");
