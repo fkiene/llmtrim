@@ -1036,6 +1036,41 @@ pub(crate) fn is_beijing_peak(now: chrono::DateTime<chrono::Utc>) -> bool {
     (9..12).contains(&bj_hour) || (14..18).contains(&bj_hour)
 }
 
+/// Baked CNY→USD rate for DeepSeek's official pricing (元 per 1M tokens).
+/// DeepSeek bills in CNY with no USD endpoint for these tiers; a fixed FX keeps
+/// savings estimates stable without a live-currency dependency. Revisit if the
+/// official USD list appears.
+const DEEPSEEK_USD_FX: f64 = 7.2;
+
+fn deepseek_bare_model(model: &str) -> &str {
+    model.rsplit('/').next().unwrap_or(model)
+}
+
+/// Official DeepSeek (peak, off-peak) USD rate tuples, or `None` for models
+/// outside flash/pro scope. Peak is exactly 2× off-peak.
+// Test-only until `rates_for` wires the DeepSeek branch (Task 3) — drop the
+// expect there, or the unfulfilled expectation fails under -D warnings.
+#[cfg_attr(not(test), expect(dead_code))]
+fn deepseek_rates(model: &str) -> Option<(BreakdownRates, BreakdownRates)> {
+    // Official CNY per 1M (hit, miss, output) — off-peak then peak (2×).
+    let (hit_off, miss_off, out_off) = match deepseek_bare_model(model) {
+        "deepseek-v4-flash" => (0.05, 1.5, 4.5),
+        "deepseek-v4-pro" => (0.15, 4.5, 13.5),
+        _ => return None,
+    };
+    let tier = |hit, miss, out| BreakdownRates {
+        input: miss / DEEPSEEK_USD_FX,
+        output: out / DEEPSEEK_USD_FX,
+        cache_read: hit / DEEPSEEK_USD_FX,
+        // DeepSeek has no cache-write surcharge; write tokens bill as miss input.
+        cache_write: 0.0,
+    };
+    Some((
+        tier(hit_off * 2.0, miss_off * 2.0, out_off * 2.0),
+        tier(hit_off, miss_off, out_off),
+    ))
+}
+
 /// Resolve the frozen rates for a (provider, model) pair. Unknown models price at 0
 /// (the TUI then shows a blank cost cell rather than a misleading $0.00).
 ///
@@ -1361,6 +1396,30 @@ mod tests {
         // Off-peak middle.
         assert!(!is_beijing_peak(at(0, 0)), "midnight Beijing");
         assert!(!is_beijing_peak(at(12, 0)), "20:00 Beijing");
+    }
+
+    #[test]
+    fn deepseek_rates_match_official_usd_at_baked_fx() {
+        let (peak, off) = deepseek_rates("deepseek-v4-flash").expect("flash priced");
+        let fx = 7.2;
+        // Official off-peak CNY per 1M: hit ¥0.05, miss ¥1.5, out ¥4.5.
+        assert!((off.input - 1.5 / fx).abs() < 1e-6, "flash off miss {}", off.input);
+        assert!((off.cache_read - 0.05 / fx).abs() < 1e-6, "flash off hit {}", off.cache_read);
+        assert!((off.output - 4.5 / fx).abs() < 1e-6, "flash off out {}", off.output);
+        assert_eq!(off.cache_write, 0.0);
+        // Peak doubles all three.
+        assert!((peak.input - off.input * 2.0).abs() < 1e-9);
+        assert!((peak.cache_read - off.cache_read * 2.0).abs() < 1e-9);
+        assert!((peak.output - off.output * 2.0).abs() < 1e-9);
+
+        let (peak, off) = deepseek_rates("deepseek-v4-pro").expect("pro priced");
+        assert!((off.input - 4.5 / fx).abs() < 1e-6, "pro off miss {}", off.input);
+        assert!((off.cache_read - 0.15 / fx).abs() < 1e-6, "pro off hit {}", off.cache_read);
+        assert!((off.output - 13.5 / fx).abs() < 1e-6, "pro off out {}", off.output);
+        assert!((peak.input - off.input * 2.0).abs() < 1e-9);
+
+        assert!(deepseek_rates("deepseek-chat").is_none(), "chat out of scope");
+        assert!(deepseek_rates("gpt-4o").is_none(), "non-deepseek out of scope");
     }
 
     #[test]
