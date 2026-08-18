@@ -1459,22 +1459,26 @@ mod tests {
     }
 
     #[test]
-    fn rates_for_deepseek_picks_tier_by_beijing_time() {
-        use chrono::{TimeZone, Utc};
-        // 02:00 UTC = 10:00 Beijing = inside the morning peak.
-        let peak_now = Utc.with_ymd_and_hms(2026, 8, 17, 2, 0, 0).unwrap();
-        // 12:00 UTC = 20:00 Beijing = off-peak.
-        let off_now = Utc.with_ymd_and_hms(2026, 8, 17, 12, 0, 0).unwrap();
-
-        // `rates_for` reads the wall clock, so this branch is tested indirectly:
-        // deepseek_rates + is_beijing_peak are the pure seams; assert the wiring
-        // composes by checking a fixed-offset-provider path is untouched.
+    fn rates_for_deepseek_routes_tiered_and_falls_through() {
+        // Tier selection itself is covered by the pure seams (`is_beijing_peak`
+        // and `deepseek_rates`, tested at fixed instants above); `rates_for`
+        // reads the wall clock, so this wiring test asserts only what it can
+        // without mocking time: (a) non-deepseek providers are untouched, and
+        // (b) an unknown deepseek model falls through to the generic path.
         let r = rates_for("openai", Some("gpt-4o"));
         assert!(r.input > 0.0 && r.cache_read == r.input * 0.5);
-        let r = rates_for("deepseek", Some("deepseek-v4-flash"));
-        // Unknown deepseek model falls through to generic (0-priced), not panic.
-        assert!(r.input >= 0.0);
-        let _ = (peak_now, off_now); // instant helpers used by manual verification
+
+        // deepseek-chat is genuinely unknown to deepseek_rates, so rates_for
+        // must price it via the generic llm_prices + cache-multiplier path —
+        // matching the computation below exactly — rather than panicking.
+        assert!(deepseek_rates("deepseek-chat").is_none());
+        let r = rates_for("deepseek", Some("deepseek-chat"));
+        let (input, output) = llm_prices("deepseek-chat").unwrap_or((0.0, 0.0));
+        let (read_mult, write_mult) = cache_multipliers("deepseek");
+        assert_eq!(r.input, input);
+        assert_eq!(r.output, output);
+        assert_eq!(r.cache_read, input * read_mult);
+        assert_eq!(r.cache_write, input * write_mult);
     }
 
     #[test]
