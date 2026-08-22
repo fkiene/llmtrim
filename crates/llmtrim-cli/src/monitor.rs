@@ -1025,6 +1025,48 @@ pub(crate) struct BreakdownRates {
     pub cache_write: f64,
 }
 
+/// DeepSeek peak windows are Beijing time (UTC+8): 09:00–12:00 and 14:00–18:00.
+/// Off-peak is exactly half price. Pure so it is unit-testable at fixed instants.
+pub(crate) fn is_beijing_peak(now: chrono::DateTime<chrono::Utc>) -> bool {
+    use chrono::Timelike;
+    let bj_hour = (now + chrono::Duration::hours(8)).time().hour();
+    (9..12).contains(&bj_hour) || (14..18).contains(&bj_hour)
+}
+
+/// Baked CNY→USD rate for DeepSeek's official pricing (元 per 1M tokens).
+/// DeepSeek bills in CNY with no USD endpoint for these tiers; a fixed FX keeps
+/// savings estimates stable without a live-currency dependency. Revisit if the
+/// official USD list appears.
+const DEEPSEEK_USD_FX: f64 = 7.2;
+
+fn deepseek_bare_model(model: &str) -> &str {
+    model.rsplit('/').next().unwrap_or(model)
+}
+
+/// Official DeepSeek (peak, off-peak) USD rate tuples, or `None` for models
+/// outside flash/pro scope. Peak is exactly 2× off-peak.
+fn deepseek_rates(model: &str) -> Option<(BreakdownRates, BreakdownRates)> {
+    // Official CNY per 1M (hit, miss, output) — off-peak then peak (2×).
+    let (hit_off, miss_off, out_off) = match deepseek_bare_model(model) {
+        "deepseek-v4-flash" => (0.05, 1.5, 4.5),
+        // Vision-exp bills at the same tiers as v4-flash.
+        "deepseek-v4-flash-vision-exp" => (0.05, 1.5, 4.5),
+        "deepseek-v4-pro" => (0.15, 4.5, 13.5),
+        _ => return None,
+    };
+    let tier = |hit, miss, out| BreakdownRates {
+        input: miss / DEEPSEEK_USD_FX,
+        output: out / DEEPSEEK_USD_FX,
+        cache_read: hit / DEEPSEEK_USD_FX,
+        // DeepSeek has no cache-write surcharge; write tokens bill as miss input.
+        cache_write: 0.0,
+    };
+    Some((
+        tier(hit_off * 2.0, miss_off * 2.0, out_off * 2.0),
+        tier(hit_off, miss_off, out_off),
+    ))
+}
+
 /// Resolve the frozen rates for a (provider, model) pair. Unknown models price at 0
 /// (the TUI then shows a blank cost cell rather than a misleading $0.00).
 ///
@@ -1032,8 +1074,27 @@ pub(crate) struct BreakdownRates {
 /// `google`). It only drives cache multipliers — list rates come from [`llm_prices`],
 /// which picks the primary brand's USD offering for the model id (resellers and CNY
 /// rows share bare ids with the real upstream).
+///
+/// DeepSeek flash/pro are the exception: their rates come from `deepseek_rates`
+/// (official peak/off-peak USD), which ignores `provider` entirely.
 #[cfg(feature = "intercept")]
 pub(crate) fn rates_for(provider: &str, model: Option<&str>) -> BreakdownRates {
+    rates_for_at(provider, model, chrono::Utc::now())
+}
+
+/// `rates_for` with the instant injected — the pure seam that lets tests pin
+/// DeepSeek's peak/off-peak tier without reading the wall clock.
+#[cfg(feature = "intercept")]
+fn rates_for_at(
+    provider: &str,
+    model: Option<&str>,
+    now: chrono::DateTime<chrono::Utc>,
+) -> BreakdownRates {
+    if let Some(model) = model
+        && let Some((peak, off_peak)) = deepseek_rates(model)
+    {
+        return if is_beijing_peak(now) { peak } else { off_peak };
+    }
     let (input, output) = model.and_then(llm_prices).unwrap_or((0.0, 0.0));
     let (read_mult, write_mult) = cache_multipliers(provider);
     BreakdownRates {
@@ -1239,6 +1300,16 @@ pub fn overview_data(
 /// embedded models.dev snapshot for models the registry hasn't shipped yet.
 pub(crate) fn llm_prices(model_id: &str) -> Option<(f64, f64)> {
     #[cfg(feature = "intercept")]
+    {
+        // DeepSeek flash/pro: the vendored llm_providers registry predates the
+        // official restructure, so prefer the tiered model's OFF-PEAK USD rates
+        // (the conservative flat figure; per-turn breakdowns still apply the
+        // Beijing peak window via rates_for_at).
+        if let Some((_, off_peak)) = deepseek_rates(model_id) {
+            return Some((off_peak.input, off_peak.output));
+        }
+    }
+    #[cfg(feature = "intercept")]
     if let Some(prices) = registry_prices(model_id) {
         return Some(prices);
     }
@@ -1333,6 +1404,138 @@ mod tests {
             live_saved: 10.0,
             out_spend_shaped: 0.0,
         }
+    }
+
+    #[test]
+    fn beijing_peak_windows_match_official() {
+        use chrono::{TimeZone, Utc};
+        let at = |utc_h: u32, utc_min: u32| {
+            Utc.with_ymd_and_hms(2026, 8, 17, utc_h, utc_min, 0)
+                .unwrap()
+        };
+        // Beijing = UTC+8: 09:00–12:00 Beijing = 01:00–04:00 UTC.
+        assert!(is_beijing_peak(at(1, 0)), "09:00 Beijing start");
+        assert!(is_beijing_peak(at(3, 59)), "11:59 Beijing");
+        assert!(!is_beijing_peak(at(4, 0)), "12:00 Beijing end");
+        // 14:00–18:00 Beijing = 06:00–10:00 UTC.
+        assert!(is_beijing_peak(at(6, 0)), "14:00 Beijing start");
+        assert!(is_beijing_peak(at(9, 59)), "17:59 Beijing");
+        assert!(!is_beijing_peak(at(10, 0)), "18:00 Beijing end");
+        // Off-peak middle.
+        assert!(!is_beijing_peak(at(0, 0)), "midnight Beijing");
+        assert!(!is_beijing_peak(at(12, 0)), "20:00 Beijing");
+    }
+
+    #[test]
+    fn deepseek_rates_match_official_usd_at_baked_fx() {
+        let (peak, off) = deepseek_rates("deepseek-v4-flash").expect("flash priced");
+        let fx = 7.2;
+        // Official off-peak CNY per 1M: hit ¥0.05, miss ¥1.5, out ¥4.5.
+        assert!(
+            (off.input - 1.5 / fx).abs() < 1e-6,
+            "flash off miss {}",
+            off.input
+        );
+        assert!(
+            (off.cache_read - 0.05 / fx).abs() < 1e-6,
+            "flash off hit {}",
+            off.cache_read
+        );
+        assert!(
+            (off.output - 4.5 / fx).abs() < 1e-6,
+            "flash off out {}",
+            off.output
+        );
+        assert_eq!(off.cache_write, 0.0);
+        // Peak doubles all three.
+        assert!((peak.input - off.input * 2.0).abs() < 1e-9);
+        assert!((peak.cache_read - off.cache_read * 2.0).abs() < 1e-9);
+        assert!((peak.output - off.output * 2.0).abs() < 1e-9);
+
+        // Vision-exp bills at exactly the same tiers as v4-flash.
+        let (vpeak, voff) = deepseek_rates("deepseek-v4-flash-vision-exp").expect("vision priced");
+        let (fpeak, foff) = deepseek_rates("deepseek-v4-flash").expect("flash priced");
+        assert_eq!(voff.input, foff.input);
+        assert_eq!(voff.cache_read, foff.cache_read);
+        assert_eq!(voff.output, foff.output);
+        assert_eq!(vpeak.input, fpeak.input);
+        assert_eq!(vpeak.cache_read, fpeak.cache_read);
+        assert_eq!(vpeak.output, fpeak.output);
+
+        let (peak, off) = deepseek_rates("deepseek-v4-pro").expect("pro priced");
+        assert!(
+            (off.input - 4.5 / fx).abs() < 1e-6,
+            "pro off miss {}",
+            off.input
+        );
+        assert!(
+            (off.cache_read - 0.15 / fx).abs() < 1e-6,
+            "pro off hit {}",
+            off.cache_read
+        );
+        assert!(
+            (off.output - 13.5 / fx).abs() < 1e-6,
+            "pro off out {}",
+            off.output
+        );
+        assert!((peak.input - off.input * 2.0).abs() < 1e-9);
+
+        assert!(
+            deepseek_rates("deepseek-chat").is_none(),
+            "chat out of scope"
+        );
+        assert!(
+            deepseek_rates("gpt-4o").is_none(),
+            "non-deepseek out of scope"
+        );
+    }
+
+    #[test]
+    fn rates_for_deepseek_routes_tiered_and_falls_through() {
+        use chrono::{TimeZone, Utc};
+        let at = |utc_h: u32, utc_min: u32| {
+            Utc.with_ymd_and_hms(2026, 8, 17, utc_h, utc_min, 0)
+                .unwrap()
+        };
+        // 02:00 UTC = 10:00 Beijing (peak window), 12:00 UTC = 20:00 Beijing
+        // (off-peak): both fixed, so the tier assertions never depend on the clock.
+        let peak_now = at(2, 0);
+        let off_peak_now = at(12, 0);
+
+        // Flash routes through the tiered branch: peak instant → `peak` tuple,
+        // off-peak instant → `off_peak` tuple (exact field equality).
+        let (peak, off_peak) = deepseek_rates("deepseek-v4-flash").expect("flash tiered");
+        let r = rates_for_at("deepseek", Some("deepseek-v4-flash"), peak_now);
+        assert_eq!(
+            (r.input, r.output, r.cache_read, r.cache_write),
+            (peak.input, peak.output, peak.cache_read, peak.cache_write)
+        );
+        let r = rates_for_at("deepseek", Some("deepseek-v4-flash"), off_peak_now);
+        assert_eq!(
+            (r.input, r.output, r.cache_read, r.cache_write),
+            (
+                off_peak.input,
+                off_peak.output,
+                off_peak.cache_read,
+                off_peak.cache_write
+            )
+        );
+
+        // Non-deepseek providers are untouched (provider drives only cache multipliers).
+        let r = rates_for_at("openai", Some("gpt-4o"), peak_now);
+        assert!(r.input > 0.0 && r.cache_read == r.input * 0.5);
+
+        // deepseek-chat is genuinely unknown to deepseek_rates, so rates_for_at
+        // must price it via the generic llm_prices + cache-multiplier path —
+        // matching the computation below exactly — rather than panicking.
+        assert!(deepseek_rates("deepseek-chat").is_none());
+        let r = rates_for_at("deepseek", Some("deepseek-chat"), peak_now);
+        let (input, output) = llm_prices("deepseek-chat").unwrap_or((0.0, 0.0));
+        let (read_mult, write_mult) = cache_multipliers("deepseek");
+        assert_eq!(r.input, input);
+        assert_eq!(r.output, output);
+        assert_eq!(r.cache_read, input * read_mult);
+        assert_eq!(r.cache_write, input * write_mult);
     }
 
     #[test]
@@ -2312,24 +2515,60 @@ mod tests {
     fn llm_prices_prefers_primary_usd_over_reseller_and_cny() {
         let want = llm_providers::get_model_for_endpoint("deepseek:global", "deepseek-v4-pro")
             .expect("deepseek global offering in registry");
-        let (input, output) = llm_prices("deepseek-v4-pro").expect("priced");
+        // The registry (vendored, pre-restructure) still resolves the primary
+        // brand's USD offering — assert that lookup directly so the reseller/CNY
+        // regression guard survives even though llm_prices no longer uses it.
+        let reg = registry_prices("deepseek-v4-pro").expect("registry priced");
         assert_eq!(
-            (input, output),
+            reg,
             (want.model.input_price, want.model.output_price),
             "expected deepseek:global USD rates, not reseller/CNY"
         );
         // Explicit guards against the two wrong rows that used to win.
-        assert_ne!(input, 12.0, "tencent/volcengine reseller row");
-        assert_ne!(input, 3.0, "deepseek CNY top-level / cn endpoint");
+        assert_ne!(reg.0, 12.0, "tencent/volcengine reseller row");
+        assert_ne!(reg.0, 3.0, "deepseek CNY top-level / cn endpoint");
+
+        // llm_prices now overrides flash/pro with the tiered OFF-PEAK USD rates
+        // (the vendored registry predates the official restructure) — assert the
+        // override wins for both bare and prefixed ids.
+        let off_peak = deepseek_rates("deepseek-v4-pro").expect("pro tiered").1;
+        let (input, output) = llm_prices("deepseek-v4-pro").expect("priced");
+        assert_eq!(
+            (input, output),
+            (off_peak.input, off_peak.output),
+            "expected tiered off-peak USD rates for deepseek flash/pro"
+        );
 
         // Prefixed ids strip to the same bare model.
         let (input2, output2) = llm_prices("deepseek/deepseek-v4-pro").expect("prefixed");
         assert_eq!((input2, output2), (input, output));
 
-        // rates_for must inherit the same list rates (provider only affects cache mult).
-        let rates = rates_for("openai", Some("deepseek-v4-pro"));
-        assert_eq!(rates.input, input);
-        assert_eq!(rates.output, output);
+        // deepseek models route through the tiered branch instead of the generic
+        // USD list path; the tier is pinned at a fixed off-peak instant
+        // (12:00 UTC = 20:00 Beijing) so this stays deterministic.
+        let off_peak = deepseek_rates("deepseek-v4-pro").expect("pro tiered").1;
+        use chrono::TimeZone;
+        let off_peak_now = chrono::Utc.with_ymd_and_hms(2026, 8, 17, 12, 0, 0).unwrap();
+        let rates = rates_for_at("deepseek", Some("deepseek-v4-pro"), off_peak_now);
+        assert_eq!(
+            (
+                rates.input,
+                rates.output,
+                rates.cache_read,
+                rates.cache_write
+            ),
+            (
+                off_peak.input,
+                off_peak.output,
+                off_peak.cache_read,
+                off_peak.cache_write
+            )
+        );
+        // Non-deepseek models still inherit the list rates (provider affects only
+        // the cache multiplier).
+        let (want_in, want_out) = llm_prices("gpt-4o").expect("gpt-4o priced");
+        let rates = rates_for("openai", Some("gpt-4o"));
+        assert_eq!((rates.input, rates.output), (want_in, want_out));
     }
 
     /// Same class of bug for Moonshot: top-level / cn is CNY, global is USD.

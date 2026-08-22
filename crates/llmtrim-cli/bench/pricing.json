@@ -327,14 +327,14 @@
 "output": 0.28
 },
 "deepseek-v4-flash": {
-"cache_read": 0.0028,
-"input": 0.14,
-"output": 0.28
+"cache_read": 0.0069,
+"input": 0.208,
+"output": 0.625
 },
 "deepseek-v4-pro": {
-"cache_read": 0.003625,
-"input": 0.435,
-"output": 0.87
+"cache_read": 0.0208,
+"input": 0.625,
+"output": 1.875
 },
 "deepseek/deepseek-chat": {
 "cache_read": 0.0,
@@ -382,9 +382,9 @@
 "output": 0.41
 },
 "deepseek/deepseek-v4-flash": {
-"cache_read": 0.028,
-"input": 0.14,
-"output": 0.28
+"cache_read": 0.0069,
+"input": 0.208,
+"output": 0.625
 },
 "deepseek/deepseek-v4-flash-0731": {
 "cache_read": 0.0028,
@@ -392,9 +392,9 @@
 "output": 0.28
 },
 "deepseek/deepseek-v4-pro": {
-"cache_read": 0.003625,
-"input": 0.435,
-"output": 0.87
+"cache_read": 0.0208,
+"input": 0.625,
+"output": 1.875
 },
 "devstral-2512": {
 "cache_read": 0.0,
