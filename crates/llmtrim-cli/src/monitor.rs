@@ -1049,6 +1049,8 @@ fn deepseek_rates(model: &str) -> Option<(BreakdownRates, BreakdownRates)> {
     // Official CNY per 1M (hit, miss, output) — off-peak then peak (2×).
     let (hit_off, miss_off, out_off) = match deepseek_bare_model(model) {
         "deepseek-v4-flash" => (0.05, 1.5, 4.5),
+        // Vision-exp bills at the same tiers as v4-flash.
+        "deepseek-v4-flash-vision-exp" => (0.05, 1.5, 4.5),
         "deepseek-v4-pro" => (0.15, 4.5, 13.5),
         _ => return None,
     };
@@ -1449,6 +1451,16 @@ mod tests {
         assert!((peak.input - off.input * 2.0).abs() < 1e-9);
         assert!((peak.cache_read - off.cache_read * 2.0).abs() < 1e-9);
         assert!((peak.output - off.output * 2.0).abs() < 1e-9);
+
+        // Vision-exp bills at exactly the same tiers as v4-flash.
+        let (vpeak, voff) = deepseek_rates("deepseek-v4-flash-vision-exp").expect("vision priced");
+        let (fpeak, foff) = deepseek_rates("deepseek-v4-flash").expect("flash priced");
+        assert_eq!(voff.input, foff.input);
+        assert_eq!(voff.cache_read, foff.cache_read);
+        assert_eq!(voff.output, foff.output);
+        assert_eq!(vpeak.input, fpeak.input);
+        assert_eq!(vpeak.cache_read, fpeak.cache_read);
+        assert_eq!(vpeak.output, fpeak.output);
 
         let (peak, off) = deepseek_rates("deepseek-v4-pro").expect("pro priced");
         assert!(
