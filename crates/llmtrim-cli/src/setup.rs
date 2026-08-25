@@ -283,7 +283,9 @@ pub fn heal_managed_env() -> Result<Vec<PathBuf>> {
         let ca_path = crate::serve::ca_cert_path()?;
         let ca = ca_path.to_string_lossy().into_owned();
         // Best-effort: a bundle build failure just means the heal keeps the Node-only trust.
-        let bundle = ensure_ca_bundle(&ca_path).ok().flatten();
+        let bundle = ensure_ca_bundle(&ca_path, current_extra_ca_certs())
+            .ok()
+            .flatten();
         let bundle_str = bundle.as_ref().map(|p| p.to_string_lossy().into_owned());
         heal_profiles_in(
             std::path::Path::new(&home),
@@ -458,7 +460,7 @@ pub fn run(requested: Option<u16>, force: bool) -> Result<()> {
     //     (curl, git, Python, rustls tools like OpenAI Codex). POSIX only; Windows uses the OS
     //     cert store. Best-effort: a missing OS root bundle just skips SSL_CERT_FILE.
     #[cfg(not(windows))]
-    let bundle = match ensure_ca_bundle(&ca_path) {
+    let bundle = match ensure_ca_bundle(&ca_path, current_extra_ca_certs()) {
         Ok(Some(p)) => {
             rows.push((ui::OK, "CA bundle".into(), p.to_string_lossy().into_owned()));
             Some(p.to_string_lossy().into_owned())
@@ -1686,16 +1688,21 @@ fn system_ca_bundle() -> Option<PathBuf> {
         .find(|p| p.exists())
 }
 
-/// Build (or refresh) `~/.llmtrim/ca-bundle.pem` = the OS root bundle **plus** the llmtrim CA,
-/// returning its path. Native TLS clients (curl, git, Python, and rustls tools like OpenAI's
-/// Codex) don't read `NODE_EXTRA_CA_CERTS` — that's Node-only — they take a full bundle via
-/// `SSL_CERT_FILE`/`CURL_CA_BUNDLE`. Because llmtrim MITMs only a fixed host set and
-/// blind-tunnels everything else, the bundle MUST carry the real OS roots too, or every
-/// non-intercepted HTTPS call would fail to verify — hence a concatenation, not the CA alone.
-/// Returns `None` (caller then omits the native vars, since a CA-only file would break tunneled
-/// hosts) when no OS bundle can be located.
+/// Build (or refresh) `~/.llmtrim/ca-bundle.pem` = the OS root bundle **plus** the configured
+/// extra CA certificates **plus** the llmtrim CA, returning its path. Native TLS clients (curl,
+/// git, Python, and rustls tools like OpenAI's Codex) don't read `NODE_EXTRA_CA_CERTS` — that's
+/// Node-only — they take a full bundle via `SSL_CERT_FILE`/`CURL_CA_BUNDLE`. Because llmtrim
+/// MITMs only a fixed host set and blind-tunnels everything else, the bundle MUST carry the
+/// real OS roots too, or every non-intercepted HTTPS call would fail to verify — hence a
+/// concatenation, not the CA alone. The extras (e.g. a corporate interception root) keep
+/// user-declared trust anchors alive across every rebuild, so a filtering proxy's root
+/// survives updates and CA regenerations. Returns `None` (caller then omits the native vars,
+/// since a CA-only file would break tunneled hosts) when no OS bundle can be located.
+///
+/// The bundle is always recomposed from scratch and overwritten — never appended onto a
+/// previous bundle — so removing an entry from `extra_certs` takes effect on the next rebuild.
 #[cfg(not(windows))]
-fn ensure_ca_bundle(ca_path: &std::path::Path) -> Result<Option<PathBuf>> {
+fn ensure_ca_bundle(ca_path: &std::path::Path, extra_certs: &[String]) -> Result<Option<PathBuf>> {
     let Some(system) = system_ca_bundle() else {
         return Ok(None);
     };
@@ -1703,15 +1710,80 @@ fn ensure_ca_bundle(ca_path: &std::path::Path) -> Result<Option<PathBuf>> {
         .with_context(|| format!("failed to read {}", system.display()))?;
     let ca_pem = std::fs::read_to_string(ca_path)
         .with_context(|| format!("failed to read {}", ca_path.display()))?;
-    let mut combined = system_pem;
-    if !combined.ends_with('\n') {
-        combined.push('\n');
+    let mut combined = String::new();
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+    append_pem_deduped(&mut combined, &system_pem, &mut seen);
+    for path in extra_certs {
+        match std::fs::read_to_string(path) {
+            Ok(pem) => {
+                ensure_trailing_newline(&mut combined);
+                append_pem_deduped(&mut combined, &pem, &mut seen);
+            }
+            Err(e) => eprintln!("llmtrim: skipping unreadable extra_ca_certs entry {path} ({e})"),
+        }
     }
-    combined.push_str(&ca_pem);
+    ensure_trailing_newline(&mut combined);
+    append_pem_deduped(&mut combined, &ca_pem, &mut seen);
     let bundle_path = ca_path.with_file_name("ca-bundle.pem");
     std::fs::write(&bundle_path, combined)
         .with_context(|| format!("failed to write {}", bundle_path.display()))?;
     Ok(Some(bundle_path))
+}
+
+/// Separator between two spliced sources: a newline when the accumulated output does not
+/// already end with one, so two PEM blocks can never merge into one invalid line.
+#[cfg(not(windows))]
+fn ensure_trailing_newline(out: &mut String) {
+    if !out.is_empty() && !out.ends_with('\n') {
+        out.push('\n');
+    }
+}
+
+/// Splice `pem` into `out`, skipping certificate blocks already spliced (tracked in `seen`) —
+/// the same root often ships both in the OS bundle and as a user-declared extra. Blocks and
+/// the text around them (bundle preamble comments, dump text) pass through verbatim, so a
+/// deduplicated OS bundle stays byte-compatible with the plain concatenation. Unterminated
+/// blocks are kept rather than silently dropped.
+#[cfg(not(windows))]
+fn append_pem_deduped(out: &mut String, pem: &str, seen: &mut std::collections::HashSet<String>) {
+    const BEGIN: &str = "-----BEGIN CERTIFICATE-----";
+    const END: &str = "-----END CERTIFICATE-----";
+    let mut rest = pem;
+    loop {
+        let Some(start) = rest.find(BEGIN) else {
+            out.push_str(rest);
+            return;
+        };
+        let Some(end_rel) = rest[start..].find(END) else {
+            out.push_str(rest);
+            return;
+        };
+        let end = start + end_rel + END.len();
+        out.push_str(&rest[..start]);
+        let block = &rest[start..end];
+        if seen.insert(block.to_string()) {
+            out.push_str(block);
+        }
+        rest = &rest[end..];
+    }
+}
+
+/// The user-declared extra CA paths from the loaded runtime config (`extra_ca_certs`).
+#[cfg(not(windows))]
+fn current_extra_ca_certs() -> &'static [String] {
+    &llmtrim_core::config::RuntimeConfig::get().extra_ca_certs
+}
+
+/// Daemon-facing bundle refresh: recompose `~/.llmtrim/ca-bundle.pem` from the OS roots, the
+/// configured extra CA certificates, and the current CA. Called after the daemon's
+/// `ensure_ca` so a regenerated (or merely reconfirmed) CA never leaves native TLS clients
+/// trusting a stale or dead bundle between `llmtrim setup` runs. Errors are the caller's to
+/// log-and-continue — a failed refresh must not block the daemon.
+#[cfg(all(not(windows), feature = "intercept"))]
+pub(crate) fn refresh_ca_bundle() -> Result<()> {
+    let ca_path = crate::daemon::home_dir()?.join("ca.pem");
+    ensure_ca_bundle(&ca_path, current_extra_ca_certs())?;
+    Ok(())
 }
 
 /// The managed env block, in the profile's native syntax. Both variants are unit-tested on
@@ -1924,7 +1996,7 @@ pub fn print_env(requested: Option<u16>) -> Result<()> {
     let ca = ca_path.to_string_lossy().into_owned();
     let proxy = format!("http://127.0.0.1:{port}");
     #[cfg(not(windows))]
-    let bundle = match ensure_ca_bundle(&ca_path) {
+    let bundle = match ensure_ca_bundle(&ca_path, current_extra_ca_certs()) {
         Ok(b) => b.map(|p| p.to_string_lossy().into_owned()),
         Err(e) => {
             eprintln!(
@@ -2465,7 +2537,7 @@ mod tests {
         )
         .expect("write ca");
 
-        let bundle = ensure_ca_bundle(&ca_path)
+        let bundle = ensure_ca_bundle(&ca_path, &[])
             .expect("build")
             .expect("some bundle");
         assert_eq!(bundle, tmp.join("ca-bundle.pem"));
@@ -2474,6 +2546,152 @@ mod tests {
         let roots = std::fs::read_to_string(&system).expect("read system");
         assert!(contents.contains(roots.trim()));
         assert!(contents.contains("LLMTRIMFAKE"));
+
+        std::fs::remove_dir_all(&tmp).ok();
+    }
+
+    /// Unique temp dir per bundle test.
+    #[cfg(not(windows))]
+    fn bundle_tmp(name: &str) -> PathBuf {
+        let tmp =
+            std::env::temp_dir().join(format!("llmtrim-cabundle-{name}-{}", std::process::id()));
+        std::fs::create_dir_all(&tmp).expect("mkdir");
+        tmp
+    }
+
+    #[cfg(not(windows))]
+    fn write_pem_file(path: &std::path::Path, marker: &str) {
+        std::fs::write(
+            path,
+            format!("-----BEGIN CERTIFICATE-----\n{marker}\n-----END CERTIFICATE-----\n"),
+        )
+        .expect("write pem");
+    }
+
+    #[cfg(not(windows))]
+    fn display_path(path: &std::path::Path) -> String {
+        path.display().to_string()
+    }
+
+    #[cfg(not(windows))] // system_ca_bundle/ensure_ca_bundle are POSIX-only (Windows uses the cert store)
+    #[test]
+    fn ensure_ca_bundle_splices_extra_certs_between_roots_and_ca() {
+        let Some(system) = system_ca_bundle() else {
+            return;
+        };
+        let tmp = bundle_tmp("splice");
+        let corp = tmp.join("corp.pem");
+        write_pem_file(&corp, "CORPROOT");
+        let extras = vec![display_path(&corp)];
+        let ca_path = tmp.join("ca.pem");
+        write_pem_file(&ca_path, "LLMTRIMFAKE");
+
+        let contents = std::fs::read_to_string(
+            ensure_ca_bundle(&ca_path, &extras)
+                .expect("build")
+                .expect("some bundle"),
+        )
+        .expect("read bundle");
+        let roots = std::fs::read_to_string(&system).expect("read system");
+        assert!(contents.contains(roots.trim()));
+        assert!(contents.contains("CORPROOT"));
+        assert!(contents.contains("LLMTRIMFAKE"));
+        // Order: OS roots, then the declared extras, then our CA.
+        let first_block = contents
+            .find("-----BEGIN CERTIFICATE-----")
+            .expect("some block");
+        let corp_at = contents.find("CORPROOT").expect("corp");
+        let ca_at = contents.find("LLMTRIMFAKE").expect("ca");
+        assert!(first_block < corp_at && corp_at < ca_at);
+
+        std::fs::remove_dir_all(&tmp).ok();
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn ensure_ca_bundle_dedupes_same_pem_across_paths() {
+        if system_ca_bundle().is_none() {
+            return;
+        }
+        let tmp = bundle_tmp("dedup");
+        let a = tmp.join("a.pem");
+        let b = tmp.join("sub-b.pem");
+        write_pem_file(&a, "DUPROOT");
+        write_pem_file(&b, "DUPROOT");
+        let extras = vec![display_path(&a), display_path(&b)];
+        let ca_path = tmp.join("ca.pem");
+        write_pem_file(&ca_path, "LLMTRIMFAKE");
+
+        let contents = std::fs::read_to_string(
+            ensure_ca_bundle(&ca_path, &extras)
+                .expect("build")
+                .expect("some bundle"),
+        )
+        .expect("read bundle");
+        assert_eq!(
+            contents.matches("DUPROOT").count(),
+            1,
+            "same certificate via two paths must appear once"
+        );
+
+        std::fs::remove_dir_all(&tmp).ok();
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn ensure_ca_bundle_skips_unreadable_extra_entries() {
+        if system_ca_bundle().is_none() {
+            return;
+        }
+        let tmp = bundle_tmp("skip");
+        let good = tmp.join("good.pem");
+        write_pem_file(&good, "GOODROOT");
+        let extras = vec![display_path(&good), display_path(&tmp.join("vanished.pem"))];
+        let ca_path = tmp.join("ca.pem");
+        write_pem_file(&ca_path, "LLMTRIMFAKE");
+
+        let contents = std::fs::read_to_string(
+            ensure_ca_bundle(&ca_path, &extras)
+                .expect("build")
+                .expect("some bundle"),
+        )
+        .expect("read bundle");
+        assert!(contents.contains("GOODROOT"));
+        assert!(contents.contains("LLMTRIMFAKE"));
+
+        std::fs::remove_dir_all(&tmp).ok();
+    }
+
+    /// The core corporate-CA scenario: when the daemon regenerates its CA, the next bundle
+    /// rebuild must carry the *new* CA and keep the declared extras — a full recomposition,
+    /// never an append onto the previous bundle.
+    #[cfg(not(windows))]
+    #[test]
+    fn ensure_ca_bundle_recomposes_after_ca_replacement() {
+        if system_ca_bundle().is_none() {
+            return;
+        }
+        let tmp = bundle_tmp("regen");
+        let corp = tmp.join("corp.pem");
+        write_pem_file(&corp, "CORPROOT");
+        let extras = vec![display_path(&corp)];
+        let ca_path = tmp.join("ca.pem");
+        write_pem_file(&ca_path, "OLDFAKE");
+        ensure_ca_bundle(&ca_path, &extras)
+            .expect("build")
+            .expect("some bundle");
+
+        // The daemon regenerates its CA in place; the bundle is rebuilt from scratch.
+        write_pem_file(&ca_path, "NEWFAKE");
+        let contents = std::fs::read_to_string(
+            ensure_ca_bundle(&ca_path, &extras)
+                .expect("rebuild")
+                .expect("some bundle"),
+        )
+        .expect("read bundle");
+        assert!(contents.contains("NEWFAKE"));
+        assert!(!contents.contains("OLDFAKE"));
+        assert!(contents.contains("CORPROOT"));
 
         std::fs::remove_dir_all(&tmp).ok();
     }

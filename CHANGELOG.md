@@ -6,6 +6,16 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- **`extra_ca_certs` keeps extra CAs in the generated trust bundle.** Corporate
+  TLS-interception roots (or any extra CA) declared via `LLMTRIM_EXTRA_CA_CERTS` /
+  `extra_ca_certs` are spliced into `~/.llmtrim/ca-bundle.pem` on every rebuild —
+  `setup`, `ensure`/doctor, and each daemon start — instead of being wiped the next
+  time the bundle is regenerated. The bundle is recomposed from scratch each time
+  (removing an entry takes effect on the next rebuild), duplicate certificate
+  blocks are deduplicated, and unreadable entries are skipped with a warning.
+
 ### Changed
 
 - **Statusline, cold-cache guard, and cheaper `/compact` are off by default.** `setup` /

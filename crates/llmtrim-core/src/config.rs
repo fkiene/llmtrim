@@ -527,6 +527,7 @@ fn config_path() -> Option<PathBuf> {
 /// and keeps the `auto` default, instead of silently downgrading shape-routing.
 pub(crate) const RUNTIME_ONLY_KEYS: &[&str] = &[
     "extra_hosts",
+    "extra_ca_certs",
     "exclude_providers",
     "exclude_hosts",
     "upstream_proxy",
@@ -891,7 +892,13 @@ pub struct RuntimeConfig {
     /// Each entry widens the name-constrained MITM CA, so keep them exact (`llm.acme.com`,
     /// never a bare apex like `acme.com`).
     pub extra_hosts: Vec<String>,
-    /// Upstream HTTP proxy URL (env `LLMTRIM_UPSTREAM_PROXY` / file `upstream_proxy`).
+    /// Extra CA certificate files to splice into the generated native TLS bundle
+    /// (`~/.llmtrim/ca-bundle.pem`), e.g. a corporate interception root behind a filtering
+    /// proxy. Env `LLMTRIM_EXTRA_CA_CERTS` (comma-separated) replaces the file
+    /// `extra_ca_certs` array. Entries are absolute paths (after `~` expansion); missing
+    /// files and non-PEM files are dropped with a warning so one bad entry cannot break the
+    /// whole bundle.
+    pub extra_ca_certs: Vec<String>,
     pub upstream_proxy: Option<String>,
     /// QA capture corpus directory (env `LLMTRIM_CAPTURE_DIR` / file `capture_dir`).
     pub capture_dir: Option<PathBuf>,
@@ -1018,9 +1025,16 @@ impl RuntimeConfig {
             "extra_hosts",
             normalize_host,
         );
+        let extra_ca_certs = resolve_str_list(
+            env_set("LLMTRIM_EXTRA_CA_CERTS"),
+            file,
+            "extra_ca_certs",
+            normalize_ca_cert_path,
+        );
 
         RuntimeConfig {
             extra_hosts,
+            extra_ca_certs,
             upstream_proxy: env_set("LLMTRIM_UPSTREAM_PROXY").or_else(|| fstr("upstream_proxy")),
             capture_dir: env_set("LLMTRIM_CAPTURE_DIR")
                 .or_else(|| fstr("capture_dir"))
@@ -1764,6 +1778,49 @@ fn normalize_host(raw: &str) -> Option<String> {
         return None;
     }
     Some(h)
+}
+
+/// A user-declared extra CA certificate path (`extra_ca_certs`): trimmed, `~`-expanded, and
+/// otherwise kept verbatim — unlike hosts, path case is significant (Linux). Empty entries and
+/// relative paths are rejected; files that cannot be read or carry no PEM certificate block are
+/// dropped with a warning so one bad entry cannot take the whole trust bundle down.
+fn normalize_ca_cert_path(raw: &str) -> Option<String> {
+    let home = std::env::var("HOME")
+        .or_else(|_| std::env::var("USERPROFILE"))
+        .ok();
+    normalize_ca_cert_path_with(raw, home.as_deref())
+}
+
+/// Env-independent body of [`normalize_ca_cert_path`] (testable without `set_var`).
+fn normalize_ca_cert_path_with(raw: &str, home: Option<&str>) -> Option<String> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    // Expand a leading `~`/`~/` against `home`; `~user` stays literal and is rejected as
+    // relative below.
+    let expanded: PathBuf = if trimmed == "~" {
+        PathBuf::from(home?)
+    } else if let Some(rest) = trimmed.strip_prefix("~/") {
+        PathBuf::from(home?).join(rest)
+    } else {
+        PathBuf::from(trimmed)
+    };
+    if expanded.is_relative() {
+        return None;
+    }
+    let path = expanded.to_str()?;
+    match std::fs::read_to_string(path) {
+        Ok(text) if text.contains("-----BEGIN CERTIFICATE-----") => Some(path.to_string()),
+        Ok(_) => {
+            eprintln!("llmtrim: extra_ca_certs entry has no PEM certificate, dropping: {path}");
+            None
+        }
+        Err(e) => {
+            eprintln!("llmtrim: extra_ca_certs entry unreadable ({e}), dropping: {path}");
+            None
+        }
+    }
 }
 
 /// Ledger age-retention in days. Thin accessor over [`RuntimeConfig`] kept for the call sites
@@ -3099,6 +3156,95 @@ active = \"off\"
     fn extra_hosts_from_file_when_env_absent() {
         let c = resolve_file("extra_hosts = [\"llm.acme.com\", \"gw.example.net\"]");
         assert_eq!(c.extra_hosts, vec!["gw.example.net", "llm.acme.com"]);
+    }
+
+    /// Unique temp dir per test (nextest runs each test in its own process).
+    fn cert_tmp(name: &str) -> std::path::PathBuf {
+        let tmp =
+            std::env::temp_dir().join(format!("llmtrim-caconfig-{name}-{}", std::process::id()));
+        std::fs::create_dir_all(&tmp).expect("mkdir");
+        tmp
+    }
+
+    fn write_pem(path: &std::path::Path, marker: &str) {
+        std::fs::write(
+            path,
+            format!("-----BEGIN CERTIFICATE-----\n{marker}\n-----END CERTIFICATE-----\n"),
+        )
+        .expect("write pem");
+    }
+
+    fn display(path: &std::path::Path) -> String {
+        path.display().to_string()
+    }
+
+    #[test]
+    fn extra_ca_certs_env_replaces_file() {
+        let tmp = cert_tmp("env");
+        let a = tmp.join("a.pem");
+        let b = tmp.join("b.pem");
+        write_pem(&a, "AAA");
+        write_pem(&b, "BBB");
+        let c = resolve_env(
+            &[(
+                "LLMTRIM_EXTRA_CA_CERTS",
+                &format!("{}, {}", display(&a), display(&b)),
+            )],
+            "extra_ca_certs = [\"/ignored/old.pem\"]",
+        );
+        // Sorted + deduped by the shared resolver, like every other string list.
+        assert_eq!(c.extra_ca_certs, vec![display(&a), display(&b)]);
+    }
+
+    #[test]
+    fn extra_ca_certs_from_file_when_env_absent() {
+        let tmp = cert_tmp("file");
+        let a = tmp.join("a.pem");
+        let b = tmp.join("b.pem");
+        write_pem(&a, "AAA");
+        write_pem(&b, "BBB");
+        let c = resolve_file(&format!(
+            "extra_ca_certs = [\"{}\", \"{}\"]",
+            display(&b),
+            display(&a)
+        ));
+        assert_eq!(c.extra_ca_certs, vec![display(&a), display(&b)]);
+    }
+
+    #[test]
+    fn extra_ca_certs_drop_missing_non_pem_relative_and_empty() {
+        let tmp = cert_tmp("drop");
+        let ok = tmp.join("ok.pem");
+        let notpem = tmp.join("notpem.txt");
+        write_pem(&ok, "OK");
+        std::fs::write(&notpem, "not a certificate").expect("write txt");
+        let c = resolve_file(&format!(
+            "extra_ca_certs = [\"{}\", \"{}\", \"{}\", \"\", \"relative.pem\", \"~/nowhere.pem\"]",
+            display(&ok),
+            display(&notpem),
+            display(&tmp.join("missing.pem")),
+        ));
+        assert_eq!(c.extra_ca_certs, vec![display(&ok)]);
+    }
+
+    #[test]
+    fn extra_ca_certs_expand_tilde_preserving_case() {
+        let home = cert_tmp("home");
+        let dir = home.join("Mixed.Case");
+        std::fs::create_dir_all(&dir).expect("mkdir");
+        let ca = dir.join("Corp.CA.pem");
+        write_pem(&ca, "CORP");
+        let home_s = display(&home);
+        let expanded =
+            normalize_ca_cert_path_with("~/Mixed.Case/Corp.CA.pem", Some(&home_s)).expect("expand");
+        // Case preserved (paths are significant on Linux), `~` resolved against home.
+        assert_eq!(expanded, display(&ca));
+        assert!(normalize_ca_cert_path_with("~/Mixed.Case/absent.pem", Some(&home_s)).is_none());
+        assert_eq!(
+            normalize_ca_cert_path_with("relative.pem", Some(&home_s)),
+            None
+        );
+        assert_eq!(normalize_ca_cert_path_with("~/x.pem", None), None);
     }
 
     /// Resolve the exclusion lists with an explicit env map and file TOML.
