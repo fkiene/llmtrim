@@ -283,7 +283,9 @@ pub fn heal_managed_env() -> Result<Vec<PathBuf>> {
         let ca_path = crate::serve::ca_cert_path()?;
         let ca = ca_path.to_string_lossy().into_owned();
         // Best-effort: a bundle build failure just means the heal keeps the Node-only trust.
-        let bundle = ensure_ca_bundle(&ca_path, current_extra_ca_certs()).ok().flatten();
+        let bundle = ensure_ca_bundle(&ca_path, current_extra_ca_certs())
+            .ok()
+            .flatten();
         let bundle_str = bundle.as_ref().map(|p| p.to_string_lossy().into_owned());
         heal_profiles_in(
             std::path::Path::new(&home),
@@ -1700,10 +1702,7 @@ fn system_ca_bundle() -> Option<PathBuf> {
 /// The bundle is always recomposed from scratch and overwritten — never appended onto a
 /// previous bundle — so removing an entry from `extra_certs` takes effect on the next rebuild.
 #[cfg(not(windows))]
-fn ensure_ca_bundle(
-    ca_path: &std::path::Path,
-    extra_certs: &[String],
-) -> Result<Option<PathBuf>> {
+fn ensure_ca_bundle(ca_path: &std::path::Path, extra_certs: &[String]) -> Result<Option<PathBuf>> {
     let Some(system) = system_ca_bundle() else {
         return Ok(None);
     };
@@ -2586,7 +2585,7 @@ mod tests {
         write_pem_file(&ca_path, "LLMTRIMFAKE");
 
         let contents = std::fs::read_to_string(
-            &ensure_ca_bundle(&ca_path, &extras)
+            ensure_ca_bundle(&ca_path, &extras)
                 .expect("build")
                 .expect("some bundle"),
         )
@@ -2622,7 +2621,7 @@ mod tests {
         write_pem_file(&ca_path, "LLMTRIMFAKE");
 
         let contents = std::fs::read_to_string(
-            &ensure_ca_bundle(&ca_path, &extras)
+            ensure_ca_bundle(&ca_path, &extras)
                 .expect("build")
                 .expect("some bundle"),
         )
@@ -2650,7 +2649,7 @@ mod tests {
         write_pem_file(&ca_path, "LLMTRIMFAKE");
 
         let contents = std::fs::read_to_string(
-            &ensure_ca_bundle(&ca_path, &extras)
+            ensure_ca_bundle(&ca_path, &extras)
                 .expect("build")
                 .expect("some bundle"),
         )
@@ -2683,7 +2682,7 @@ mod tests {
         // The daemon regenerates its CA in place; the bundle is rebuilt from scratch.
         write_pem_file(&ca_path, "NEWFAKE");
         let contents = std::fs::read_to_string(
-            &ensure_ca_bundle(&ca_path, &extras)
+            ensure_ca_bundle(&ca_path, &extras)
                 .expect("rebuild")
                 .expect("some bundle"),
         )

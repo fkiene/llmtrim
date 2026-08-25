@@ -3240,7 +3240,10 @@ active = \"off\"
         // Case preserved (paths are significant on Linux), `~` resolved against home.
         assert_eq!(expanded, display(&ca));
         assert!(normalize_ca_cert_path_with("~/Mixed.Case/absent.pem", Some(&home_s)).is_none());
-        assert_eq!(normalize_ca_cert_path_with("relative.pem", Some(&home_s)), None);
+        assert_eq!(
+            normalize_ca_cert_path_with("relative.pem", Some(&home_s)),
+            None
+        );
         assert_eq!(normalize_ca_cert_path_with("~/x.pem", None), None);
     }
 
