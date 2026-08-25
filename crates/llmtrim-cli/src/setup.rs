@@ -1732,6 +1732,7 @@ fn ensure_ca_bundle(ca_path: &std::path::Path, extra_certs: &[String]) -> Result
 
 /// Separator between two spliced sources: a newline when the accumulated output does not
 /// already end with one, so two PEM blocks can never merge into one invalid line.
+#[cfg(not(windows))]
 fn ensure_trailing_newline(out: &mut String) {
     if !out.is_empty() && !out.ends_with('\n') {
         out.push('\n');
@@ -1743,6 +1744,7 @@ fn ensure_trailing_newline(out: &mut String) {
 /// the text around them (bundle preamble comments, dump text) pass through verbatim, so a
 /// deduplicated OS bundle stays byte-compatible with the plain concatenation. Unterminated
 /// blocks are kept rather than silently dropped.
+#[cfg(not(windows))]
 fn append_pem_deduped(out: &mut String, pem: &str, seen: &mut std::collections::HashSet<String>) {
     const BEGIN: &str = "-----BEGIN CERTIFICATE-----";
     const END: &str = "-----END CERTIFICATE-----";
@@ -1777,7 +1779,7 @@ fn current_extra_ca_certs() -> &'static [String] {
 /// `ensure_ca` so a regenerated (or merely reconfirmed) CA never leaves native TLS clients
 /// trusting a stale or dead bundle between `llmtrim setup` runs. Errors are the caller's to
 /// log-and-continue — a failed refresh must not block the daemon.
-#[cfg(not(windows))]
+#[cfg(all(not(windows), feature = "intercept"))]
 pub(crate) fn refresh_ca_bundle() -> Result<()> {
     let ca_path = crate::daemon::home_dir()?.join("ca.pem");
     ensure_ca_bundle(&ca_path, current_extra_ca_certs())?;

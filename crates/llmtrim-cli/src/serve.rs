@@ -5317,7 +5317,10 @@ mod imp {
     async fn run_async(port: u16) -> Result<()> {
         let _ = aws_lc_rs::default_provider().install_default();
 
-        let (cert_pem, key_pem) = ensure_ca()?;
+        // super:: (not the bare imp::ensure_ca): the wrapper also recomposes the native TLS
+        // bundle, so a daemon-start CA regeneration never leaves SSL_CERT_FILE/CURL_CA_BUNDLE
+        // clients on a retired CA.
+        let (cert_pem, key_pem) = super::ensure_ca()?;
         let key = hudsucker::rcgen::KeyPair::from_pem(&key_pem)
             .map_err(|e| anyhow::anyhow!("failed to parse CA key: {e}"))?;
         let issuer = hudsucker::rcgen::Issuer::from_ca_cert_pem(&cert_pem, key)
