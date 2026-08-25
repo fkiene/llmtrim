@@ -1768,8 +1768,21 @@ fn append_pem_deduped(out: &mut String, pem: &str, seen: &mut std::collections::
 }
 
 /// The user-declared extra CA paths from the loaded runtime config (`extra_ca_certs`).
+#[cfg(not(windows))]
 fn current_extra_ca_certs() -> &'static [String] {
     &llmtrim_core::config::RuntimeConfig::get().extra_ca_certs
+}
+
+/// Daemon-facing bundle refresh: recompose `~/.llmtrim/ca-bundle.pem` from the OS roots, the
+/// configured extra CA certificates, and the current CA. Called after the daemon's
+/// `ensure_ca` so a regenerated (or merely reconfirmed) CA never leaves native TLS clients
+/// trusting a stale or dead bundle between `llmtrim setup` runs. Errors are the caller's to
+/// log-and-continue — a failed refresh must not block the daemon.
+#[cfg(not(windows))]
+pub(crate) fn refresh_ca_bundle() -> Result<()> {
+    let ca_path = crate::daemon::home_dir()?.join("ca.pem");
+    ensure_ca_bundle(&ca_path, current_extra_ca_certs())?;
+    Ok(())
 }
 
 /// The managed env block, in the profile's native syntax. Both variants are unit-tested on

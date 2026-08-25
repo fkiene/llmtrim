@@ -29,7 +29,23 @@ pub fn ensure_ca() -> anyhow::Result<(String, String)> {
 }
 
 #[cfg(feature = "intercept")]
-pub use imp::{ca_cert_path, ensure_ca, run, run_supervised};
+pub use imp::{ca_cert_path, run, run_supervised};
+
+/// Load (or regenerate) the local CA, then refresh the native TLS bundle. Regenerating the CA
+/// (or merely reconfirming the current one) also recomposes `~/.llmtrim/ca-bundle.pem` from
+/// the OS roots, the configured `extra_ca_certs`, and the now-current CA — so env-trusting
+/// clients (`SSL_CERT_FILE`/`CURL_CA_BUNDLE`) never keep following a dead or stale bundle
+/// until the next `llmtrim setup`. The refresh is best-effort: a failure warns and never
+/// blocks the daemon start.
+#[cfg(feature = "intercept")]
+pub fn ensure_ca() -> anyhow::Result<(String, String)> {
+    let out = imp::ensure_ca()?;
+    #[cfg(not(windows))]
+    if let Err(e) = crate::setup::refresh_ca_bundle() {
+        eprintln!("llmtrim: CA bundle refresh failed ({e}); continuing");
+    }
+    Ok(out)
+}
 
 #[cfg(feature = "intercept")]
 mod imp {
