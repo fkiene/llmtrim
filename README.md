@@ -465,6 +465,7 @@ These knobs are orthogonal to compression. Each resolves env-first, then from th
 | env var | config key | meaning |
 | --- | --- | --- |
 | `LLMTRIM_EXTRA_HOSTS` | `extra_hosts` | extra exact LLM-API hosts to intercept (comma-separated env / array in file), e.g. a self-hosted OpenAI-compatible endpoint |
+| `LLMTRIM_EXTRA_CA_CERTS` | `extra_ca_certs` | extra CA certificate files spliced into the generated `ca-bundle.pem` (comma-separated env / array in file), e.g. a corporate interception root behind a filtering proxy |
 | `LLMTRIM_EXCLUDE_PROVIDERS` | `exclude_providers` | wire shapes to skip compressing: `openai` / `anthropic` / `google` (e.g. `anthropic` to leave Claude Code untouched); coarse, covers every host of that shape |
 | `LLMTRIM_EXCLUDE_HOSTS` | `exclude_hosts` | exact hostnames to skip compressing (e.g. `openrouter.ai`); precise, leaves other hosts of the same shape compressed |
 | `LLMTRIM_UPSTREAM_PROXY` | `upstream_proxy` | route egress through another proxy (see below) |
@@ -479,6 +480,8 @@ These knobs are orthogonal to compression. Each resolves env-first, then from th
 | `LLMTRIM_NO_UPDATE_CHECK` | `no_update_check` | disable the passive update check |
 
 `extra_hosts` entries must be exact hostnames (`llm.acme.com`, never a bare `acme.com`): each one widens the name-constrained MITM CA, which regenerates automatically on the next launch to cover them.
+
+`extra_ca_certs` entries survive every bundle rebuild: `setup`, `ensure`/doctor, and each daemon start recompose `~/.llmtrim/ca-bundle.pem` from the OS roots, these files, and the current llmtrim CA — so a regenerated CA no longer strands native TLS clients until the next `setup`. The managed env block keeps pointing `SSL_CERT_FILE`/`CURL_CA_BUNDLE` at that generated bundle; entries here are trusted by every client following those variables, not only intercepted hosts, so list only CAs you trust. Missing or non-PEM entries are dropped with a warning rather than breaking the bundle.
 
 </details>
 
