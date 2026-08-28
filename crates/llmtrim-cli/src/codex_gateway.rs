@@ -20,6 +20,9 @@ use std::collections::BTreeMap;
 use llmtrim_core::config::DenseConfig;
 use llmtrim_core::ir::ProviderKind;
 
+pub mod socket;
+pub mod upstream;
+
 /// The only origin this gateway will ever talk to. Not configurable, not derived from the
 /// request: a client that can reach the loopback port must not be able to choose a
 /// destination, or the gateway becomes an open SSRF relay.
@@ -356,22 +359,34 @@ mod tests {
     };
     use std::collections::BTreeMap;
 
-    /// The production half of this file — everything before the test module. The scans below
-    /// must not read their own assertion lists, which necessarily name what they forbid.
+    /// The production half of the whole gateway — this file and every submodule under it,
+    /// each cut at its own test module. The scans below must cover the entire call path: a
+    /// forbidden mechanism moved into `socket` or `upstream` would otherwise slip past them.
     fn production_source() -> String {
-        let whole = include_str!("codex_gateway.rs");
+        [
+            include_str!("codex_gateway.rs"),
+            include_str!("codex_gateway/socket.rs"),
+            include_str!("codex_gateway/upstream.rs"),
+        ]
+        .into_iter()
+        .map(production_half)
+        .collect::<Vec<_>>()
+        .join("\n")
+    }
+
+    /// Everything before the test module, minus the comments. The scans must not read their
+    /// own assertion lists, and comments are prose: the module docs name the very mechanisms
+    /// this architecture avoids, so scanning them would forbid explaining the design.
+    fn production_half(whole: &str) -> String {
         let marker = concat!("#[cfg(", "test)]");
-        let production = whole.split(marker).next().expect("production half");
-        // Comments are prose: the module doc names the very mechanisms this architecture
-        // avoids, and scanning them would forbid explaining the design.
-        production
+        whole
+            .split(marker)
+            .next()
+            .expect("production half")
             .lines()
             .filter(|line| !line.trim_start().starts_with("//"))
             .collect::<Vec<_>>()
-            .join(
-                "
-",
-            )
+            .join("\n")
     }
 
     /// Fictitious sentinels. Any real credential would be a bug in the test, not a secret.
