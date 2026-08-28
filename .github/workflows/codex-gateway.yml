@@ -8,7 +8,10 @@ on:
   pull_request:
     paths:
       - "crates/llmtrim-cli/src/codex_gateway.rs"
+      - "crates/llmtrim-cli/src/codex_gateway/**"
+      - "crates/llmtrim-cli/src/main.rs"
       - "crates/llmtrim-cli/src/lib.rs"
+      - "crates/llmtrim-cli/Cargo.toml"
       - "crates/llmtrim-core/**"
       - "docs/codex-local-gateway.md"
       - ".github/workflows/codex-gateway.yml"
@@ -54,7 +57,7 @@ jobs:
         run: cargo fmt --all -- --check
 
       - name: WINDOWS_CHECK / LINUX_CHECK
-        run: cargo check -p llmtrim --lib --locked
+        run: cargo check -p llmtrim --lib --bins --locked
 
       - name: WINDOWS_TEST / LINUX_TEST
         run: cargo test -p llmtrim --lib --locked codex_gateway
@@ -82,14 +85,18 @@ jobs:
           "$PY" - clippy.json "$CARGO_EXIT" <<'PYEOF'
           import json, sys
 
-          TARGET = "crates/llmtrim-cli/src/codex_gateway.rs"
+          # The gateway is a module *tree*: the policy file plus every submodule under it.
+          # A lint in a submodule is ours exactly as much as one in the parent file.
+          GATEWAY_FILE = "crates/llmtrim-cli/src/codex_gateway.rs"
+          GATEWAY_DIR = "crates/llmtrim-cli/src/codex_gateway/"
 
           def norm(path):
               return path.replace("\\", "/")
 
           def touches_target(message):
               for span in message.get("spans") or []:
-                  if norm(span.get("file_name", "")).endswith(TARGET):
+                  path = norm(span.get("file_name", ""))
+                  if path.endswith(GATEWAY_FILE) or GATEWAY_DIR in path:
                       return True
               return False
 

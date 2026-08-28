@@ -66,6 +66,10 @@ pub enum GatewayError {
     RouteNotFound,
     /// Codex did not attach the credentials it normally attaches.
     MissingAuthorization,
+    /// The local request body was larger than the gateway is willing to hold.
+    RequestTooLarge,
+    /// The local request could not be read as an HTTP body at all.
+    MalformedRequest,
     /// The `Authorization` header was present but not in the expected bearer form.
     MalformedAuthorization,
     /// Compression failed. The gateway fails closed rather than quietly forwarding the
@@ -81,6 +85,8 @@ impl std::fmt::Display for GatewayError {
             Self::MethodNotAllowed => "method not allowed",
             Self::RouteNotFound => "route not served by the codex gateway",
             Self::MissingAuthorization => "request carried no authorization header",
+            Self::RequestTooLarge => "request body exceeded the gateway limit",
+            Self::MalformedRequest => "request body could not be read",
             Self::MalformedAuthorization => "authorization header was not a bearer token",
             Self::CompressionFailed => "compression failed; refusing to forward uncompressed",
             Self::UpstreamFailed => "upstream request failed",
@@ -98,6 +104,8 @@ impl GatewayError {
             Self::MethodNotAllowed => 405,
             Self::RouteNotFound => 404,
             Self::MissingAuthorization | Self::MalformedAuthorization => 401,
+            Self::MalformedRequest => 400,
+            Self::RequestTooLarge => 413,
             Self::CompressionFailed => 500,
             Self::UpstreamFailed => 502,
         }
@@ -225,11 +233,19 @@ impl GatewayMetrics {
     }
 }
 
-/// The whole pipeline: validate, gate, compress, forward, relay.
-pub fn handle<U: GatewayUpstream>(
-    request: &GatewayRequest,
-    upstream: &mut U,
-) -> Result<(UpstreamResponse, GatewayMetrics), GatewayError> {
+/// What the request half of the pipeline produces: the one upstream request it will send,
+/// and the byte counts describing it.
+pub type PreparedRequest = (UpstreamRequest, GatewayMetrics);
+
+/// The request half of the pipeline: validate, gate, compress, select headers.
+///
+/// Split out so the offline [`handle`] and the real [`socket`] server run the *same* policy. A
+/// rule added here cannot be enforced on one path and quietly forgotten on the other.
+///
+/// # Errors
+///
+/// The first gate the request fails: route, method, authorization shape, or compression.
+pub fn prepare(request: &GatewayRequest) -> Result<PreparedRequest, GatewayError> {
     validate_route(&request.method, &request.path)?;
     auth_gate(&request.headers)?;
 
@@ -244,7 +260,15 @@ pub fn handle<U: GatewayUpstream>(
         upstream_request_bytes: outgoing.body.len() as u64,
         ..GatewayMetrics::default()
     };
+    Ok((outgoing, metrics))
+}
 
+/// The whole pipeline: validate, gate, compress, forward, relay.
+pub fn handle<U: GatewayUpstream>(
+    request: &GatewayRequest,
+    upstream: &mut U,
+) -> Result<(UpstreamResponse, GatewayMetrics), GatewayError> {
+    let (outgoing, metrics) = prepare(request)?;
     let response = upstream.send(outgoing)?;
     let metrics = GatewayMetrics {
         response_chunks: response.chunks.len() as u64,
@@ -710,6 +734,8 @@ mod tests {
             GatewayError::UpstreamFailed,
             GatewayError::RouteNotFound,
             GatewayError::MethodNotAllowed,
+            GatewayError::RequestTooLarge,
+            GatewayError::MalformedRequest,
         ] {
             let rendered = format!("{error} {error:?}");
             for sentinel in [

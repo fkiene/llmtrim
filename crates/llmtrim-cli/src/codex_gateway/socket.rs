@@ -8,6 +8,386 @@
 //! The server is generic over the upstream seam, so the whole exchange — a real socket, a
 //! real HTTP client, the product's real compression — is exercised without a network.
 
+use std::collections::BTreeMap;
+use std::io::Read;
+use std::net::{IpAddr, SocketAddr};
+use std::pin::Pin;
+use std::sync::Arc;
+use std::task::{Context, Poll};
+use std::time::Duration;
+
+use http_body_util::{BodyExt, LengthLimitError, Limited};
+use hyper::body::{Body, Bytes, Frame, Incoming};
+use hyper::service::service_fn;
+use hyper::{Request, Response};
+use hyper_util::rt::{TokioIo, TokioTimer};
+use tokio::net::TcpListener;
+use tokio::sync::{Semaphore, mpsc, oneshot};
+use tokio::task::JoinSet;
+
+use super::listener::{BindError, bind_address};
+use super::upstream::{StreamingUpstream, UpstreamStream};
+use super::{GatewayError, GatewayRequest, UpstreamRequest, prepare};
+
+/// The port the gateway listens on unless the caller names another one. Picked high and
+/// unassigned; nothing else in the product uses it.
+pub const DEFAULT_PORT: u16 = 43117;
+
+/// Ceiling on one local request body.
+///
+/// The gateway has to hold a whole body to compress it, so this is what stops a local client
+/// from turning the loopback port into an out-of-memory switch. 64 MiB is not a new number:
+/// it is the ceiling the rest of the product already uses wherever it must materialise a
+/// payload (`ensure`, `recall`, the CLIProxyAPI download).
+pub const MAX_REQUEST_BODY_BYTES: usize = 64 * 1024 * 1024;
+
+/// Connections served at once. Codex opens one; the bound exists so nothing can make the
+/// gateway spawn tasks without limit.
+pub const MAX_LOCAL_CLIENTS: usize = 32;
+
+/// Response chunks that may sit between the upstream reader and the local writer.
+///
+/// This is the backpressure. The reader is a blocking thread using `blocking_send`, so when
+/// Codex reads slower than the upstream sends, the thread parks and the upstream connection
+/// stops being drained. Memory tracks this depth, never the length of the generation.
+pub const RESPONSE_QUEUE_DEPTH: usize = 8;
+
+/// Bytes taken from the upstream per relay step.
+pub const RESPONSE_READ_SIZE: usize = 16 * 1024;
+
+/// How long a local client may take to send its request headers before hyper drops it.
+pub const LOCAL_HEADER_TIMEOUT: Duration = Duration::from_secs(60);
+
+/// What the server bounds. Not a configuration surface: the command line cannot reach it,
+/// [`ServerLimits::default`] is what production uses, and the only reason it is a value at all
+/// is so a test can shrink a ceiling instead of shipping 64 MiB over a socket to prove it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ServerLimits {
+    pub max_request_body_bytes: usize,
+    pub max_connections: usize,
+}
+
+impl Default for ServerLimits {
+    fn default() -> Self {
+        Self {
+            max_request_body_bytes: MAX_REQUEST_BODY_BYTES,
+            max_connections: MAX_LOCAL_CLIENTS,
+        }
+    }
+}
+
+/// Status and relayed headers, handed back the moment the upstream answers — before its body
+/// has finished arriving, which is what makes the relay incremental.
+type UpstreamHead = Result<(u16, BTreeMap<String, String>), GatewayError>;
+
+/// One piece of the upstream body, in the order it came off the wire.
+type ResponseChunk = Result<Bytes, std::io::Error>;
+
+/// Why the gateway could not start listening.
+#[derive(Debug)]
+pub enum ServeError {
+    /// The requested host was not IPv4 loopback.
+    Bind(BindError),
+    /// The operating system refused the bind — almost always a port already in use.
+    Listen(std::io::Error),
+}
+
+impl std::fmt::Display for ServeError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Bind(error) => write!(formatter, "{error}"),
+            Self::Listen(error) => write!(formatter, "could not listen on 127.0.0.1: {error}"),
+        }
+    }
+}
+
+impl std::error::Error for ServeError {}
+
+/// The body the gateway hands hyper: either nothing at all, or the bounded queue the upstream
+/// reader feeds. There is no third case — the gateway never composes a body of its own.
+pub struct GatewayBody {
+    inner: BodyInner,
+}
+
+enum BodyInner {
+    Empty,
+    Streaming(mpsc::Receiver<ResponseChunk>),
+}
+
+impl GatewayBody {
+    fn empty() -> Self {
+        Self {
+            inner: BodyInner::Empty,
+        }
+    }
+
+    fn streaming(chunks: mpsc::Receiver<ResponseChunk>) -> Self {
+        Self {
+            inner: BodyInner::Streaming(chunks),
+        }
+    }
+}
+
+impl Body for GatewayBody {
+    type Data = Bytes;
+    type Error = std::io::Error;
+
+    fn poll_frame(
+        self: Pin<&mut Self>,
+        context: &mut Context<'_>,
+    ) -> Poll<Option<Result<Frame<Self::Data>, Self::Error>>> {
+        match &mut self.get_mut().inner {
+            BodyInner::Empty => Poll::Ready(None),
+            BodyInner::Streaming(chunks) => match chunks.poll_recv(context) {
+                Poll::Pending => Poll::Pending,
+                Poll::Ready(None) => Poll::Ready(None),
+                Poll::Ready(Some(Ok(chunk))) => Poll::Ready(Some(Ok(Frame::data(chunk)))),
+                Poll::Ready(Some(Err(error))) => Poll::Ready(Some(Err(error))),
+            },
+        }
+    }
+}
+
+/// A running gateway. Dropping this leaves the server running; [`GatewayServer::shutdown`] is
+/// how it stops, and it does not return until the port is free.
+pub struct GatewayServer {
+    local_addr: SocketAddr,
+    stop: Option<oneshot::Sender<()>>,
+    task: tokio::task::JoinHandle<()>,
+}
+
+impl GatewayServer {
+    /// The address actually bound. With port 0 this is how the caller learns the real port.
+    #[must_use]
+    pub fn local_addr(&self) -> SocketAddr {
+        self.local_addr
+    }
+
+    /// Stop accepting, drop the listener, end the connections still open, release the port.
+    pub async fn shutdown(mut self) {
+        if let Some(stop) = self.stop.take() {
+            let _ = stop.send(());
+        }
+        let _ = self.task.await;
+    }
+}
+
+/// Start the gateway on loopback. Returns once the port is bound, so the caller can read the
+/// real port before anything connects.
+///
+/// # Errors
+///
+/// [`ServeError::Bind`] for any host that is not IPv4 loopback, [`ServeError::Listen`] if the
+/// port cannot be opened.
+pub async fn serve<U: StreamingUpstream>(
+    requested_host: Option<IpAddr>,
+    port: u16,
+    limits: ServerLimits,
+    upstream: Arc<U>,
+) -> Result<GatewayServer, ServeError> {
+    let address = bind_address(requested_host, port).map_err(ServeError::Bind)?;
+    let bound = TcpListener::bind(address).await;
+    let listener = bound.map_err(ServeError::Listen)?;
+    let local_addr = listener.local_addr().map_err(ServeError::Listen)?;
+    let (stop, stopped) = oneshot::channel();
+    let task = tokio::spawn(accept_loop(listener, limits, upstream, stopped));
+    Ok(GatewayServer {
+        local_addr,
+        stop: Some(stop),
+        task,
+    })
+}
+
+async fn accept_loop<U: StreamingUpstream>(
+    listener: TcpListener,
+    limits: ServerLimits,
+    upstream: Arc<U>,
+    mut stopped: oneshot::Receiver<()>,
+) {
+    let permits = Arc::new(Semaphore::new(limits.max_connections));
+    let mut connections = JoinSet::new();
+    loop {
+        // Taking the permit before accepting is what bounds the work: with every permit out,
+        // the loop waits here instead of queuing connections it cannot serve.
+        let Ok(permit) = Arc::clone(&permits).acquire_owned().await else {
+            break;
+        };
+        let accepted = tokio::select! {
+            _ = &mut stopped => break,
+            accepted = listener.accept() => accepted,
+        };
+        let (stream, _) = match accepted {
+            Ok(accepted) => accepted,
+            Err(_) => continue,
+        };
+        let upstream = Arc::clone(&upstream);
+        connections.spawn(async move {
+            let service = service_fn(move |request: Request<Incoming>| {
+                serve_request(request, limits, Arc::clone(&upstream))
+            });
+            let io = TokioIo::new(stream);
+            let mut builder = hyper::server::conn::http1::Builder::new();
+            builder.timer(TokioTimer::new());
+            builder.header_read_timeout(LOCAL_HEADER_TIMEOUT);
+            let _ = builder.serve_connection(io, service).await;
+            drop(permit);
+        });
+    }
+    // Dropping the listener is what frees the port; the connection tasks are then ended so a
+    // shutdown cannot outlive the handle that asked for it.
+    drop(listener);
+    connections.shutdown().await;
+}
+
+async fn serve_request<U: StreamingUpstream>(
+    request: Request<Incoming>,
+    limits: ServerLimits,
+    upstream: Arc<U>,
+) -> Result<Response<GatewayBody>, std::convert::Infallible> {
+    let response = match relay(request, limits, upstream).await {
+        Ok(response) => response,
+        Err(error) => refuse(&error),
+    };
+    Ok(response)
+}
+
+/// Which refusal a failed body read is. Only an over-length body is a 413; anything else is a
+/// request the gateway could not read at all, and neither answer says anything about content.
+fn body_error(error: Box<dyn std::error::Error + Send + Sync>) -> GatewayError {
+    if error.downcast_ref::<LengthLimitError>().is_some() {
+        GatewayError::RequestTooLarge
+    } else {
+        GatewayError::MalformedRequest
+    }
+}
+
+/// A refusal carries a status and nothing else: no body, no echoed header, no reason text.
+/// An error path is exactly where a credential or a prompt fragment would leak if it could.
+fn refuse(error: &GatewayError) -> Response<GatewayBody> {
+    Response::builder()
+        .status(error.status())
+        .body(GatewayBody::empty())
+        .expect("a status-only response is always well formed")
+}
+
+async fn relay<U: StreamingUpstream>(
+    request: Request<Incoming>,
+    limits: ServerLimits,
+    upstream: Arc<U>,
+) -> Result<Response<GatewayBody>, GatewayError> {
+    let (parts, body) = request.into_parts();
+
+    // A target in absolute or authority form carries a destination. This gateway has exactly
+    // one, so anything but an origin-form path is simply not a route it serves.
+    if parts.uri.authority().is_some() || parts.uri.scheme().is_some() {
+        return Err(GatewayError::RouteNotFound);
+    }
+
+    let method = parts.method.as_str().to_string();
+    let path = parts.uri.path().to_string();
+    let mut headers = BTreeMap::new();
+    for (name, value) in &parts.headers {
+        if let Ok(value) = value.to_str() {
+            headers
+                .entry(name.as_str().to_ascii_lowercase())
+                .or_insert_with(|| value.to_string());
+        }
+    }
+
+    // The cheap gates first: a request that will be refused must not cost a body read, and
+    // must never reach the upstream leg.
+    super::validate_route(&method, &path)?;
+    super::auth_gate(&headers)?;
+
+    let collected = Limited::new(body, limits.max_request_body_bytes)
+        .collect()
+        .await
+        .map_err(body_error)?
+        .to_bytes();
+
+    let local = GatewayRequest {
+        method,
+        path,
+        headers,
+        body: collected.to_vec(),
+    };
+    // Both entry points run the same policy. `prepare` re-checks the two gates above; that is
+    // two comparisons, and one guarantee that the socket path cannot drift away from it.
+    let (outgoing, metrics) = prepare(&local)?;
+
+    let (head_sender, head_receiver) = oneshot::channel();
+    let (chunk_sender, chunk_receiver) = mpsc::channel(RESPONSE_QUEUE_DEPTH);
+    tokio::task::spawn_blocking(move || {
+        pump(upstream.as_ref(), outgoing, head_sender, chunk_sender);
+    });
+
+    let head = head_receiver
+        .await
+        .map_err(|_| GatewayError::UpstreamFailed)?;
+    let (status, upstream_headers) = head?;
+
+    // Metadata only, and only once the exchange is under way: byte counts and a status. No
+    // header, no body, nothing written down.
+    println!(
+        "codex-gateway: {} -> {} bytes upstream ({:.2}% smaller), status {status}",
+        metrics.local_request_bytes,
+        metrics.upstream_request_bytes,
+        metrics.reduction_basis_points() as f64 / 100.0
+    );
+
+    let mut response = Response::builder().status(status);
+    for (name, value) in &upstream_headers {
+        response = response.header(name.as_str(), value.as_str());
+    }
+    response
+        .body(GatewayBody::streaming(chunk_receiver))
+        .map_err(|_| GatewayError::UpstreamFailed)
+}
+
+/// The upstream leg, start to finish, on one blocking thread.
+///
+/// Sending, reading the head and pumping the body all happen here, so the upstream reader
+/// never crosses a thread boundary and `blocking_send` can park it when the local client is
+/// the slower of the two.
+fn pump<U: StreamingUpstream>(
+    upstream: &U,
+    outgoing: UpstreamRequest,
+    head: oneshot::Sender<UpstreamHead>,
+    chunks: mpsc::Sender<ResponseChunk>,
+) {
+    let stream = match upstream.send(outgoing) {
+        Ok(stream) => stream,
+        Err(error) => {
+            let _ = head.send(Err(error));
+            return;
+        }
+    };
+    let UpstreamStream {
+        status,
+        headers,
+        mut body,
+    } = stream;
+    if head.send(Ok((status, headers))).is_err() {
+        return;
+    }
+    let mut buffer = vec![0_u8; RESPONSE_READ_SIZE];
+    loop {
+        match body.read(&mut buffer) {
+            Ok(0) => return,
+            Ok(read) => {
+                let chunk = Bytes::copy_from_slice(&buffer[..read]);
+                if chunks.blocking_send(Ok(chunk)).is_err() {
+                    return;
+                }
+            }
+            Err(error) => {
+                let _ = chunks.blocking_send(Err(error));
+                return;
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::{BTreeMap, VecDeque};
