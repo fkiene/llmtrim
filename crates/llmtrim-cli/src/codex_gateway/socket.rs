@@ -16,7 +16,9 @@ use std::sync::Arc;
 use std::task::{Context, Poll};
 use std::time::Duration;
 
-use anyhow::Context;
+// Imported anonymously: the trait is only needed for `.context()`, and its name would
+// collide with the `std::task::Context` the body's `poll_frame` takes.
+use anyhow::Context as _;
 use http_body_util::{BodyExt, LengthLimitError, Limited};
 use hyper::body::{Body, Bytes, Frame, Incoming};
 use hyper::service::service_fn;
