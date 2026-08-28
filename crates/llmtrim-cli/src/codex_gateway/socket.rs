@@ -398,7 +398,13 @@ mod tests {
         let upstream = Arc::new(FakeUpstream::replying(sse()));
         let server = start(&upstream).await;
         let address = server.local_addr();
-        let reply = post(address, "/v1/chat/completions", auth_headers(), codex_body()).await;
+        let reply = post(
+            address,
+            "/v1/chat/completions",
+            auth_headers(),
+            codex_body(),
+        )
+        .await;
         assert_eq!(reply.status, 404);
         assert!(upstream.seen().is_empty(), "a refused route costs nothing");
         server.shutdown().await;
@@ -477,7 +483,9 @@ mod tests {
             reader.read_exact(&mut head).expect("the first chunk");
             release.send(()).expect("release the upstream");
             let mut rest = Vec::new();
-            reader.read_to_end(&mut rest).expect("the rest of the stream");
+            reader
+                .read_to_end(&mut rest)
+                .expect("the rest of the stream");
             head.extend_from_slice(&rest);
             head
         });
@@ -571,7 +579,10 @@ mod tests {
             Some(FAKE_BEARER)
         );
         assert_eq!(
-            sent[0].headers.get("chatgpt-account-id").map(String::as_str),
+            sent[0]
+                .headers
+                .get("chatgpt-account-id")
+                .map(String::as_str),
             Some(FAKE_ACCOUNT)
         );
         server.shutdown().await;

@@ -33,7 +33,10 @@ mod tests {
 
     #[test]
     fn the_upstream_url_is_the_one_https_destination() {
-        assert_eq!(upstream_url(), "https://chatgpt.com/backend-api/codex/responses");
+        assert_eq!(
+            upstream_url(),
+            "https://chatgpt.com/backend-api/codex/responses"
+        );
     }
 
     #[test]
@@ -106,7 +109,12 @@ mod tests {
     #[test]
     fn only_the_content_type_comes_back_to_codex() {
         assert_eq!(RELAYED_RESPONSE_HEADERS, ["content-type"]);
-        for never in ["set-cookie", "content-length", "transfer-encoding", "content-encoding"] {
+        for never in [
+            "set-cookie",
+            "content-length",
+            "transfer-encoding",
+            "content-encoding",
+        ] {
             assert!(!RELAYED_RESPONSE_HEADERS.contains(&never), "{never}");
         }
     }
