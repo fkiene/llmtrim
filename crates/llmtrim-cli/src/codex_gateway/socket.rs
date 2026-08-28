@@ -16,6 +16,7 @@ use std::sync::Arc;
 use std::task::{Context, Poll};
 use std::time::Duration;
 
+use anyhow::Context;
 use http_body_util::{BodyExt, LengthLimitError, Limited};
 use hyper::body::{Body, Bytes, Frame, Incoming};
 use hyper::service::service_fn;
@@ -26,8 +27,8 @@ use tokio::sync::{Semaphore, mpsc, oneshot};
 use tokio::task::JoinSet;
 
 use super::listener::{BindError, bind_address};
-use super::upstream::{StreamingUpstream, UpstreamStream};
-use super::{GatewayError, GatewayRequest, UpstreamRequest, prepare};
+use super::upstream::{HttpsUpstream, StreamingUpstream, UpstreamStream};
+use super::{GATEWAY_PRESET, GatewayError, GatewayRequest, UpstreamRequest, prepare};
 
 /// The port the gateway listens on unless the caller names another one. Picked high and
 /// unassigned; nothing else in the product uses it.
@@ -196,6 +197,40 @@ pub async fn serve<U: StreamingUpstream>(
         stop: Some(stop),
         task,
     })
+}
+
+/// Run the gateway in the foreground until Ctrl-C, talking to the real upstream.
+///
+/// It builds its own Tokio runtime so the rest of the CLI stays synchronous. There is no
+/// daemon, no autostart and no background service: the gateway lives exactly as long as this
+/// process, and nothing it does outlives it.
+///
+/// # Errors
+///
+/// If the async runtime cannot start, or the loopback port cannot be bound.
+pub fn run(port: u16) -> anyhow::Result<()> {
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .context("failed to start async runtime")?;
+    runtime.block_on(run_async(port))
+}
+
+async fn run_async(port: u16) -> anyhow::Result<()> {
+    let upstream = Arc::new(HttpsUpstream::new());
+    let server = serve(None, port, ServerLimits::default(), upstream)
+        .await
+        .map_err(|error| anyhow::anyhow!("{error}"))?;
+    let address = server.local_addr();
+    // Metadata only: an address and a profile name. Never a header, a token or a payload.
+    println!("Codex gateway listening on {address}");
+    println!("Compressing with the `{GATEWAY_PRESET}` preset.");
+    println!("Point Codex at http://{address}/backend-api/codex");
+    println!("Press Ctrl-C to stop.");
+    let _ = tokio::signal::ctrl_c().await;
+    println!("Stopping the Codex gateway.");
+    server.shutdown().await;
+    Ok(())
 }
 
 async fn accept_loop<U: StreamingUpstream>(

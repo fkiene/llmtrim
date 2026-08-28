@@ -195,6 +195,12 @@ jobs:
           cargo test -p llmtrim --lib --locked codex_gateway::tests::the_gateway_needs_no_api_key
           cargo test -p llmtrim --lib --locked codex_gateway::tests::the_gateway_writes_nothing_to_disk
           cargo test -p llmtrim --lib --locked codex_gateway::listener::tests
+          cargo test -p llmtrim --lib --locked codex_gateway::upstream::tests
+          cargo test -p llmtrim --lib --locked codex_gateway::socket::tests::the_socket_layer_writes_nothing_and_carries_no_secret
+          cargo test -p llmtrim --lib --locked codex_gateway::socket::tests::socket_binds_ipv4_loopback_only
+          cargo test -p llmtrim --lib --locked codex_gateway::socket::tests::socket_rejects_non_loopback_configuration
+          cargo test -p llmtrim --lib --locked codex_gateway::socket::tests::a_body_over_the_ceiling_is_refused_before_the_upstream_leg
+          cargo test -p llmtrim --lib --locked codex_gateway::socket::tests::no_local_header_can_redirect_the_gateway
 
       # A second, coarser net over the gateway module only. The in-module tests already pin
       # these, but a reviewer reading the workflow can see the list without opening the source.
@@ -202,18 +208,27 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          module=crates/llmtrim-cli/src/codex_gateway.rs
-          # Strip comments and the test module: prose names what the design avoids, and the
-          # tests necessarily spell out what they forbid.
-          production=$(sed '/#\[cfg(test)\]/,$d' "$module" | grep -v '^\s*//')
+          # The whole module tree, not just the policy file: a mechanism moved into a
+          # submodule would still sit on the call path.
+          modules="crates/llmtrim-cli/src/codex_gateway.rs"
+          for submodule in crates/llmtrim-cli/src/codex_gateway/*.rs; do
+            modules="$modules $submodule"
+          done
+          echo "scanning: $modules"
           fail=0
-          for term in HTTPS_PROXY HTTP_PROXY ALL_PROXY NODE_EXTRA_CA_CERTS SSL_CERT_FILE \
-                      CURL_CA_BUNDLE rcgen hudsucker ca.key certutil capture_dir \
-                      OPENAI_API_KEY ANTHROPIC_API_KEY fs::write File::create; do
-            if printf '%s' "$production" | grep -qF -- "$term"; then
-              echo "::error::gateway module must not use $term"
-              fail=1
-            fi
+          for module in $modules; do
+            # Strip comments and the test module: prose names what the design avoids, and the
+            # tests necessarily spell out what they forbid.
+            production=$(sed '/#\[cfg(test)\]/,$d' "$module" | grep -v '^\s*//' || true)
+            for term in HTTPS_PROXY HTTP_PROXY ALL_PROXY NODE_EXTRA_CA_CERTS SSL_CERT_FILE \
+                        CURL_CA_BUNDLE rcgen hudsucker ca.key certutil capture_dir \
+                        OPENAI_API_KEY ANTHROPIC_API_KEY CODEX_API_KEY fs::write \
+                        File::create OpenOptions danger_accept_invalid; do
+              if printf '%s' "$production" | grep -qF -- "$term"; then
+                echo "::error::$module must not use $term"
+                fail=1
+              fi
+            done
           done
           exit $fail
 
@@ -229,3 +244,15 @@ jobs:
           key: codex-gateway-e2e
       - name: Synthetic end-to-end
         run: cargo test -p llmtrim --lib --locked codex_gateway::tests::synthetic_end_to_end_fake_codex_to_gateway_to_fake_upstream -- --nocapture
+
+      # SOCKET_E2E: the same exchange, but over a real loopback socket with a real HTTP client
+      # at both ends. The upstream is still the fake, so no external host is contacted.
+      - name: SOCKET_E2E
+        run: cargo test -p llmtrim --lib --locked codex_gateway::socket::tests::socket_end_to_end_fake_codex_to_real_socket_to_fake_upstream -- --nocapture
+
+      - name: Streaming and lifecycle
+        run: |
+          cargo test -p llmtrim --lib --locked codex_gateway::socket::tests::socket_sse_order_preserved
+          cargo test -p llmtrim --lib --locked codex_gateway::socket::tests::socket_relays_incrementally_without_buffering_the_response
+          cargo test -p llmtrim --lib --locked codex_gateway::socket::tests::socket_shutdown_releases_port
+          cargo test -p llmtrim --lib --locked codex_gateway::socket::tests::socket_shutdown_leaves_no_listener

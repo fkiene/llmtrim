@@ -163,6 +163,19 @@ enum Commands {
         #[arg(long, hide = true)]
         hide_console: bool,
     },
+    /// Run the Codex localhost gateway in the foreground
+    ///
+    /// A reverse gateway for Codex alone: point a `[model_providers.*]` `base_url` at it and
+    /// Codex sends its normal, ChatGPT-authenticated request to 127.0.0.1 in plaintext. No
+    /// proxy variable, no local CA, no API key. It compresses the request body with the
+    /// `safe` preset and streams the answer straight back. Ctrl-C stops it; nothing is left
+    /// running afterwards.
+    #[cfg(feature = "intercept")]
+    CodexGateway {
+        /// Port to listen on. The host is not configurable — it is always 127.0.0.1.
+        #[arg(long, default_value_t = llmtrim::codex_gateway::socket::DEFAULT_PORT)]
+        port: u16,
+    },
     /// Set everything up and start saving (CA, environment, autostart, daemon)
     ///
     /// The fastest path from install to compressing: ensures the local CA, sets
@@ -1737,6 +1750,10 @@ fn run() -> Result<()> {
             } else {
                 llmtrim::serve::run(port, force)?;
             }
+        }
+        #[cfg(feature = "intercept")]
+        Commands::CodexGateway { port } => {
+            llmtrim::codex_gateway::socket::run(port)?;
         }
         Commands::Setup { port, force, env } => {
             if env {
