@@ -1,0 +1,224 @@
+name: Codex gateway
+
+# Validation only. This workflow builds and tests the Codex local gateway; it never uploads an
+# executable, cuts a release or publishes a package.
+on:
+  push:
+    branches: [main, master, feature/codex-local-gateway]
+  pull_request:
+    paths:
+      - "crates/llmtrim-cli/src/codex_gateway.rs"
+      - "crates/llmtrim-cli/src/lib.rs"
+      - "crates/llmtrim-core/**"
+      - "docs/codex-local-gateway.md"
+      - ".github/workflows/codex-gateway.yml"
+
+concurrency:
+  group: codex-gateway-${{ github.ref }}
+  cancel-in-progress: true
+
+# Read-only. The gateway jobs need no token beyond checkout, no secret and no environment.
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: "-D warnings"
+  CARGO_INCREMENTAL: "0"
+
+jobs:
+  # Windows first: it is the platform where avoiding a local CA and a machine-wide proxy
+  # matters most. Linux runs the same suite as a portability check.
+  gateway:
+    name: gateway (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, ubuntu-latest]
+    steps:
+      - uses: actions/checkout@v7
+
+      # The channel is pinned repo-wide by rust-toolchain.toml; rustfmt and clippy come with
+      # it, so no toolchain arguments are needed here.
+      - name: Show toolchain
+        run: |
+          rustc --version
+          cargo --version
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: codex-gateway-${{ matrix.os }}
+
+      - name: WINDOWS_FMT / LINUX_FMT
+        run: cargo fmt --all -- --check
+
+      - name: WINDOWS_CHECK / LINUX_CHECK
+        run: cargo check -p llmtrim --lib --locked
+
+      - name: WINDOWS_TEST / LINUX_TEST
+        run: cargo test -p llmtrim --lib --locked codex_gateway
+
+      # Clippy runs on the whole crate, but this workflow answers a narrower question: did
+      # *this* contribution introduce a lint? The repository denies several clippy lints, so a
+      # pre-existing one in upstream code arrives as `level: "error"` even though it is not a
+      # compilation failure. The gate therefore classifies by the structured lint code rather
+      # than by level alone: a real compile error fails anywhere, a clippy lint fails only in
+      # the gateway module, and an upstream lint is reported without failing this workflow.
+      - name: WINDOWS_CLIPPY_GATE / LINUX_CLIPPY_GATE
+        shell: bash
+        env:
+          # Cleared for this step only, so the workflow-level `-D warnings` does not add a
+          # second promotion path on top of the repository's own deny configuration.
+          RUSTFLAGS: ""
+        run: |
+          set -uo pipefail
+          # GitHub runs `shell: bash` with `-e`, so a non-zero cargo exit would abort before
+          # the code could be captured. `|| CARGO_EXIT=$?` suppresses that and records it: a
+          # denied upstream lint makes cargo exit non-zero without being our failure.
+          CARGO_EXIT=0
+          cargo clippy -p llmtrim --lib --no-deps --locked --message-format=json > clippy.json || CARGO_EXIT=$?
+          PY=$(command -v python3 || command -v python)
+          "$PY" - clippy.json "$CARGO_EXIT" <<'PYEOF'
+          import json, sys
+
+          TARGET = "crates/llmtrim-cli/src/codex_gateway.rs"
+
+          def norm(path):
+              return path.replace("\\", "/")
+
+          def touches_target(message):
+              for span in message.get("spans") or []:
+                  if norm(span.get("file_name", "")).endswith(TARGET):
+                      return True
+              return False
+
+          diagnostics_path = sys.argv[1]
+          cargo_exit = int(sys.argv[2])
+
+          gateway_lints = 0
+          gateway_other = 0
+          upstream_lints = 0
+          upstream_denies = 0
+          non_clippy_errors = 0
+          parsed = 0
+          detail = []
+
+          with open(diagnostics_path, encoding="utf-8") as handle:
+              for raw in handle:
+                  raw = raw.strip()
+                  if not raw.startswith("{"):
+                      continue
+                  try:
+                      record = json.loads(raw)
+                  except ValueError:
+                      continue
+                  parsed += 1
+                  if record.get("reason") != "compiler-message":
+                      continue
+                  message = record.get("message") or {}
+                  level = message.get("level")
+                  code = (message.get("code") or {}).get("code")
+                  # Only the structured code identifies a clippy lint; the human text never does.
+                  is_clippy = bool(code) and code.startswith("clippy::")
+                  in_gateway = touches_target(message)
+                  span = (message.get("spans") or [{}])[0]
+                  where = "%s:%s" % (norm(span.get("file_name", "?")), span.get("line_start", "?"))
+                  head = (message.get("message") or "")[:120]
+                  label = code or "-"
+
+                  if is_clippy and in_gateway:
+                      gateway_lints += 1
+                      detail.append("FAIL gateway lint   %-28s %s %s" % (label, where, head))
+                  elif is_clippy:
+                      upstream_lints += 1
+                      if level == "error":
+                          upstream_denies += 1
+                      detail.append("     upstream lint   %-28s %s %s" % (label, where, head))
+                  elif level == "error":
+                      # A real compilation error fails the gate wherever it comes from.
+                      non_clippy_errors += 1
+                      detail.append("FAIL compile error  %-28s %s %s" % (label, where, head))
+                  elif level == "warning" and in_gateway:
+                      # Our own file must be clean of every diagnostic, not only clippy ones.
+                      gateway_other += 1
+                      detail.append("FAIL gateway warn   %-28s %s %s" % (label, where, head))
+
+          print("GATEWAY_CLIPPY_LINT_COUNT=%d" % gateway_lints)
+          print("GATEWAY_OTHER_DIAGNOSTIC_COUNT=%d" % gateway_other)
+          print("UPSTREAM_CLIPPY_LINT_COUNT=%d" % upstream_lints)
+          print("UPSTREAM_CLIPPY_DENY_COUNT=%d" % upstream_denies)
+          print("NON_CLIPPY_ERROR_COUNT=%d" % non_clippy_errors)
+          print("CARGO_EXIT=%d" % cargo_exit)
+          for line in detail:
+              print("  " + line)
+
+          fatal = gateway_lints or gateway_other or non_clippy_errors
+          # A non-zero cargo exit is tolerated only when a denied clippy lint outside the gateway
+          # fully explains it. An unexplained failure is a crash or an infrastructure problem and
+          # must never be reported as success.
+          if cargo_exit != 0 and not fatal and upstream_denies == 0:
+              print("::error::cargo clippy failed with no diagnostic that explains it")
+              fatal = 1
+          if parsed == 0 and cargo_exit != 0:
+              print("::error::cargo clippy produced no parsable diagnostics")
+              fatal = 1
+
+          if fatal:
+              print("::error::the gateway clippy gate failed")
+              sys.exit(1)
+          print("gateway clippy gate: clean")
+          PYEOF
+
+  # The security contract is expressed as tests inside the module, so it is enforced by the
+  # compiler and the test runner rather than by a grep over the whole repository — the legacy
+  # proxy legitimately contains every term this gateway must not use.
+  security-contract:
+    name: GATEWAY_SECURITY_CONTRACT
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: codex-gateway-contract
+
+      - name: Contract tests
+        run: |
+          cargo test -p llmtrim --lib --locked codex_gateway::tests::the_gateway_call_path_has_no_mitm_no_ca_and_no_proxy_env
+          cargo test -p llmtrim --lib --locked codex_gateway::tests::the_gateway_needs_no_api_key
+          cargo test -p llmtrim --lib --locked codex_gateway::tests::the_gateway_writes_nothing_to_disk
+          cargo test -p llmtrim --lib --locked codex_gateway::listener::tests
+
+      # A second, coarser net over the gateway module only. The in-module tests already pin
+      # these, but a reviewer reading the workflow can see the list without opening the source.
+      - name: Forbidden mechanisms in the gateway module
+        shell: bash
+        run: |
+          set -euo pipefail
+          module=crates/llmtrim-cli/src/codex_gateway.rs
+          # Strip comments and the test module: prose names what the design avoids, and the
+          # tests necessarily spell out what they forbid.
+          production=$(sed '/#\[cfg(test)\]/,$d' "$module" | grep -v '^\s*//')
+          fail=0
+          for term in HTTPS_PROXY HTTP_PROXY ALL_PROXY NODE_EXTRA_CA_CERTS SSL_CERT_FILE \
+                      CURL_CA_BUNDLE rcgen hudsucker ca.key certutil capture_dir \
+                      OPENAI_API_KEY ANTHROPIC_API_KEY fs::write File::create; do
+            if printf '%s' "$production" | grep -qF -- "$term"; then
+              echo "::error::gateway module must not use $term"
+              fail=1
+            fi
+          done
+          exit $fail
+
+  # Proves the whole exchange against a fake upstream on loopback. No external host is
+  # contacted: the production upstream is a constant, and the test reaches it through a seam.
+  e2e:
+    name: GATEWAY_E2E
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: codex-gateway-e2e
+      - name: Synthetic end-to-end
+        run: cargo test -p llmtrim --lib --locked codex_gateway::tests::synthetic_end_to_end_fake_codex_to_gateway_to_fake_upstream -- --nocapture

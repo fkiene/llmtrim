@@ -11,6 +11,7 @@ pub mod bench;
 #[cfg(feature = "breakdown")]
 pub mod breakdown;
 #[cfg(feature = "intercept")]
+pub mod codex_gateway;
 pub mod compact;
 pub mod daemon;
 pub mod discover;
