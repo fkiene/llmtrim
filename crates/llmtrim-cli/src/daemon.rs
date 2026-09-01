@@ -152,8 +152,13 @@ pub fn is_alive(pid: u32) -> bool {
     }
     #[cfg(windows)]
     {
+        // CREATE_NO_WINDOW: `tasklist` is a console app; without this, a GUI caller
+        // (the tray spawning `llmtrim start`/`status`) flashes a console on every probe.
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
         std::process::Command::new("tasklist")
             .args(["/FI", &format!("PID eq {pid}"), "/FO", "CSV", "/NH"])
+            .creation_flags(CREATE_NO_WINDOW)
             .output()
             .map(|o| tasklist_reports_pid(&String::from_utf8_lossy(&o.stdout), pid))
             .unwrap_or(false)
@@ -234,13 +239,11 @@ pub fn spawn_detached(port: u16) -> Result<u32> {
     }
     #[cfg(windows)]
     {
-        // DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW: no inherited
-        // console, own process group, survives the launching shell.
+        // CREATE_NO_WINDOW is ignored when combined with DETACHED_PROCESS, so we do
+        // not set both. CREATE_NEW_PROCESS_GROUP keeps Ctrl-C on the parent console
+        // from taking the daemon with it.
         use std::os::windows::process::CommandExt;
-        const DETACHED_PROCESS: u32 = 0x0000_0008;
-        const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
-        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-        cmd.creation_flags(DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW);
+        cmd.creation_flags(windows_daemon_creation_flags());
     }
     let child = cmd.spawn().context("failed to spawn the interceptor")?;
     let pid = child.id();
@@ -248,17 +251,17 @@ pub fn spawn_detached(port: u16) -> Result<u32> {
     // Readiness: the proxy warms its tokenizer tables before binding (~2-3s), so returning
     // at fork time makes an immediate `status` read "degraded" and an immediate request
     // fail. Poll until the port accepts (10s cap) so success means "serving", not "forked".
-    for _ in 0..100 {
-        if probe_port(port) {
-            return Ok(pid);
-        }
-        std::thread::sleep(std::time::Duration::from_millis(100));
+    if wait_until_ready(port, probe_port, 100, std::time::Duration::from_millis(100)) {
+        return Ok(pid);
     }
-    eprintln!(
-        "llmtrim: interceptor spawned (pid {pid}) but :{port} is not accepting after 10s — \
+    // Half-started: the child may have already written Windows user env (HTTPS_PROXY)
+    // before binding. Tear it down so a failed `start` does not leave a dead proxy
+    // wired into HKCU. Callers (the tray) then surface the error instead of spinning.
+    let _ = stop();
+    anyhow::bail!(
+        "interceptor spawned (pid {pid}) but :{port} is not accepting after 10s — \
          check `llmtrim status` and the log"
     );
-    Ok(pid)
 }
 
 /// Stop the running daemon (SIGTERM) and clear the pidfile. Returns the stopped pid.
@@ -285,8 +288,11 @@ pub fn stop() -> Result<Option<u32>> {
             #[cfg(windows)]
             {
                 // /T kills the child tree, /F forces termination.
+                use std::os::windows::process::CommandExt;
+                const CREATE_NO_WINDOW: u32 = 0x0800_0000;
                 let _ = std::process::Command::new("taskkill")
                     .args(["/PID", &state.pid.to_string(), "/T", "/F"])
+                    .creation_flags(CREATE_NO_WINDOW)
                     .stdout(std::process::Stdio::null())
                     .stderr(std::process::Stdio::null())
                     .status();
@@ -341,6 +347,36 @@ fn wait_until_free(
     false
 }
 
+/// Poll until `probe` reports `port` accepting, up to `iters` times spaced `step` apart;
+/// `true` if it came up, `false` on timeout. Parameters match [`wait_until_free`] so the
+/// timeout path is unit-testable without a real 10s wait.
+fn wait_until_ready(
+    port: u16,
+    probe: impl Fn(u16) -> bool,
+    iters: u32,
+    step: std::time::Duration,
+) -> bool {
+    for _ in 0..iters {
+        if probe(port) {
+            return true;
+        }
+        std::thread::sleep(step);
+    }
+    false
+}
+
+/// Windows `CreateProcess` flags for the detached interceptor.
+///
+/// `CREATE_NO_WINDOW` (0x08000000) is ignored when combined with `DETACHED_PROCESS`
+/// (0x00000008), so this must not set both — otherwise a GUI parent still flashes a
+/// console, and grandchild PowerShell windows (env broadcast) do too.
+#[cfg(any(windows, test))]
+fn windows_daemon_creation_flags() -> u32 {
+    const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+    CREATE_NO_WINDOW | CREATE_NEW_PROCESS_GROUP
+}
+
 /// Format a duration in seconds as `3h12m` / `5m` / `42s`.
 pub fn human_uptime(secs: i64) -> String {
     let (h, m, s) = (secs / 3600, (secs % 3600) / 60, secs % 60);
@@ -385,6 +421,46 @@ mod tests {
         // A port that never frees must report timeout, not hang — the `--force stopped it but
         // the socket lingered` path. Tiny iters/step so this runs in microseconds.
         assert!(!wait_until_free(0, |_| true, 3, std::time::Duration::ZERO));
+    }
+
+    #[test]
+    fn wait_until_ready_returns_true_once_the_port_accepts() {
+        let calls = std::cell::Cell::new(0);
+        assert!(wait_until_ready(
+            0,
+            |_| {
+                calls.set(calls.get() + 1);
+                calls.get() >= 2
+            },
+            50,
+            std::time::Duration::ZERO,
+        ));
+    }
+
+    #[test]
+    fn wait_until_ready_times_out_when_the_port_never_accepts() {
+        // Failed `start` must error, not return Ok with a warning — the tray treats
+        // a zero exit as success and would otherwise spin or leave HTTPS_PROXY wired.
+        assert!(!wait_until_ready(
+            0,
+            |_| false,
+            3,
+            std::time::Duration::ZERO
+        ));
+    }
+
+    #[test]
+    fn windows_daemon_flags_keep_create_no_window() {
+        // CREATE_NO_WINDOW is ignored when OR'd with DETACHED_PROCESS (MSDN).
+        const DETACHED_PROCESS: u32 = 0x0000_0008;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        let flags = windows_daemon_creation_flags();
+        assert_eq!(flags & CREATE_NO_WINDOW, CREATE_NO_WINDOW);
+        assert_eq!(
+            flags & DETACHED_PROCESS,
+            0,
+            "CREATE_NO_WINDOW is ignored with DETACHED_PROCESS"
+        );
     }
 
     #[test]

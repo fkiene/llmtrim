@@ -1321,11 +1321,29 @@ fn broadcast_env_change() {
         $t = Add-Type -MemberDefinition $sig -Name NativeMethods -Namespace Win32 -PassThru;\
         $r = [UIntPtr]::Zero;\
         [void]$t::SendMessageTimeout([IntPtr]0xffff, 0x1A, [UIntPtr]::Zero, 'Environment', 0x2, 5000, [ref]$r)";
-    let _ = std::process::Command::new("powershell")
-        .args(["-NoProfile", "-NonInteractive", "-Command", PS])
+    // Spawn, don't wait: blocking here keeps the supervised daemon from binding, and
+    // HWND_BROADCAST plus a GUI waiter (the tray) can deadlock. Windowless so a tray
+    // start doesn't flash a console.
+    let _ = powershell_hidden(PS).spawn();
+}
+
+/// Windowless PowerShell one-shot. Callers `.spawn()` (don't block the daemon) or
+/// `.status()` when the work must finish first. Compiled on all OSes so the argv
+/// contract is unit-tested off-Windows.
+#[cfg(any(windows, test))]
+pub(crate) fn powershell_hidden(script: &str) -> std::process::Command {
+    let mut cmd = std::process::Command::new("powershell");
+    cmd.args(["-NoProfile", "-NonInteractive", "-Command", script])
+        .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status();
+        .stderr(std::process::Stdio::null());
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        cmd.creation_flags(CREATE_NO_WINDOW);
+    }
+    cmd
 }
 
 // The registry mechanics, taking the key as a seam so tests can exercise them against a
@@ -2919,6 +2937,18 @@ mod tests {
 
         // Tidy up the scratch key.
         hkcu.delete_subkey_all(&scratch).ok();
+    }
+
+    #[test]
+    fn powershell_hidden_is_noninteractive_and_has_no_stdio() {
+        // The env-broadcast helper must never flash a console or inherit the
+        // caller's pipes — that's the tray "Start proxy" hang on Windows (#272).
+        let cmd = powershell_hidden("Write-Output x");
+        let debug = format!("{cmd:?}");
+        assert!(debug.contains("powershell"), "{debug}");
+        assert!(debug.contains("-NoProfile"), "{debug}");
+        assert!(debug.contains("-NonInteractive"), "{debug}");
+        assert!(debug.contains("-Command"), "{debug}");
     }
 
     #[test]

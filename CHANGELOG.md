@@ -6,6 +6,15 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Fixed
+
+- **Windows tray Start proxy no longer spins forever.** Clicking Start proxy flashed
+  a PowerShell window, left `HTTPS_PROXY` wired, and never left the loading state
+  because the tray waited on pipes the daemon still held and the daemon blocked on
+  `WM_SETTINGCHANGE` before binding. Env broadcast is now windowless and
+  non-blocking, `start` fails (and unwires) if the port never accepts, and the tray
+  shows an error instead of spinning. (#272)
+
 ## [0.13.3] - 2026-09-01
 
 ### Changed

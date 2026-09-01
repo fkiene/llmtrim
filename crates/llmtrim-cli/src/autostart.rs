@@ -44,11 +44,7 @@ pub fn hide_console_window() {
             $t = Add-Type -MemberDefinition $sig -Name NativeMethods -Namespace Win32 -PassThru;\
             $h = $t::GetConsoleWindow();\
             if ($h -ne [IntPtr]::Zero) { [void]$t::ShowWindow($h, 0) }";
-        let _ = std::process::Command::new("powershell")
-            .args(["-NoProfile", "-NonInteractive", "-Command", PS])
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .status();
+        let _ = crate::setup::powershell_hidden(PS).status();
     }
 }
 

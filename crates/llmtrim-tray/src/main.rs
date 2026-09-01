@@ -208,7 +208,7 @@ fn llmtrim_binary() -> std::path::PathBuf {
 /// up repeatedly. `CREATE_NO_WINDOW` (0x0800_0000) suppresses it. No-op elsewhere.
 fn llmtrim_command(args: &[&str]) -> std::process::Command {
     let mut cmd = std::process::Command::new(llmtrim_binary());
-    cmd.args(args);
+    cmd.args(args).stdin(std::process::Stdio::null());
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
@@ -220,27 +220,76 @@ fn llmtrim_command(args: &[&str]) -> std::process::Command {
 
 /// Run `llmtrim <args>` to completion, mapping any failure to a sanitised string
 /// (full detail logged to stderr, never surfaced to JS).
+///
+/// Must not use `Command::output()`: that waits for stdout/stderr pipes to close.
+/// On Windows `llmtrim start` spawns a long-lived daemon that inherits those
+/// inheritable pipe handles, so `output()` never returns and the Settings
+/// "Start proxy" button spins forever (issue #272). `.status()` waits only for
+/// the CLI process. Stderr is captured via a temp file so the daemon holding an
+/// extra file handle cannot block us.
 fn run_llmtrim(args: &[&str]) -> Result<(), String> {
-    let output = llmtrim_command(args).output().map_err(|e| {
+    let err_path = std::env::temp_dir().join(format!(
+        "llmtrim-tray-{}-{}.err",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0)
+    ));
+    let err_file = std::fs::File::create(&err_path).map_err(|e| {
         eprintln!("llmtrim-tray: failed to run llmtrim {args:?}: {e}");
         "could not run the llmtrim CLI — is it installed?".to_string()
     })?;
-    if output.status.success() {
+    let status = llmtrim_command(args)
+        .stdout(std::process::Stdio::null())
+        .stderr(err_file)
+        .status()
+        .map_err(|e| {
+            let _ = std::fs::remove_file(&err_path);
+            eprintln!("llmtrim-tray: failed to run llmtrim {args:?}: {e}");
+            "could not run the llmtrim CLI — is it installed?".to_string()
+        })?;
+    let stderr = std::fs::read_to_string(&err_path).unwrap_or_default();
+    let _ = std::fs::remove_file(&err_path);
+    if status.success() {
         Ok(())
     } else {
         eprintln!(
-            "llmtrim-tray: llmtrim {args:?} exited {:?}: {}",
-            output.status.code(),
-            String::from_utf8_lossy(&output.stderr)
+            "llmtrim-tray: llmtrim {args:?} exited {:?}: {stderr}",
+            status.code()
         );
-        Err("the llmtrim command failed — see the proxy logs".to_string())
+        Err(tray_start_error(&stderr))
+    }
+}
+
+/// Path-free error for the webview. Prefer the "did not come up" wording when
+/// `start` timed out waiting for the port, so Settings can show an actionable
+/// message instead of a generic CLI failure.
+fn tray_start_error(stderr: &str) -> String {
+    if stderr.contains("not accepting") {
+        "the proxy did not start — see the proxy logs".to_string()
+    } else {
+        "the llmtrim command failed — see the proxy logs".to_string()
     }
 }
 
 /// Start the background interceptor (no-op if already running).
 #[tauri::command]
 fn start_proxy() -> Result<(), String> {
-    run_llmtrim(&["start"])
+    start_proxy_blocking()
+}
+
+fn start_proxy_blocking() -> Result<(), String> {
+    let result = run_llmtrim(&["start"]);
+    if result.is_ok() && proxy_running() {
+        return Ok(());
+    }
+    // Failed or exited 0 without a live daemon: `stop` clears Windows user env
+    // so a dead HTTPS_PROXY is not left behind (issue #272).
+    let _ = run_llmtrim(&["stop"]);
+    result.and(Err(
+        "the proxy did not start — see the proxy logs".to_string()
+    ))
 }
 
 /// Stop the background interceptor.
@@ -679,5 +728,26 @@ fn poll_loop(app: AppHandle, stop: Arc<AtomicBool>) {
                 eprintln!("llmtrim-tray: poll failed: {e:#}");
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::tray_start_error;
+
+    #[test]
+    fn start_error_is_actionable_when_the_port_never_accepts() {
+        let msg =
+            tray_start_error("interceptor spawned (pid 1) but :43117 is not accepting after 10s");
+        assert!(msg.contains("did not start"), "{msg}");
+        assert!(!msg.contains("43117"), "no port in the JS-facing string");
+    }
+
+    #[test]
+    fn start_error_stays_generic_for_other_failures() {
+        assert_eq!(
+            tray_start_error("failed to spawn the interceptor"),
+            "the llmtrim command failed — see the proxy logs"
+        );
     }
 }

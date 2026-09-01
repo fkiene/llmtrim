@@ -1786,7 +1786,17 @@ fn run() -> Result<()> {
                 // No live daemon → resolve the port the same way `setup` does (explicit, else
                 // the one already wired into the env, else DEFAULT_PORT) so we match clients.
                 let port = llmtrim::setup::resolve_port(port, None)?;
-                let pid = llmtrim::daemon::spawn_detached(port)?;
+                let pid = match llmtrim::daemon::spawn_detached(port) {
+                    Ok(pid) => pid,
+                    Err(e) => {
+                        // Supervised serve wires HKCU before it binds. If bind never
+                        // happens, drop those vars so a failed start doesn't leave
+                        // HTTPS_PROXY pointing at a dead port (issue #272).
+                        #[cfg(windows)]
+                        let _ = llmtrim::setup::unwire_env_windows();
+                        return Err(e);
+                    }
+                };
                 println!(
                     "{}",
                     ui::ok(
