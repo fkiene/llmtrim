@@ -4,7 +4,7 @@ name: Codex gateway
 # executable, cuts a release or publishes a package.
 on:
   push:
-    branches: [main, master, feature/codex-local-gateway]
+    branches: [main, master]
   pull_request:
     paths:
       - "crates/llmtrim-cli/src/codex_gateway.rs"

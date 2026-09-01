@@ -34,7 +34,7 @@ use super::{GATEWAY_PRESET, GatewayError, GatewayRequest, UpstreamRequest, prepa
 
 /// The port the gateway listens on unless the caller names another one. Picked high and
 /// unassigned; nothing else in the product uses it.
-pub const DEFAULT_PORT: u16 = 43117;
+pub const DEFAULT_PORT: u16 = 43200;
 
 /// Ceiling on one local request body.
 ///
@@ -365,8 +365,13 @@ async fn relay<U: StreamingUpstream>(
 
     // Metadata only, and only once the exchange is under way: byte counts and a status. No
     // header, no body, nothing written down.
+    let note = if metrics.compression_failed {
+        " (compression failed; original body forwarded)"
+    } else {
+        ""
+    };
     println!(
-        "codex-gateway: {} -> {} bytes upstream ({:.2}% smaller), status {status}",
+        "codex-gateway: {} -> {} bytes upstream ({:.2}% smaller), status {status}{note}",
         metrics.local_request_bytes,
         metrics.upstream_request_bytes,
         metrics.reduction_basis_points() as f64 / 100.0
@@ -708,7 +713,18 @@ mod tests {
 
     #[test]
     fn the_default_port_is_the_documented_one() {
-        assert_eq!(DEFAULT_PORT, 43117);
+        assert_eq!(DEFAULT_PORT, 43200);
+    }
+
+    #[test]
+    fn the_default_port_is_clear_of_the_interceptor() {
+        // `setup` wires the interceptor at 43117 and, when that is busy, scans the 64 ports
+        // above it. A gateway default inside that window would race the interceptor for a
+        // port on the same machine.
+        assert!(
+            !(43117..=43181).contains(&DEFAULT_PORT),
+            "{DEFAULT_PORT} sits in the interceptor's scan window"
+        );
     }
 
     // ----- the served exchange ----------------------------------------------------------
@@ -772,16 +788,46 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn socket_compression_failure_returns_500() {
+    async fn socket_compression_failure_forwards_the_original_body() {
         let upstream = Arc::new(FakeUpstream::replying(sse()));
         let server = start(&upstream).await;
         let address = server.local_addr();
-        // Not UTF-8, so the product's real transform cannot run. The gateway fails closed
-        // rather than forwarding a body llmtrim never touched.
+        // Not UTF-8, so the product's real transform cannot run. The turn still completes;
+        // the body goes out exactly as it arrived.
         let broken = vec![0x80, 0x81, 0xfe, 0xff];
-        let reply = post(address, GATEWAY_ROUTE, auth_headers(), broken).await;
-        assert_eq!(reply.status, 500);
-        assert!(upstream.seen().is_empty(), "nothing uncompressed goes out");
+        let reply = post(address, GATEWAY_ROUTE, auth_headers(), broken.clone()).await;
+        assert_eq!(reply.status, 200, "a failed transform is not a failed turn");
+        let seen = upstream.seen();
+        assert_eq!(seen.len(), 1, "one attempt, no retry");
+        assert_eq!(seen[0].body, broken, "forwarded byte for byte");
+        server.shutdown().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn socket_forwards_an_encoded_body_with_its_encoding() {
+        // The whole fail-open path over a real socket: a zstd-framed body arrives with its
+        // `Content-Encoding`, the transform cannot run, and the upstream receives the
+        // original request intact — the same bytes, still described as zstd.
+        let upstream = Arc::new(FakeUpstream::replying(sse()));
+        let server = start(&upstream).await;
+        let address = server.local_addr();
+        let encoded = vec![0x28, 0xb5, 0x2f, 0xfd, 0x00, 0x58, 0x99, 0x00, 0x00];
+        let mut headers = auth_headers();
+        headers.push(("content-encoding".to_string(), "zstd".to_string()));
+
+        let reply = post(address, GATEWAY_ROUTE, headers, encoded.clone()).await;
+        assert_eq!(reply.status, 200);
+        let seen = upstream.seen();
+        assert_eq!(seen.len(), 1);
+        assert_eq!(seen[0].body, encoded, "no transformation applied");
+        assert_eq!(
+            seen[0].headers.get("content-encoding").map(String::as_str),
+            Some("zstd")
+        );
+        assert!(
+            !seen[0].headers.contains_key("content-length"),
+            "the client sets this from the body it sends"
+        );
         server.shutdown().await;
     }
 

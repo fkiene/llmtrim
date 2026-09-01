@@ -6,7 +6,7 @@ using its own native configuration, and llmtrim serves that address as an ordina
 endpoint.
 
 ```
-Codex  ──HTTP──▶  127.0.0.1:43117  (llmtrim gateway)  ──HTTPS──▶  chatgpt.com
+Codex  ──HTTP──▶  127.0.0.1:43200  (llmtrim gateway)  ──HTTPS──▶  chatgpt.com
 ```
 
 ## Motivation
@@ -42,9 +42,13 @@ credentials attached. No API key is involved at any point.
 ## Running it
 
 ```
-llmtrim codex-gateway            # 127.0.0.1:43117
+llmtrim codex-gateway            # 127.0.0.1:43200
 llmtrim codex-gateway --port 8123
 ```
+
+The default is **43200**, deliberately not 43117. That one belongs to the interceptor, which
+also scans the 64 ports above it when the default is busy — so a gateway default inside
+`43117..=43181` would race the interceptor for a port on the same machine.
 
 Foreground only. There is no daemon, no autostart, no background service and no supervision:
 the gateway lives exactly as long as the process, and Ctrl-C stops accepting, ends the
@@ -66,7 +70,7 @@ and warns about it at startup — a sensible guard against a hostile repository.
 ```toml
 [model_providers.llmtrim_local]
 name = "LLMTrim Local"
-base_url = "http://127.0.0.1:43117/backend-api/codex"
+base_url = "http://127.0.0.1:43200/backend-api/codex"
 wire_api = "responses"
 requires_openai_auth = true
 
@@ -75,6 +79,41 @@ model_provider = "llmtrim_local"
 
 Nothing here is secret. llmtrim does not write this file and does not read `auth.json`;
 configuring Codex stays the user's decision.
+
+Two details in that snippet are easy to get wrong:
+
+- **`base_url` stops at `/backend-api/codex`.** Codex appends the operation itself, so
+  `wire_api = "responses"` turns it into `POST /backend-api/codex/responses` — which is the
+  one route the gateway serves. Writing the full path with `/responses` already on it yields
+  `/backend-api/codex/responses/responses` and a `404` from the gateway.
+- **`chatgpt_base_url` is not this setting.** That one points at the ChatGPT *login* host
+  used during authentication. Pointing it at the gateway breaks sign-in and does not route a
+  single turn through llmtrim.
+
+### Provider name and first-party capabilities
+
+Codex gates some first-party features on `provider.name` being exactly `"OpenAI"` —
+`ModelProviderInfo::is_openai()` compares that string, not the endpoint or the credentials.
+With any other name the turn works and the ChatGPT session is used normally, but the built-in
+web-search tool is not offered to the model. Measured against Codex 0.146.0, that tool is
+worth about 2.4k input tokens per turn; dropping it is a capability change, not a saving.
+
+Naming the provider `"OpenAI"` restores it, and also lets Codex compress its request bodies
+with zstd. This version does not decode that, so such a request is forwarded exactly as it
+arrived — original body, matching `Content-Encoding` — and the turn completes normally; it
+simply gets no llmtrim reduction. The per-request line says which happened.
+
+To let the gateway see readable JSON and try the `safe` preset on it:
+
+```toml
+[features]
+enable_request_compression = false
+```
+
+All three combinations were exercised against a live session and none of them costs you a
+turn. What changes is how often llmtrim has anything to work with — and even when it does,
+the reduction depends on the payload: structured JSON shrinks, prose and diffs may not shrink
+at all.
 
 ## Security properties
 
@@ -93,7 +132,7 @@ configuring Codex stays the user's decision.
 | Auth gate | A well-formed bearer must be present, checked by shape only, before any body is read. |
 | Request size | 64 MiB, the ceiling the rest of the product already uses. Over it: `413`, and no upstream request. |
 | Compression | `llmtrim_core::compress_with_config`, `safe` preset. |
-| Failure mode | Fail closed: a body that cannot be compressed is refused, not forwarded. |
+| Failure mode | Security gates fail closed. Compression fails **open**: a body llmtrim cannot transform is forwarded unchanged — same bytes, and the `Content-Encoding` that describes them — and the log line says so. |
 | Response | Relayed incrementally, byte for byte and in order (SSE). Nothing is parsed or rewritten. |
 | Memory | Bounded by a fixed relay queue, not by the length of the generation. |
 | Timeouts | Connect 30 s, response head 120 s, response body 30 min. Nothing unbounded. |
@@ -113,17 +152,37 @@ the last.
 
 ## Limitations
 
-- **No gateway authentication.** Any process on the machine can reach the port. The mitigation
-  is structural rather than added: the gateway stores no credential, and it refuses a request
-  that does not carry the caller's own bearer.
-- **The local hop is plaintext.** That is why it is loopback-only.
-- **Fail-closed compression** differs from the interceptor, which forwards the original body
-  when compression does not help. Here a failure surfaces, so a session is never silently
-  running without llmtrim.
+- **No separate gateway authentication.** The gateway has no credential of its own and
+  persists none: `Authorization` and `ChatGPT-Account-ID` exist in memory for the length of one
+  request and are never parsed, logged or written down. It requires a non-empty bearer before
+  forwarding, but that check is on the header's shape — it is not authentication of the local
+  process. Reaching the port does not by itself yield a valid ChatGPT credential, and a bearer
+  that is merely well-formed is still rejected upstream.
+- **The local hop is plaintext.** Credentials transit the loopback hop unencrypted. Binding to
+  loopback reduces network exposure; it does not isolate the port from other processes on the
+  same machine. Confirm the gateway started and bound the port you configured before pointing
+  Codex at it: if another process already holds that port, Codex is talking to that process,
+  not to the gateway.
+- **Compression fails open.** A body llmtrim cannot transform is forwarded unchanged rather
+  than refused: a failed optimisation should not cost the user their turn. It is not silent —
+  the per-request line ends with `(compression failed; original body forwarded)`. The security
+  gates around it stay fail-closed.
+- **No zstd decoding.** Codex compresses request bodies when it considers the provider
+  first-party. This gateway does not decode them, so the transform cannot run and the request
+  is relayed exactly as it arrived: the turn works, llmtrim simply does nothing for it. The
+  interceptor *does* decode zstd and gzip; to have those turns compressed here instead, use
+  the `enable_request_compression = false` configuration above.
+- **`llmtrim status` does not count these turns.** The gateway writes no ledger entry — it has
+  no filesystem surface at all, which is a property the security-contract test enforces. Its
+  only accounting is the two byte counts printed per request, and those are local estimates of
+  request bytes, not billed usage.
+- **The README's savings figures do not describe this path.** They come from the interceptor
+  across mixed traffic. Here the preset is `safe` (lossless, input-only) and the measured
+  effect depends entirely on payload shape: structured JSON pasted into a prompt shrinks;
+  prose, diffs and logs with no exact repetition do not shrink at all. No output-token claim
+  applies to this path.
 - **Codex only.** One route, one upstream. This is not a general reverse proxy and is not
   meant to become one.
-- **Not yet exercised against a live Codex session.** Everything below is validated with a
-  synthetic socket end-to-end test; the first real Codex run has not happened.
 - **Smart App Control** still applies to a locally compiled, unsigned binary on Windows, and
   can block it from running. That is a property of the build, not of this gateway.
 
@@ -137,6 +196,13 @@ The policy layer is pure functions; the socket and upstream layers sit behind a 
 seam. So the whole exchange is **validated with synthetic socket end-to-end tests**: a real
 HTTP client, a real loopback socket, the product's real compression, and a scripted fake
 upstream. No external host is contacted at any point.
+
+Those tests are necessary but not sufficient, so the path is also **exercised against a live
+ChatGPT-signed-in session**: `codex exec` posting to the loopback listener, llmtrim
+compressing, the request reaching `https://chatgpt.com/backend-api/codex/responses`, and the
+turn completing with the expected answer. Pinned to **Codex 0.146.0**
+(`rust-v0.146.0`, `e363b08c9175ac1cbe5893615dd2cb9ddf95043b`); a different Codex version can
+change what it sends and is a different claim.
 
 The suite covers the bind policy and the refusal of any non-loopback host, the route and
 method allowlist, the auth gate and the fact that a refused request never reaches the upstream

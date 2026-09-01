@@ -47,6 +47,10 @@ pub const FORWARDED_HEADERS: [&str; 5] = [
     "originator",
 ];
 
+/// The one header that survives only when the body is forwarded untransformed. See
+/// [`prepare`] for why it is handled there instead of in [`FORWARDED_HEADERS`].
+pub const CONTENT_ENCODING: &str = "content-encoding";
+
 /// Hop-by-hop headers that must not be relayed, plus the ones the upstream leg recomputes.
 pub const DROPPED_HEADERS: [&str; 7] = [
     "host",
@@ -72,8 +76,10 @@ pub enum GatewayError {
     MalformedRequest,
     /// The `Authorization` header was present but not in the expected bearer form.
     MalformedAuthorization,
-    /// Compression failed. The gateway fails closed rather than quietly forwarding the
-    /// original body, so a session never silently runs without llmtrim.
+    /// The transform could not run over this body. Reported by [`compress_body`] so the
+    /// caller can decide; [`prepare`] treats it as a failed *optimisation* and forwards the
+    /// original request unchanged, because losing a turn is worse than losing a reduction.
+    /// The security gates — route, method, bearer, destination — still fail closed.
     CompressionFailed,
     /// The upstream leg failed. No fallback, no alternate provider, no retry.
     UpstreamFailed,
@@ -88,7 +94,7 @@ impl std::fmt::Display for GatewayError {
             Self::RequestTooLarge => "request body exceeded the gateway limit",
             Self::MalformedRequest => "request body could not be read",
             Self::MalformedAuthorization => "authorization header was not a bearer token",
-            Self::CompressionFailed => "compression failed; refusing to forward uncompressed",
+            Self::CompressionFailed => "compression failed",
             Self::UpstreamFailed => "upstream request failed",
         })
     }
@@ -201,9 +207,12 @@ pub fn forward_headers(incoming: &BTreeMap<String, String>) -> BTreeMap<String, 
 
 /// Compress the request body with the product's real transform.
 ///
-/// Fail-closed by design, and deliberately different from the legacy proxy: there, a body that
-/// does not shrink is forwarded verbatim so a user never pays more. Here the point is to know
-/// the gateway is doing its job, so a failure surfaces instead of silently passing through.
+/// Reports failure to the caller rather than deciding what to do about it: [`prepare`] owns
+/// that policy. Whether a failure is fatal is not a property of the transform.
+///
+/// # Errors
+///
+/// A body that is not UTF-8, a preset that will not resolve, or a transform that fails.
 pub fn compress_body(body: &[u8]) -> Result<Vec<u8>, GatewayError> {
     let text = std::str::from_utf8(body).map_err(|_| GatewayError::CompressionFailed)?;
     let config = DenseConfig::preset(GATEWAY_PRESET).ok_or(GatewayError::CompressionFailed)?;
@@ -219,6 +228,10 @@ pub struct GatewayMetrics {
     pub upstream_request_bytes: u64,
     pub response_chunks: u64,
     pub status: u16,
+    /// The original body went upstream because the transform failed. Equal byte counts alone
+    /// cannot say this — a body that simply did not shrink looks identical — so the fact is
+    /// carried rather than inferred, and the operator is told which one happened.
+    pub compression_failed: bool,
 }
 
 impl GatewayMetrics {
@@ -242,22 +255,49 @@ pub type PreparedRequest = (UpstreamRequest, GatewayMetrics);
 /// Split out so the offline [`handle`] and the real [`socket`] server run the *same* policy. A
 /// rule added here cannot be enforced on one path and quietly forgotten on the other.
 ///
+/// Compression is the one step that fails *open*: a body llmtrim cannot transform is
+/// forwarded unchanged, so a failed optimisation never costs the user their turn. The
+/// security gates above it stay fail-closed — route, method and bearer are refusals, and the
+/// destination is still built from constants, so failing open here widens nothing.
+///
 /// # Errors
 ///
-/// The first gate the request fails: route, method, authorization shape, or compression.
+/// The first *security* gate the request fails: route, method, or authorization shape.
 pub fn prepare(request: &GatewayRequest) -> Result<PreparedRequest, GatewayError> {
     validate_route(&request.method, &request.path)?;
     auth_gate(&request.headers)?;
 
-    let compressed = compress_body(&request.body)?;
+    let (body, compression_failed) = match compress_body(&request.body) {
+        Ok(compressed) => (compressed, false),
+        Err(_) => (request.body.clone(), true),
+    };
+    let mut headers = forward_headers(&request.headers);
+    if compression_failed {
+        // The body goes out exactly as it arrived, so whatever encodes it has to travel with
+        // it. Dropping the header here would forward a still-encoded body labelled as plain
+        // JSON — bytes preserved, meaning destroyed, which is not the original request.
+        //
+        // This mirrors the interceptor rather than inventing a policy: it strips
+        // `content-encoding` only after a *successful* decode, and on any decode failure
+        // "the header stays and the still-encoded body is forwarded verbatim"
+        // (`serve.rs`, `decode_request_body` and its caller).
+        //
+        // Deliberately not added to `FORWARDED_HEADERS`: on the success path the body really
+        // is plain JSON llmtrim just wrote, and claiming an encoding there would be a lie in
+        // the other direction. The header is relayed on this one path and no other.
+        if let Some(encoding) = request.headers.get(CONTENT_ENCODING) {
+            headers.insert(CONTENT_ENCODING.to_string(), encoding.clone());
+        }
+    }
     let outgoing = UpstreamRequest {
         url: upstream_url(),
-        headers: forward_headers(&request.headers),
-        body: compressed,
+        headers,
+        body,
     };
     let metrics = GatewayMetrics {
         local_request_bytes: request.body.len() as u64,
         upstream_request_bytes: outgoing.body.len() as u64,
+        compression_failed,
         ..GatewayMetrics::default()
     };
     Ok((outgoing, metrics))
@@ -377,9 +417,9 @@ pub mod listener {
 #[cfg(test)]
 mod tests {
     use super::{
-        DROPPED_HEADERS, GATEWAY_PRESET, GATEWAY_ROUTE, GatewayError, GatewayRequest,
-        GatewayUpstream, UPSTREAM_ORIGIN, UpstreamRequest, UpstreamResponse, auth_gate,
-        compress_body, forward_headers, handle, upstream_url, validate_route,
+        CONTENT_ENCODING, DROPPED_HEADERS, GATEWAY_PRESET, GATEWAY_ROUTE, GatewayError,
+        GatewayRequest, GatewayUpstream, UPSTREAM_ORIGIN, UpstreamRequest, UpstreamResponse,
+        auth_gate, compress_body, forward_headers, handle, prepare, upstream_url, validate_route,
     };
     use std::collections::BTreeMap;
 
@@ -675,21 +715,105 @@ mod tests {
     }
 
     #[test]
-    fn compression_failure_is_closed_not_open() {
-        // Invalid UTF-8 cannot be compressed. The legacy proxy would forward the original;
-        // this gateway must refuse, so a session never silently runs without llmtrim.
+    fn compression_failure_forwards_the_original_body() {
+        // Invalid UTF-8 cannot be compressed. The turn must still happen: a failed
+        // optimisation is not a reason to take the user's session away from them.
         let mut request = codex_request();
-        request.body = vec![0xff, 0xfe, 0xfd];
-        let mut upstream = FakeUpstream::default();
-        assert_eq!(
-            handle(&request, &mut upstream),
-            Err(GatewayError::CompressionFailed)
-        );
-        assert!(
-            upstream.seen.is_empty(),
-            "nothing may be forwarded when compression fails"
-        );
+        let original = vec![0xff, 0xfe, 0xfd];
+        request.body = original.clone();
+        let mut upstream = FakeUpstream::streaming();
+        let (_, metrics) = handle(&request, &mut upstream).expect("the turn still happens");
+        assert_eq!(upstream.seen.len(), 1, "one attempt, still no retry");
+        assert_eq!(upstream.seen[0].body, original, "byte for byte, untouched");
+        assert!(metrics.compression_failed, "the operator is told");
+        assert_eq!(metrics.local_request_bytes, metrics.upstream_request_bytes);
         assert!(compress_body(&[0xff, 0xfe]).is_err());
+    }
+
+    #[test]
+    fn an_untransformed_body_keeps_the_encoding_that_describes_it() {
+        // A zstd body: not UTF-8, so the transform cannot run. What reaches the upstream must
+        // be the original request in full — the same bytes AND the header that says how to
+        // read them.
+        let mut request = codex_request();
+        let original = vec![0x28, 0xb5, 0x2f, 0xfd, 0x00, 0x58, 0x99, 0x00, 0x00];
+        request.body = original.clone();
+        request
+            .headers
+            .insert(CONTENT_ENCODING.to_string(), "zstd".to_string());
+
+        let mut upstream = FakeUpstream::streaming();
+        let (_, metrics) = handle(&request, &mut upstream).expect("the turn still happens");
+        let sent = &upstream.seen[0];
+        assert_eq!(sent.body, original, "byte for byte");
+        assert_eq!(
+            sent.headers.get(CONTENT_ENCODING).map(String::as_str),
+            Some("zstd"),
+            "a still-encoded body must not be presented as plain JSON"
+        );
+        assert!(metrics.compression_failed);
+    }
+
+    #[test]
+    fn a_transformed_body_never_claims_an_encoding() {
+        // The other direction, and the reason this is not on the forward list: after a
+        // successful transform the body is plain JSON llmtrim just serialised. Relaying an
+        // inherited `content-encoding` would describe bytes that no longer exist.
+        let mut request = codex_request();
+        request
+            .headers
+            .insert(CONTENT_ENCODING.to_string(), "zstd".to_string());
+
+        let mut upstream = FakeUpstream::streaming();
+        let (_, metrics) = handle(&request, &mut upstream).expect("handled");
+        assert!(!metrics.compression_failed, "this body does compress");
+        assert!(
+            !upstream.seen[0].headers.contains_key(CONTENT_ENCODING),
+            "plain JSON must not be labelled encoded"
+        );
+    }
+
+    #[test]
+    fn no_stale_content_length_is_ever_forwarded() {
+        // The gateway changes the body length on the success path and preserves it on the
+        // fail-open path. Either way it never forwards a length of its own: `content-length`
+        // is dropped, and `HttpsUpstream::send` hands ureq the body slice, which sets the
+        // header from the bytes actually sent. Same rule as the interceptor, which removes
+        // `CONTENT_LENGTH` so hyper recomputes it.
+        for body in [codex_request().body, vec![0xff, 0xfe, 0xfd]] {
+            let mut request = codex_request();
+            request.body = body;
+            request
+                .headers
+                .insert("content-length".to_string(), "999999".to_string());
+            let (outgoing, _) = prepare(&request).expect("prepared");
+            assert!(
+                !outgoing.headers.contains_key("content-length"),
+                "the client must compute this from the body it sends"
+            );
+        }
+        assert!(DROPPED_HEADERS.contains(&"content-length"));
+    }
+
+    #[test]
+    fn failing_open_is_only_the_compression_step() {
+        // The gates that keep the port from being an anonymous relay are untouched by the
+        // change above: each still refuses, and refusing still means nothing goes upstream.
+        let gates: [(&str, fn(&mut GatewayRequest)); 3] = [
+            ("route", |r| r.path = "/v1/responses".into()),
+            ("method", |r| r.method = "GET".into()),
+            ("bearer", |r| {
+                r.headers.remove("authorization");
+            }),
+        ];
+        for (name, mutate) in gates {
+            let mut request = codex_request();
+            request.body = vec![0xff, 0xfe, 0xfd];
+            mutate(&mut request);
+            let mut upstream = FakeUpstream::streaming();
+            assert!(handle(&request, &mut upstream).is_err(), "{name}");
+            assert!(upstream.seen.is_empty(), "{name}: nothing forwarded");
+        }
     }
 
     // ----- response ---------------------------------------------------------------------
