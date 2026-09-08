@@ -4453,12 +4453,15 @@ mod imp {
                 }
             }
         }
-        let mut result = llmtrim_core::compress_with_config_model_and_recovery(
+        let mut result = llmtrim_core::compress_with_config_model_recovery_passthrough(
             text,
             Some(kind),
             config,
             model_override,
             recovery_hints,
+            llmtrim_core::config::RuntimeConfig::get()
+                .toolout_passthrough
+                .clone(),
         )
         .ok()?;
         // Replay previously-forwarded prefix bytes before deciding whether this turn has a net

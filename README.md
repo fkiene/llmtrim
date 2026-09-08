@@ -442,7 +442,6 @@ Every stage is individually tunable via config flags; `preset` wins over individ
 | field | default | meaning |
 | --- | --- | --- |
 | `toolout` | on in `agent`/`aggressive` | tool-output compression (logs / diffs / grep / dumps) |
-| `toolout_passthrough` | `[]` | command globs whose tool results skip compression (`*` = all); see `LLMTRIM_TOOL_OUTPUT` |
 | `retrieve` | `false` | lexical retrieval for long context (lossy) |
 | `skeletonize` | `false` | drop non-relevant function bodies to signatures |
 | `serialize` | `true` | TOON / CSV encoding of record arrays |

@@ -159,12 +159,6 @@ pub struct DenseConfig {
     /// Dropped lines are elided by position (`[… N lines omitted …]`); the agent re-runs
     /// the tool if it needs them.
     pub toolout_mode: String,
-    /// Stage T — command globs whose tool results skip tool-output compression
-    /// (byte-identical stdout, no recall trailer). `*` matches every command.
-    /// Env `LLMTRIM_TOOL_OUTPUT=passthrough` is this glob. Overlayed at [`load`]
-    /// from env/file so it coexists with `preset = "agent"`.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub toolout_passthrough: Vec<String>,
     /// Stage C — skeletonize fenced code blocks (drop function bodies to stubs).
     /// Lossy; off by default.
     pub skeletonize: bool,
@@ -274,7 +268,6 @@ impl DenseConfig {
             toolout_min_lines: 20,
             toolout_template: true,
             toolout_mode: "auto".to_string(),
-            toolout_passthrough: Vec::new(),
             skeletonize: false,
             skeleton_keep_full_top_k: 5,
             skeleton_drop_unmatched: false,
@@ -298,26 +291,22 @@ impl DenseConfig {
     /// `reasoning`. A `preset` key and raw flags are alternatives — `preset` wins (one knob
     /// instead of ~30); drop the `preset` key to hand-tune flags.
     pub fn load() -> Result<Self> {
-        let mut cfg = if let Some(name) = std::env::var("LLMTRIM_PRESET")
+        if let Some(name) = std::env::var("LLMTRIM_PRESET")
             .ok()
             .filter(|s| !s.is_empty())
         {
-            Self::preset(&name).with_context(|| {
+            return Self::preset(&name).with_context(|| {
                 format!("unknown LLMTRIM_PRESET '{name}' (auto|safe|rag|agent|code|aggressive|cache|reasoning)")
-            })?
-        } else if let Some(path) = config_path().filter(|p| p.exists()) {
-            let text = std::fs::read_to_string(&path)
-                .with_context(|| format!("failed to read {}", path.display()))?;
-            let value: toml::Value = toml::from_str(&text)
-                .with_context(|| format!("failed to parse {}", path.display()))?;
-            Self::from_toml_value(value)
-                .with_context(|| format!("invalid config {}", path.display()))?
-        } else {
-            Self::auto()
+            });
+        }
+        let Some(path) = config_path().filter(|p| p.exists()) else {
+            return Ok(Self::auto());
         };
-        cfg.toolout_passthrough =
-            resolve_toolout_passthrough(|k| std::env::var(k).ok(), load_config_file().as_ref());
-        Ok(cfg)
+        let text = std::fs::read_to_string(&path)
+            .with_context(|| format!("failed to read {}", path.display()))?;
+        let value: toml::Value =
+            toml::from_str(&text).with_context(|| format!("failed to parse {}", path.display()))?;
+        Self::from_toml_value(value).with_context(|| format!("invalid config {}", path.display()))
     }
 
     /// Resolve a parsed config: a `preset = "<name>"` key selects a named profile; otherwise

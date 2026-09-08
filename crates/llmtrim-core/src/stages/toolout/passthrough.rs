@@ -5,7 +5,7 @@
 //! (it is sandboxed to the dispatch command). Three signals skip lossy shaping and
 //! the ANSI/CR pre-pass for that result only:
 //!
-//! 1. Config/env command globs ([`crate::config::DenseConfig::toolout_passthrough`]).
+//! 1. Config/env command globs ([`crate::config::RuntimeConfig::toolout_passthrough`]).
 //!    `*` matches every command. `LLMTRIM_TOOL_OUTPUT=passthrough` is this glob.
 //! 2. The producing bash command assigns `LLMTRIM_TOOL_OUTPUT=passthrough`.
 //! 3. A line of the result is exactly that assignment (in-band, for wrappers that

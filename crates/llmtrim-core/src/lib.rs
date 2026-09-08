@@ -94,7 +94,6 @@ fn stages_for(_provider: ProviderKind, config: &config::DenseConfig) -> Vec<Box<
             min_lines: config.toolout_min_lines,
             template: config.toolout_template,
             mode: stages::toolout::ModeSetting::parse(&config.toolout_mode),
-            passthrough: config.toolout_passthrough.clone(),
         }));
     }
     // Stage B (input-side, lossy): prune large context to the relevant chunks first.
@@ -269,7 +268,14 @@ pub fn compress(input: &str, provider: Option<ProviderKind>) -> Result<CompressR
         eprintln!("llmtrim: {e}; using the auto default");
         config::DenseConfig::default()
     });
-    compress_with_config(input, provider, &config)
+    compress_with_config_model_recovery_passthrough(
+        input,
+        provider,
+        &config,
+        None,
+        BTreeMap::new(),
+        config::RuntimeConfig::get().toolout_passthrough.clone(),
+    )
 }
 
 /// Compress with an explicit [`config::DenseConfig`] (no environment access — the
@@ -314,6 +320,28 @@ pub fn compress_with_config_model_and_recovery(
     model_override: Option<&str>,
     recovery_hints: BTreeMap<String, String>,
 ) -> Result<CompressResult> {
+    compress_with_config_model_recovery_passthrough(
+        input,
+        provider,
+        config,
+        model_override,
+        recovery_hints,
+        Vec::new(),
+    )
+}
+
+/// Like [`compress_with_config_model_and_recovery`], plus command globs that skip
+/// tool-output windowing (issue #281). Not a [`config::DenseConfig`] field: adding one
+/// would be a breaking public-struct change.
+#[doc(hidden)]
+pub fn compress_with_config_model_recovery_passthrough(
+    input: &str,
+    provider: Option<ProviderKind>,
+    config: &config::DenseConfig,
+    model_override: Option<&str>,
+    recovery_hints: BTreeMap<String, String>,
+    toolout_passthrough: Vec<String>,
+) -> Result<CompressResult> {
     let value: Value = serde_json::from_str(input).context("request body is not valid JSON")?;
     let kind = match provider {
         Some(k) => k,
@@ -331,7 +359,7 @@ pub fn compress_with_config_model_and_recovery(
     let mut req = Request::from_value(kind, value);
     req.set_model_hint(model_override);
     req.set_recovery_hints(recovery_hints);
-
+    req.set_toolout_passthrough(toolout_passthrough);
     // `auto` resolves the preset from the request shape (structural, zero-model).
     let routed;
     let config = if config.auto {
@@ -932,14 +960,14 @@ mod tests {
         let dump = courier_dump();
         let input = courier_turn("bash ~/.claude/bin/gpt.sh --job 1", &dump);
         let pointer = "/messages/1/content/0/content".to_string();
-        let mut cfg = config::DenseConfig::preset("agent").unwrap();
-        cfg.toolout_passthrough = vec!["bash ~/.claude/bin/gpt.sh *".into()];
-        let recovered = compress_with_config_model_and_recovery(
+        let cfg = config::DenseConfig::preset("agent").unwrap();
+        let recovered = compress_with_config_model_recovery_passthrough(
             &input,
             Some(ProviderKind::Anthropic),
             &cfg,
             None,
             BTreeMap::from([(pointer.clone(), "r_a".to_string())]),
+            vec!["bash ~/.claude/bin/gpt.sh *".into()],
         )
         .unwrap();
         let body: Value = serde_json::from_str(&recovered.request_json).unwrap();

@@ -153,8 +153,6 @@ pub struct ToolOutputStage {
     /// Adaptive/aggressive split: `Adaptive` (always window), `Aggressive` (always
     /// signal-only), or `Auto` (decide per segment by noise density).
     pub mode: ModeSetting,
-    /// Command globs whose tool results skip normalize + windowing (`*` = all).
-    pub passthrough: Vec<String>,
 }
 
 /// Per-segment knobs handed to each kind's compressor.
@@ -194,6 +192,7 @@ impl Transform for ToolOutputStage {
             mode: self.mode,
         };
         let commands = passthrough::commands_by_id(req.raw());
+        let patterns = req.toolout_passthrough();
         let exempt: HashSet<String> = first_arrival
             .iter()
             .chain(pointers.iter())
@@ -202,7 +201,7 @@ impl Transform for ToolOutputStage {
                     passthrough::should_passthrough(
                         raw,
                         passthrough::command_for(&commands, req.raw(), p),
-                        &self.passthrough,
+                        patterns,
                     )
                 })
             })

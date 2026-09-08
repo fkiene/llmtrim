@@ -56,6 +56,8 @@ pub struct Request {
     model_hint: Option<String>,
     /// Opaque, request-local recovery handles keyed by content pointer. Never serialized.
     recovery_hints: BTreeMap<String, String>,
+    /// Command globs that skip tool-output windowing for this request. Never serialized.
+    toolout_passthrough: Vec<String>,
 }
 
 impl Request {
@@ -67,6 +69,7 @@ impl Request {
             raw,
             model_hint: None,
             recovery_hints: BTreeMap::new(),
+            toolout_passthrough: Vec::new(),
         })
     }
 
@@ -77,6 +80,7 @@ impl Request {
             raw,
             model_hint: None,
             recovery_hints: BTreeMap::new(),
+            toolout_passthrough: Vec::new(),
         }
     }
 
@@ -96,6 +100,14 @@ impl Request {
 
     pub(crate) fn recovery_hint(&self, pointer: &str) -> Option<&str> {
         self.recovery_hints.get(pointer).map(String::as_str)
+    }
+
+    pub(crate) fn set_toolout_passthrough(&mut self, patterns: Vec<String>) {
+        self.toolout_passthrough = patterns;
+    }
+
+    pub(crate) fn toolout_passthrough(&self) -> &[String] {
+        &self.toolout_passthrough
     }
 
     /// The request's model id: the body's `model` field if present, else the out-of-band hint.
