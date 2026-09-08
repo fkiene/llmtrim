@@ -42,7 +42,7 @@
 //!    wherever windowing still runs (including errors-only).
 //!
 //! Live-zone windowing is lossy. First-arrival cache-boundary results receive recoverable
-//! windowing by default on auto-routed agent requests: an admitted result gets an opaque recall
+//! windowing only when `first_arrival_recall` is on: an admitted result gets an opaque recall
 //! handle, while its raw bytes live only in the daemon memory store for five hours by default.
 //! When recovery is disabled or admission fails, the boundary receives terminal-equivalent
 //! normalization only. Without an admission hint, template folding and lossy

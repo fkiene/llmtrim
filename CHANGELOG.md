@@ -19,6 +19,15 @@ All notable changes to this project are documented here. The format follows
   with `preset = "agent"`. Lines starting with `LLMTRIM_KEEP:` are force-kept
   when windowing still runs. (#281)
 
+### Changed
+
+- **First-arrival tool-output recall is off by default.** Cache-boundary tool results
+  were shaped Aggressive (errors-only / `+/-` only) and recovered via `llmtrim recall`,
+  which the agent often cannot run (PATH, sandbox, in-memory store). Frozen prefixes
+  then kept the skeleton for the rest of the session. Live-zone log/diff/grep windowing
+  is unchanged; re-run the tool to get the full result. Opt in with
+  `first_arrival_recall = true` or `LLMTRIM_FIRST_ARRIVAL_RECALL=true`.
+
 ### Fixed
 
 - **Windows tray Start proxy no longer spins forever.** Clicking Start proxy flashed

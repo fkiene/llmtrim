@@ -966,8 +966,8 @@ pub struct RuntimeConfig {
     /// model substitution is disabled. File-only: model routing is persistent policy, not an
     /// environment toggle.
     pub compact_models: Vec<String>,
-    /// Enable recoverable lossy first-arrival tool-output shaping (default true). It activates on
-    /// auto-routed agent requests; set false to retain normalization-only cache writes. Raw output
+    /// Enable recoverable lossy first-arrival tool-output shaping (default false). Opt in
+    /// on auto-routed agent requests; unset keeps normalization-only cache writes. Raw output
     /// remains only in daemon memory and can be recalled for the configured TTL.
     pub first_arrival_recall: bool,
     /// Recall-store TTL in seconds; unset uses five hours (18,000 seconds).
@@ -1073,7 +1073,7 @@ impl RuntimeConfig {
             first_arrival_recall: env_set("LLMTRIM_FIRST_ARRIVAL_RECALL")
                 .and_then(|s| s.parse().ok())
                 .or_else(|| fbool("first_arrival_recall"))
-                .unwrap_or(true),
+                .unwrap_or(false),
             first_arrival_recall_ttl_secs: env_set("LLMTRIM_FIRST_ARRIVAL_RECALL_TTL_SECS")
                 .and_then(|s| s.parse().ok())
                 .or_else(|| {
@@ -3256,11 +3256,11 @@ active = \"off\"
     }
 
     #[test]
-    fn first_arrival_recall_defaults_on_allows_opt_out_and_parses_limits() {
+    fn first_arrival_recall_defaults_off_allows_opt_in_and_parses_limits() {
         let defaults = resolve_file("");
-        assert!(defaults.first_arrival_recall);
+        assert!(!defaults.first_arrival_recall);
         assert_eq!(defaults.first_arrival_recall_ttl_secs, None);
-        assert!(!resolve_file("first_arrival_recall = false").first_arrival_recall);
+        assert!(resolve_file("first_arrival_recall = true").first_arrival_recall);
         let c = resolve_env(
             &[
                 ("LLMTRIM_FIRST_ARRIVAL_RECALL", "true"),
