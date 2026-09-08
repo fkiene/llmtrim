@@ -302,23 +302,36 @@ mod imp {
         (out.len() as u64 <= MAX_DECODED).then_some(out)
     }
 
+    /// HTTP/2 Extended CONNECT with `:protocol: websocket` (RFC 8441). hudsucker treats
+    /// CONNECT as an HTTP tunnel, so these must be refused rather than forwarded.
+    fn is_h2_websocket_connect(req: &Request<Body>) -> bool {
+        req.method() == Method::CONNECT
+            && req
+                .extensions()
+                .get::<hudsucker::hyper::ext::Protocol>()
+                .is_some_and(|p| p.as_str().eq_ignore_ascii_case("websocket"))
+    }
+
     /// True if `req` is a WebSocket upgrade attempt — either an HTTP/1.1 `Upgrade: websocket`
-    /// handshake or an HTTP/2 Extended CONNECT (RFC 8441, the `:protocol` pseudo-header set to
-    /// `websocket`). We refuse these on intercepted LLM hosts (see `handle_request_inner`): a
-    /// WebSocket carries the prompt as frames, not an HTTP body, so llmtrim can't compress it,
-    /// and hudsucker can't forward an h2 Extended CONNECT anyway — it stalls until the client
-    /// times out. Refusing fast makes the client fall back to the plain-HTTPS transport, which
-    /// is a normal POST body llmtrim *does* compress. OpenAI's Codex is the motivating client.
+    /// handshake or an HTTP/2 Extended CONNECT. See [`should_refuse_websocket`] for which of
+    /// these are refused vs forwarded.
     fn is_websocket_upgrade(req: &Request<Body>) -> bool {
-        if req.method() == Method::CONNECT
-            && let Some(p) = req.extensions().get::<hudsucker::hyper::ext::Protocol>()
-        {
-            return p.as_str().eq_ignore_ascii_case("websocket");
-        }
-        req.headers()
-            .get(header::UPGRADE)
-            .and_then(|v| v.to_str().ok())
-            .is_some_and(|v| v.eq_ignore_ascii_case("websocket"))
+        is_h2_websocket_connect(req)
+            || req
+                .headers()
+                .get(header::UPGRADE)
+                .and_then(|v| v.to_str().ok())
+                .is_some_and(|v| v.eq_ignore_ascii_case("websocket"))
+    }
+
+    /// True when an intercepted WebSocket must be refused with 426 rather than forwarded.
+    /// Prompt-bearing routes (Codex `/responses`) have an HTTPS fallback llmtrim can compress;
+    /// h2 Extended CONNECT cannot be forwarded by hudsucker. Everything else — notably Claude
+    /// Code voice dictation at `/api/ws/speech_to_text/voice_stream` — is passed through so
+    /// hudsucker can tunnel it.
+    fn should_refuse_websocket(req: &Request<Body>) -> bool {
+        is_websocket_upgrade(req)
+            && (is_h2_websocket_connect(req) || is_compressible_path(req.uri().path()))
     }
 
     /// Host of a request: the URI authority, else the `Host` header (port stripped).
@@ -2026,16 +2039,20 @@ mod imp {
         /// constructing a `hudsucker::HttpContext` (which is `#[non_exhaustive]` and
         /// cannot be instantiated outside the hudsucker crate).
         async fn handle_request_inner(&mut self, req: Request<Body>) -> RequestOrResponse {
-            // Refuse WebSocket upgrades on intercepted hosts so the client drops to the
-            // compressible plain-HTTPS transport (see `is_websocket_upgrade`). 426 Upgrade
-            // Required is a clean, immediate handshake failure — no body, no hang — so the
-            // client falls back at once instead of retrying the dead upgrade for seconds.
-            if is_websocket_upgrade(&req) {
+            // WebSockets on intercepted hosts: refuse prompt-bearing upgrades (Codex
+            // `/responses`) with 426 so the client drops to compressible HTTPS; refuse h2
+            // Extended CONNECT (hudsucker can't forward it). Other sockets — Claude Code
+            // dictation on `/api/ws/` — have no HTTPS fallback, so pass them through for
+            // hudsucker to tunnel. Return before dummy-auth stubs so dictation is not eaten.
+            if should_refuse_websocket(&req) {
                 let res = Response::builder()
                     .status(hudsucker::hyper::StatusCode::UPGRADE_REQUIRED)
                     .body(Body::empty())
                     .expect("static 426 response is always valid");
                 return RequestOrResponse::Response(res);
+            }
+            if is_websocket_upgrade(&req) {
+                return req.into();
             }
             // Lowercase the host once: every host comparison below (Vertex suffix, provider
             // lookup, exclusion match) is case-insensitive.
@@ -6997,6 +7014,7 @@ mod imp {
                 "/v1/messages/count_tokens",
                 "/v1beta/models/gemini-2.0-flash:countTokens",
                 "/v1/audio/transcriptions",
+                "/api/ws/speech_to_text/voice_stream",
             ] {
                 assert!(!is_compressible_path(skip), "must NOT compress {skip}");
             }
@@ -7552,6 +7570,16 @@ mod imp {
                 .expect("valid request")
         }
 
+        fn websocket_get(uri: &str) -> Request<Body> {
+            Request::builder()
+                .method(Method::GET)
+                .uri(uri)
+                .header(header::UPGRADE, "websocket")
+                .header(header::CONNECTION, "Upgrade")
+                .body(Body::empty())
+                .expect("valid request")
+        }
+
         fn get_request_bearer(uri: &str, token: &str) -> Request<Body> {
             Request::builder()
                 .method(Method::GET)
@@ -7792,39 +7820,81 @@ mod imp {
 
         #[test]
         fn is_websocket_upgrade_detects_h1_upgrade_header() {
-            let ws = Request::builder()
-                .method(Method::GET)
-                .uri("https://chatgpt.com/backend-api/codex/responses")
-                .header(header::UPGRADE, "websocket")
-                .header(header::CONNECTION, "Upgrade")
-                .body(Body::empty())
-                .expect("valid request");
+            let ws = websocket_get("https://chatgpt.com/backend-api/codex/responses");
             assert!(is_websocket_upgrade(&ws));
+            assert!(should_refuse_websocket(&ws));
+
+            let dictation =
+                websocket_get("https://api.anthropic.com/api/ws/speech_to_text/voice_stream");
+            assert!(is_websocket_upgrade(&dictation));
+            assert!(
+                !should_refuse_websocket(&dictation),
+                "dictation has no HTTPS fallback; refusing it kills the microphone"
+            );
 
             let plain = post_request("https://api.openai.com/v1/chat/completions", "{}");
             assert!(!is_websocket_upgrade(&plain));
+            assert!(!should_refuse_websocket(&plain));
         }
 
-        /// A WebSocket upgrade on an intercepted host is short-circuited with 426 so the client
-        /// falls back to the compressible HTTPS transport — never forwarded, never compressed.
+        /// A WebSocket upgrade on a prompt-bearing path is short-circuited with 426 so the
+        /// client falls back to the compressible HTTPS transport — never forwarded, never
+        /// compressed. Codex `/responses` is the motivating case.
         #[tokio::test]
         async fn handle_request_inner_refuses_websocket_upgrade_with_426() {
             let (mut handler, rx) = make_interceptor();
-            let req = Request::builder()
-                .method(Method::GET)
-                .uri("https://chatgpt.com/backend-api/codex/responses")
-                .header(header::UPGRADE, "websocket")
-                .header(header::CONNECTION, "Upgrade")
-                .body(Body::empty())
-                .expect("valid request");
+            let req = websocket_get("https://chatgpt.com/backend-api/codex/responses");
 
             let result = handler.handle_request_inner(req).await;
 
             let RequestOrResponse::Response(res) = result else {
-                panic!("a WebSocket upgrade must be refused with a Response, not forwarded");
+                panic!(
+                    "a prompt-bearing WebSocket upgrade must be refused with a Response, not forwarded"
+                );
             };
             assert_eq!(res.status(), hudsucker::hyper::StatusCode::UPGRADE_REQUIRED);
             // Refusal is not a compressed request: no pending state, no ledger record.
+            assert!(handler.pending.is_none());
+            assert!(rx.try_recv().is_err());
+        }
+
+        /// Claude Code dictation (`wss://api.anthropic.com/api/ws/speech_to_text/voice_stream`)
+        /// has no HTTPS fallback. Refusing it with 426 kills the microphone (#282). Forward
+        /// the upgrade so hudsucker can tunnel it; do not compress, do not ledger.
+        #[tokio::test]
+        async fn handle_request_inner_forwards_anthropic_dictation_websocket() {
+            let (mut handler, rx) = make_interceptor();
+            let req = websocket_get("https://api.anthropic.com/api/ws/speech_to_text/voice_stream");
+
+            let result = handler.handle_request_inner(req).await;
+
+            let RequestOrResponse::Request(out) = result else {
+                panic!("dictation WebSocket must be forwarded, not refused with 426");
+            };
+            assert_eq!(out.uri().path(), "/api/ws/speech_to_text/voice_stream");
+            assert!(handler.pending.is_none());
+            assert!(rx.try_recv().is_err());
+        }
+
+        /// hudsucker treats CONNECT as an HTTP tunnel, so an h2 Extended CONNECT websocket
+        /// would stall. Refuse even on a non-compressible path (dictation) rather than hang.
+        #[tokio::test]
+        async fn handle_request_inner_refuses_h2_websocket_connect_on_dictation_path() {
+            let (mut handler, rx) = make_interceptor();
+            let mut req = Request::builder()
+                .method(Method::CONNECT)
+                .uri("https://api.anthropic.com/api/ws/speech_to_text/voice_stream")
+                .body(Body::empty())
+                .expect("valid request");
+            req.extensions_mut()
+                .insert(hudsucker::hyper::ext::Protocol::from_static("websocket"));
+
+            let result = handler.handle_request_inner(req).await;
+
+            let RequestOrResponse::Response(res) = result else {
+                panic!("h2 Extended CONNECT must be refused with 426, not forwarded");
+            };
+            assert_eq!(res.status(), hudsucker::hyper::StatusCode::UPGRADE_REQUIRED);
             assert!(handler.pending.is_none());
             assert!(rx.try_recv().is_err());
         }

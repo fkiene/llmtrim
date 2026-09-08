@@ -15,6 +15,13 @@ All notable changes to this project are documented here. The format follows
   non-blocking, `start` fails (and unwires) if the port never accepts, and the tray
   shows an error instead of spinning. (#272)
 
+- **Claude Code voice dictation works through the proxy.** The interceptor refused
+  every WebSocket upgrade to an intercepted host with `426` so Codex would fall
+  back to compressible HTTPS. Claude Code's speech-to-text socket
+  (`wss://api.anthropic.com/api/ws/speech_to_text/voice_stream`) has no HTTPS
+  fallback, so the microphone died. Non-prompt WebSockets are now forwarded;
+  Codex `/responses` still gets `426`. (#282)
+
 ## [0.13.3] - 2026-09-01
 
 ### Changed
