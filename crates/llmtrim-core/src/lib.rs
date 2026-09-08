@@ -94,6 +94,7 @@ fn stages_for(_provider: ProviderKind, config: &config::DenseConfig) -> Vec<Box<
             min_lines: config.toolout_min_lines,
             template: config.toolout_template,
             mode: stages::toolout::ModeSetting::parse(&config.toolout_mode),
+            passthrough: config.toolout_passthrough.clone(),
         }));
     }
     // Stage B (input-side, lossy): prune large context to the relevant chunks first.
@@ -889,6 +890,138 @@ mod tests {
             "first occurrence got smaller ({} -> {})",
             dump.len(),
             first.len()
+        );
+    }
+
+    fn courier_dump() -> String {
+        let mut lines: Vec<String> = (0..80)
+            .map(|i| format!("INFO  courier step {i} routine nominal pass"))
+            .collect();
+        lines.push("ERROR courier inner tool failed".into());
+        lines.push("INFO  padding after the error".into());
+        lines.push("LANE_DELIVERY job=11111111-2222-3333-4444-555555555555 sha256=deadbeef".into());
+        lines.join("\n")
+    }
+
+    fn courier_turn(command: &str, dump: &str) -> String {
+        serde_json::json!({
+            "model": "claude-3-5-sonnet-20241022",
+            "messages": [
+                {"role": "assistant", "content": [
+                    {"type": "tool_use", "id": "new", "name": "Bash",
+                     "input": {"command": command}}
+                ]},
+                {"role": "user", "content": [
+                    {"type": "tool_result", "tool_use_id": "new", "content": dump}
+                ]},
+                {"role": "system", "content": [
+                    {"type": "text", "text": "budget reminder",
+                     "cache_control": {"type": "ephemeral"}}
+                ]},
+            ],
+            "max_tokens": 1024,
+        })
+        .to_string()
+    }
+
+    #[test]
+    fn command_glob_passthrough_keeps_courier_trailer_verbatim() {
+        // #281: a nested wrapper's terminal LANE_DELIVERY line is a machine contract.
+        // First-arrival aggressive shaping would drop it; a matching command glob must
+        // ship the result byte-identical, with no recall pointer appended.
+        let dump = courier_dump();
+        let input = courier_turn("bash ~/.claude/bin/gpt.sh --job 1", &dump);
+        let pointer = "/messages/1/content/0/content".to_string();
+        let mut cfg = config::DenseConfig::preset("agent").unwrap();
+        cfg.toolout_passthrough = vec!["bash ~/.claude/bin/gpt.sh *".into()];
+        let recovered = compress_with_config_model_and_recovery(
+            &input,
+            Some(ProviderKind::Anthropic),
+            &cfg,
+            None,
+            BTreeMap::from([(pointer.clone(), "r_a".to_string())]),
+        )
+        .unwrap();
+        let body: Value = serde_json::from_str(&recovered.request_json).unwrap();
+        let shaped = body.pointer(&pointer).and_then(Value::as_str).unwrap();
+        assert_eq!(shaped, dump, "exempt command stdout is uncompressed");
+        assert!(
+            !shaped.contains("llmtrim recall"),
+            "passthrough must not append a recall pointer"
+        );
+        assert!(
+            shaped.ends_with(
+                "LANE_DELIVERY job=11111111-2222-3333-4444-555555555555 sha256=deadbeef"
+            ),
+            "trailer remains the last line: {shaped}"
+        );
+    }
+
+    #[test]
+    fn command_env_sentinel_passthroughs_without_config() {
+        let dump = courier_dump();
+        let input = courier_turn(
+            "LLMTRIM_TOOL_OUTPUT=passthrough bash ~/.claude/bin/gpt.sh --job 1",
+            &dump,
+        );
+        let pointer = "/messages/1/content/0/content".to_string();
+        let cfg = config::DenseConfig::preset("agent").unwrap();
+        let recovered = compress_with_config_model_and_recovery(
+            &input,
+            Some(ProviderKind::Anthropic),
+            &cfg,
+            None,
+            BTreeMap::from([(pointer.clone(), "r_a".to_string())]),
+        )
+        .unwrap();
+        let body: Value = serde_json::from_str(&recovered.request_json).unwrap();
+        let shaped = body.pointer(&pointer).and_then(Value::as_str).unwrap();
+        assert_eq!(shaped, dump);
+    }
+
+    #[test]
+    fn output_sentinel_line_passthroughs() {
+        let dump = format!("LLMTRIM_TOOL_OUTPUT=passthrough\n{}", courier_dump());
+        let input = courier_turn("bash cargo test", &dump);
+        let pointer = "/messages/1/content/0/content".to_string();
+        let cfg = config::DenseConfig::preset("agent").unwrap();
+        let recovered = compress_with_config_model_and_recovery(
+            &input,
+            Some(ProviderKind::Anthropic),
+            &cfg,
+            None,
+            BTreeMap::from([(pointer.clone(), "r_a".to_string())]),
+        )
+        .unwrap();
+        let body: Value = serde_json::from_str(&recovered.request_json).unwrap();
+        let shaped = body.pointer(&pointer).and_then(Value::as_str).unwrap();
+        assert_eq!(shaped, dump);
+    }
+
+    #[test]
+    fn unexempted_first_arrival_drops_terminal_courier_trailer() {
+        // Sanity: without an exemption the original bug still holds — aggressive
+        // first-arrival shaping neither keeps LANE_DELIVERY last nor leaves it intact.
+        let dump = courier_dump();
+        let input = courier_turn("bash cargo test", &dump);
+        let pointer = "/messages/1/content/0/content".to_string();
+        let cfg = config::DenseConfig::preset("agent").unwrap();
+        let recovered = compress_with_config_model_and_recovery(
+            &input,
+            Some(ProviderKind::Anthropic),
+            &cfg,
+            None,
+            BTreeMap::from([(pointer.clone(), "r_a".to_string())]),
+        )
+        .unwrap();
+        let body: Value = serde_json::from_str(&recovered.request_json).unwrap();
+        let shaped = body.pointer(&pointer).and_then(Value::as_str).unwrap();
+        assert_ne!(shaped, dump, "unexempted long log is shaped");
+        assert!(
+            !shaped.ends_with(
+                "LANE_DELIVERY job=11111111-2222-3333-4444-555555555555 sha256=deadbeef"
+            ),
+            "clipped last line is not the courier trailer: {shaped}"
         );
     }
 }

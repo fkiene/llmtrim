@@ -15,7 +15,10 @@
 
 use std::collections::HashSet;
 
-use super::{Ctx, FORCE_PRIORITY, MIN_KEEP, priority, query_bonus, rebuild, select_keep, template};
+use super::{
+    Ctx, FORCE_PRIORITY, MIN_KEEP, pin_keep_lines, priority, query_bonus, rebuild, select_keep,
+    template,
+};
 use crate::stages::sizing::optimal_keep;
 
 /// Minimum lines before the fallback considers a segment.
@@ -48,7 +51,8 @@ pub fn compress(text: &str, ctx: &Ctx, query: &HashSet<String>) -> Option<String
         .map(|l| priority(l) + query_bonus(l, query))
         .collect();
     let k = optimal_keep(&lines, MIN_KEEP, ctx.max_lines);
-    let keep = select_keep(&scores, k, FORCE_PRIORITY);
+    let mut keep = select_keep(&scores, k, FORCE_PRIORITY);
+    pin_keep_lines(&mut keep, &lines);
     if keep.iter().all(|&x| x) {
         return Some(collapsed);
     }

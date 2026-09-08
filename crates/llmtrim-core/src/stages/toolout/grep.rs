@@ -20,7 +20,9 @@ use std::collections::HashSet;
 use once_cell::sync::Lazy;
 use regex::Regex;
 
-use super::{Ctx, FORCE_PRIORITY, MIN_KEEP, query_bonus, rebuild, select_keep, template};
+use super::{
+    Ctx, FORCE_PRIORITY, MIN_KEEP, pin_keep_lines, query_bonus, rebuild, select_keep, template,
+};
 use crate::stages::sizing::optimal_keep;
 
 /// Captures the file field of a `path:line:` record (same shape as the detector, with
@@ -75,6 +77,7 @@ pub fn compress(text: &str, ctx: &Ctx, query: &HashSet<String>) -> Option<String
         .collect();
     let k = optimal_keep(&lines, MIN_KEEP, ctx.max_lines);
     let mut keep = select_keep(&scores, k, FORCE_PRIORITY);
+    pin_keep_lines(&mut keep, &lines);
     for (slot, &first) in keep.iter_mut().zip(&first_in_file) {
         *slot |= first;
     }

@@ -9,8 +9,8 @@
 use std::collections::HashSet;
 
 use super::{
-    Ctx, FORCE_PRIORITY, MIN_KEEP, Mode, WARN_PRIORITY, pick_mode, priority, query_bonus, rebuild,
-    select_keep, template,
+    Ctx, FORCE_PRIORITY, MIN_KEEP, Mode, WARN_PRIORITY, pick_mode, pin_keep_lines, priority,
+    query_bonus, rebuild, select_keep, template,
 };
 use crate::stages::sizing::optimal_keep;
 
@@ -48,8 +48,8 @@ pub fn compress(text: &str, ctx: &Ctx, query: &HashSet<String>) -> Option<String
         .map(|l| priority(l) + query_bonus(l, query))
         .collect();
     let k = optimal_keep(&lines, MIN_KEEP, ctx.max_lines);
-    let keep = select_keep(&scores, k, FORCE_PRIORITY);
-
+    let mut keep = select_keep(&scores, k, FORCE_PRIORITY);
+    pin_keep_lines(&mut keep, &lines);
     // If selection kept everything (all lines were forced failures), the windowing was
     // a no-op; still surface the collapse if it shrank the text.
     if keep.iter().all(|&k| k) {
@@ -74,7 +74,6 @@ fn compress_errors_only(text: &str) -> Option<String> {
     ))
 }
 
-/// Keep only failure lines and the indented stack-trace frames immediately under them.
 fn aggressive_keep(lines: &[&str]) -> Vec<bool> {
     let mut keep = vec![false; lines.len()];
     for i in 0..lines.len() {
@@ -85,6 +84,7 @@ fn aggressive_keep(lines: &[&str]) -> Vec<bool> {
             keep[i] = true; // stack-trace frame attached to the error kept above
         }
     }
+    pin_keep_lines(&mut keep, lines);
     keep
 }
 
@@ -204,6 +204,27 @@ mod tests {
             out.lines().count() < 10,
             "errors-only collapses to a handful of lines"
         );
+    }
+
+    #[test]
+    fn aggressive_mode_keeps_llmtrim_keep_trailer() {
+        let mut lines: Vec<String> = (0..100)
+            .map(|i| format!("INFO  step {i} routine nominal pass"))
+            .collect();
+        lines.insert(50, "ERROR disk full on volume /dev/sda1".to_string());
+        lines.push("LLMTRIM_KEEP: LANE_DELIVERY job=abc sha256=def".to_string());
+        let log = lines.join("\n");
+        let ctx = Ctx {
+            max_lines: 40,
+            template: true,
+            mode: ModeSetting::Aggressive,
+        };
+        let out = compress(&log, &ctx, &HashSet::new()).expect("compresses");
+        assert!(
+            out.contains("LLMTRIM_KEEP: LANE_DELIVERY job=abc sha256=def"),
+            "keep-prefix trailer survives errors-only: {out}"
+        );
+        assert!(!out.contains("routine nominal"), "INFO noise still dropped");
     }
 
     #[test]

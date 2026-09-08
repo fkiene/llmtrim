@@ -6,6 +6,19 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- **Tool-output passthrough for machine couriers.** Long tool results are still
+  windowed by default (head + errors + `llmtrim recall`), which drops a terminal
+  trailer such as `LANE_DELIVERY job=… sha256=…` and breaks attesters that bind
+  the courier's delivered text. A result now ships byte-identical — no ANSI strip,
+  no window, no recall pointer — when any of these hold: the producing command
+  matches `toolout_passthrough` globs (`*` = all), the command assigns
+  `LLMTRIM_TOOL_OUTPUT=passthrough`, or a line of the result is that assignment.
+  Env `LLMTRIM_TOOL_OUTPUT` (same values) overlays the file key so it coexists
+  with `preset = "agent"`. Lines starting with `LLMTRIM_KEEP:` are force-kept
+  when windowing still runs. (#281)
+
 ### Fixed
 
 - **Windows tray Start proxy no longer spins forever.** Clicking Start proxy flashed

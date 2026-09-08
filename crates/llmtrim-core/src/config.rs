@@ -159,6 +159,12 @@ pub struct DenseConfig {
     /// Dropped lines are elided by position (`[… N lines omitted …]`); the agent re-runs
     /// the tool if it needs them.
     pub toolout_mode: String,
+    /// Stage T — command globs whose tool results skip tool-output compression
+    /// (byte-identical stdout, no recall trailer). `*` matches every command.
+    /// Env `LLMTRIM_TOOL_OUTPUT=passthrough` is this glob. Overlayed at [`load`]
+    /// from env/file so it coexists with `preset = "agent"`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub toolout_passthrough: Vec<String>,
     /// Stage C — skeletonize fenced code blocks (drop function bodies to stubs).
     /// Lossy; off by default.
     pub skeletonize: bool,
@@ -268,6 +274,7 @@ impl DenseConfig {
             toolout_min_lines: 20,
             toolout_template: true,
             toolout_mode: "auto".to_string(),
+            toolout_passthrough: Vec::new(),
             skeletonize: false,
             skeleton_keep_full_top_k: 5,
             skeleton_drop_unmatched: false,
@@ -291,22 +298,26 @@ impl DenseConfig {
     /// `reasoning`. A `preset` key and raw flags are alternatives — `preset` wins (one knob
     /// instead of ~30); drop the `preset` key to hand-tune flags.
     pub fn load() -> Result<Self> {
-        if let Some(name) = std::env::var("LLMTRIM_PRESET")
+        let mut cfg = if let Some(name) = std::env::var("LLMTRIM_PRESET")
             .ok()
             .filter(|s| !s.is_empty())
         {
-            return Self::preset(&name).with_context(|| {
+            Self::preset(&name).with_context(|| {
                 format!("unknown LLMTRIM_PRESET '{name}' (auto|safe|rag|agent|code|aggressive|cache|reasoning)")
-            });
-        }
-        let Some(path) = config_path().filter(|p| p.exists()) else {
-            return Ok(Self::auto());
+            })?
+        } else if let Some(path) = config_path().filter(|p| p.exists()) {
+            let text = std::fs::read_to_string(&path)
+                .with_context(|| format!("failed to read {}", path.display()))?;
+            let value: toml::Value = toml::from_str(&text)
+                .with_context(|| format!("failed to parse {}", path.display()))?;
+            Self::from_toml_value(value)
+                .with_context(|| format!("invalid config {}", path.display()))?
+        } else {
+            Self::auto()
         };
-        let text = std::fs::read_to_string(&path)
-            .with_context(|| format!("failed to read {}", path.display()))?;
-        let value: toml::Value =
-            toml::from_str(&text).with_context(|| format!("failed to parse {}", path.display()))?;
-        Self::from_toml_value(value).with_context(|| format!("invalid config {}", path.display()))
+        cfg.toolout_passthrough =
+            resolve_toolout_passthrough(|k| std::env::var(k).ok(), load_config_file().as_ref());
+        Ok(cfg)
     }
 
     /// Resolve a parsed config: a `preset = "<name>"` key selects a named profile; otherwise
@@ -547,6 +558,7 @@ pub(crate) const RUNTIME_ONLY_KEYS: &[&str] = &[
     "first_arrival_recall_max_entries",
     "first_arrival_recall_max_bytes",
     "first_arrival_recall_max_entry_bytes",
+    "toolout_passthrough",
 ];
 
 /// The resolved config-file path (`LLMTRIM_CONFIG`, else `$XDG_CONFIG_HOME`/`$HOME/.config` +
@@ -977,6 +989,10 @@ pub struct RuntimeConfig {
     pub first_arrival_recall_max_bytes: Option<usize>,
     /// Recall-store per-entry byte cap; unset uses 8 MiB.
     pub first_arrival_recall_max_entry_bytes: Option<usize>,
+    /// Command globs that skip tool-output compression for matching tool results.
+    /// Env `LLMTRIM_TOOL_OUTPUT` (`passthrough` = all commands, else comma-separated
+    /// globs) replaces the file `toolout_passthrough` array.
+    pub toolout_passthrough: Vec<String>,
 }
 
 impl RuntimeConfig {
@@ -1095,6 +1111,7 @@ impl RuntimeConfig {
                 fint("first_arrival_recall_max_entry_bytes").and_then(|n| usize::try_from(n).ok())
             })
             .filter(|n| *n > 0),
+            toolout_passthrough: resolve_toolout_passthrough(&env, file),
         }
     }
 }
@@ -1669,6 +1686,50 @@ fn resolve_str_list(
     out.sort();
     out.dedup();
     out
+}
+
+/// Env `LLMTRIM_TOOL_OUTPUT` replaces file `toolout_passthrough`. `passthrough` (any
+/// case) becomes the match-all glob `*`; otherwise comma-separated command globs.
+fn resolve_toolout_passthrough(
+    env: impl Fn(&str) -> Option<String>,
+    file: Option<&toml::Value>,
+) -> Vec<String> {
+    if let Some(raw) = env("LLMTRIM_TOOL_OUTPUT").filter(|s| !s.trim().is_empty()) {
+        return parse_toolout_passthrough(&raw);
+    }
+    file.and_then(|v| v.get("toolout_passthrough"))
+        .map(parse_toolout_passthrough_toml)
+        .unwrap_or_default()
+}
+
+fn parse_toolout_passthrough(raw: &str) -> Vec<String> {
+    let t = raw.trim();
+    if t.eq_ignore_ascii_case("passthrough") {
+        return vec!["*".to_string()];
+    }
+    t.split(',')
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(|s| {
+            if s.eq_ignore_ascii_case("passthrough") {
+                "*".to_string()
+            } else {
+                s.to_string()
+            }
+        })
+        .collect()
+}
+
+fn parse_toolout_passthrough_toml(v: &toml::Value) -> Vec<String> {
+    match v {
+        toml::Value::String(s) => parse_toolout_passthrough(s),
+        toml::Value::Array(arr) => arr
+            .iter()
+            .filter_map(toml::Value::as_str)
+            .flat_map(parse_toolout_passthrough)
+            .collect(),
+        _ => Vec::new(),
+    }
 }
 
 /// The provider/host exclusion lists. Kept as its own type rather than fields on
@@ -3239,6 +3300,7 @@ active = \"off\"
             "extra_hosts = [\"llm.acme.com\"]",
             "no_update_check = true",
             "db_path = \"/tmp/db\"\ncapture_max_mb = 100\nretention_days = 7",
+            "toolout_passthrough = [\"*gpt.sh*\"]",
         ] {
             let c = DenseConfig::from_toml_value(toml::from_str(src).unwrap()).unwrap();
             assert!(c.auto, "runtime-only config `{src}` must keep auto routing");
@@ -3252,5 +3314,27 @@ active = \"off\"
             !c.auto && !c.hygiene,
             "a compression key opts into explicit flags"
         );
+    }
+
+    #[test]
+    fn toolout_passthrough_env_and_file() {
+        assert_eq!(
+            resolve_env(&[("LLMTRIM_TOOL_OUTPUT", "passthrough")], "").toolout_passthrough,
+            vec!["*"]
+        );
+        assert_eq!(
+            resolve_file("toolout_passthrough = [\"bash ~/.claude/bin/gpt.sh *\"]")
+                .toolout_passthrough,
+            vec!["bash ~/.claude/bin/gpt.sh *"]
+        );
+        assert_eq!(
+            resolve_file("toolout_passthrough = \"passthrough\"").toolout_passthrough,
+            vec!["*"]
+        );
+        let c = resolve_env(
+            &[("LLMTRIM_TOOL_OUTPUT", "*gpt.sh*")],
+            "toolout_passthrough = [\"ignored\"]",
+        );
+        assert_eq!(c.toolout_passthrough, vec!["*gpt.sh*"]);
     }
 }

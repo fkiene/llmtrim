@@ -213,7 +213,7 @@ Log folding is one stage. Others kick in on different waste:
 > [!IMPORTANT]
 > Compression cannot raise your bill or break a request. Each stage is re-measured with the provider's real tokenizer and undone if it does not save tokens. If the provider rejects the compressed body, the original is resent. Worst case is zero savings.
 
-Existing prompt-cache prefixes (`cache_control`) are left alone. On shell-capable agent turns, a newly arriving tool result may be shaped once before its first cache write; the exact raw result remains recoverable with the emitted `llmtrim recall r_…` command.
+Existing prompt-cache prefixes (`cache_control`) are left alone. On shell-capable agent turns, a newly arriving tool result may be shaped once before its first cache write; the exact raw result remains recoverable with the emitted `llmtrim recall r_…` command. To skip shaping for a command (verbatim stdout, including a terminal trailer), set `toolout_passthrough = ["*gpt.sh*"]` or prefix the command with `LLMTRIM_TOOL_OUTPUT=passthrough`. Lines starting with `LLMTRIM_KEEP:` survive windowing even when the rest is clipped.
 
 <details>
 <summary><b>All 10 compressors</b></summary>
@@ -442,6 +442,7 @@ Every stage is individually tunable via config flags; `preset` wins over individ
 | field | default | meaning |
 | --- | --- | --- |
 | `toolout` | on in `agent`/`aggressive` | tool-output compression (logs / diffs / grep / dumps) |
+| `toolout_passthrough` | `[]` | command globs whose tool results skip compression (`*` = all); see `LLMTRIM_TOOL_OUTPUT` |
 | `retrieve` | `false` | lexical retrieval for long context (lossy) |
 | `skeletonize` | `false` | drop non-relevant function bodies to signatures |
 | `serialize` | `true` | TOON / CSV encoding of record arrays |
@@ -472,6 +473,7 @@ These knobs are orthogonal to compression. Each resolves env-first, then from th
 | `LLMTRIM_CAPTURE_DIR` | `capture_dir` | before/after QA capture directory |
 | `LLMTRIM_CAPTURE_MAX_MB` | `capture_max_mb` | capture corpus size ceiling (`0` disables) |
 | `LLMTRIM_FIRST_ARRIVAL_RECALL` | `first_arrival_recall` | recoverable first-arrival tool-output shaping (default `true`; set `false` for normalization-only cache writes) |
+| `LLMTRIM_TOOL_OUTPUT` | `toolout_passthrough` | skip tool-output compression for matching commands: `passthrough` (all) or command globs (`*gpt.sh*`); also honoured as a command assignment or a result line. `LLMTRIM_KEEP:` lines are always retained |
 | `LLMTRIM_FIRST_ARRIVAL_RECALL_TTL_SECS` | `first_arrival_recall_ttl_secs` | in-memory raw-result lifetime (default 18,000 seconds / five hours) |
 | `LLMTRIM_BIND` | `bind` | listen IP (default loopback; `0.0.0.0` for containers) |
 | `LLMTRIM_BREAKDOWN_WINDOW` | `breakdown_window` | context-window override for the cost breakdown |
