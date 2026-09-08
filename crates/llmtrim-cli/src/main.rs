@@ -65,11 +65,13 @@ When something's wrong:
   uninstall  Undo everything `setup` did
 
 Pipes & one-shots:
-  compress   Compress a request from stdin to stdout
-  send       Compress a request, send it to the provider, print the response
-  recall     Recover raw bytes from an ephemeral recall handle
-  serve      Run the HTTPS interceptor in the foreground
-  ca         Print the local CA certificate path and how to trust it
+  compress       Compress a request from stdin to stdout
+  send           Compress a request, send it to the provider, print the response
+  recall         Recover raw bytes from an ephemeral recall handle
+  serve          Run the HTTPS interceptor in the foreground
+  codex-gateway  Run llmtrim in front of Codex on loopback (no proxy, no CA)
+  mcp            Run an MCP server over stdio (`mcp install` registers it)
+  ca             Print the local CA certificate path and how to trust it
 
 Measurement (dev):
   eval       Measure retrieval recall + token savings on a corpus
@@ -3329,6 +3331,26 @@ fn run_monitor(
 mod tests {
     use super::*;
     use std::time::{SystemTime, UNIX_EPOCH};
+
+    // The comment on `HELP_TEMPLATE` asks for it to be kept in sync with `Commands`, and
+    // nothing enforced that: `codex-gateway` and `mcp` were both absent, so a user reading
+    // `llmtrim --help` could not discover either. Hidden commands stay out by design, and
+    // clap's generated `help` is not a listed entry.
+    #[test]
+    fn every_visible_command_is_listed_in_the_help_template() {
+        let command = <Cli as clap::CommandFactory>::command();
+        let missing: Vec<&str> = command
+            .get_subcommands()
+            .filter(|sub| !sub.is_hide_set())
+            .map(clap::Command::get_name)
+            .filter(|name| *name != "help")
+            .filter(|name| !HELP_TEMPLATE.contains(&format!("\n  {name} ")))
+            .collect();
+        assert!(
+            missing.is_empty(),
+            "commands missing from HELP_TEMPLATE: {missing:?}"
+        );
+    }
 
     // `--watch` is a deprecated no-op, but it must still parse: removing it outright would
     // break existing `llmtrim status --watch` scripts and aliases.

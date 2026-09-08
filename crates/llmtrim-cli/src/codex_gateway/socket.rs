@@ -300,9 +300,20 @@ fn body_error(error: Box<dyn std::error::Error + Send + Sync>) -> GatewayError {
 
 /// A refusal carries a status and nothing else: no body, no echoed header, no reason text.
 /// An error path is exactly where a credential or a prompt fragment would leak if it could.
+///
+/// It also ends the connection. The gates run *before* the body is read, which is what keeps a
+/// refused request cheap, and that leaves the unread body in the stream. hyper does drain a
+/// small one to reuse the connection, but that is its choice and not a promise this gateway
+/// makes: `Connection: close` turns "probably drained" into "cannot be re-read", and costs a
+/// connection nobody wanted to keep anyway.
 fn refuse(error: &GatewayError) -> Response<GatewayBody> {
     Response::builder()
         .status(error.status())
+        // A lowercase literal, like every other header name in this module. hyper's typed
+        // constant would work, but its name contains a substring the security-contract test
+        // forbids anywhere in the production source, and tripping that test over a header
+        // name is a false alarm nobody should have to diagnose twice.
+        .header("connection", "close")
         .body(GatewayBody::empty())
         .expect("a status-only response is always well formed")
 }
@@ -658,9 +669,19 @@ mod tests {
             "PRIVATE_PROMPT_DO_NOT_LEAK Read the log tool output and reply with the requestId \
              of {MARKER}.\n\n{tool_output}"
         );
+        // The shape this route actually serves: Responses `input` items carrying `input_text`
+        // parts, the same body `reroute::codex` builds. Chat Completions `messages` would not
+        // reach this endpoint at all, so a fixture in that shape proved nothing about it.
         serde_json::to_vec(&serde_json::json!({
             "model": "gpt-5.6-sol",
-            "messages": [{ "role": "user", "content": content }],
+            "instructions": "You are a terse log assistant.",
+            "input": [{
+                "type": "message",
+                "role": "user",
+                "content": [{ "type": "input_text", "text": content }],
+            }],
+            "store": false,
+            "stream": true,
         }))
         .expect("serialize body")
     }
@@ -785,6 +806,74 @@ mod tests {
             assert_eq!(reply.status, 401, "{value}");
         }
         server.shutdown().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_refusal_cannot_poison_the_next_request_on_the_same_socket() {
+        // The gateway refuses before reading the body — deliberately, so a refused request
+        // costs nothing. On a keep-alive connection that leaves the unread body sitting in
+        // the stream, where the next parse would read it as a request line. The contract is
+        // that the refusal ends the connection, so those bytes can never be re-read.
+        let upstream = Arc::new(FakeUpstream::replying(sse()));
+        let server = start(&upstream).await;
+        let address = server.local_addr();
+
+        let transcript = tokio::task::spawn_blocking(move || {
+            use std::io::Write;
+            let mut socket = TcpStream::connect(address).expect("the port is open");
+            socket
+                .set_read_timeout(Some(Duration::from_secs(10)))
+                .expect("read timeout");
+
+            // First request: no `Authorization`, so it is refused with 401. The body is real
+            // and non-empty; these are the bytes that would poison the next parse.
+            let poison = br#"{"input":"POISON"}"#;
+            let head = format!(
+                "POST {GATEWAY_ROUTE} HTTP/1.1\r\n\
+                 Host: {address}\r\n\
+                 Content-Type: application/json\r\n\
+                 Content-Length: {}\r\n\r\n",
+                poison.len()
+            );
+            socket.write_all(head.as_bytes()).expect("write first head");
+            socket.write_all(poison).expect("write first body");
+
+            // A second, well-formed request on the same connection.
+            let second = format!("GET /nope HTTP/1.1\r\nHost: {address}\r\n\r\n");
+            // Both of these may fail once the server has closed: that is the passing case,
+            // not an error, so neither result is asserted on.
+            let _ = socket.write_all(second.as_bytes());
+            let _ = socket.flush();
+
+            let mut raw = Vec::new();
+            let _ = socket.read_to_end(&mut raw);
+            String::from_utf8_lossy(&raw).into_owned()
+        })
+        .await
+        .expect("the client task runs");
+
+        server.shutdown().await;
+
+        assert!(
+            transcript.starts_with("HTTP/1.1 401"),
+            "the first request is refused: {transcript:?}"
+        );
+        assert!(
+            transcript
+                .to_ascii_lowercase()
+                .contains("connection: close"),
+            "a refusal must announce that the connection ends: {transcript:?}"
+        );
+        assert_eq!(
+            transcript.matches("HTTP/1.1 ").count(),
+            1,
+            "one answer, then EOF — a second answer means the poison body was parsed as a \
+             request: {transcript:?}"
+        );
+        assert!(
+            upstream.seen().is_empty(),
+            "a refused request never reaches the upstream"
+        );
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

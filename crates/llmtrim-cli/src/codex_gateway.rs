@@ -36,15 +36,33 @@ pub const GATEWAY_ROUTE: &str = "/backend-api/codex/responses";
 /// sees without anyone asking for it.
 pub const GATEWAY_PRESET: &str = "safe";
 
-/// Headers the gateway forwards verbatim. `Authorization` and `ChatGPT-Account-ID` are the
-/// credentials Codex attached; they are passed through in memory and never inspected for
-/// meaning, logged or written down.
-pub const FORWARDED_HEADERS: [&str; 5] = [
+/// Headers the gateway forwards verbatim.
+///
+/// `Authorization` and `ChatGPT-Account-ID` are the credentials Codex attached; they are
+/// passed through in memory and never inspected for meaning, logged or written down.
+///
+/// The rest are Codex's identity to the backend, and dropping them is not neutral. The
+/// interceptor's own notes (`reroute::codex`) record that this exact URL answers 404 for the
+/// GPT-5.6 models unless `originator` is `codex_cli_rs` *and* `user-agent` starts with
+/// `codex_cli_rs`; `ureq` supplies its own `user-agent` only when the request carries none, so
+/// relaying Codex's is what keeps the client identity intact instead of announcing `ureq/3.x`.
+/// `openai-beta`, `session_id`, `x-client-request-id` and `x-codex-window-id` complete the set
+/// `request_headers_with_mode` sets for this route.
+///
+/// This stays an allowlist rather than becoming a hop-by-hop denylist. The gateway attaches
+/// the user's ChatGPT credential to whatever it forwards, so the default for a header nobody
+/// named has to be "dropped" — not "relayed because no one thought to ban it".
+pub const FORWARDED_HEADERS: [&str; 10] = [
     "authorization",
     "chatgpt-account-id",
     "content-type",
     "accept",
     "originator",
+    "user-agent",
+    "openai-beta",
+    "session_id",
+    "x-client-request-id",
+    "x-codex-window-id",
 ];
 
 /// The one header that survives only when the body is forwarded untransformed. See
@@ -417,9 +435,10 @@ pub mod listener {
 #[cfg(test)]
 mod tests {
     use super::{
-        CONTENT_ENCODING, DROPPED_HEADERS, GATEWAY_PRESET, GATEWAY_ROUTE, GatewayError,
-        GatewayRequest, GatewayUpstream, UPSTREAM_ORIGIN, UpstreamRequest, UpstreamResponse,
-        auth_gate, compress_body, forward_headers, handle, prepare, upstream_url, validate_route,
+        CONTENT_ENCODING, DROPPED_HEADERS, FORWARDED_HEADERS, GATEWAY_PRESET, GATEWAY_ROUTE,
+        GatewayError, GatewayRequest, GatewayUpstream, UPSTREAM_ORIGIN, UpstreamRequest,
+        UpstreamResponse, auth_gate, compress_body, forward_headers, handle, prepare, upstream_url,
+        validate_route,
     };
     use std::collections::BTreeMap;
 
@@ -528,9 +547,19 @@ mod tests {
         let content = format!(
             "PRIVATE_PROMPT_DO_NOT_LEAK Read the log tool output and reply with the requestId of REQ-000057.\n\n{tool_output}"
         );
+        // The shape this route actually serves: Responses `input` items carrying `input_text`
+        // parts, the same body `reroute::codex` builds. Chat Completions `messages` would not
+        // reach this endpoint at all, so a fixture in that shape proved nothing about it.
         serde_json::to_vec(&serde_json::json!({
             "model": "gpt-5.6-sol",
-            "messages": [{ "role": "user", "content": content }],
+            "instructions": "You are a terse log assistant.",
+            "input": [{
+                "type": "message",
+                "role": "user",
+                "content": [{ "type": "input_text", "text": content }],
+            }],
+            "store": false,
+            "stream": true,
         }))
         .expect("serialize body")
     }
@@ -675,6 +704,72 @@ mod tests {
         assert_eq!(
             sent.headers.get("chatgpt-account-id").map(String::as_str),
             Some(FAKE_ACCOUNT)
+        );
+    }
+
+    #[test]
+    fn codex_identity_headers_reach_the_upstream() {
+        // Not cosmetic. `reroute::codex` records that this exact URL answers 404 for the
+        // GPT-5.6 models unless `originator` is `codex_cli_rs` *and* `user-agent` starts with
+        // it, and `ureq` supplies its own `user-agent` whenever the request carries none. A
+        // gateway that drops these turns a working turn into a 404 that looks like an outage.
+        // The full set is what `request_headers_with_mode` sets for this route.
+        let identity = [
+            ("originator", "codex_cli_rs"),
+            ("user-agent", "codex_cli_rs/0.146.0 (Windows 11; x86_64)"),
+            ("openai-beta", "responses=experimental"),
+            ("session_id", "11111111-2222-3333-4444-555555555555"),
+            (
+                "x-client-request-id",
+                "11111111-2222-3333-4444-555555555555",
+            ),
+            (
+                "x-codex-window-id",
+                "11111111-2222-3333-4444-555555555555:0",
+            ),
+        ];
+        let mut request = codex_request();
+        for (name, value) in identity {
+            request.headers.insert(name.to_string(), value.to_string());
+        }
+
+        let mut upstream = FakeUpstream::default();
+        handle(&request, &mut upstream).expect("handled");
+        let sent = &upstream.seen[0];
+        for (name, value) in identity {
+            assert_eq!(
+                sent.headers.get(name).map(String::as_str),
+                Some(value),
+                "{name} did not reach the upstream"
+            );
+        }
+    }
+
+    #[test]
+    fn widening_the_list_did_not_turn_it_into_a_denylist() {
+        // The gateway attaches the user's ChatGPT credential to whatever it forwards, so the
+        // default for a header nobody named must stay "dropped". This is the test that fails
+        // if someone later swaps the allowlist for "everything except hop-by-hop".
+        let unnamed = [
+            "cookie",
+            "x-api-key",
+            "referer",
+            "origin",
+            "x-forwarded-for",
+        ];
+        let mut request = codex_request();
+        for name in unnamed {
+            request.headers.insert(name.to_string(), "x".to_string());
+        }
+        let forwarded = forward_headers(&request.headers);
+        for name in unnamed {
+            assert!(!forwarded.contains_key(name), "{name} was relayed");
+        }
+        assert!(
+            forwarded
+                .keys()
+                .all(|name| FORWARDED_HEADERS.contains(&name.as_str())),
+            "only listed headers may be forwarded"
         );
     }
 
