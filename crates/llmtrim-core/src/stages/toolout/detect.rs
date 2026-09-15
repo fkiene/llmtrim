@@ -1,9 +1,11 @@
 //! Tool-output kind detection — shape-based, cheap, zero-model.
 //!
 //! Each candidate segment is classified by structural shape only (no keywords from the
-//! user's language). Diff wins first (unambiguous `@@`/`--- ` markers), then grep
-//! (`path:line:` records), then log (a meaningful share of lines carrying a level or
-//! failure signal). Anything else returns `None` and is left for the prose stages.
+//! user's language, no tool name). Diff wins first (unambiguous `@@`/`--- ` markers), then grep
+//! (`path:line:` records), then source dumps (file reads) which decline this stage, then log
+//! (a meaningful share of *line-start* level/failure tokens). Anything else returns `None`
+//! and is left for the prose stages — except source, which must not fall through to plaintext
+//! windowing (#289).
 
 use once_cell::sync::Lazy;
 use regex::Regex;
@@ -23,10 +25,15 @@ pub enum OutKind {
 static GREP_LINE: Lazy<Regex> =
     Lazy::new(|| Regex::new(r"^(?:[A-Za-z]:)?[^:\n]*[A-Za-z./\\][^:\n]*:\d+:").unwrap());
 
+/// Claude Code `Read` / `cat -n` gutter: padded line number then `|` or a tab.
+static GUTTER: Lazy<Regex> = Lazy::new(|| Regex::new(r"^[\t ]*\d+[\t ]*[|\t]").unwrap());
+
 /// Minimum non-empty lines for the line-oriented kinds (grep, log).
 const MIN_LINES: usize = 3;
 /// Minimum non-empty lines before a segment is considered for log windowing.
 const MIN_LOG_LINES: usize = 8;
+/// Source dumps need enough lines that windowing would actually fire (`toolout_min_lines`).
+const MIN_SOURCE_LINES: usize = 20;
 
 /// Classify a tool-output segment, or `None` if it is not a shape this stage handles.
 pub fn detect(text: &str) -> Option<OutKind> {
@@ -40,10 +47,21 @@ pub fn detect(text: &str) -> Option<OutKind> {
     if is_grep(&lines) {
         return Some(OutKind::Grep);
     }
+    // Source before log: identifiers like `Exception` / `Error` must not make a file
+    // read look like a build log (#289).
+    if is_source(&lines) {
+        return None;
+    }
     if is_log(&lines) {
         return Some(OutKind::Log);
     }
     None
+}
+
+/// True when `text` is a source-file dump (Read / cat), so toolout must not window it.
+pub fn is_source_dump(text: &str) -> bool {
+    let lines: Vec<&str> = text.lines().filter(|l| !l.trim().is_empty()).collect();
+    is_source(&lines)
 }
 
 /// A unified diff: an explicit `diff --git` header, or a `--- `/`+++ ` file header
@@ -63,28 +81,68 @@ fn is_grep(lines: &[&str]) -> bool {
     matches >= MIN_LINES && matches * 4 >= lines.len() * 3
 }
 
-/// Log-shaped: enough lines, and either ≥30% of lines carrying any level token, or
-/// failure lines dense enough for the segment's length (two outright failure lines is
-/// only enough on short segments — ≥10% of lines must be failures on longer ones).
-/// The density requirement keeps long prose that merely *mentions* failure a couple of
-/// times (e.g. instructions about error handling) out of errors-only windowing, while a
-/// real long log still qualifies via the level-token share.
+/// Log-shaped: enough lines, and either ≥30% of lines carrying a *line-start* level
+/// token, or line-start failure lines dense enough for the segment's length (two
+/// outright failure lines is only enough on short segments — ≥10% of lines must be
+/// failures on longer ones). Identifier hits (`throws Exception`, `io::Error`) do
+/// not count. The density requirement keeps long prose that merely *mentions* failure
+/// a couple of times out of errors-only windowing, while a real long log still
+/// qualifies via the level-token share.
 fn is_log(lines: &[&str]) -> bool {
     if lines.len() < MIN_LOG_LINES {
         return false;
     }
     let level = lines
         .iter()
-        .filter(|l| super::signals::LEVEL.is_match(l))
+        .filter(|l| super::signals::LINE_LEVEL.is_match(l))
         .count();
     if level * 100 >= lines.len() * 30 {
         return true;
     }
     let strong = lines
         .iter()
-        .filter(|l| super::signals::STRONG.is_match(l))
+        .filter(|l| super::signals::LINE_STRONG.is_match(l))
         .count();
     strong >= 2 && strong * 10 >= lines.len()
+}
+
+/// Source-shaped file dump: numbered gutters, or mostly indented/punctuation-dense
+/// lines without log prefixes. Fail-open (treat as source) so plaintext windowing
+/// cannot punch holes in a Read.
+fn is_source(lines: &[&str]) -> bool {
+    if lines.len() < MIN_SOURCE_LINES {
+        return false;
+    }
+    let gutter = lines.iter().filter(|l| GUTTER.is_match(l)).count();
+    if gutter * 4 >= lines.len() * 3 {
+        return true;
+    }
+    let codeish = lines.iter().filter(|l| looks_like_code_line(l)).count();
+    let logish = lines
+        .iter()
+        .filter(|l| super::signals::LINE_LEVEL.is_match(l))
+        .count();
+    codeish * 2 >= lines.len() && logish * 5 < lines.len()
+}
+
+/// A line that looks like source rather than a log/prose record: 4-space/tab indent
+/// (after stripping a Read gutter) or punctuation-dense. Same structural idea as
+/// Stage F's prose/code split — no language word list.
+fn looks_like_code_line(line: &str) -> bool {
+    let line = GUTTER.find(line).map(|m| &line[m.end()..]).unwrap_or(line);
+    if line.starts_with("    ") || line.starts_with('\t') {
+        return true;
+    }
+    let trimmed = line.trim();
+    if trimmed.is_empty() {
+        return false;
+    }
+    let symbol_count = trimmed
+        .chars()
+        .filter(|c| "{}();=<>|&/\\[]".contains(*c))
+        .count();
+    let letter_count = trimmed.chars().filter(|c| c.is_alphabetic()).count();
+    symbol_count > 0 && symbol_count >= letter_count
 }
 
 #[cfg(test)]
@@ -172,5 +230,64 @@ mod tests {
                      Margins improved across every region this year.\n\
                      The board approved the new budget unanimously.";
         assert_eq!(detect(prose), None);
+    }
+
+    fn java_source(n: usize) -> String {
+        let mut lines = vec![
+            "package com.example.app;".to_string(),
+            "import java.util.List;".to_string(),
+            "import java.io.IOException;".to_string(),
+            "public class Sample {".to_string(),
+        ];
+        for i in 0..n {
+            lines.push(format!(
+                "    public void step{i}() throws Exception {{ logger.info(\"n={i}\"); }}"
+            ));
+        }
+        lines.push("}".to_string());
+        lines.join("\n")
+    }
+
+    #[test]
+    fn java_source_with_exception_is_not_log() {
+        let src = java_source(40);
+        assert_eq!(detect(&src), None);
+        assert!(is_source_dump(&src));
+    }
+
+    #[test]
+    fn rust_and_ts_source_are_not_logs() {
+        let rust: String = (0..40)
+            .map(|i| {
+                format!(
+                    "    pub fn step_{i}() -> Result<(), io::Error> {{ debug!(\"i={i}\"); Ok(()) }}"
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        let rust = format!("use std::io;\nfn main() {{\n{rust}\n}}\n");
+        assert_eq!(detect(&rust), None, "rust source");
+        assert!(is_source_dump(&rust));
+
+        let ts: String = (0..40)
+            .map(|i| format!("    function step{i}() {{ console.error(err); return {i}; }}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let ts = format!("export class Worker {{\n{ts}\n}}\n");
+        assert_eq!(detect(&ts), None, "ts source");
+        assert!(is_source_dump(&ts));
+    }
+
+    #[test]
+    fn numbered_gutter_read_is_source() {
+        let body = java_source(30);
+        let guttered: String = body
+            .lines()
+            .enumerate()
+            .map(|(i, l)| format!("{:>6}|{l}", i + 1))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(is_source_dump(&guttered));
+        assert_eq!(detect(&guttered), None);
     }
 }

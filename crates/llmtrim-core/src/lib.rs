@@ -606,6 +606,47 @@ mod tests {
     }
 
     #[test]
+    fn agent_preset_keeps_java_source_tool_result() {
+        // #289: a Read of real source must not be log-windowed or plaintext-elided.
+        let mut src = String::from(
+            "package com.example;\nimport java.io.IOException;\npublic class Sample {\n",
+        );
+        for i in 0..80 {
+            src.push_str(&format!(
+                "    public int step{i}() throws Exception {{ logger.info(\"i={i}\"); return {i}; }}\n"
+            ));
+        }
+        src.push_str("}\n");
+        let input = serde_json::json!({
+            "model": "claude-3-5-sonnet-20241022",
+            "messages": [{
+                "role": "user",
+                "content": [{"type": "tool_result", "tool_use_id": "t1", "content": src}],
+            }],
+            "max_tokens": 1024,
+        })
+        .to_string();
+
+        let cfg = config::DenseConfig::preset("agent").expect("agent preset");
+        let result =
+            compress_with_config(&input, Some(ProviderKind::Anthropic), &cfg).expect("compress");
+        let body: Value = serde_json::from_str(&result.request_json).unwrap();
+        let got = body
+            .pointer("/messages/0/content/0/content")
+            .and_then(Value::as_str)
+            .unwrap();
+        assert!(
+            !got.contains("omitted") && !got.contains("[llmtrim:"),
+            "source must not be windowed: {got}"
+        );
+        assert!(
+            got.contains("public int step40()"),
+            "middle of the class must survive"
+        );
+        assert_eq!(got, src, "source dump ships verbatim");
+    }
+
+    #[test]
     fn agent_preset_shapes_tool_result_at_cache_write_boundary() {
         let cached_log = (0..80)
             .map(|i| format!("INFO old step {i} routine nominal pass"))

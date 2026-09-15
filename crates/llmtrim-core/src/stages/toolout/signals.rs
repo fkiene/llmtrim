@@ -1,9 +1,8 @@
 //! Shared level/failure signal regexes for the tool-output stage.
 //!
-//! Both the kind detector ([`super::detect`]) and the line-priority scorer
-//! ([`super::priority`]) test lines for failure / log-level tokens. Defining the patterns
-//! here once keeps the two in lockstep — they classified the same tokens before, in two
-//! verbatim copies that would silently drift apart on the next edit.
+//! [`STRONG`] / [`WARN`] score *lines already classified as a log* (keep errors).
+//! Kind detection uses [`LINE_LEVEL`] / [`LINE_STRONG`] so identifier hits in
+//! source (`throws Exception`, `io::Error`, `console.error`) are not log-shaped.
 //!
 //! These are tokens *machine-emitted* by runtimes and build tools (`ERROR`, `FATAL`,
 //! `Traceback`, `panicked`), not human prose (see the module note in `mod.rs`), so a fixed
@@ -26,10 +25,25 @@ pub(crate) static STRONG: Lazy<Regex> = Lazy::new(|| {
 pub(crate) static WARN: Lazy<Regex> =
     Lazy::new(|| Regex::new(r"(?i)\b(warn(?:ing)?|deprecat)").unwrap());
 
-/// Any log-level token (the strong ones plus informational levels) — used to decide
-/// whether a segment is log-shaped at all.
-pub(crate) static LEVEL: Lazy<Regex> = Lazy::new(|| {
-    Regex::new(r"(?i)\b(error|warn|info|debug|trace|fatal|fail|panic|exception)\b").unwrap()
+/// Optional leading timestamp / bracketed tag before a line-start level token.
+const LINE_PREFIX: &str = r"^[\t ]*(?:\[[^\]]{0,80}\]\s*)?(?:(?:\d{4}-\d{2}-\d{2}[T ]\S+)\s+)?";
+
+/// Log-level token at the start of a line (after optional timestamp/tag). Used to
+/// decide whether a segment is log-shaped. Does not include `exception`/`panic`
+/// as identifiers — those fire inside source.
+pub(crate) static LINE_LEVEL: Lazy<Regex> = Lazy::new(|| {
+    Regex::new(&format!(
+        r"(?i){LINE_PREFIX}(?:error|warn(?:ing)?|info|debug|trace|fatal|fail)(?:\b|\[)"
+    ))
+    .unwrap()
+});
+
+/// Failure marker at the start of a line (after optional timestamp/tag).
+pub(crate) static LINE_STRONG: Lazy<Regex> = Lazy::new(|| {
+    Regex::new(&format!(
+        r"(?i){LINE_PREFIX}(?:not ok\b|error\b|fatal\b|fail(?:ed|ure)?\b|panic(?:ked)?\b|traceback\b|segfault\b|assert(?:ion)?(?:error)?\b|exception in thread\b)"
+    ))
+    .unwrap()
 });
 
 #[cfg(test)]
@@ -43,5 +57,21 @@ mod tests {
         assert!(STRONG.is_match("[10:02:31Z] ERROR src/worker/pool.rs:214"));
         assert!(!STRONG.is_match("ok 19 - normalize: backslash path"));
         assert!(!STRONG.is_match("ok 30 - isInList: FAIL_OPEN path returns true"));
+    }
+
+    #[test]
+    fn line_level_is_prefix_not_identifier() {
+        assert!(LINE_LEVEL.is_match("INFO  compiling module 3"));
+        assert!(LINE_LEVEL.is_match("[10:02:31Z] ERROR src/worker/pool.rs:214"));
+        assert!(LINE_LEVEL.is_match("error[E0308]: mismatched types"));
+        assert!(LINE_STRONG.is_match("not ok 19 - normalize: backslash path"));
+        assert!(
+            LINE_STRONG.is_match("Exception in thread \"main\" java.lang.NullPointerException")
+        );
+        assert!(!LINE_LEVEL.is_match("    throw new Exception(msg);"));
+        assert!(!LINE_LEVEL.is_match("    logger.info(\"step\");"));
+        assert!(!LINE_LEVEL.is_match("    console.error(err);"));
+        assert!(!LINE_LEVEL.is_match("fn boom() -> io::Error {"));
+        assert!(!LINE_STRONG.is_match("    throw new Exception(msg);"));
     }
 }

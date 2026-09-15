@@ -6,6 +6,16 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Fixed
+
+- **Source-file tool results are no longer windowed.** Claude Code `Read` (and
+  equivalent dumps: guttered `cat -n`, TypeScript, Rust, Java) was classified as a
+  log because identifiers such as `Exception` / `Error` / `info` matched
+  anywhere in the line, or else fell through to plaintext fold+window. The model
+  then re-read in ~20-line slices. Log detection now requires a line-start level
+  token; source-shaped dumps (gutter or indent/punctuation density) skip toolout
+  entirely. Logs, diffs, and grep still window. (#289)
+
 ## [0.13.5] - 2026-09-15
 
 ### Changed

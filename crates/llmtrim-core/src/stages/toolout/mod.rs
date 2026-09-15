@@ -18,7 +18,8 @@
 //! window under an adaptive budget (`crate::stages::sizing`) with dropped runs
 //! becoming positional elision markers (`[… N lines omitted …]`, like the `retrieve`
 //! stage) — plus universal rails that apply to every windowed segment, current
-//! and future kinds alike:
+//! and future kinds alike. **Source-shaped dumps are not a kind:** they decline this
+//! stage (no log window, no plaintext window) so a file Read stays intact (#289).
 //!
 //! 1. **Attribution** (`rebuild`): windowed output opens with a self-identifying
 //!    header naming llmtrim and the recovery action, so an agent never misattributes
@@ -345,7 +346,14 @@ fn compress_shaped(
         Some(OutKind::Log) => log::compress(text, ctx, query),
         Some(OutKind::Grep) => grep::compress(text, ctx, query),
         Some(OutKind::Diff) => diff::compress(text, ctx, query),
-        None => generated::compress(text).or_else(|| plaintext::compress(text, ctx, query)),
+        // Lockfiles/minified still elide. Ordinary source must not be plaintext-windowed (#289).
+        None => generated::compress(text).or_else(|| {
+            if detect::is_source_dump(text) {
+                None
+            } else {
+                plaintext::compress(text, ctx, query)
+            }
+        }),
     }
 }
 
