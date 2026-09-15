@@ -664,6 +664,19 @@ fn toggle_popover(app: &AppHandle) {
     }
 }
 
+/// Place the popover next to the tray icon, clamped to the monitor that holds
+/// the icon. Unconstrained `TrayCenter` centres a 360px window on a Win10
+/// notification-area glyph and leaves ~25% past the right edge (#287).
+///
+/// When the tray rect is unknown (menu Open / second-instance before a
+/// Click/Enter/Move event has populated the positioner), fall back to the
+/// monitor's bottom-right rather than the HWND default of (0, 0).
+fn place_popover(popover: &tauri::WebviewWindow) -> tauri::Result<()> {
+    popover
+        .move_window_constrained(Position::TrayCenter)
+        .or_else(|_| popover.move_window(Position::BottomRight))
+}
+
 /// Show the popover positioned next to the tray icon, unconditionally. Used by
 /// the menu "Open" item (which, unlike a tray click, has no blur to debounce).
 fn show_popover(app: &AppHandle) {
@@ -675,9 +688,9 @@ fn show_popover(app: &AppHandle) {
     // no current monitor, so the positioner fails. tauri-plugin-positioner
     // 2.3.3+ returns Err instead of panicking (#240); show first in that case
     // and retry once the window is mapped.
-    if popover.move_window(Position::TrayCenter).is_err() {
+    if place_popover(&popover).is_err() {
         let _ = popover.show();
-        let _ = popover.move_window(Position::TrayCenter);
+        let _ = place_popover(&popover);
     } else {
         let _ = popover.show();
     }

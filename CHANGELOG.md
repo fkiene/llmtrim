@@ -14,6 +14,13 @@ All notable changes to this project are documented here. The format follows
   reissued, and the proxy's TLS server signs `CertificateVerify` with rustls'
   `ring` provider after canonicalizing `s`. (#290)
 
+- **Windows tray popover stays on screen.** Opening the dashboard from the
+  notification area centred a 360px window on the tray icon, so about a
+  quarter of it sat past the right edge of the monitor and could not be
+  dragged back. Positioning now clamps to the screen; if the icon location is
+  not yet known, the window opens at the bottom-right instead of at (0, 0).
+  (#287)
+
 ## [0.13.4] - 2026-09-08
 
 ### Added
