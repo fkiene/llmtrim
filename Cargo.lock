@@ -3214,6 +3214,8 @@ dependencies = [
  "regex",
  "reqwest",
  "rmcp",
+ "rustls",
+ "rustls-webpki",
  "schannel",
  "schemars 1.2.2",
  "serde",

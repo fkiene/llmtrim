@@ -74,6 +74,10 @@ hudsucker = { version = "0.25", default-features = false, features = [
   "rustls-client",
   "http2",
 ], optional = true }
+# Already in the graph via hudsucker. The `ring` feature is extra: the MITM *server*
+# signs CertificateVerify with ring so ring/webpki clients accept the handshake.
+# Origin TLS stays aws-lc-rs (hudsucker's default rustls features + install_default).
+rustls = { version = "0.23", default-features = false, features = ["ring"], optional = true }
 # Upstream-proxy connector for the MITM path — tunnels HTTPS origin connections via CONNECT.
 # `rustls-tls-native-roots` enables the `__rustls` internal feature, which causes ProxyConnector
 # to build a tokio-rustls TlsConnector for the ORIGIN leg of tunnelled connections (the part
@@ -131,6 +135,8 @@ crossterm = { version = "0.29", optional = true }
 [dev-dependencies]
 insta = "1"
 rmcp = { version = "3.0", default-features = false, features = ["client", "transport-io"] }
+# Ring-backed webpki: proves MITM CA/leaf signatures verify the way rustls+ring clients do (#290).
+rustls-webpki = { version = "0.103", default-features = false, features = ["ring", "std"] }
 
 [target.'cfg(not(windows))'.dependencies]
 auto-launch = "0.6.0"
@@ -162,6 +168,7 @@ live = ["dep:async-openai", "dep:reqwest", "dep:tokio"]
 breakdown = ["dep:ratatui", "dep:crossterm"]
 intercept = [
   "dep:hudsucker",
+  "dep:rustls",
   "dep:tokio",
   "dep:http-body-util",
   "dep:bytes",

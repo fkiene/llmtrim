@@ -6,6 +6,14 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Fixed
+
+- **MITM certs are canonical low-S ECDSA.** `ring` / rustls-webpki reject high-S
+  P-256 signatures (OpenSSL and Node normalize them). The local CA and each
+  intercepted leaf are re-signed until `s ≤ n/2`, a high-S CA on disk is
+  reissued, and the proxy's TLS server signs `CertificateVerify` with rustls'
+  `ring` provider after canonicalizing `s`. (#290)
+
 ## [0.13.4] - 2026-09-08
 
 ### Added

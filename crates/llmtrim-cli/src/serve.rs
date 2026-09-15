@@ -56,6 +56,10 @@ mod imp {
     use hudsucker::{Body, HttpContext, HttpHandler, Proxy, RequestOrResponse};
     use hyper_http_proxy::{Intercept, Proxy as UpstreamProxy, ProxyConnector};
     use hyper_util::client::legacy::connect::HttpConnector;
+    use rustls::crypto::KeyProvider;
+    use rustls::crypto::ring as rustls_ring;
+    use rustls::sign::{Signer, SigningKey};
+    use rustls::{SignatureAlgorithm, SignatureScheme};
 
     use crate::tracking::{Record, Tracker};
     use llmtrim_core::config::{DenseConfig, RuntimeConfig};
@@ -5331,7 +5335,7 @@ mod imp {
             .map_err(|e| anyhow::anyhow!("failed to parse CA key: {e}"))?;
         let issuer = hudsucker::rcgen::Issuer::from_ca_cert_pem(&cert_pem, key)
             .map_err(|e| anyhow::anyhow!("failed to parse CA cert: {e}"))?;
-        let ca = LeafCertAuthority::new(issuer, aws_lc_rs::default_provider());
+        let ca = LeafCertAuthority::new(issuer, mitm_server_crypto_provider());
 
         // Ledger writes go to a dedicated thread (rusqlite isn't async); the handler just
         // sends Records over the channel.
@@ -5596,6 +5600,219 @@ mod imp {
         Ok(crate::daemon::home_dir()?.join("ca.hosts"))
     }
 
+    /// P-256 group order n/2. ECDSA signatures with s > n/2 are high-S: mathematically
+    /// valid, but *ring*/webpki reject them (OpenSSL/Node silently normalize).
+    const P256_HALF_N: [u8; 32] = [
+        0x7F, 0xFF, 0xFF, 0xFF, 0x80, 0x00, 0x00, 0x00, 0x7F, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
+        0xFF, 0xDE, 0x73, 0xD5, 0x56, 0xD3, 0x8B, 0xCF, 0x42, 0x79, 0xDC, 0xE5, 0x61, 0x7E, 0x31,
+        0x92, 0xA8,
+    ];
+
+    fn der_len(input: &[u8], i: &mut usize) -> Option<usize> {
+        let b = *input.get(*i)?;
+        *i += 1;
+        if b < 0x80 {
+            return Some(b as usize);
+        }
+        let n = (b & 0x7f) as usize;
+        if n == 0 || n > 3 {
+            return None;
+        }
+        let mut len = 0usize;
+        for _ in 0..n {
+            len = (len << 8) | (*input.get(*i)? as usize);
+            *i += 1;
+        }
+        Some(len)
+    }
+
+    fn der_tlv<'a>(input: &'a [u8], i: &mut usize) -> Option<(u8, &'a [u8])> {
+        let tag = *input.get(*i)?;
+        *i += 1;
+        let len = der_len(input, i)?;
+        let start = *i;
+        let end = start.checked_add(len)?;
+        if end > input.len() {
+            return None;
+        }
+        *i = end;
+        Some((tag, &input[start..end]))
+    }
+
+    fn int_be_padded32(bytes: &[u8]) -> Option<[u8; 32]> {
+        let mut v = bytes;
+        while v.first() == Some(&0) && v.len() > 1 {
+            v = &v[1..];
+        }
+        if v.len() > 32 {
+            return None;
+        }
+        let mut out = [0u8; 32];
+        out[32 - v.len()..].copy_from_slice(v);
+        Some(out)
+    }
+
+    fn p256_s_bytes_are_low(s: &[u8]) -> bool {
+        int_be_padded32(s).is_some_and(|sb| sb <= P256_HALF_N)
+    }
+
+    /// True for a P-256 ECDSA signature in X.509 ASN.1 or TLS 1.3 IEEE-P1363 (r||s) form.
+    fn p256_ecdsa_sig_is_low_s(sig: &[u8]) -> bool {
+        if sig.len() == 64 {
+            return p256_s_bytes_are_low(&sig[32..]);
+        }
+        let mut i = 0;
+        let Some((tag, body)) = der_tlv(sig, &mut i) else {
+            return false;
+        };
+        if tag != 0x30 {
+            return false;
+        }
+        let mut j = 0;
+        let Some((rt, _r)) = der_tlv(body, &mut j) else {
+            return false;
+        };
+        let Some((st, s)) = der_tlv(body, &mut j) else {
+            return false;
+        };
+        rt == 0x02 && st == 0x02 && p256_s_bytes_are_low(s)
+    }
+
+    const P256_N: [u8; 32] = [
+        0xFF, 0xFF, 0xFF, 0xFF, 0x00, 0x00, 0x00, 0x00, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
+        0xFF, 0xBC, 0xE6, 0xFA, 0xAD, 0xA7, 0x17, 0x9E, 0x84, 0xF3, 0xB9, 0xCA, 0xC2, 0xFC, 0x63,
+        0x25, 0x51,
+    ];
+
+    fn p256_n_minus(s: &[u8; 32]) -> [u8; 32] {
+        let mut out = [0u8; 32];
+        let mut borrow = 0u16;
+        for i in (0..32).rev() {
+            let lhs = P256_N[i] as u16;
+            let rhs = s[i] as u16 + borrow;
+            if lhs >= rhs {
+                out[i] = (lhs - rhs) as u8;
+                borrow = 0;
+            } else {
+                out[i] = (lhs + 256 - rhs) as u8;
+                borrow = 1;
+            }
+        }
+        out
+    }
+
+    fn der_encode_int(be32: &[u8]) -> Vec<u8> {
+        let mut v = be32;
+        while v.len() > 1 && v[0] == 0 {
+            v = &v[1..];
+        }
+        let mut body = Vec::with_capacity(v.len() + 1);
+        if v[0] & 0x80 != 0 {
+            body.push(0);
+        }
+        body.extend_from_slice(v);
+        let mut out = Vec::with_capacity(2 + body.len());
+        out.push(0x02);
+        out.push(body.len() as u8);
+        out.extend_from_slice(&body);
+        out
+    }
+
+    /// Rewrite a P-256 ECDSA signature so `s ≤ n/2` (X.509 ASN.1 or TLS 1.3 raw r||s).
+    fn p256_ecdsa_sig_canonicalize(sig: Vec<u8>) -> Vec<u8> {
+        if sig.len() == 64 {
+            let s: [u8; 32] = sig[32..].try_into().expect("64-byte P-256 sig");
+            if p256_s_bytes_are_low(&s) {
+                return sig;
+            }
+            let mut out = sig;
+            out[32..].copy_from_slice(&p256_n_minus(&s));
+            return out;
+        }
+        let mut i = 0;
+        let Some((tag, body)) = der_tlv(&sig, &mut i) else {
+            return sig;
+        };
+        if tag != 0x30 {
+            return sig;
+        }
+        let mut j = 0;
+        let Some((rt, r)) = der_tlv(body, &mut j) else {
+            return sig;
+        };
+        let Some((st, s)) = der_tlv(body, &mut j) else {
+            return sig;
+        };
+        if rt != 0x02 || st != 0x02 {
+            return sig;
+        }
+        let Some(sb) = int_be_padded32(s) else {
+            return sig;
+        };
+        if p256_s_bytes_are_low(&sb) {
+            return sig;
+        }
+        let s_low = p256_n_minus(&sb);
+        let r_der = der_encode_int(r);
+        let s_der = der_encode_int(&s_low);
+        let mut seq = Vec::with_capacity(r_der.len() + s_der.len());
+        seq.extend_from_slice(&r_der);
+        seq.extend_from_slice(&s_der);
+        let mut out = Vec::with_capacity(2 + seq.len());
+        out.push(0x30);
+        out.push(seq.len() as u8);
+        out.extend_from_slice(&seq);
+        out
+    }
+
+    fn cert_p256_sig_is_low_s(cert_der: &[u8]) -> bool {
+        let mut i = 0;
+        let Some((tag, body)) = der_tlv(cert_der, &mut i) else {
+            return false;
+        };
+        if tag != 0x30 {
+            return false;
+        }
+        let mut j = 0;
+        let Some(_) = der_tlv(body, &mut j) else {
+            return false;
+        };
+        let Some(_) = der_tlv(body, &mut j) else {
+            return false;
+        };
+        let Some((btag, bits)) = der_tlv(body, &mut j) else {
+            return false;
+        };
+        btag == 0x03 && bits.len() > 1 && p256_ecdsa_sig_is_low_s(&bits[1..])
+    }
+
+    fn pem_cert_der(pem: &str) -> Option<Vec<u8>> {
+        use base64::{Engine as _, engine::general_purpose::STANDARD};
+        let start = pem.find("-----BEGIN CERTIFICATE-----")?;
+        let rest = &pem[start + "-----BEGIN CERTIFICATE-----".len()..];
+        let end = rest.find("-----END CERTIFICATE-----")?;
+        let b64: String = rest[..end].chars().filter(|c| !c.is_whitespace()).collect();
+        STANDARD.decode(b64).ok()
+    }
+
+    fn pem_cert_is_p256_low_s(pem: &str) -> bool {
+        pem_cert_der(pem).is_some_and(|d| cert_p256_sig_is_low_s(&d))
+    }
+
+    fn mint_p256_until_low_s(
+        mint: impl Fn() -> Result<hudsucker::rcgen::Certificate>,
+    ) -> Result<hudsucker::rcgen::Certificate> {
+        // rcgen's ring backend (and aws-lc) can emit high-S. ECDSA `k` is fresh each
+        // attempt, so P(high-S) ≤ 1/2 per try.
+        for _ in 0..32 {
+            let cert = mint()?;
+            if cert_p256_sig_is_low_s(cert.der().as_ref()) {
+                return Ok(cert);
+            }
+        }
+        anyhow::bail!("failed to mint a canonical low-S ECDSA P-256 certificate")
+    }
+
     /// The domains the persisted CA was built for, from its sidecar (one per line). `None` when
     /// there is no sidecar (a CA from before sidecars existed, or no CA at all).
     fn read_ca_hosts() -> Option<Vec<String>> {
@@ -5633,10 +5850,13 @@ mod imp {
         let have_ca = cert_path.exists() && key_path.exists();
         let expected = intercept_domains();
         if ca_is_current(have_ca, read_ca_hosts().as_deref(), &expected) {
-            return Ok((
-                std::fs::read_to_string(&cert_path)?,
-                std::fs::read_to_string(&key_path)?,
-            ));
+            let cert_pem = std::fs::read_to_string(&cert_path)?;
+            let key_pem = std::fs::read_to_string(&key_path)?;
+            // Issue #290: a CA minted with high-S ECDSA is persisted until the host set
+            // changes. ring-based clients reject it even after NODE_EXTRA_CA_CERTS trust.
+            if pem_cert_is_p256_low_s(&cert_pem) {
+                return Ok((cert_pem, key_pem));
+            }
         }
         let (cert_pem, key_pem) = generate_ca(&expected)?;
         let dir = crate::daemon::home_dir()?;
@@ -5664,12 +5884,13 @@ mod imp {
         std::fs::write(ca_hosts_path()?, expected.join("\n"))
             .with_context(|| "failed to write CA host sidecar")?;
         if have_ca {
-            // Regenerated over an existing CA because the host set changed. Env-trusting tools
-            // follow the file automatically; any OS trust-store copy is now stale.
+            // Regenerated over an existing CA (host set changed, or a high-S ECDSA
+            // signature that ring/webpki reject). Env-trusting tools follow the file;
+            // any OS trust-store copy is now stale.
             eprintln!(
-                "llmtrim: CA updated for a changed provider-host set. Tools trusting it via \
-                 NODE_EXTRA_CA_CERTS pick it up on relaunch; if you trusted it system-wide \
-                 (GUI apps), re-trust it — see `llmtrim ca`."
+                "llmtrim: CA updated. Tools trusting it via NODE_EXTRA_CA_CERTS pick it up \
+                 on relaunch; if you trusted it system-wide (GUI apps), re-trust it — see \
+                 `llmtrim ca`."
             );
         }
         Ok((cert_pem, key_pem))
@@ -5700,10 +5921,77 @@ mod imp {
                 .collect(),
             excluded_subtrees: vec![],
         });
-        let cert = params
-            .self_signed(&key)
-            .map_err(|e| anyhow::anyhow!("CA self-sign failed: {e}"))?;
+        let cert = mint_p256_until_low_s(|| {
+            params
+                .self_signed(&key)
+                .map_err(|e| anyhow::anyhow!("CA self-sign failed: {e}"))
+        })?;
         Ok((cert.pem(), key.serialize_pem()))
+    }
+
+    /// rustls `ring`/`aws-lc-rs` ECDSA signers may emit high-S. Wrap them so CertificateVerify
+    /// is always canonical (ring/webpki clients otherwise fail the handshake, #290).
+    #[derive(Debug)]
+    struct LowSKeyProvider;
+
+    static LOW_S_KEY_PROVIDER: LowSKeyProvider = LowSKeyProvider;
+
+    impl KeyProvider for LowSKeyProvider {
+        fn load_private_key(
+            &self,
+            key_der: PrivateKeyDer<'static>,
+        ) -> Result<Arc<dyn SigningKey>, rustls::Error> {
+            let inner = rustls_ring::default_provider()
+                .key_provider
+                .load_private_key(key_der)?;
+            Ok(Arc::new(LowSSigningKey(inner)))
+        }
+    }
+
+    struct LowSSigningKey(Arc<dyn SigningKey>);
+
+    impl std::fmt::Debug for LowSSigningKey {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.debug_tuple("LowSSigningKey").finish()
+        }
+    }
+
+    impl SigningKey for LowSSigningKey {
+        fn choose_scheme(&self, offered: &[SignatureScheme]) -> Option<Box<dyn Signer>> {
+            Some(Box::new(LowSSigner(self.0.choose_scheme(offered)?)))
+        }
+
+        fn algorithm(&self) -> SignatureAlgorithm {
+            self.0.algorithm()
+        }
+
+        fn public_key(&self) -> Option<hudsucker::rustls::pki_types::SubjectPublicKeyInfoDer<'_>> {
+            self.0.public_key()
+        }
+    }
+
+    struct LowSSigner(Box<dyn Signer>);
+
+    impl std::fmt::Debug for LowSSigner {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.debug_tuple("LowSSigner").finish()
+        }
+    }
+
+    impl Signer for LowSSigner {
+        fn sign(&self, message: &[u8]) -> Result<Vec<u8>, rustls::Error> {
+            Ok(p256_ecdsa_sig_canonicalize(self.0.sign(message)?))
+        }
+
+        fn scheme(&self) -> SignatureScheme {
+            self.0.scheme()
+        }
+    }
+
+    fn mitm_server_crypto_provider() -> CryptoProvider {
+        let mut provider = rustls_ring::default_provider();
+        provider.key_provider = &LOW_S_KEY_PROVIDER;
+        provider
     }
 
     /// MITM leaf-certificate authority: a drop-in for hudsucker's `RcgenAuthority` that adds the
@@ -5717,6 +6005,10 @@ mod imp {
     /// CA, cached in memory. `RcgenAuthority::new` exposes no hook for these extensions and 0.24
     /// is the latest published version, and llmtrim publishes to crates.io (so a git-patched
     /// hudsucker is not an option), hence the small in-tree copy.
+    ///
+    /// TLS `ServerConfig`s are built with rustls' `ring` provider so CertificateVerify is
+    /// canonical low-S ECDSA — aws-lc-rs (used for origin TLS) may emit high-S, which
+    /// ring/webpki clients reject (#290).
     ///
     /// TODO: drop this and go back to `RcgenAuthority` once hudsucker mints leaves with an
     /// Authority Key Identifier (or exposes a hook to set leaf extensions). Tracking upstream at
@@ -5788,10 +6080,13 @@ mod imp {
             // stricter stacks (LibreSSL, corporate TLS inspectors) want it.
             params.is_ca = IsCa::ExplicitNoCa;
 
-            params
-                .signed_by(self.issuer.key(), &self.issuer)
-                .expect("failed to sign leaf certificate")
-                .into()
+            mint_p256_until_low_s(|| {
+                params
+                    .signed_by(self.issuer.key(), &self.issuer)
+                    .map_err(|e| anyhow::anyhow!("failed to sign leaf certificate: {e}"))
+            })
+            .expect("failed to sign leaf certificate")
+            .into()
         }
     }
 
@@ -6813,7 +7108,7 @@ mod imp {
             let (cert_pem, key_pem) = generate_ca(&intercept_domains()).unwrap();
             let key = hudsucker::rcgen::KeyPair::from_pem(&key_pem).unwrap();
             let issuer = hudsucker::rcgen::Issuer::from_ca_cert_pem(&cert_pem, key).unwrap();
-            let ca = LeafCertAuthority::new(issuer, aws_lc_rs::default_provider());
+            let ca = LeafCertAuthority::new(issuer, mitm_server_crypto_provider());
             let der = ca.gen_cert("example.com");
             let bytes: &[u8] = der.as_ref();
             let has = |oid: &[u8]| bytes.windows(oid.len()).any(|w| w == oid);
@@ -6830,6 +7125,63 @@ mod imp {
                 has(&[0x06, 0x03, 0x55, 0x1D, 0x25]),
                 "leaf must carry Extended Key Usage (2.5.29.37)"
             );
+        }
+
+        #[test]
+        fn minted_ca_and_leaf_are_low_s_and_verify_with_ring_webpki() {
+            // Issue #290: ring/webpki reject high-S ECDSA. The CA and each MITM leaf must
+            // verify with the ring algorithms a rustls+ring client uses.
+            let (cert_pem, key_pem) = generate_ca(&intercept_domains()).unwrap();
+            assert!(
+                pem_cert_is_p256_low_s(&cert_pem),
+                "CA self-signature must be canonical low-S ECDSA"
+            );
+            let key = hudsucker::rcgen::KeyPair::from_pem(&key_pem).unwrap();
+            let issuer = hudsucker::rcgen::Issuer::from_ca_cert_pem(&cert_pem, key).unwrap();
+            let ca = LeafCertAuthority::new(issuer, mitm_server_crypto_provider());
+            let leaf = ca.gen_cert("api.openai.com");
+            assert!(
+                cert_p256_sig_is_low_s(leaf.as_ref()),
+                "leaf signature must be canonical low-S ECDSA"
+            );
+
+            let ca_der = pem_cert_der(&cert_pem).expect("CA PEM");
+            let ca_der = CertificateDer::from(ca_der);
+            let ta = webpki::anchor_from_trusted_cert(&ca_der).expect("trust anchor");
+            let ee = webpki::EndEntityCert::try_from(&leaf).expect("parse leaf");
+            ee.verify_for_usage(
+                &[webpki::ring::ECDSA_P256_SHA256],
+                &[ta],
+                &[],
+                hudsucker::rustls::pki_types::UnixTime::now(),
+                webpki::KeyUsage::server_auth(),
+                None,
+                None,
+            )
+            .expect("ring/webpki must accept the MITM chain");
+        }
+
+        #[test]
+        fn mitm_server_key_signs_low_s_with_ring_provider() {
+            let (cert_pem, key_pem) = generate_ca(&intercept_domains()).unwrap();
+            let key = hudsucker::rcgen::KeyPair::from_pem(&key_pem).unwrap();
+            let issuer = hudsucker::rcgen::Issuer::from_ca_cert_pem(&cert_pem, key).unwrap();
+            let ca = LeafCertAuthority::new(issuer, mitm_server_crypto_provider());
+            let signing = mitm_server_crypto_provider()
+                .key_provider
+                .load_private_key(ca.private_key.clone_key())
+                .expect("load MITM server key");
+            let signer = signing
+                .choose_scheme(&[SignatureScheme::ECDSA_NISTP256_SHA256])
+                .expect("p256 scheme");
+            for i in 0..32 {
+                let sig = signer.sign(b"tls13-certificate-verify-test").expect("sign");
+                assert!(
+                    p256_ecdsa_sig_is_low_s(&sig),
+                    "handshake signature {i} must be canonical low-S (len={})",
+                    sig.len()
+                );
+            }
         }
 
         #[test]
