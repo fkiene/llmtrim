@@ -6,6 +6,17 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Changed
+
+- **Interceptor replay/fallback no longer pins blocking threads.** Secondary upstream
+  POSTs (400/422 replay, `sub` fallback, compact candidates, transport retries) use
+  the same async HTTP stack as the MITM path, with a 600s timeout, so a hung stream
+  cannot exhaust tokio's blocking pool. (#291)
+
+- **HTTP/2 to the origin through `LLMTRIM_UPSTREAM_PROXY`.** CONNECT-tunnelled TLS
+  now advertises `h2` alongside HTTP/1.1 so concurrent streams can multiplex on the
+  origin connection. (#291)
+
 ### Fixed
 
 - **MITM certs are canonical low-S ECDSA.** `ring` / rustls-webpki reject high-S

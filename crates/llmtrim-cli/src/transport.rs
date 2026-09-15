@@ -14,8 +14,9 @@
 //! starts. Changing it while running has no effect.
 //!
 //! The env var is honoured by: `Endpoint::send` (CLI `send` command),
-//! `forward_post` (replay path), and the primary hudsucker MITM path
-//! (via a `hyper-http-proxy` `ProxyConnector` wrapping hudsucker's outbound connector).
+//! `forward_post` (CLI + blocking helpers), and the interceptor's async replay/fallback
+//! client plus the primary hudsucker MITM path (via a `hyper-http-proxy` `ProxyConnector`
+//! wrapping hudsucker's outbound connector, with HTTP/2 ALPN on the origin TLS leg).
 //! `forward_get` exists but currently has no call site — GET requests pass through
 //! hudsucker's ProxyConnector directly and do not route through this function.
 //!
@@ -185,7 +186,7 @@ fn make_proxy(url: &str) -> Result<ureq::Proxy> {
 /// Hard ceiling on any single upstream round-trip. ureq has no default timeout, so a hung
 /// upstream would pin a blocking thread forever (and on the replay path, leak the daemon's
 /// connection pool). Generous enough for slow streamed generations.
-const UPSTREAM_TIMEOUT: Duration = Duration::from_secs(600);
+pub(crate) const UPSTREAM_TIMEOUT: Duration = Duration::from_secs(600);
 
 /// A configured provider endpoint.
 pub struct Endpoint {

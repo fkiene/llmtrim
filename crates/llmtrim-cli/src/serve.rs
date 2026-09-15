@@ -585,17 +585,14 @@ mod imp {
 
     /// Send the original (uncompressed) request to the upstream and buffer the reply. `None` if
     /// the round-trip itself fails.
-    fn fetch_original(
+    async fn fetch_original_with(
+        http: &BufferedHttp,
         orig: &OriginalRequest,
-        proxy_url: Option<&str>,
     ) -> Option<(u16, Option<String>, Vec<u8>)> {
-        use std::io::Read;
-        let body = std::str::from_utf8(&orig.body).ok()?;
-        let mut up =
-            crate::transport::forward_post(&orig.url, &orig.headers, body, proxy_url).ok()?;
-        let mut buf = Vec::new();
-        up.reader.read_to_end(&mut buf).ok()?;
-        Some((up.status, up.content_type, buf))
+        let (status, content_type, _retry_after, buf) = http
+            .post(&orig.url, &orig.headers, orig.body.clone())
+            .await?;
+        Some((status, content_type, buf))
     }
 
     /// Build a client response from a buffered upstream reply.
@@ -616,8 +613,11 @@ mod imp {
     /// Replay the original (uncompressed) request to the upstream — direct, all statuses
     /// relayed — and build a response for the client. `None` if the replay itself fails (in
     /// which case the caller keeps the compressed response's error).
-    fn replay_original(orig: &OriginalRequest, proxy_url: Option<&str>) -> Option<Response<Body>> {
-        let (status, content_type, body) = fetch_original(orig, proxy_url)?;
+    async fn replay_original_with(
+        http: &BufferedHttp,
+        orig: &OriginalRequest,
+    ) -> Option<Response<Body>> {
+        let (status, content_type, body) = fetch_original_with(http, orig).await?;
         Some(buffered_response(status, content_type, body))
     }
 
@@ -1493,6 +1493,166 @@ mod imp {
         client
     }
 
+    /// Origin-leg rustls config: verifying roots + ALPN `h2` then `http/1.1`.
+    ///
+    /// `hyper-http-proxy`'s default `TlsConnector` builds a `ClientConfig` with **no** ALPN, so
+    /// CONNECT-tunnelled origins negotiate HTTP/1.1 only. Setting ALPN here is what lets concurrent
+    /// streams multiplex on one TLS session when `LLMTRIM_UPSTREAM_PROXY` is set.
+    fn origin_tls_client_config() -> Result<hudsucker::rustls::ClientConfig> {
+        let builder = hudsucker::rustls::ClientConfig::builder_with_provider(Arc::new(
+            aws_lc_rs::default_provider(),
+        ))
+        .with_safe_default_protocol_versions()
+        .context("failed to configure origin TLS protocol versions")?;
+        #[cfg(windows)]
+        let builder = builder.with_root_certificates(windows_root_store()?);
+        #[cfg(not(windows))]
+        let builder = builder.with_root_certificates(unix_native_root_store()?);
+        Ok(builder.with_no_client_auth())
+    }
+
+    fn origin_tls_client_config_with_alpn() -> Result<hudsucker::rustls::ClientConfig> {
+        let mut cfg = origin_tls_client_config()?;
+        cfg.alpn_protocols = vec![b"h2".to_vec(), b"http/1.1".to_vec()];
+        Ok(cfg)
+    }
+
+    #[cfg(not(windows))]
+    fn unix_native_root_store() -> Result<hudsucker::rustls::RootCertStore> {
+        let mut roots = hudsucker::rustls::RootCertStore::empty();
+        let native = rustls_native_certs::load_native_certs();
+        for cert in native.certs {
+            let _ = roots.add(cert);
+        }
+        if roots.is_empty() {
+            anyhow::bail!("no native TLS roots found for origin connections");
+        }
+        Ok(roots)
+    }
+
+    fn direct_https_connector() -> Result<hyper_rustls::HttpsConnector<HttpConnector>> {
+        Ok(hyper_rustls::HttpsConnectorBuilder::new()
+            .with_tls_config(origin_tls_client_config()?)
+            .https_or_http()
+            .enable_http1()
+            .enable_http2()
+            .build())
+    }
+
+    fn upstream_proxy_connector(upstream_url: &str) -> Result<ProxyConnector<HttpConnector>> {
+        let upstream_uri = upstream_url
+            .parse::<hudsucker::hyper::Uri>()
+            .with_context(|| {
+                format!(
+                    "failed to parse upstream proxy URI `{}`",
+                    crate::transport::redact_proxy_url(upstream_url)
+                )
+            })?;
+        let spec = UpstreamProxy::new(Intercept::All, upstream_uri);
+        let mut connector = ProxyConnector::from_proxy(HttpConnector::new(), spec)
+            .map_err(|e| anyhow::anyhow!("failed to build upstream ProxyConnector: {e}"))?;
+        connector.set_tls(Some(tokio_rustls::TlsConnector::from(Arc::new(
+            origin_tls_client_config_with_alpn()?,
+        ))));
+        Ok(connector)
+    }
+
+    /// Headers that must not be forwarded on HTTP/2 (RFC 9113) or that the HTTP client sets.
+    fn is_hop_by_hop_header(name: &str) -> bool {
+        matches!(
+            name.to_ascii_lowercase().as_str(),
+            "connection"
+                | "keep-alive"
+                | "proxy-connection"
+                | "transfer-encoding"
+                | "upgrade"
+                | "te"
+                | "trailer"
+                | "host"
+                | "content-length"
+        )
+    }
+
+    /// Buffered POST used by replay / fallback / compact / transport retry. Async so a slow SSE
+    /// generation cannot pin a `spawn_blocking` thread for up to [`crate::transport::UPSTREAM_TIMEOUT`].
+    async fn buffered_post<C>(
+        client: &hyper_util::client::legacy::Client<C, Full<Bytes>>,
+        url: &str,
+        headers: &[(String, String)],
+        body: Vec<u8>,
+    ) -> Option<(u16, Option<String>, Option<String>, Vec<u8>)>
+    where
+        C: hyper_util::client::legacy::connect::Connect + Clone + Send + Sync + 'static,
+    {
+        let mut builder = Request::builder().method(Method::POST).uri(url);
+        for (k, v) in headers {
+            if is_hop_by_hop_header(k) {
+                continue;
+            }
+            builder = builder.header(k.as_str(), v.as_str());
+        }
+        let req = builder.body(Full::new(Bytes::from(body))).ok()?;
+        let fut = async {
+            let res = client.request(req).await.ok()?;
+            let status = res.status().as_u16();
+            let content_type = res
+                .headers()
+                .get(header::CONTENT_TYPE)
+                .and_then(|v| v.to_str().ok())
+                .map(str::to_string);
+            let retry_after = res
+                .headers()
+                .get(header::RETRY_AFTER)
+                .and_then(|v| v.to_str().ok())
+                .map(str::to_string);
+            let body = res.into_body().collect().await.ok()?.to_bytes().to_vec();
+            Some((status, content_type, retry_after, body))
+        };
+        tokio::time::timeout(crate::transport::UPSTREAM_TIMEOUT, fut)
+            .await
+            .ok()?
+    }
+
+    /// Secondary HTTP client for interceptor paths that buffer the upstream body (not the MITM
+    /// hot path). Same pool/idle settings as the outbound MITM client.
+    #[derive(Clone)]
+    enum BufferedHttp {
+        Direct(
+            hyper_util::client::legacy::Client<
+                hyper_rustls::HttpsConnector<HttpConnector>,
+                Full<Bytes>,
+            >,
+        ),
+        Proxied(hyper_util::client::legacy::Client<ProxyConnector<HttpConnector>, Full<Bytes>>),
+    }
+
+    impl BufferedHttp {
+        fn new(proxy_url: Option<&str>) -> Result<Self> {
+            let _ = aws_lc_rs::default_provider().install_default();
+            Ok(match proxy_url {
+                Some(url) => Self::Proxied(
+                    outbound_client_builder()
+                        .build::<_, Full<Bytes>>(upstream_proxy_connector(url)?),
+                ),
+                None => Self::Direct(
+                    outbound_client_builder().build::<_, Full<Bytes>>(direct_https_connector()?),
+                ),
+            })
+        }
+
+        async fn post(
+            &self,
+            url: &str,
+            headers: &[(String, String)],
+            body: Vec<u8>,
+        ) -> Option<(u16, Option<String>, Option<String>, Vec<u8>)> {
+            match self {
+                Self::Direct(c) => buffered_post(c, url, headers, body).await,
+                Self::Proxied(c) => buffered_post(c, url, headers, body).await,
+            }
+        }
+    }
+
     /// Read Windows roots directly instead of going through `rustls-native-certs`, whose
     /// `SSL_CERT_FILE`/`SSL_CERT_DIR` precedence can hide the OS store in an inherited shell.
     #[cfg(windows)]
@@ -1540,20 +1700,7 @@ mod imp {
     /// the Windows stores instead of Mozilla's public-only roots or environment-selected bundles.
     #[cfg(windows)]
     fn windows_native_roots_connector() -> Result<hyper_rustls::HttpsConnector<HttpConnector>> {
-        let tls_config = hudsucker::rustls::ClientConfig::builder_with_provider(Arc::new(
-            aws_lc_rs::default_provider(),
-        ))
-        .with_safe_default_protocol_versions()
-        .context("failed to configure Windows upstream TLS protocol versions")?
-        .with_root_certificates(windows_root_store()?)
-        .with_no_client_auth();
-
-        Ok(hyper_rustls::HttpsConnectorBuilder::new()
-            .with_tls_config(tls_config)
-            .https_or_http()
-            .enable_http1()
-            .enable_http2()
-            .build())
+        direct_https_connector()
     }
 
     /// Per-source attribution attached to a `Pending` for the breakdown view: the parsed
@@ -1826,10 +1973,9 @@ mod imp {
         /// `handle_error` so a transport failure is reported in the shape the client parses).
         /// Per-request: the handler is cloned per request, like `pending`.
         streaming: bool,
-        /// Optional upstream proxy URL from `LLMTRIM_UPSTREAM_PROXY`. Used by the replay path
-        /// (`forward_post`). The primary MITM interception path honours this setting via the
-        /// `ProxyConnector` built at startup (see the `start` function in this module).
-        upstream_proxy: Option<String>,
+        /// Async HTTP client for buffered secondary upstream POSTs (replay, fallback, compact).
+        /// Honours `LLMTRIM_UPSTREAM_PROXY` the same way the MITM `ProxyConnector` does.
+        http: BufferedHttp,
         /// User opt-out lists (`exclude_hosts` / `exclude_providers`), snapshotted from
         /// [`RuntimeConfig`] at construction like `domains` above: a request matching either is
         /// forwarded verbatim (still intercepted, just not compressed).
@@ -1964,12 +2110,8 @@ mod imp {
                     log_upstream_transport_failure(self.pending.as_ref(), &cause, "retry-failed");
                 } else if let Some(original) = pending.original.clone() {
                     log_upstream_transport_failure(self.pending.as_ref(), &cause, "retry");
-                    let proxy = self.upstream_proxy.clone();
-                    let fetched = tokio::task::spawn_blocking(move || {
-                        fetch_original(&original, proxy.as_deref())
-                    })
-                    .await;
-                    if let Ok(Some((status, content_type, body))) = fetched {
+                    let fetched = fetch_original_with(&self.http, &original).await;
+                    if let Some((status, content_type, body)) = fetched {
                         let pending = self.pending.take().expect("pending present above");
                         if (200..300).contains(&status) {
                             note_session_accepted(&pending);
@@ -3496,33 +3638,20 @@ mod imp {
             }
         }
 
-        /// Re-issue a rerouted upstream request (blocking, buffered `forward_post` like the replay
-        /// net) for a retry attempt. Returns `(status, body, reset-hint-seconds)`, or `None` if the
-        /// round-trip or its task failed (the caller stops retrying and surfaces the last error).
+        /// Re-issue a rerouted upstream request (buffered, like the replay net) for a retry
+        /// attempt. Returns `(status, body, reset-hint-seconds)`, or `None` if the round-trip
+        /// failed (the caller stops retrying and surfaces the last error).
         async fn reissue_reroute(
             &self,
             url: &str,
             headers: Vec<(String, String)>,
             body: Arc<Vec<u8>>,
         ) -> Option<(u16, Vec<u8>, Option<u64>)> {
-            let url = url.to_string();
-            let proxy = self.upstream_proxy.clone();
-            // `forward_post` exposes no response headers, so a retried attempt's reset hint comes
-            // from the body (`resets_in_seconds`) — enough for the Codex/Kimi usage-limit shape.
-            let (status, raw) = tokio::task::spawn_blocking(move || {
-                use std::io::Read;
-                let body_str = String::from_utf8_lossy(&body);
-                let mut up =
-                    crate::transport::forward_post(&url, &headers, &body_str, proxy.as_deref())
-                        .map_err(|e| e.to_string())?;
-                let mut buf = Vec::new();
-                up.reader.read_to_end(&mut buf).map_err(|e| e.to_string())?;
-                Ok::<(u16, Vec<u8>), String>((up.status, buf))
-            })
-            .await
-            .ok()?
-            .ok()?;
-            let retry_after = reroute_retry_after_secs(None, None, &raw);
+            // Response headers besides retry-after are unused; a retried attempt's reset hint
+            // also comes from the body (`resets_in_seconds`) for the Codex/Kimi usage-limit shape.
+            let (status, _ct, retry_after_hdr, raw) =
+                self.http.post(url, &headers, body.as_ref().clone()).await?;
+            let retry_after = reroute_retry_after_secs(retry_after_hdr.as_deref(), None, &raw);
             Some((status, raw, retry_after))
         }
 
@@ -3634,7 +3763,7 @@ mod imp {
                 }
                 if crate::reroute::cliproxy::is_anthropic_hop(&hop) {
                     if let Some(orig) = pending.original.as_ref()
-                        && let Some(res) = replay_original(orig, self.upstream_proxy.as_deref())
+                        && let Some(res) = replay_original_with(&self.http, orig).await
                     {
                         if res.status().as_u16() < 400 {
                             return res;
@@ -3781,28 +3910,14 @@ mod imp {
             let url = rewrite.url();
             let headers = rewrite.headers.clone();
             let body = String::from_utf8_lossy(&sent_body).into_owned();
-            let proxy = self.upstream_proxy.clone();
             let mut attempt = 0;
             loop {
-                let url = url.clone();
-                let headers = headers.clone();
-                let body = body.clone();
-                let proxy = proxy.clone();
-                let result = tokio::task::spawn_blocking(move || {
-                    use std::io::Read;
-                    let mut up =
-                        crate::transport::forward_post(&url, &headers, &body, proxy.as_deref())
-                            .map_err(|e| e.to_string())?;
-                    let mut buf = Vec::new();
-                    up.reader.read_to_end(&mut buf).map_err(|e| e.to_string())?;
-                    let retry_after =
-                        reroute_retry_after_secs(up.retry_after.as_deref(), None, &buf);
-                    Ok::<(u16, Vec<u8>, Option<u64>), String>((up.status, buf, retry_after))
-                })
-                .await
-                .map_err(|_| "fallback task failed".to_string())?
-                .map_err(|e| format!("request failed: {e}"))?;
-                let (status, body, retry_after) = result;
+                let (status, _ct, retry_after_hdr, body) = self
+                    .http
+                    .post(&url, &headers, body.clone().into_bytes())
+                    .await
+                    .ok_or_else(|| "request failed".to_string())?;
+                let retry_after = reroute_retry_after_secs(retry_after_hdr.as_deref(), None, &body);
                 if (200..300).contains(&status) {
                     return Ok(FallbackAttempt {
                         provider,
@@ -3858,11 +3973,8 @@ mod imp {
                 return Err(Box::new(pending));
             };
             tokio::time::sleep(std::time::Duration::from_millis(wait_ms)).await;
-            let proxy = self.upstream_proxy.clone();
-            let fetched =
-                tokio::task::spawn_blocking(move || fetch_original(&original, proxy.as_deref()))
-                    .await;
-            let Ok(Some((status, content_type, body))) = fetched else {
+            let fetched = fetch_original_with(&self.http, &original).await;
+            let Some((status, content_type, body)) = fetched else {
                 return Err(Box::new(pending));
             };
             if !(200..300).contains(&status) || is_sub_fallback_body(&body) {
@@ -4054,19 +4166,11 @@ mod imp {
                 }
                 let url = state.url.clone();
                 let headers = state.headers.clone();
-                let proxy = self.upstream_proxy.clone();
-                let fetched = tokio::task::spawn_blocking(move || {
-                    use std::io::Read;
-                    let mut up =
-                        crate::transport::forward_post(&url, &headers, &json, proxy.as_deref())
-                            .ok()?;
-                    let mut body = Vec::new();
-                    up.reader.read_to_end(&mut body).ok()?;
-                    Some((up.status, up.content_type, body))
-                })
-                .await
-                .ok()
-                .flatten()?;
+                let fetched = self
+                    .http
+                    .post(&url, &headers, json.into_bytes())
+                    .await
+                    .map(|(status, content_type, _ra, body)| (status, content_type, body))?;
                 if !compact_should_retry(fetched.0) && !is_sub_fallback_body(&fetched.2) {
                     pending = next;
                     pending.model = Some(candidate.upstream_model.clone());
@@ -4220,13 +4324,7 @@ mod imp {
             let status = res.status();
             if should_replay(status.as_u16())
                 && let Some(original) = pending.original.clone()
-                && let Ok(Some(replayed)) = {
-                    let proxy = self.upstream_proxy.clone();
-                    tokio::task::spawn_blocking(move || {
-                        replay_original(&original, proxy.as_deref())
-                    })
-                    .await
-                }
+                && let Some(replayed) = replay_original_with(&self.http, &original).await
             {
                 eprintln!(
                     "llmtrim: upstream {} on compressed request — replayed original (no compression this call)",
@@ -5416,7 +5514,8 @@ mod imp {
                 .then(|| crate::recall::from_runtime(RuntimeConfig::get())),
             pending: None,
             streaming: false,
-            upstream_proxy: upstream_proxy.clone(),
+            http: BufferedHttp::new(upstream_proxy.as_deref())
+                .context("failed to build interceptor HTTP client")?,
             exclude_providers: Arc::new(exclusions.providers.clone()),
             exclude_hosts: Arc::new(exclusions.hosts.clone()),
             sub: {
@@ -5506,32 +5605,10 @@ mod imp {
         // proxy connector), so each branch calls .start().await directly rather than binding
         // a common variable.
         if let Some(ref upstream_url) = upstream_proxy {
-            let upstream_uri =
-                upstream_url
-                    .parse::<hudsucker::hyper::Uri>()
-                    .with_context(|| {
-                        format!(
-                            "failed to parse upstream proxy URI `{}`",
-                            crate::transport::redact_proxy_url(upstream_url)
-                        )
-                    })?;
-            let upstream_proxy_spec = UpstreamProxy::new(Intercept::All, upstream_uri);
-            // ProxyConnector has two distinct connection roles:
-            //  - Its INNER connector dials the PROXY itself. The upstream proxy is http://,
-            //    so a plain HttpConnector is correct — no TLS to the proxy.
-            //  - Its `tls` field wraps the ORIGIN connection that is tunnelled THROUGH the
-            //    CONNECT. This must perform full verifying TLS against the real origin
-            //    (openrouter.ai etc.) so the API key is never sent over a cleartext or
-            //    unverified channel.
-            //
-            // `from_proxy` (with the `rustls-tls-native-roots` feature active) builds a
-            // tokio-rustls TlsConnector for the origin leg using native roots and full cert
-            // verification. The tokio-rustls ClientConfig uses whatever CryptoProvider is
-            // installed at process start — we call aws_lc_rs::default_provider() at startup,
-            // so origin TLS automatically uses aws-lc-rs throughout.
-            let proxy_connector =
-                ProxyConnector::from_proxy(HttpConnector::new(), upstream_proxy_spec)
-                    .map_err(|e| anyhow::anyhow!("failed to build upstream ProxyConnector: {e}"))?;
+            // ProxyConnector inner connector dials the HTTP proxy; `tls` wraps the origin
+            // connection inside CONNECT. We replace the crate default (no ALPN) with
+            // `origin_tls_client_config` so the origin can negotiate HTTP/2.
+            let proxy_connector = upstream_proxy_connector(upstream_url)?;
             Proxy::builder()
                 .with_addr(addr)
                 .with_ca(ca)
@@ -7819,7 +7896,7 @@ mod imp {
                 recall: None,
                 pending: None,
                 streaming: false,
-                upstream_proxy: None,
+                http: BufferedHttp::new(None).expect("test HTTP client"),
                 exclude_hosts: Arc::new(Vec::new()),
                 exclude_providers: Arc::new(Vec::new()),
                 sub: None,
@@ -7953,9 +8030,8 @@ mod imp {
         /// exactly one connection, reads (discards) the request, then writes the given
         /// status line and response body. Returns the bound port immediately.
         ///
-        /// Because `replay_original` calls `transport::forward_post` (blocking ureq),
-        /// the server is a plain `std::thread` — the OS TCP accept is the synchronization
-        /// primitive, no sleeps needed.
+        /// Replay talks HTTP/1.1 to this stub via the async hyper client; a `std::thread`
+        /// server is enough — the OS TCP accept is the synchronization primitive.
         fn stub_http_server(status_line: &str, response_body: &str) -> u16 {
             use std::io::{Read, Write};
             use std::net::TcpListener;
@@ -9072,27 +9148,28 @@ mod imp {
         // What the test guarantees: if someone reverts `from_proxy` to `from_proxy_unsecured`,
         // the test catches it immediately.
         #[test]
-        fn proxy_connector_origin_tls_is_active() {
-            // ProxyConnector::from_proxy internally builds a tokio-rustls ClientConfig.
-            // tokio-rustls requires a CryptoProvider to be installed; we use the same
-            // aws-lc-rs provider that production installs at daemon startup.
+        fn origin_tls_config_advertises_h2_alpn() {
             let _ = aws_lc_rs::default_provider().install_default();
+            let cfg = origin_tls_client_config_with_alpn().expect("origin TLS config");
+            assert_eq!(
+                cfg.alpn_protocols,
+                vec![b"h2".to_vec(), b"http/1.1".to_vec()],
+                "origin TLS must offer HTTP/2 then HTTP/1.1"
+            );
+        }
 
-            let proxy_uri: hudsucker::hyper::Uri = "http://proxy.example.test:3128"
-                .parse()
-                .expect("test proxy URI");
-            let upstream_proxy_spec = UpstreamProxy::new(Intercept::All, proxy_uri);
-            let connector = ProxyConnector::from_proxy(HttpConnector::new(), upstream_proxy_spec)
-                .expect("ProxyConnector::from_proxy must succeed");
+        #[test]
+        fn proxy_connector_origin_tls_is_active() {
+            // tokio-rustls requires a CryptoProvider; same aws-lc-rs as production.
+            let _ = aws_lc_rs::default_provider().install_default();
+            let connector = upstream_proxy_connector("http://proxy.example.test:3128")
+                .expect("upstream_proxy_connector must succeed");
 
             // hyper-http-proxy's Debug impl emits "(unsecured)" only when `tls` is None.
-            // Assert its absence to confirm the origin leg has a verifying TLS connector.
             let debug_str = format!("{connector:?}");
             assert!(
                 !debug_str.contains("(unsecured)"),
-                "ProxyConnector must have a TLS connector for the origin leg \
-                 (built with from_proxy, not from_proxy_unsecured). \
-                 Debug output: {debug_str}"
+                "ProxyConnector must have a TLS connector for the origin leg (from_proxy + set_tls). Debug: {debug_str}"
             );
         }
     }

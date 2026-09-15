@@ -90,8 +90,22 @@ hyper-http-proxy = { version = "1.1", default-features = false, features = [
 ], optional = true }
 hyper-util = { version = "0.1", default-features = false, features = [
   "client-legacy",
+  "http1",
   "http2",
 ], optional = true }
+# Direct + CONNECT-origin TLS for replay/fallback (and HTTP/2 ALPN on the origin
+# leg). `native-tokio` is the rustls-native-certs feature name in 0.27.
+hyper-rustls = { version = "0.27", default-features = false, features = [
+  "aws-lc-rs",
+  "http1",
+  "http2",
+  "native-tokio",
+], optional = true }
+tokio-rustls = { version = "0.26", default-features = false, features = [
+  "aws-lc-rs",
+  "tls12",
+], optional = true }
+rustls-native-certs = { version = "0.8", optional = true }
 http-body-util = { version = "0.1", optional = true }
 bytes = { version = "1", optional = true }
 llm_providers = { version = "0.14", optional = true }
@@ -146,13 +160,8 @@ nix = { version = "0.31", features = ["user"] }
 
 [target.'cfg(windows)'.dependencies]
 # Corporate TLS interception roots are commonly installed only in the Windows certificate
-# store. The direct MITM upstream keeps rustls verification but loads native Windows roots;
-# resolver v3 keeps this target-only dependency out of non-Windows builds.
-hyper-rustls = { version = "0.27", default-features = false, features = [
-  "aws-lc-rs",
-  "http1",
-  "http2",
-], optional = true }
+# store. The direct MITM upstream keeps rustls verification but loads native Windows roots
+# via `schannel` (see `windows_root_store`); hyper-rustls is a workspace intercept dep.
 schannel = { version = "0.1.29", optional = true }
 winreg = "0.56"
 windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_System_Pipes"] }
@@ -177,6 +186,8 @@ intercept = [
   "dep:hyper-http-proxy",
   "dep:hyper-rustls",
   "dep:hyper-util",
+  "dep:tokio-rustls",
+  "dep:rustls-native-certs",
   "dep:schannel",
   "dep:uuid",
   "dep:zstd",
