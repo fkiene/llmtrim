@@ -187,20 +187,23 @@ fn prune(registry: &mut Registry, current: u64) {
     });
 }
 
-/// Token to keep across `/clear` / `/compact`, if any.
+/// Token to keep across `/clear` / `/compact` / `--resume`, if any.
 ///
 /// Preference order (first hit with a live window wins):
 /// 1. live `sessions` map for this session id (authoritative; not another TTY's env token),
 /// 2. `cleared` side table (backup if the session map was dropped),
 /// 3. env `LLMTRIM_CLAUDE_WINDOW_TOKEN` only when neither session-scoped map has a live hit
 ///    (stale env from another window must not override this session's intent).
+///
+/// `startup` / `fork` mint a fresh window. `resume` is the same Claude Code session coming
+/// back (`--resume` / `/resume`); dropping its window is why `/sub` did not start again.
 fn resolve_retained_token(
     registry: &Registry,
     source: &str,
     session: &str,
     existing: Option<&str>,
 ) -> Option<String> {
-    if !matches!(source, "clear" | "compact") {
+    if !matches!(source, "clear" | "compact" | "resume") {
         return None;
     }
     if let Some(token) = registry
@@ -244,7 +247,7 @@ fn token() -> String {
     }
     b.iter().map(|x| format!("{x:02x}")).collect()
 }
-/// Register a fresh startup/resume window, or retain its token across clear/compact.
+/// Register a fresh startup/fork window, or retain its token across clear/compact/resume.
 pub fn session_start(session: &str, source: &str, existing: Option<&str>) -> Result<String> {
     let path = registry_path()?;
     session_start_at(&path, session, source, existing)
@@ -262,18 +265,32 @@ fn session_start_at(
     let _lock = lock_registry(path)?;
     let mut r = load_at(path)?;
     let t = now();
+    // Snapshot before prune: resume/clear/compact must keep this session's intent even if
+    // the window sat idle past TTL. Other windows still expire.
+    let retained = resolve_retained_token(&r, source, session, existing);
+    let saved = retained
+        .as_ref()
+        .and_then(|tok| r.windows.get(tok).cloned());
     prune(&mut r, t);
-    let token = resolve_retained_token(&r, source, session, existing).unwrap_or_else(token);
+    let token = retained.unwrap_or_else(token);
     // Consumed: either reattached or about to mint a fresh window for this session.
     r.cleared.remove(session);
-    r.windows
-        .entry(token.clone())
-        .or_insert(Window {
-            intent: None,
-            touched: t,
-            last_provider: None,
-        })
-        .touched = t;
+    match saved {
+        Some(mut w) => {
+            w.touched = t;
+            r.windows.insert(token.clone(), w);
+        }
+        None => {
+            r.windows
+                .entry(token.clone())
+                .or_insert(Window {
+                    intent: None,
+                    touched: t,
+                    last_provider: None,
+                })
+                .touched = t;
+        }
+    }
     r.sessions.insert(session.to_owned(), token.clone());
     save_at(path, &r)?;
     Ok(token)
@@ -291,10 +308,14 @@ fn session_end_at(path: &Path, session: &str, reason: &str) -> Result<()> {
     let _lock = lock_registry(path)?;
     let mut r = load_at(path)?;
     let t = now();
-    if matches!(reason, "clear" | "compact") {
+    if matches!(reason, "clear" | "compact" | "resume") {
         // Keep window + live sessions map. SessionStart may already have reattached the same
         // session id; unmapping here would drop /sub until the next clear. Still snapshot into
         // `cleared` so Start can recover if the session map is empty for any other reason.
+        //
+        // `resume` is Claude Code switching away (`/resume` / `--resume` of another session):
+        // this session is paused, not logged out. Dropping the window is why /sub did not
+        // start again when the same session id came back.
         if let Some(token) = r
             .sessions
             .get(session)
@@ -820,6 +841,10 @@ mod tests {
             resolve_retained_token(&r, "clear", "sess", None).as_deref(),
             Some("from-session")
         );
+        assert_eq!(
+            resolve_retained_token(&r, "resume", "sess", Some("from-env")).as_deref(),
+            Some("from-session")
+        );
         r.sessions.remove("sess");
         // Cleared beats env once the session map is empty.
         assert_eq!(
@@ -830,15 +855,23 @@ mod tests {
             resolve_retained_token(&r, "compact", "sess", None).as_deref(),
             Some("from-cleared")
         );
+        assert_eq!(
+            resolve_retained_token(&r, "resume", "sess", None).as_deref(),
+            Some("from-cleared")
+        );
         r.cleared.remove("sess");
         // Env is last resort only.
         assert_eq!(
             resolve_retained_token(&r, "clear", "sess", Some("from-env")).as_deref(),
             Some("from-env")
         );
-        // startup never reuses
+        // startup / fork never reuse — those are new sessions.
         assert_eq!(
             resolve_retained_token(&r, "startup", "sess", Some("from-env")),
+            None
+        );
+        assert_eq!(
+            resolve_retained_token(&r, "fork", "sess", Some("from-env")),
             None
         );
         // dead env tokens are skipped
@@ -1065,6 +1098,83 @@ mod tests {
         {
             let r = load_at(&path).unwrap();
             assert!(r.windows.get(&fresh).unwrap().intent.is_none());
+        }
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn resume_reattaches_window_intent() {
+        // Claude Code session ids are dashed UUIDs. Switching away used to drop /sub;
+        // --resume of the same id must start the same window again.
+        let dir = std::env::temp_dir().join(format!(
+            "llmtrim-window-sub-resume-{}-{}",
+            std::process::id(),
+            now()
+        ));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("claude-window-sub.json");
+        const SID: &str = "88bbf213-54ed-448a-9916-1f352677b54f";
+        assert!(valid(SID), "Claude Code session UUIDs must be accepted");
+
+        let token = session_start_at(&path, SID, "startup", None).unwrap();
+        {
+            let _lock = lock_registry(&path).unwrap();
+            let mut r = load_at(&path).unwrap();
+            let w = r.windows.get_mut(&token).unwrap();
+            w.intent = Some(Intent::Enabled {
+                provider: "grok".into(),
+            });
+            w.last_provider = Some("grok".into());
+            save_at(&path, &r).unwrap();
+        }
+
+        session_end_at(&path, SID, "resume").unwrap();
+        {
+            let r = load_at(&path).unwrap();
+            assert_eq!(
+                r.sessions.get(SID).map(String::as_str),
+                Some(token.as_str())
+            );
+            assert_eq!(
+                r.windows.get(&token).and_then(|w| w.intent.clone()),
+                Some(Intent::Enabled {
+                    provider: "grok".into()
+                })
+            );
+        }
+
+        let again = session_start_at(&path, SID, "resume", None).unwrap();
+        assert_eq!(again, token);
+        {
+            let r = load_at(&path).unwrap();
+            assert_eq!(
+                r.windows.get(&token).and_then(|w| w.intent.clone()),
+                Some(Intent::Enabled {
+                    provider: "grok".into()
+                })
+            );
+        }
+
+        // Idle past TTL: resume still restores this session's intent.
+        {
+            let _lock = lock_registry(&path).unwrap();
+            let mut r = load_at(&path).unwrap();
+            r.windows.get_mut(&token).unwrap().touched = 1;
+            save_at(&path, &r).unwrap();
+        }
+        let after_ttl = session_start_at(&path, SID, "resume", None).unwrap();
+        assert_eq!(after_ttl, token);
+        {
+            let r = load_at(&path).unwrap();
+            assert_eq!(
+                r.windows.get(&token).and_then(|w| w.intent.clone()),
+                Some(Intent::Enabled {
+                    provider: "grok".into()
+                })
+            );
+            assert!(r.windows.get(&token).unwrap().touched > 1);
         }
 
         let _ = fs::remove_dir_all(&dir);

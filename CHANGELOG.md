@@ -6,6 +6,14 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Fixed
+
+- **`/sub` starts again on Claude Code resume.** Switching away (`/resume`, or
+  `--resume` of another session) treated `SessionEnd(reason=resume)` as a logout
+  and minted a fresh empty window on the way back, so window-local subscription
+  routing did not start again for that session id. Resume now reattaches the
+  same window and intent.
+
 ## [0.13.6] - 2026-09-15
 
 ### Fixed
