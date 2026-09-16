@@ -6,6 +6,14 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- **`llmtrim mcp install --client dsh`** registers the MCP server with DeepSeek
+  Harness by writing its user patch layer (`$DSH_HOME/cordis.patch.yml`).
+  `--client claude|dsh|all`, default `claude` — unchanged behaviour for existing
+  users. The write is idempotent (a stale entry needs `--force`), and DSH
+  hot-reloads the patch layer, so the tools appear without a DSH restart.
+
 ## [0.13.7] - 2026-09-16
 
 ### Fixed

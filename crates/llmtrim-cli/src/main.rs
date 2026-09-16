@@ -629,15 +629,18 @@ enum AuthAction {
 enum McpAction {
     /// Register the llmtrim MCP server with your MCP client
     ///
-    /// Installs it into Claude Code via its `claude mcp add` CLI (idempotent — re-running
-    /// is a no-op). For any other client, `--print` emits the config block to paste.
+    /// `--client` picks the client (default `claude`). `--print` emits that client's config
+    /// instead of writing anything.
     Install {
-        /// Print the client config JSON instead of installing it.
+        /// Print the client config instead of installing it.
         #[arg(long)]
         print: bool,
-        /// Overwrite an existing `llmtrim` server entry that differs.
+        /// Overwrite an existing `llmtrim` entry that differs.
         #[arg(long)]
         force: bool,
+        /// Which client to register with.
+        #[arg(long, value_enum, default_value = "claude")]
+        client: llmtrim::mcp::McpClient,
     },
 }
 
@@ -1922,7 +1925,11 @@ fn run() -> Result<()> {
         Commands::Update => llmtrim::update::run()?,
         Commands::Mcp { action } => match action {
             None => llmtrim::mcp::run()?,
-            Some(McpAction::Install { print, force }) => llmtrim::mcp::install(print, force)?,
+            Some(McpAction::Install {
+                print,
+                force,
+                client,
+            }) => llmtrim::mcp::install_for_client(print, force, client)?,
         },
         Commands::Statusline { action } => match action {
             None => llmtrim::statusline::run()?,
@@ -3322,6 +3329,36 @@ mod tests {
         match cli.command {
             Commands::Monitor { watch, .. } => assert!(watch),
             _ => panic!("expected status to parse as the Monitor command"),
+        }
+    }
+
+    // `mcp install` defaulted to Claude Code before `--client` existed; the default must not
+    // move, or every existing user's `mcp install` would silently start editing a second tool.
+    #[test]
+    fn mcp_install_defaults_to_claude() {
+        let cli = Cli::try_parse_from(["llmtrim", "mcp", "install"]).expect("must parse");
+        match cli.command {
+            Commands::Mcp {
+                action: Some(McpAction::Install { client, .. }),
+            } => assert_eq!(client, llmtrim::mcp::McpClient::Claude),
+            _ => panic!("expected mcp install"),
+        }
+    }
+
+    #[test]
+    fn mcp_install_accepts_dsh_and_all() {
+        for (arg, want) in [
+            ("dsh", llmtrim::mcp::McpClient::Dsh),
+            ("all", llmtrim::mcp::McpClient::All),
+        ] {
+            let cli = Cli::try_parse_from(["llmtrim", "mcp", "install", "--client", arg])
+                .expect("must parse");
+            match cli.command {
+                Commands::Mcp {
+                    action: Some(McpAction::Install { client, .. }),
+                } => assert_eq!(client, want),
+                _ => panic!("expected mcp install"),
+            }
         }
     }
 

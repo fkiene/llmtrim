@@ -367,8 +367,10 @@ Bindings and WASM notes: [`crates/llmtrim-uniffi`](crates/llmtrim-uniffi) · [`c
 <summary><b>MCP server</b></summary>
 
 ```bash
-llmtrim mcp install          # Claude Code
-llmtrim mcp install --print  # paste into any client
+llmtrim mcp install                    # Claude Code
+llmtrim mcp install --client dsh       # DeepSeek Harness
+llmtrim mcp install --client all       # both
+llmtrim mcp install --print            # paste into any client
 ```
 
 ```json
