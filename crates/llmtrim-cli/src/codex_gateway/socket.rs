@@ -13,6 +13,7 @@ use std::io::Read;
 use std::net::{IpAddr, SocketAddr};
 use std::pin::Pin;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::task::{Context, Poll};
 use std::time::Duration;
 
@@ -157,6 +158,7 @@ pub struct GatewayServer {
     local_addr: SocketAddr,
     stop: Option<oneshot::Sender<()>>,
     task: tokio::task::JoinHandle<()>,
+    held: Arc<AtomicUsize>,
 }
 
 impl GatewayServer {
@@ -164,6 +166,18 @@ impl GatewayServer {
     #[must_use]
     pub fn local_addr(&self) -> SocketAddr {
         self.local_addr
+    }
+
+    /// Connection task handles the accept loop is holding: live connections, plus any that
+    /// finished and have not been collected yet.
+    ///
+    /// No request can observe this. A finished connection hands its permit back whether or not
+    /// its handle is collected, so a loop that never reaps keeps answering 200 while the set
+    /// grows by one entry per connection for the life of the process. The count is what lets a
+    /// test tell those two apart; nothing else reads it.
+    #[cfg_attr(not(test), allow(dead_code))]
+    fn held_connection_tasks(&self) -> usize {
+        self.held.load(Ordering::Relaxed)
     }
 
     /// Stop accepting, drop the listener, end the connections still open, release the port.
@@ -193,11 +207,19 @@ pub async fn serve<U: StreamingUpstream>(
     let listener = bound.map_err(ServeError::Listen)?;
     let local_addr = listener.local_addr().map_err(ServeError::Listen)?;
     let (stop, stopped) = oneshot::channel();
-    let task = tokio::spawn(accept_loop(listener, limits, upstream, stopped));
+    let held = Arc::new(AtomicUsize::new(0));
+    let task = tokio::spawn(accept_loop(
+        listener,
+        limits,
+        upstream,
+        stopped,
+        Arc::clone(&held),
+    ));
     Ok(GatewayServer {
         local_addr,
         stop: Some(stop),
         task,
+        held,
     })
 }
 
@@ -240,18 +262,41 @@ async fn accept_loop<U: StreamingUpstream>(
     limits: ServerLimits,
     upstream: Arc<U>,
     mut stopped: oneshot::Receiver<()>,
+    held: Arc<AtomicUsize>,
 ) {
     let permits = Arc::new(Semaphore::new(limits.max_connections));
     let mut connections = JoinSet::new();
-    loop {
+    'serve: loop {
+        // Both waits below also listen for the stop signal and for connections that ended.
+        // Waiting on the permit alone would leave a saturated server deaf to Ctrl-C until some
+        // connection finished by itself; never asking the set for finished tasks would keep one
+        // handle per connection until shutdown. `biased` puts the stop signal first so shutdown
+        // cannot lose a race to new work. A connection that panicked is collected like any
+        // other finished one, which is what the set already did with it at shutdown.
+        //
         // Taking the permit before accepting is what bounds the work: with every permit out,
         // the loop waits here instead of queuing connections it cannot serve.
-        let Ok(permit) = Arc::clone(&permits).acquire_owned().await else {
-            break;
+        let permit = tokio::select! {
+            biased;
+            _ = &mut stopped => break 'serve,
+            Some(_) = connections.join_next() => {
+                held.store(connections.len(), Ordering::Relaxed);
+                continue 'serve;
+            }
+            permit = Arc::clone(&permits).acquire_owned() => match permit {
+                Ok(permit) => permit,
+                Err(_) => break 'serve,
+            },
         };
-        let accepted = tokio::select! {
-            _ = &mut stopped => break,
-            accepted = listener.accept() => accepted,
+        let accepted = loop {
+            tokio::select! {
+                biased;
+                _ = &mut stopped => break 'serve,
+                Some(_) = connections.join_next() => {
+                    held.store(connections.len(), Ordering::Relaxed);
+                }
+                accepted = listener.accept() => break accepted,
+            }
         };
         let (stream, _) = match accepted {
             Ok(accepted) => accepted,
@@ -269,6 +314,7 @@ async fn accept_loop<U: StreamingUpstream>(
             let _ = builder.serve_connection(io, service).await;
             drop(permit);
         });
+        held.store(connections.len(), Ordering::Relaxed);
     }
     // Dropping the listener is what frees the port; the connection tasks are then ended so a
     // shutdown cannot outlive the handle that asked for it.
@@ -1156,6 +1202,159 @@ mod tests {
         }
         assert_eq!(upstream.seen().len(), 3);
         server.shutdown().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn finished_connections_are_reaped_while_the_server_runs() {
+        // Permits cap live work, so a server that never reaps still answers every request: a
+        // finished connection gives its permit back whether or not its handle is collected.
+        // A later 200 cannot be the whole test. The held-task count is what separates
+        // "collected as they end" from "piling up until Ctrl-C".
+        let upstream = Arc::new(FakeUpstream::replying(sse()));
+        let limits = ServerLimits {
+            max_connections: 4,
+            ..ServerLimits::default()
+        };
+        let server = serve(None, 0, limits, Arc::clone(&upstream))
+            .await
+            .expect("the gateway binds loopback");
+        let address = server.local_addr();
+
+        // Three times the connection limit, one after another. Every `post` builds its own
+        // client, so each one is a separate connection that closes once the answer is read.
+        let rounds = limits.max_connections * 3;
+        for _ in 0..rounds {
+            let reply = post(address, GATEWAY_ROUTE, auth_headers(), codex_body()).await;
+            assert_eq!(reply.status, 200);
+        }
+
+        // All of them are finished. The loop must collect them while it keeps running; the
+        // deadline turns a regression into a failure instead of a hung suite.
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        while server.held_connection_tasks() > 0 {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "{} of {rounds} finished connection tasks are still held",
+                server.held_connection_tasks()
+            );
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+
+        // Still serving, and nothing had to be shut down to get here.
+        let reply = post(address, GATEWAY_ROUTE, auth_headers(), codex_body()).await;
+        assert_eq!(reply.status, 200);
+        assert_eq!(upstream.seen().len(), rounds + 1);
+        server.shutdown().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn reaping_does_not_widen_the_connection_limit() {
+        // The loop now waits on several things at once, so the permit still coming first has
+        // to be shown rather than assumed. With the only permit held, a second connection's
+        // complete request waits in the backlog, and is answered once that permit comes back.
+        //
+        // The waiting request is a refused route on purpose. Its 404 is written before any body
+        // is read, compressed or sent upstream, so the short window below measures whether the
+        // connection was accepted, and nothing else. A real POST would also measure how fast a
+        // cold debug build compresses, and a server over its limit could still look compliant.
+        let upstream = Arc::new(FakeUpstream::replying(sse()));
+        let limits = ServerLimits {
+            max_connections: 1,
+            ..ServerLimits::default()
+        };
+        let server = serve(None, 0, limits, Arc::clone(&upstream))
+            .await
+            .expect("the gateway binds loopback");
+        let address = server.local_addr();
+
+        let holder = TcpStream::connect(address).expect("the port is open");
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        while server.held_connection_tasks() < 1 {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the first connection was never accepted"
+            );
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+
+        let (answered_early, transcript) = tokio::task::spawn_blocking(move || {
+            use std::io::Write;
+            let mut socket = TcpStream::connect(address).expect("the backlog takes it");
+            let request =
+                format!("GET /nope HTTP/1.1\r\nHost: {address}\r\nConnection: close\r\n\r\n");
+            socket.write_all(request.as_bytes()).expect("write request");
+
+            // A refusal takes microseconds once accepted, so any answer inside this window means
+            // the connection got in while the only permit was held.
+            socket
+                .set_read_timeout(Some(Duration::from_millis(300)))
+                .expect("short timeout");
+            let mut probe = [0_u8; 1];
+            let answered_early = matches!(socket.read(&mut probe), Ok(n) if n > 0);
+
+            // Give the permit back; the waiting request must now be served.
+            drop(holder);
+            socket
+                .set_read_timeout(Some(Duration::from_secs(10)))
+                .expect("long timeout");
+            let mut raw = Vec::new();
+            let _ = socket.read_to_end(&mut raw);
+            (answered_early, String::from_utf8_lossy(&raw).into_owned())
+        })
+        .await
+        .expect("the client task runs");
+
+        assert!(
+            !answered_early,
+            "a second connection was served while the only permit was held"
+        );
+        assert!(
+            transcript.starts_with("HTTP/1.1 404"),
+            "the queued request is answered once the permit is free: {transcript:?}"
+        );
+        assert!(
+            upstream.seen().is_empty(),
+            "a refused route never goes upstream"
+        );
+        server.shutdown().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn shutdown_is_heard_while_every_permit_is_taken() {
+        // A loop that waits for a permit before it listens for the stop signal is deaf to
+        // Ctrl-C while every permit is out, until some connection ends on its own. An idle one
+        // only ends when its header timeout expires, a minute later.
+        let upstream = Arc::new(FakeUpstream::replying(sse()));
+        let limits = ServerLimits {
+            max_connections: 2,
+            ..ServerLimits::default()
+        };
+        let server = serve(None, 0, limits, Arc::clone(&upstream))
+            .await
+            .expect("the gateway binds loopback");
+        let address = server.local_addr();
+
+        // Every permit taken by a connection that never sends a byte, and one more waiting.
+        let idle: Vec<TcpStream> = (0..=limits.max_connections)
+            .map(|_| TcpStream::connect(address).expect("the port is open"))
+            .collect();
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        while server.held_connection_tasks() < limits.max_connections {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the idle connections were never accepted"
+            );
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+
+        tokio::time::timeout(Duration::from_secs(5), server.shutdown())
+            .await
+            .expect("shutdown must return while every permit is held");
+        assert!(
+            TcpStream::connect(address).is_err(),
+            "nothing is still listening on {address}"
+        );
+        drop(idle);
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
