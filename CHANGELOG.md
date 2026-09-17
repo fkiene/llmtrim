@@ -6,6 +6,17 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- **Codex local gateway (`llmtrim codex-gateway`).** Runs llmtrim in front of Codex with no
+  proxy, no local certificate authority and no change to the machine's trust configuration:
+  Codex is pointed at `127.0.0.1:43200` through its own `[model_providers]` block, and the
+  gateway relays one route to `https://chatgpt.com`. Loopback-only bind, a single route, a
+  destination built from constants, no API key and nothing written to disk. The `safe`
+  lossless preset is pinned for this version, and SSE bytes are relayed unparsed and in
+  order. Validated with synthetic socket end-to-end tests and against a live
+  ChatGPT-signed-in session on Codex 0.146.0. See `docs/codex-local-gateway.md`.
+
 ## [0.13.7] - 2026-09-16
 
 ### Fixed

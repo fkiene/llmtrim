@@ -3199,6 +3199,7 @@ dependencies = [
  "flate2",
  "http-body-util",
  "hudsucker",
+ "hyper",
  "hyper-http-proxy",
  "hyper-rustls",
  "hyper-util",

@@ -65,11 +65,13 @@ When something's wrong:
   uninstall  Undo everything `setup` did
 
 Pipes & one-shots:
-  compress   Compress a request from stdin to stdout
-  send       Compress a request, send it to the provider, print the response
-  recall     Recover raw bytes from an ephemeral recall handle
-  serve      Run the HTTPS interceptor in the foreground
-  ca         Print the local CA certificate path and how to trust it
+  compress       Compress a request from stdin to stdout
+  send           Compress a request, send it to the provider, print the response
+  recall         Recover raw bytes from an ephemeral recall handle
+  serve          Run the HTTPS interceptor in the foreground
+  codex-gateway  Run llmtrim in front of Codex on loopback (no proxy, no CA)
+  mcp            Run an MCP server over stdio (`mcp install` registers it)
+  ca             Print the local CA certificate path and how to trust it
 
 Measurement (dev):
   eval       Measure retrieval recall + token savings on a corpus
@@ -162,6 +164,19 @@ enum Commands {
         /// Run-key entry, which Explorer would otherwise launch with a visible console).
         #[arg(long, hide = true)]
         hide_console: bool,
+    },
+    /// Run the Codex localhost gateway in the foreground
+    ///
+    /// A reverse gateway for Codex alone: point a `[model_providers.*]` `base_url` at it and
+    /// Codex sends its normal, ChatGPT-authenticated request to 127.0.0.1 in plaintext. No
+    /// proxy variable, no local CA, no API key. It compresses the request body with the
+    /// `safe` preset and streams the answer straight back. Ctrl-C stops it; nothing is left
+    /// running afterwards.
+    #[cfg(feature = "intercept")]
+    CodexGateway {
+        /// Port to listen on. The host is not configurable — it is always 127.0.0.1.
+        #[arg(long, default_value_t = llmtrim::codex_gateway::socket::DEFAULT_PORT)]
+        port: u16,
     },
     /// Set everything up and start saving (CA, environment, autostart, daemon)
     ///
@@ -1738,6 +1753,10 @@ fn run() -> Result<()> {
                 llmtrim::serve::run(port, force)?;
             }
         }
+        #[cfg(feature = "intercept")]
+        Commands::CodexGateway { port } => {
+            llmtrim::codex_gateway::socket::run(port)?;
+        }
         Commands::Setup { port, force, env } => {
             if env {
                 llmtrim::setup::print_env(port)?
@@ -3312,6 +3331,26 @@ fn run_monitor(
 mod tests {
     use super::*;
     use std::time::{SystemTime, UNIX_EPOCH};
+
+    // The comment on `HELP_TEMPLATE` asks for it to be kept in sync with `Commands`, and
+    // nothing enforced that: `codex-gateway` and `mcp` were both absent, so a user reading
+    // `llmtrim --help` could not discover either. Hidden commands stay out by design, and
+    // clap's generated `help` is not a listed entry.
+    #[test]
+    fn every_visible_command_is_listed_in_the_help_template() {
+        let command = <Cli as clap::CommandFactory>::command();
+        let missing: Vec<&str> = command
+            .get_subcommands()
+            .filter(|sub| !sub.is_hide_set())
+            .map(clap::Command::get_name)
+            .filter(|name| *name != "help")
+            .filter(|name| !HELP_TEMPLATE.contains(&format!("\n  {name} ")))
+            .collect();
+        assert!(
+            missing.is_empty(),
+            "commands missing from HELP_TEMPLATE: {missing:?}"
+        );
+    }
 
     // `--watch` is a deprecated no-op, but it must still parse: removing it outright would
     // break existing `llmtrim status --watch` scripts and aliases.
