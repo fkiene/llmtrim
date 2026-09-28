@@ -6,6 +6,10 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Changed
+
+- **8-bit images in `fit_to_cap` skip `image`'s per-pixel resampler.** Grayscale, grayscale-with-alpha, RGB, and RGBA are downscaled with the same Lanczos3 kernel over packed rows. Other pixel types still use the library. Output size is unchanged, and pixels stay within one level of the previous resampler.
+
 ## [0.13.7] - 2026-09-16
 
 ### Fixed
