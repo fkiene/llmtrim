@@ -19,7 +19,7 @@ use std::io::Cursor;
 #[cfg(feature = "multimodal")]
 use base64::Engine;
 #[cfg(feature = "multimodal")]
-use image::ImageReader;
+use image::{ImageDecoder as _, ImageReader};
 
 /// Decode caps for untrusted images. A crafted ~20k×20k PNG decodes to ~1.6 GB with the
 /// library default (`Limits::default()` = 512 MiB alloc, *no* dimension cap), which can
@@ -210,6 +210,140 @@ fn snap_tile(dim: u32, tile: u32) -> u32 {
     }
 }
 
+/// `DynamicImage::resize`'s fit-within rounding (`resize_dimensions`, `fill=false`):
+/// the library re-derives the output size from the bound, so mirror it to keep the
+/// output dimensions identical to the code this replaces. Only reached on the
+/// downscale path, so `ratio < 1` and no overflow clamp is needed.
+#[cfg(feature = "multimodal")]
+fn fit_dims(w: u32, h: u32, nw: u32, nh: u32) -> (u32, u32) {
+    let ratio = (f64::from(nw) / f64::from(w)).min(f64::from(nh) / f64::from(h));
+    (
+        ((f64::from(w) * ratio).round() as u64).max(1) as u32,
+        ((f64::from(h) * ratio).round() as u64).max(1) as u32,
+    )
+}
+
+/// `image`'s Lanczos3 kernel (`sinc(x) * sinc(x/3)`, support 3), verbatim.
+#[cfg(feature = "multimodal")]
+fn lanczos3(x: f32) -> f32 {
+    fn sinc(t: f32) -> f32 {
+        if t == 0.0 {
+            1.0
+        } else {
+            let a = t * std::f32::consts::PI;
+            a.sin() / a
+        }
+    }
+    if x.abs() < 3.0 {
+        sinc(x) * sinc(x / 3.0)
+    } else {
+        0.0
+    }
+}
+
+/// Per-output-pixel weights for one axis, identical to `image`'s `vertical_sample` /
+/// `horizontal_sample`: the kernel window widens with the downscale ratio, taps are
+/// clamped to the source edge, and each output pixel's weights are normalized.
+#[cfg(feature = "multimodal")]
+fn axis_weights(src: usize, dst: usize) -> Vec<(usize, Vec<f32>)> {
+    let ratio = src as f32 / dst as f32;
+    let sratio = if ratio < 1.0 { 1.0 } else { ratio };
+    let support = 3.0 * sratio;
+    (0..dst)
+        .map(|o| {
+            let centre = (o as f32 + 0.5) * ratio;
+            let left = ((centre - support).floor() as i64).clamp(0, src as i64 - 1) as usize;
+            let right =
+                ((centre + support).ceil() as i64).clamp(left as i64 + 1, src as i64) as usize;
+            let centre = centre - 0.5;
+            let mut ws: Vec<f32> = (left..right)
+                .map(|i| lanczos3((i as f32 - centre) / sratio))
+                .collect();
+            let sum: f32 = ws.iter().sum();
+            for w in ws.iter_mut() {
+                *w /= sum;
+            }
+            (left, ws)
+        })
+        .collect()
+}
+
+/// Separable Lanczos3 downscale of a tightly packed `CN`-channel `u8` buffer.
+/// Same math as `image::imageops::resize` (vertical pass through an `f32` scratch,
+/// then horizontal, clamp + round), but ~3x faster: it iterates row slices instead
+/// of going through `GenericImageView::get_pixel` + per-pixel channel widening,
+/// which dominates `fit_to_cap` in unoptimized builds.
+#[cfg(feature = "multimodal")]
+fn resample_u8<const CN: usize>(src: &[u8], w: usize, h: usize, nw: usize, nh: usize) -> Vec<u8> {
+    let stride = w * CN;
+    let vws = axis_weights(h, nh);
+    let mut tmp = vec![0f32; stride * nh];
+    for (oy, (top, ws)) in vws.iter().enumerate() {
+        let out = &mut tmp[oy * stride..(oy + 1) * stride];
+        for (i, &wt) in ws.iter().enumerate() {
+            let row = &src[(top + i) * stride..(top + i + 1) * stride];
+            for (o, &s) in out.iter_mut().zip(row) {
+                *o += f32::from(s) * wt;
+            }
+        }
+    }
+    let hws = axis_weights(w, nw);
+    let mut dst = vec![0u8; nw * CN * nh];
+    for (y, out_row) in dst.chunks_exact_mut(nw * CN).enumerate() {
+        let row = &tmp[y * stride..(y + 1) * stride];
+        for (ox, (left, ws)) in hws.iter().enumerate() {
+            let mut acc = [0f32; CN];
+            for (i, &wt) in ws.iter().enumerate() {
+                let p = &row[(left + i) * CN..(left + i + 1) * CN];
+                for c in 0..CN {
+                    acc[c] += p[c] * wt;
+                }
+            }
+            for (o, a) in out_row[ox * CN..ox * CN + CN].iter_mut().zip(acc) {
+                *o = a.clamp(0.0, 255.0).round() as u8;
+            }
+        }
+    }
+    dst
+}
+
+/// `img.resize(nw, nh, Lanczos3)` with a fast path for the common 8-bit layouts.
+/// Other pixel types (16-bit, f32) keep the library path.
+#[cfg(feature = "multimodal")]
+fn downscale(img: &image::DynamicImage, nw: u32, nh: u32) -> image::DynamicImage {
+    use image::DynamicImage as D;
+    let (w2, h2) = fit_dims(img.width(), img.height(), nw, nh);
+    if (w2, h2) == (img.width(), img.height()) {
+        return img.clone();
+    }
+    let (w, h) = (img.width() as usize, img.height() as usize);
+    if w == 0 || h == 0 {
+        // Degenerate source: hand to the library path (our resampler has no pixels to read).
+        return img.resize_exact(w2, h2, image::imageops::FilterType::Lanczos3);
+    }
+    let (nw2, nh2) = (w2 as usize, h2 as usize);
+    match img {
+        D::ImageLuma8(b) => {
+            image::GrayImage::from_raw(w2, h2, resample_u8::<1>(b.as_raw(), w, h, nw2, nh2))
+                .map(D::ImageLuma8)
+        }
+        D::ImageLumaA8(b) => {
+            image::GrayAlphaImage::from_raw(w2, h2, resample_u8::<2>(b.as_raw(), w, h, nw2, nh2))
+                .map(D::ImageLumaA8)
+        }
+        D::ImageRgb8(b) => {
+            image::RgbImage::from_raw(w2, h2, resample_u8::<3>(b.as_raw(), w, h, nw2, nh2))
+                .map(D::ImageRgb8)
+        }
+        D::ImageRgba8(b) => {
+            image::RgbaImage::from_raw(w2, h2, resample_u8::<4>(b.as_raw(), w, h, nw2, nh2))
+                .map(D::ImageRgba8)
+        }
+        _ => None,
+    }
+    .unwrap_or_else(|| img.resize_exact(w2, h2, image::imageops::FilterType::Lanczos3))
+}
+
 /// Resize a base64 image down to `cap` (preserving format + aspect), then tile-snap
 /// for tile-priced providers. `None` (leave the original unchanged) when it can't decode,
 /// the format isn't supported, it's already optimal, a decode limit is exceeded (oversized
@@ -225,20 +359,30 @@ pub fn fit_to_cap(data: &str, cap: ImageCap) -> Option<String> {
     if is_jpeg && jpeg_exif_orientation(&bytes).is_some_and(|o| o != 1) {
         return None;
     }
-    // Decode under explicit limits (dimension + alloc cap) instead of `load_from_memory`'s
-    // 512 MiB/no-dimension-cap default — a limit hit returns Err → None → original passes through.
+    // Build the decoder once: header parse enforces the dimension cap (the decoders'
+    // `set_limits` → `check_dimensions`), `dimensions()` reads the just-parsed header,
+    // and an already-optimal image exits before a single pixel is decoded — the
+    // dominant cost of this function is decode → Lanczos3 → encode.
     let mut reader = ImageReader::with_format(Cursor::new(&bytes), format);
     reader.limits(decode_limits());
-    let img = reader.decode().ok()?;
-    let (w, h) = (img.width(), img.height());
+    let mut decoder = reader.into_decoder().ok()?;
+    let (w, h) = decoder.dimensions();
     // Cap resize (or original dims), then trim a wasteful partial tile.
     let (cw, ch) = target_dims(w, h, cap).unwrap_or((w, h));
     let (nw, nh) = (snap_tile(cw, cap.tile), snap_tile(ch, cap.tile));
     if nw == w && nh == h {
         return None; // already optimal
     }
-    let resized = img.resize(nw, nh, image::imageops::FilterType::Lanczos3);
-    let mut buf = Cursor::new(Vec::new());
+    // Full decode only happens now that a resize is required. Mirror `decode()`:
+    // reserve `total_bytes` against the alloc cap, then hand the decoder over.
+    let mut limits = decode_limits();
+    limits.reserve(decoder.total_bytes()).ok()?;
+    decoder.set_limits(limits).ok()?;
+    let img = image::DynamicImage::from_decoder(decoder).ok()?;
+    let resized = downscale(&img, nw, nh);
+    // Reserve the input size: output must end up smaller anyway (guarded below), so a
+    // single up-front alloc avoids Vec regrowth during encode.
+    let mut buf = Cursor::new(Vec::with_capacity(bytes.len()));
     if is_jpeg {
         // Encode at high quality so the downscale stays quality-neutral (vs the ~75 default).
         let encoder = image::codecs::jpeg::JpegEncoder::new_with_quality(&mut buf, JPEG_QUALITY);
@@ -453,5 +597,36 @@ mod tests {
         let out = fit_to_cap(&data, CAP_OPENAI).expect("jpeg downscaled");
         let (w, h) = dims(&out);
         assert!(w.min(h) <= 768 && w.max(h) <= 2048, "within OpenAI cap");
+    }
+    #[test]
+    fn downscale_matches_library_lanczos3() {
+        // The fast path must produce (near-)identical pixels to `image`'s Lanczos3
+        // resize — same kernel, same fit-within dims — on a non-trivial image.
+        let mut px = image::RgbImage::new(97, 61); // odd primes: exercise weight tables
+        for (x, y, p) in px.enumerate_pixels_mut() {
+            *p = image::Rgb([(x % 256) as u8, (y % 256) as u8, ((x * 3 + y) % 256) as u8]);
+        }
+        let img = image::DynamicImage::ImageRgb8(px);
+        let (nw, nh) = (40, 25);
+        let fast = downscale(&img, nw, nh).to_rgb8();
+        let reference = img
+            .resize(nw, nh, image::imageops::FilterType::Lanczos3)
+            .to_rgb8();
+        assert_eq!(
+            fast.dimensions(),
+            reference.dimensions(),
+            "same fit-within dims"
+        );
+        let max_diff = fast
+            .as_raw()
+            .iter()
+            .zip(reference.as_raw())
+            .map(|(a, b)| (*a as i32 - *b as i32).abs())
+            .max()
+            .unwrap();
+        assert!(
+            max_diff <= 1,
+            "matches library Lanczos3 (max_diff={max_diff})"
+        );
     }
 }

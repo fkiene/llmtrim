@@ -6,6 +6,12 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Changed
+
+- **8-bit images in `fit_to_cap` skip `image`'s per-pixel resampler.** Grayscale, grayscale-with-alpha, RGB, and RGBA are downscaled with the same Lanczos3 kernel over packed rows. Other pixel types still use the library. Output size is unchanged, and pixels stay within one level of the previous resampler.
+- **`fit_to_cap` no longer decodes images that need no resize.** The decoder is built once, dimensions come from the parsed header, and pixels are decoded only when a downscale is required. Decode limits are unchanged: the dimension cap applies at header parse and `total_bytes` is reserved against the allocation cap before the full decode. The encode buffer is pre-sized to the input length.
+- **Dev and test builds optimize the codec, tokenizer, and JSON dependencies.** `[profile.dev.package.*]` sets `opt-level = 3` with debug assertions and overflow checks off for the image codecs (`image`, `png`, `zune-jpeg`, `moxcms`, …) and the per-request hot dependencies (`tiktoken-rs`, `fancy-regex`, `serde_json`, `bm25`, `gaoya`, `whatlang`, …). Workspace code and release builds are unchanged.
+
 ## [0.13.7] - 2026-09-16
 
 ### Fixed
