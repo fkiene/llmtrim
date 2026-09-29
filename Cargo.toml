@@ -63,3 +63,126 @@ strip = true
 # this one crate unstripped so bindgen can read it.
 [profile.release.package.llmtrim-uniffi]
 strip = false
+
+# Pure-Rust codec/resample crates are ~10–20× slower at opt-level 0, and debug
+# assertions/overflow checks still tax their per-pixel kernels when only opt-level
+# is raised. media::fit_to_cap runs decode→Lanczos3 resize→encode on real images in
+# tests, which dominates suite wall time. Optimize just these dependencies in dev
+# (inherited by test); the workspace's own code keeps dev profile checks.
+[profile.dev.package.image]
+opt-level = 3
+debug-assertions = false
+overflow-checks = false
+
+[profile.dev.package.zune-core]
+opt-level = 3
+debug-assertions = false
+overflow-checks = false
+
+[profile.dev.package.num-traits]
+opt-level = 3
+debug-assertions = false
+overflow-checks = false
+
+[profile.dev.package.crc32fast]
+opt-level = 3
+debug-assertions = false
+overflow-checks = false
+
+[profile.dev.package.bytemuck]
+opt-level = 3
+debug-assertions = false
+overflow-checks = false
+
+[profile.dev.package.byteorder-lite]
+opt-level = 3
+debug-assertions = false
+overflow-checks = false
+
+[profile.dev.package.moxcms]
+opt-level = 3
+debug-assertions = false
+overflow-checks = false
+
+[profile.dev.package.zune-jpeg]
+opt-level = 3
+debug-assertions = false
+overflow-checks = false
+
+[profile.dev.package.png]
+opt-level = 3
+debug-assertions = false
+overflow-checks = false
+
+[profile.dev.package.fdeflate]
+opt-level = 3
+debug-assertions = false
+overflow-checks = false
+
+[profile.dev.package.base64]
+opt-level = 3
+debug-assertions = false
+overflow-checks = false
+
+# Same rationale as the codec block above: the pipeline re-tokenizes and
+# re-serializes the full body per stage, and the gates re-count after each —
+# BPE merge/regex and serde_json at opt-level 0 dominate remaining test time.
+[profile.dev.package.tiktoken-rs]
+opt-level = 3
+debug-assertions = false
+overflow-checks = false
+
+[profile.dev.package.fancy-regex]
+opt-level = 3
+debug-assertions = false
+overflow-checks = false
+
+[profile.dev.package.regex-automata]
+opt-level = 3
+debug-assertions = false
+overflow-checks = false
+
+[profile.dev.package.bstr]
+opt-level = 3
+debug-assertions = false
+overflow-checks = false
+
+[profile.dev.package.rustc-hash]
+opt-level = 3
+debug-assertions = false
+overflow-checks = false
+
+[profile.dev.package.serde_json]
+opt-level = 3
+debug-assertions = false
+overflow-checks = false
+
+[profile.dev.package.toon-format]
+opt-level = 3
+debug-assertions = false
+overflow-checks = false
+
+[profile.dev.package.bm25]
+opt-level = 3
+debug-assertions = false
+overflow-checks = false
+
+[profile.dev.package.gaoya]
+opt-level = 3
+debug-assertions = false
+overflow-checks = false
+
+[profile.dev.package.whatlang]
+opt-level = 3
+debug-assertions = false
+overflow-checks = false
+
+[profile.dev.package.unicode-normalization]
+opt-level = 3
+debug-assertions = false
+overflow-checks = false
+
+[profile.dev.package.unicode-segmentation]
+opt-level = 3
+debug-assertions = false
+overflow-checks = false

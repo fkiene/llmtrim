@@ -19,7 +19,7 @@ use std::io::Cursor;
 #[cfg(feature = "multimodal")]
 use base64::Engine;
 #[cfg(feature = "multimodal")]
-use image::ImageReader;
+use image::{ImageDecoder as _, ImageReader};
 
 /// Decode caps for untrusted images. A crafted ~20k×20k PNG decodes to ~1.6 GB with the
 /// library default (`Limits::default()` = 512 MiB alloc, *no* dimension cap), which can
@@ -359,20 +359,30 @@ pub fn fit_to_cap(data: &str, cap: ImageCap) -> Option<String> {
     if is_jpeg && jpeg_exif_orientation(&bytes).is_some_and(|o| o != 1) {
         return None;
     }
-    // Decode under explicit limits (dimension + alloc cap) instead of `load_from_memory`'s
-    // 512 MiB/no-dimension-cap default — a limit hit returns Err → None → original passes through.
+    // Build the decoder once: header parse enforces the dimension cap (the decoders'
+    // `set_limits` → `check_dimensions`), `dimensions()` reads the just-parsed header,
+    // and an already-optimal image exits before a single pixel is decoded — the
+    // dominant cost of this function is decode → Lanczos3 → encode.
     let mut reader = ImageReader::with_format(Cursor::new(&bytes), format);
     reader.limits(decode_limits());
-    let img = reader.decode().ok()?;
-    let (w, h) = (img.width(), img.height());
+    let mut decoder = reader.into_decoder().ok()?;
+    let (w, h) = decoder.dimensions();
     // Cap resize (or original dims), then trim a wasteful partial tile.
     let (cw, ch) = target_dims(w, h, cap).unwrap_or((w, h));
     let (nw, nh) = (snap_tile(cw, cap.tile), snap_tile(ch, cap.tile));
     if nw == w && nh == h {
         return None; // already optimal
     }
+    // Full decode only happens now that a resize is required. Mirror `decode()`:
+    // reserve `total_bytes` against the alloc cap, then hand the decoder over.
+    let mut limits = decode_limits();
+    limits.reserve(decoder.total_bytes()).ok()?;
+    decoder.set_limits(limits).ok()?;
+    let img = image::DynamicImage::from_decoder(decoder).ok()?;
     let resized = downscale(&img, nw, nh);
-    let mut buf = Cursor::new(Vec::new());
+    // Reserve the input size: output must end up smaller anyway (guarded below), so a
+    // single up-front alloc avoids Vec regrowth during encode.
+    let mut buf = Cursor::new(Vec::with_capacity(bytes.len()));
     if is_jpeg {
         // Encode at high quality so the downscale stays quality-neutral (vs the ~75 default).
         let encoder = image::codecs::jpeg::JpegEncoder::new_with_quality(&mut buf, JPEG_QUALITY);
