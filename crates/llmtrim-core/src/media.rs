@@ -20,6 +20,8 @@ use std::io::Cursor;
 use base64::Engine;
 #[cfg(feature = "multimodal")]
 use image::{ImageDecoder as _, ImageReader};
+#[cfg(feature = "multimodal")]
+use llmtrim_resample::{resample_u8, resample3};
 
 /// Decode caps for untrusted images. A crafted ~20k×20k PNG decodes to ~1.6 GB with the
 /// library default (`Limits::default()` = 512 MiB alloc, *no* dimension cap), which can
@@ -223,92 +225,11 @@ fn fit_dims(w: u32, h: u32, nw: u32, nh: u32) -> (u32, u32) {
     )
 }
 
-/// `image`'s Lanczos3 kernel (`sinc(x) * sinc(x/3)`, support 3), verbatim.
-#[cfg(feature = "multimodal")]
-fn lanczos3(x: f32) -> f32 {
-    fn sinc(t: f32) -> f32 {
-        if t == 0.0 {
-            1.0
-        } else {
-            let a = t * std::f32::consts::PI;
-            a.sin() / a
-        }
-    }
-    if x.abs() < 3.0 {
-        sinc(x) * sinc(x / 3.0)
-    } else {
-        0.0
-    }
-}
-
-/// Per-output-pixel weights for one axis, identical to `image`'s `vertical_sample` /
-/// `horizontal_sample`: the kernel window widens with the downscale ratio, taps are
-/// clamped to the source edge, and each output pixel's weights are normalized.
-#[cfg(feature = "multimodal")]
-fn axis_weights(src: usize, dst: usize) -> Vec<(usize, Vec<f32>)> {
-    let ratio = src as f32 / dst as f32;
-    let sratio = if ratio < 1.0 { 1.0 } else { ratio };
-    let support = 3.0 * sratio;
-    (0..dst)
-        .map(|o| {
-            let centre = (o as f32 + 0.5) * ratio;
-            let left = ((centre - support).floor() as i64).clamp(0, src as i64 - 1) as usize;
-            let right =
-                ((centre + support).ceil() as i64).clamp(left as i64 + 1, src as i64) as usize;
-            let centre = centre - 0.5;
-            let mut ws: Vec<f32> = (left..right)
-                .map(|i| lanczos3((i as f32 - centre) / sratio))
-                .collect();
-            let sum: f32 = ws.iter().sum();
-            for w in ws.iter_mut() {
-                *w /= sum;
-            }
-            (left, ws)
-        })
-        .collect()
-}
-
-/// Separable Lanczos3 downscale of a tightly packed `CN`-channel `u8` buffer.
-/// Same math as `image::imageops::resize` (vertical pass through an `f32` scratch,
-/// then horizontal, clamp + round), but ~3x faster: it iterates row slices instead
-/// of going through `GenericImageView::get_pixel` + per-pixel channel widening,
-/// which dominates `fit_to_cap` in unoptimized builds.
-#[cfg(feature = "multimodal")]
-fn resample_u8<const CN: usize>(src: &[u8], w: usize, h: usize, nw: usize, nh: usize) -> Vec<u8> {
-    let stride = w * CN;
-    let vws = axis_weights(h, nh);
-    let mut tmp = vec![0f32; stride * nh];
-    for (oy, (top, ws)) in vws.iter().enumerate() {
-        let out = &mut tmp[oy * stride..(oy + 1) * stride];
-        for (i, &wt) in ws.iter().enumerate() {
-            let row = &src[(top + i) * stride..(top + i + 1) * stride];
-            for (o, &s) in out.iter_mut().zip(row) {
-                *o += f32::from(s) * wt;
-            }
-        }
-    }
-    let hws = axis_weights(w, nw);
-    let mut dst = vec![0u8; nw * CN * nh];
-    for (y, out_row) in dst.chunks_exact_mut(nw * CN).enumerate() {
-        let row = &tmp[y * stride..(y + 1) * stride];
-        for (ox, (left, ws)) in hws.iter().enumerate() {
-            let mut acc = [0f32; CN];
-            for (i, &wt) in ws.iter().enumerate() {
-                let p = &row[(left + i) * CN..(left + i + 1) * CN];
-                for c in 0..CN {
-                    acc[c] += p[c] * wt;
-                }
-            }
-            for (o, a) in out_row[ox * CN..ox * CN + CN].iter_mut().zip(acc) {
-                *o = a.clamp(0.0, 255.0).round() as u8;
-            }
-        }
-    }
-    dst
-}
-
-/// `img.resize(nw, nh, Lanczos3)` with a fast path for the common 8-bit layouts.
-/// Other pixel types (16-bit, f32) keep the library path.
+/// `img.resize(nw, nh, Lanczos3)` with a fast path for the common 8-bit layouts:
+/// `llmtrim_resample`'s kernels (same separable Lanczos3 math, row-slice iteration)
+/// in a leaf crate whose dev profile is optimized — see the root `Cargo.toml`
+/// `[profile.dev.package.llmtrim-resample]` override. Other pixel types (16-bit,
+/// f32) keep the library path.
 #[cfg(feature = "multimodal")]
 fn downscale(img: &image::DynamicImage, nw: u32, nh: u32) -> image::DynamicImage {
     use image::DynamicImage as D;
@@ -331,10 +252,13 @@ fn downscale(img: &image::DynamicImage, nw: u32, nh: u32) -> image::DynamicImage
             image::GrayAlphaImage::from_raw(w2, h2, resample_u8::<2>(b.as_raw(), w, h, nw2, nh2))
                 .map(D::ImageLumaA8)
         }
-        D::ImageRgb8(b) => {
-            image::RgbImage::from_raw(w2, h2, resample_u8::<3>(b.as_raw(), w, h, nw2, nh2))
-                .map(D::ImageRgb8)
-        }
+        // `resample3` is the RGB-specialized kernel: bit-identical output to
+        // `resample_u8::<3>` (asserted in `downscale_matches_library_lanczos3`)
+        // but with scalar accumulators — the common case, since png/jpeg decode
+        // to Rgb8. It exists purely for speed; a regression to the generic
+        // kernel here is only a perf loss, never a correctness one.
+        D::ImageRgb8(b) => image::RgbImage::from_raw(w2, h2, resample3(b.as_raw(), w, h, nw2, nh2))
+            .map(D::ImageRgb8),
         D::ImageRgba8(b) => {
             image::RgbaImage::from_raw(w2, h2, resample_u8::<4>(b.as_raw(), w, h, nw2, nh2))
                 .map(D::ImageRgba8)
@@ -627,6 +551,16 @@ mod tests {
         assert!(
             max_diff <= 1,
             "matches library Lanczos3 (max_diff={max_diff})"
+        );
+        // The CN=3 specialization must be byte-identical to the generic kernel —
+        // same weights, same tap order, same clamp+round — at the dims `downscale`
+        // actually resamples to.
+        let raw = img.to_rgb8();
+        let (w2, h2) = fit_dims(97, 61, nw, nh);
+        assert_eq!(
+            resample3(raw.as_raw(), 97, 61, w2 as usize, h2 as usize),
+            resample_u8::<3>(raw.as_raw(), 97, 61, w2 as usize, h2 as usize),
+            "resample3 is bit-identical to resample_u8::<3>"
         );
     }
 }

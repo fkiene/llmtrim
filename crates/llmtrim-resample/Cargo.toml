@@ -1,0 +1,13 @@
+[package]
+name = "llmtrim-resample"
+description = "Separable Lanczos3 resample kernels for llmtrim's Stage H image downscaling (internal, not published)."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+homepage.workspace = true
+license.workspace = true
+publish = false
+
+[lints]
+workspace = true

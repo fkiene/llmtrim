@@ -4,6 +4,7 @@ members = [
   "crates/llmtrim-core",
   "crates/llmtrim-cli",
   "crates/llmtrim-ledger",
+  "crates/llmtrim-resample",
   "crates/llmtrim-uniffi",
   "crates/llmtrim-wasm",
   "crates/llmtrim-tray",
@@ -73,6 +74,13 @@ strip = false
 opt-level = 3
 debug-assertions = false
 overflow-checks = false
+
+# The per-pixel Lanczos3 kernels behind `fit_to_cap` live in this leaf crate so they
+# get the same treatment as the codec deps above: opt-level 3 in dev (they're ~10×
+# slower at opt-level 0). `debug-assertions`/`overflow-checks` stay on — it's still
+# our code; the FP math is unaffected either way.
+[profile.dev.package.llmtrim-resample]
+opt-level = 3
 
 [profile.dev.package.zune-core]
 opt-level = 3
@@ -186,3 +194,12 @@ overflow-checks = false
 opt-level = 3
 debug-assertions = false
 overflow-checks = false
+[profile.dev.package.llmtrim-core]
+opt-level = 3
+
+# Same treatment as llmtrim-core above: this package's own code — serve.rs intercept
+# handlers, mcp.rs compress calls, tests/quality.rs's recall-vs-savings sweep — still
+# compiles at opt-level 0 for `cargo test`, dominating remaining suite wall time.
+# `debug-assertions`/`overflow-checks` stay on — it's still our code.
+[profile.dev.package.llmtrim]
+opt-level = 3

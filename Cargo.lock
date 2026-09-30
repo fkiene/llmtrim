@@ -3249,6 +3249,7 @@ dependencies = [
  "getrandom 0.3.4",
  "getrandom 0.4.2",
  "image",
+ "llmtrim-resample",
  "once_cell",
  "regex",
  "serde",
@@ -3290,6 +3291,10 @@ dependencies = [
  "serde",
  "serde_json",
 ]
+
+[[package]]
+name = "llmtrim-resample"
+version = "0.13.8-dev"
 
 [[package]]
 name = "llmtrim-tray"

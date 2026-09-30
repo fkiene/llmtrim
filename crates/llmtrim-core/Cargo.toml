@@ -40,6 +40,9 @@ image = { version = "0.25.10", default-features = false, features = [
   "png",
   "jpeg",
 ], optional = true }
+# Optional: Lanczos3 resample kernels for Stage H (with `multimodal`). A leaf crate
+# so the root manifest can compile just these per-pixel loops at opt-level 3 in dev.
+llmtrim-resample = { path = "../llmtrim-resample", optional = true }
 once_cell.workspace = true
 regex.workspace = true
 serde.workspace = true
@@ -89,7 +92,7 @@ getrandom_04 = { package = "getrandom", version = "0.4", features = ["wasm_js"] 
 default = ["skeleton", "tiktoken", "multimodal"]
 # Stage H image downscaling via the `image` crate (png/jpeg decoders). Off → image
 # payloads pass through unchanged.
-multimodal = ["dep:image"]
+multimodal = ["dep:image", "dep:llmtrim-resample"]
 # Exact OpenAI tokenization via tiktoken-rs (embeds the BPE vocabs). Without it the
 # estimate tokenizer is used everywhere (approximate counts; savings % is unchanged).
 tiktoken = ["dep:tiktoken-rs"]
