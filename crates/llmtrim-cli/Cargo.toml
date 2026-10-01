@@ -57,7 +57,7 @@ unicode-width = "0.2"
 ureq = "3.3.0"
 wait-timeout = "0.2.1"
 # Live A/B benchmarking (the `bench` command's network path).
-async-openai = { version = "0.41.0", features = ["chat-completion", "byot"], optional = true }
+async-openai = { version = "0.42.0", features = ["chat-completion", "byot"], optional = true }
 reqwest = { version = "0.13", default-features = false, optional = true }
 tokio = { version = "1.52", features = [
   "rt",
