@@ -6,6 +6,8 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.13.8] - 2026-11-02
+
 ### Changed
 
 - **Refresh Rust, tray frontend, and Java build dependencies.** Includes rustls 0.23.46, async-openai 0.42, zstd 0.14, source-map-js 1.2.2, and the Cargo minor/patch updates. Stopword language selection uses the updated dependency's supported API; ledger migrations also compile with current Clippy.
@@ -1792,7 +1794,8 @@ bill, never a broken call.
   (6 targets with SLSA build provenance), CI on Linux/macOS/Windows with secret
   scanning, license compliance, and MSRV gates.
 
-[Unreleased]: https://github.com/fkiene/llmtrim/compare/v0.13.7...HEAD
+[Unreleased]: https://github.com/fkiene/llmtrim/compare/v0.13.8...HEAD
+[0.13.8]: https://github.com/fkiene/llmtrim/compare/v0.13.7...v0.13.8
 [0.13.7]: https://github.com/fkiene/llmtrim/compare/v0.13.6...v0.13.7
 [0.13.6]: https://github.com/fkiene/llmtrim/compare/v0.13.5...v0.13.6
 [0.13.5]: https://github.com/fkiene/llmtrim/compare/v0.13.4...v0.13.5

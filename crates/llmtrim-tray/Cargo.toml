@@ -17,7 +17,7 @@ path = "src/main.rs"
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
-llmtrim-ledger = { path = "../llmtrim-ledger", version = "0.13.8-dev" }
+llmtrim-ledger = { path = "../llmtrim-ledger", version = "0.13.8" }
 # image-png: required for Image::from_bytes to decode the embedded PNG tray icon.
 tauri = { version = "2", features = ["tray-icon", "image-png"] }
 # 2.3.3+ returns Err instead of panicking when a still-hidden window has no
