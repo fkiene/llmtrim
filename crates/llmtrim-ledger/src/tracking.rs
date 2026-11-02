@@ -494,14 +494,12 @@ impl Tracker {
                 return Err(e).with_context(|| format!("failed to add breakdown column {col}"));
             }
         }
-        for col in ["outcome"] {
-            if let Err(e) = self.conn.execute(
-                &format!("ALTER TABLE compressions ADD COLUMN {col} TEXT"),
-                [],
-            ) && !is_duplicate_column(&e)
-            {
-                return Err(e).with_context(|| format!("failed to add ledger column {col}"));
-            }
+        if let Err(e) = self
+            .conn
+            .execute("ALTER TABLE compressions ADD COLUMN outcome TEXT", [])
+            && !is_duplicate_column(&e)
+        {
+            return Err(e).context("failed to add ledger column outcome");
         }
         // Key/value meta (daily reprice gate, future one-shot flags). Idempotent.
         self.conn

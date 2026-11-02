@@ -44,7 +44,7 @@ once_cell.workspace = true
 regex.workspace = true
 serde.workspace = true
 serde_json.workspace = true
-stop-words = "0.10.0"
+stop-words = "0.10.1"
 # Optional: embeds ~8.3 MB of BPE vocab assets. Behind the default-on `tiktoken` feature
 # so size-constrained targets (wasm) can drop it and fall back to the estimate tokenizer.
 tiktoken-rs = { workspace = true, optional = true }

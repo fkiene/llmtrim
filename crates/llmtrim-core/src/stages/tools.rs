@@ -132,7 +132,7 @@ pub(crate) fn detect_lang(sample: &str) -> Option<whatlang::Lang> {
 /// language isn't in our supported map. The map is enum→enum glue; the word lists
 /// themselves come from the crate. Shared with Stage B sentence pruning.
 pub(crate) fn stopword_set(sample: &str) -> &'static HashSet<&'static str> {
-    use stop_words::LANGUAGE as L;
+    use stop_words::Language as L;
     use whatlang::Lang;
     // Detect on a leading slice of a large segment (see LANG_DETECT_MAX_BYTES): matches
     // whole-text detection for monolingual inputs while avoiding a multi-KB rescan.
