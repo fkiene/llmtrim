@@ -6,6 +6,11 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Changed
+
+- **Tray frontend builds with vite 6.4.5.** Closes five advisories against vite ≤ 6.4.3 and its bundled `launch-editor` (GHSA-587h-7wmj-h5pm, GHSA-698v-4r3x-3vcv, GHSA-r825-w8mm-5pxw, GHSA-rq7h-c2jc-7f22, GHSA-9jrq-w75r-8gcw). Vite is a dev dependency, so they affected the tray's dev server, not the shipped app.
+- **The Headroom benchmark pins `headroom-ai==0.35.0`.** Closes GHSA-h46j-26q3-rggf (cross-site WebSocket hijacking in Headroom's proxy mode, which the benchmark does not use). The benchmark adapter's `compress()` options, `transforms_applied` output, and ML switches still work on 0.35.0. The committed vs-headroom snapshots were run on 0.26.0, which their `results.json` provenance records.
+
 ## [0.13.8] - 2026-11-02
 
 ### Changed
