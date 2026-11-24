@@ -6,6 +6,8 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.13.9] - 2026-11-24
+
 ### Changed
 
 - **Tray frontend builds with vite 6.4.5.** Closes five advisories against vite ≤ 6.4.3 and its bundled `launch-editor` (GHSA-587h-7wmj-h5pm, GHSA-698v-4r3x-3vcv, GHSA-r825-w8mm-5pxw, GHSA-rq7h-c2jc-7f22, GHSA-9jrq-w75r-8gcw). Vite is a dev dependency, so they affected the tray's dev server, not the shipped app.
@@ -1799,7 +1801,8 @@ bill, never a broken call.
   (6 targets with SLSA build provenance), CI on Linux/macOS/Windows with secret
   scanning, license compliance, and MSRV gates.
 
-[Unreleased]: https://github.com/fkiene/llmtrim/compare/v0.13.8...HEAD
+[Unreleased]: https://github.com/fkiene/llmtrim/compare/v0.13.9...HEAD
+[0.13.9]: https://github.com/fkiene/llmtrim/compare/v0.13.8...v0.13.9
 [0.13.8]: https://github.com/fkiene/llmtrim/compare/v0.13.7...v0.13.8
 [0.13.7]: https://github.com/fkiene/llmtrim/compare/v0.13.6...v0.13.7
 [0.13.6]: https://github.com/fkiene/llmtrim/compare/v0.13.5...v0.13.6
