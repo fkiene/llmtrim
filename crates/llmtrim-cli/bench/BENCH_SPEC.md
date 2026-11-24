@@ -105,7 +105,7 @@ across arms, so only the first ML arm reflects true inference cost.
 
 ## Pinning & reproducibility
 
-- `headroom-ai==0.26.0`, `tiktoken==0.13.0`, `rouge-score==0.1.2` (requirements file). llmtrim
+- `headroom-ai==0.35.0`, `tiktoken==0.13.0`, `rouge-score==0.1.2` (requirements file). llmtrim
   is built locally; its version + the Headroom version + platform + data-manifest date are
   recorded in `results.json["meta"]["provenance"]`.
 - `make setup` (wheel + deps + corpora), then `make bench` / `bench LIVE=1` / `bench NOML=1`

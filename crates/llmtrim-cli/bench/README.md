@@ -155,7 +155,8 @@ overhead can outweigh the output saving ([snapshots/vs-caveman/README.md](snapsh
 ## Head-to-head: Headroom
 
 Both libraries run through their Python APIs on the same inputs and the same `o200k_base`
-denominator, against Headroom's pinned latest release (`headroom-ai==0.26.0`) over public
+denominator, against Headroom's pinned release (`headroom-ai==0.35.0`; the committed snapshot
+predates the bump and ran 0.26.0, as its `results.json` provenance records) over public
 corpora. The metric is cost per unit of answer quality, plus the full token, latency, and
 no-ML breakdown. Method and limitations are in [BENCH_SPEC.md](BENCH_SPEC.md); the generated
 tables are in [snapshots/vs-headroom/README.md](snapshots/vs-headroom/README.md).
