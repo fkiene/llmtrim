@@ -6,6 +6,10 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Fixed
+
+- Identify OpenCode 2 requests in the usage breakdown.
+
 ## [0.13.9] - 2026-11-24
 
 ### Changed
