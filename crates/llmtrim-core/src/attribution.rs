@@ -719,7 +719,11 @@ static AGENTS: &[AgentFingerprint] = &[
     },
     AgentFingerprint {
         label: "opencode",
-        markers: &["You are OpenCode,", "You are opencode,"],
+        markers: &[
+            "You are OpenCode,",
+            "You are opencode,",
+            "You are an AI agent running in OpenCode, a coding agent harness.",
+        ],
     },
     AgentFingerprint {
         label: "crush",
@@ -981,6 +985,17 @@ mod tests {
                 agent.label
             );
         }
+    }
+
+    #[test]
+    fn identity_from_opencode_v2_system_message() {
+        let body = json!({"messages": [{"role": "system", "content": "You are an AI agent running in OpenCode, a coding agent harness. Help the user."}]});
+        assert_eq!(
+            extract_identity(&body, ProviderKind::OpenAi)
+                .agent
+                .as_deref(),
+            Some("opencode")
+        );
     }
 
     #[test]
